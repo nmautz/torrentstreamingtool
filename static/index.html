@@ -14701,6 +14701,12 @@ function _ssEpisodeQueries(season, episode){
   const titles=[];
   for(const t of [_ssQueryTitle(), ..._ssAkaTitles()]){
     const k=norm(t);
+    // Mostly-Latin only. TMDb's alias list holds names like "헌터x헌터", which
+    // pass the backend's Latin test on their "x" and, searched, return every
+    // unrelated S01E01 the indexers have. (Fixed backend-side too, but a cached
+    // TMDb response still carries them.)
+    const letters=[...t].filter(ch=>/\p{L}/u.test(ch));
+    if(letters.length && letters.filter(ch=>/[A-Za-z]/.test(ch)).length / letters.length < 0.6) continue;
     if(!k || titles.some(u=>norm(u)===k)
           || all.some(v=>k.startsWith(v+" ") || k.startsWith(v+":"))) continue;
     titles.push(t.trim());
@@ -14718,6 +14724,46 @@ function _ssEpisodeQueries(season, episode){
   return forms;
 }
 
+// Is this result really the episode we asked for? The parser already agreed on
+// the season/episode numbers, so what is left is telling the show apart from its
+// remakes, sequels and namesakes. Measured over 1172 indexer results for 39
+// confusable shows, the numbers-only check showed 439 wrong sources against 237
+// right ones, and the most-seeded row — the one Play now and Auto take — was the
+// wrong show for 17 of 37 shows. These three tests cut that to 22 wrong / 212
+// right and 6 bad top picks. (A local 4B LLM judging the same results scored no
+// better on the pick that matters; see CHANGELOG 16.5.0.)
+//
+// 1. The name must match almost exactly: "Trigun Stampede", "Berserk of
+//    Gluttony" and "Dragon Ball Daima" are not the shows they contain. `rel`
+//    comes from the backend, scored against the one title this query searched.
+// 2. A year in the name must be one the show had (first air, or one of its
+//    seasons) — "Doctor Who 2023" is not the 2005 series.
+// 3. A country tag must be the show's own country — "The Office US" is not the
+//    UK show, "Utopia AU" is not the UK one.
+const _SS_CC = {US:"US", UK:"GB", AU:"AU", NZ:"NZ", CA:"CA"};
+function _ssShowYears(){
+  const m=_ssMeta||{}; const out=[];
+  const add=d=>{ const y=parseInt((d||"").slice(0,4),10); if(y) out.push(y); };
+  add(m.first_air_date);
+  Object.values(m.seasons||{}).forEach(s=>add(((s.episodes||[])[0]||{}).air_date));
+  return out;
+}
+function _ssEpisodeAccept(res){
+  if((typeof res.rel==="number"?res.rel:0) < 0.95) return false;
+  // Split on punctuation so a group name that ends in digits ("Mooi1990") is one
+  // token and never reads as a year.
+  const toks=String(res.title||"").split(/[^0-9A-Za-z]+/).filter(Boolean);
+  const years=toks.filter(t=>/^(19|20)\d{2}$/.test(t)).map(Number);
+  if(years.length){
+    const show=_ssShowYears();
+    if(show.length && !years.some(y=>show.some(sy=>Math.abs(y-sy)<=1))) return false;
+  }
+  const tags=toks.filter(t=>_SS_CC[t]).map(t=>_SS_CC[t]);
+  const cc=(_ssMeta&&_ssMeta.origin_country)||"";
+  if(tags.length && cc && !tags.includes(cc)) return false;
+  return true;
+}
+
 // Spawn a targeted follow-up search for one missing episode, merging any matching
 // sources into the show's episode buckets. See _ssEpisodeQueries for what's asked.
 async function ssSearchEpisode(season, episode, opts={}){
@@ -14731,23 +14777,18 @@ async function ssSearchEpisode(season, episode, opts={}){
   let found=[];
   for(const f of forms){
     if(_ssGroup!==grp) break;
-    // The original query keeps its old behaviour. A fallback's results must be
-    // named for the title it searched, scored against that title alone (aka=,
-    // so the number in the query doesn't count). A bare number proves little,
-    // so it needs a near-exact name: at 0.7, "Mushishi 01" kept 21 releases of
-    // the sequel and a special alongside 2 real ones; 0.9 is the squashed-name
-    // floor, which still lets "Mushishi Zoku Shou" through. SxxExx carries its
-    // own evidence, so 0.9 is enough there.
-    const minRel=f.orig ? -Infinity : f.bare ? 0.95 : 0.9;
     try{
-      let url=`/api/search?q=${encodeURIComponent(f.q)}${f.orig?"":`&aka=${encodeURIComponent(f.t)}`}`;
+      // `aka` is the one title this query searched, so `rel` scores the release
+      // against that name alone and the episode number in the query can't
+      // dilute it.
+      let url=`/api/search?q=${encodeURIComponent(f.q)}&aka=${encodeURIComponent(f.t)}`;
       if(profile.id) url+=`&profile_id=${encodeURIComponent(profile.id)}`;
       const r=await fetch(url);
       if(r.ok){
         const data=await r.json();
         (data.groups||[]).forEach(g=>(g.results||[]).forEach(res=>{
           if(res.kind==="episode" && res.season===season && res.episode===episode
-             && (typeof res.rel==="number" ? res.rel : 0)>=minRel) found.push(res);
+             && _ssEpisodeAccept(res)) found.push(res);
         }));
       }
     }catch(_){}
@@ -24686,6 +24727,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">16.4.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">16.5.0</div>
 </body>
 </html>

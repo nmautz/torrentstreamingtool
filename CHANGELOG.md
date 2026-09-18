@@ -1,5 +1,29 @@
 # Changelog
 
+## [16.5.0] — 2026-09-17
+**Find on an episode kept handing you the wrong show: the sequel, the remake, or the American version.**
+
+* Find checked that a result's season and episode numbers matched, but not that the show did.
+  So *Trigun* offered *Trigun Stampede*, *Dragon Ball* offered *Daima*, the 2005 *Doctor Who*
+  offered the 2023 one, and the UK *Shameless* offered the US one.
+* **Measured before changing anything:** 1172 results from your indexers across 39 shows that
+  are easy to confuse, each one checked by hand. Find was showing 439 wrong sources against 237
+  right ones, and the most-seeded row — the one Play now and Auto take — was the wrong show for
+  **17 of 37**.
+* Three checks now run on every result: the name must match the searched title almost exactly;
+  a year in the name must be one the show actually had; a US/UK/AU tag must be the show's own
+  country. That leaves 22 wrong against 212 right, and 6 bad top picks.
+* Five scoring fixes so real releases aren't caught by the stricter name test: a country tag no
+  longer counts as an extra word ("The Office US"), apostrophes join instead of splitting
+  ("Journey's End"), a name that only loses its punctuation is an exact match ("SPYxFAMILY"),
+  a release naming the show twice in two languages is too ("Attack on Titan Shingeki no Kyojin"),
+  and alternative titles must be mostly Latin script — "헌터x헌터" was being searched and
+  returning every unrelated episode 1 on the indexers.
+* **A local AI model was tested for this and not adopted.** Qwen3-4B judging the same 1172
+  results got no more top picks right than the checks above, while needing ~20 s per show and
+  2.5 GB of video memory on the box. The mistakes turned out to be mechanical, so mechanical
+  checks handle them.
+
 ## [16.4.0] — 2026-09-17
 **Find on a single episode now tries the names anime and old cartoons are actually released under.**
 

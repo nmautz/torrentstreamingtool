@@ -769,6 +769,9 @@ is deliberately **dropped** rather than migrated; see [GOTCHAS.md](GOTCHAS.md)
   "poster_url":    "https://.../p.jpg",   // custom only: absolute image URL (wins over poster_path)
   "backdrop_url":  "https://.../b.jpg",   // custom only: absolute image URL
   "first_air_date":"2004-04-07",          // tv only
+  "origin_country":"JP",                  // tv only; ISO country, from TMDb details.
+                                          // The show page rejects a release tagged
+                                          // for another country's version with it.
   "release_date":  "1999-09-30",          // movie only
   "vote_average":  8.7,
   "genres":        ["Drama", "Mystery"],

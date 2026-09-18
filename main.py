@@ -3076,6 +3076,17 @@ async def _tmdb_match_show(item: dict) -> Optional[dict]:
 _TMDB_LATIN_RE = re.compile(r"[A-Za-z]")
 
 
+def _mostly_latin(t: str) -> bool:
+    """True when a title is really written in Latin script, not just decorated
+    with one Latin letter. "헌터x헌터" (Hunter x Hunter's Korean alias) passed a
+    bare `[A-Za-z]` test on its "x", and searching it returns every unrelated
+    S01E01 the indexers hold, because the CJK words match nothing."""
+    letters = [ch for ch in (t or "") if ch.isalpha()]
+    if not letters:
+        return False
+    return sum(1 for ch in letters if ch.isascii()) / len(letters) >= 0.6
+
+
 def _tmdb_akas(alt_results: list, primary: str, original: str) -> list[str]:
     """Latin-script alternative titles for a show/movie, for cross-language
     search + relevance (e.g. an anime indexed under its romaji name as well as
@@ -3088,7 +3099,7 @@ def _tmdb_akas(alt_results: list, primary: str, original: str) -> list[str]:
     rest: list[str] = []
     def _add(t: str, bucket: list) -> None:
         t = (t or "").strip()
-        if not t or not _TMDB_LATIN_RE.search(t):
+        if not t or not _mostly_latin(t):
             return
         k = t.lower()
         if k in seen:
@@ -3248,6 +3259,10 @@ async def _tmdb_fetch_tv(show_id: int, seasons: Optional[list[int]]) -> dict:
         "poster_path":   details.get("poster_path") or "",
         "backdrop_path": details.get("backdrop_path") or "",
         "first_air_date": details.get("first_air_date") or "",
+        # ISO country of origin ("GB", "US", …). The show page uses it to reject a
+        # release tagged for another country's version of the same title — "The
+        # Office US" under the UK show. TMDb can list several; the first is the one.
+        "origin_country": (details.get("origin_country") or [""])[0] or "",
         # Show-level fallback runtime, in minutes. Per-episode runtimes only
         # exist for seasons that have actually been fetched, so without this a
         # download race for an unfetched season has no divisor at all for its
@@ -17632,7 +17647,13 @@ def _shape_search_results(items: list, limit: int) -> list:
 # against the query so the intended release ranks first even with fewer seeders.
 # See docs/GOTCHAS.md § search-result relevance.
 _REL_STOPWORDS = {"the", "a", "an", "of", "and", "to", "in", "on", "at",
-                  "for", "with", "from"}
+                  "for", "with", "from",
+                  # Country-of-version tags. Scored as words they made "The
+                  # Office US" an imperfect match for "The Office" (an extra
+                  # word it doesn't have) — while the tag's real meaning, which
+                  # version this is, is checked separately against the show's
+                  # origin country.
+                  "us", "uk", "au", "nz", "ca"}
 
 
 def _rel_squash(s: str) -> str:
@@ -17645,7 +17666,9 @@ def _rel_squash(s: str) -> str:
 def _rel_tokens(s: str) -> set:
     """Distinctive lowercase word tokens of a title: split on punctuation, drop
     stop-words and bare release years (years are scored separately below)."""
-    toks = re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).split()
+    # Apostrophes join rather than split: a scene name drops them, so
+    # "Journey's End" must tokenize like "Journeys End", not "journey"+"s".
+    toks = re.sub(r"[^a-z0-9]+", " ", (s or "").lower().replace("'", "")).split()
     return {t for t in toks if t not in _REL_STOPWORDS and not _YEAR_RE.fullmatch(t)}
 
 
@@ -17682,10 +17705,15 @@ def _title_relevance(query: str, title: str, name: str,
     # scores 0.
     # If the whole query, stripped to alphanumerics, is contained in the same-
     # stripped name (or vice versa), floor the score to a strong match.
-    if score < 0.9:
+    if score < 1.0:
         sqq = _rel_squash(query)
         sqn = _rel_squash(name) or _rel_squash(title)
-        if len(sqq) >= 5 and sqn and (sqq in sqn or sqn in sqq):
+        # Equal once squashed is the same title written without delimiters
+        # ("SPYxFAMILY"), which is an exact match, not a near one. Containment
+        # is only a strong hint — "mushishi" sits inside "mushishizokushou".
+        if len(sqq) >= 5 and sqn and sqq == sqn:
+            score = max(score, 1.0)
+        elif score < 0.9 and len(sqq) >= 5 and sqn and (sqq in sqn or sqn in sqq):
             score = 0.9
     if year_hint:
         ym = _YEAR_RE.search(title)
@@ -17711,6 +17739,13 @@ def _group_search_results(shaped: list, query: str,
     into the indexer query, where it would exclude anime releases that carry no
     year)."""
     cands = [query] + [a for a in (akas or []) if a and a.strip()]
+    # Every distinctive word the show is known by, across the query and its
+    # aliases. A release that writes two of them together ("Attack on Titan
+    # Shingeki no Kyojin") scores badly against each one alone — the other
+    # name's words read as an unrelated extra title — but it is an exact match
+    # for the show, so a name built only from these words is scored as one.
+    cand_tokens = [_rel_tokens(c) for c in cands]
+    known_words = set().union(*cand_tokens) if cand_tokens else set()
     if year_hint is None:
         qy = _YEAR_RE.search(query or "")
         year_hint = int(qy.group(0)) if qy else None
@@ -17718,6 +17753,10 @@ def _group_search_results(shaped: list, query: str,
     for r in shaped:
         p = parse_torrent_title(r["title"])
         rel = max(_title_relevance(c, r["title"], p["show"], year_hint) for c in cands)
+        name_tokens = _rel_tokens(p["show"]) or _rel_tokens(r["title"])
+        if (rel < 1.0 and name_tokens and name_tokens <= known_words
+                and any(t and t <= name_tokens for t in cand_tokens)):
+            rel = 1.0
         aud, aud_lang = _parse_release_audio(r["title"])
         er = dict(r)
         er.update({
