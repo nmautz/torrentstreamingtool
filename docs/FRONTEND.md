@@ -665,6 +665,15 @@ duration. It now runs detached.
   run started from the **library** discarded the one download that answers a whole season.
   `ctx.swept` records the seasons a run has already queried so the pack attempt and the gap
   sweep can't ask the indexers for the same season twice.
+- **Aliases on background queries (17.4.2).** `_bgQuery(q, ctx)` sends `aka=ctx.akas`, built by
+  `_relevantAkas(meta, title)` — which keeps only aliases contributing a token the primary title
+  hasn't got. Both halves are measured: without aliases the relevance floor cut 50 correct
+  releases across ten anime; with *all* aliases it admitted 42 wrong-show ones on Hunter x Hunter.
+  See [GOTCHAS.md](GOTCHAS.md). `_relTokens` is a thin mirror of the server's `_rel_tokens`, used
+  only to filter the list — the server re-scores authoritatively.
+- **Fractional episode codes (17.4.2).** `_bgIngest` also skips `special` results (`S01E07.5`, a
+  recap). Flagged in `parse_torrent_title`, not un-matched — see GOTCHAS for why un-matching turns
+  a recap into a season pack.
 - **Relevance floor on ingested episodes (17.3.0).** `_bgIngest` drops episode results scoring
   below `rel` 0.7 — the same floor `_packCoversScope` applies to packs. `_bgQuery` concatenates
   **every group** the search returned, so without it a `Hunter x Hunter S01` query fed

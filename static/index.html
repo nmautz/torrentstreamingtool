@@ -10763,6 +10763,7 @@ function _epBgCtx(scope, only){
       ? (epMetadata.original_language==="en") : null,
     audioPref: _ssAudioPref,
     tmdb: {tmdb_id:c.id, tmdb_kind:c.kind},
+    akas: _relevantAkas(epMetadata, c.title),
     // No search screen is open, so there is no broad query to inherit. The
     // per-season sweep inside _bgEnsureSources does the finding, and its
     // targeted "<title> S0N" query is the better one anyway (see ssSearchSeason).
@@ -10880,9 +10881,9 @@ async function epPlayEpisode(season, episode, btn){
   let eps=[], packs=[];
   try{
     const abs=(season<=1 && episode>=100);
-    eps=(await _bgQuery(`${ctx.query} ${abs?episode:code}`)).filter(same);
+    eps=(await _bgQuery(`${ctx.query} ${abs?episode:code}`, ctx)).filter(same);
     if(!eps.length && !ctx.absolute){
-      const res=await _bgQuery(`${ctx.query} S${pad2(season)}`);
+      const res=await _bgQuery(`${ctx.query} S${pad2(season)}`, ctx);
       eps=res.filter(same);
       packs=res.filter(r=>(r.kind==="season" && r.season===season)
         || (r.kind==="multiseason" && r.season_from<=season && season<=r.season_to));
@@ -15529,6 +15530,8 @@ function _bgCtx(scope){
     // Snapshot, not a live read: a detached run keeps queueing after the user
     // closes the show page, and `_ssMeta` is null by then.
     tmdb:_ssTmdbBinding(),
+    // Filtered aliases (see _relevantAkas) — a detached run can't read _ssMeta.
+    akas:_relevantAkas(_ssMeta, (_ssGroup&&_ssGroup.title)||""),
     searched:_ssEpisodesSearched,
     scope:(scope===undefined)?_ssBulkScope:scope,
     seasons:_ssAllSeasons(),
@@ -15546,9 +15549,57 @@ function _bgCtx(scope){
 // Is the user still looking at the show this run belongs to?
 function _bgLive(ctx){ return !!_ssGroup && _ssGroup.title===ctx.title; }
 
-async function _bgQuery(q){
+// Distinctive tokens of a title — a thin mirror of the server's `_rel_tokens`,
+// used only to decide which aliases are worth sending. Exactness isn't needed:
+// the server re-scores, this only filters the list it scores against.
+const _REL_STOP=new Set(["the","a","an","of","and","to","in","on","at","for","with","from",
+                         "us","uk","au","nz","ca"]);
+function _relTokens(s){
+  return new Set(String(s||"").toLowerCase().replace(/'/g,"")
+    .replace(/[^a-z0-9]+/g," ").split(" ")
+    .filter(t=>t&&!_REL_STOP.has(t)&&!/^(19|20)\d{2}$/.test(t)));
+}
+
+// The show's alternative titles, minus the ones that would do more harm than
+// good. A release named only in romaji ("[COPiUM] Dungeon Meshi - S01E09") scores
+// ~0.38 against the English query and gets cut by `_bgIngest`'s relevance floor,
+// even at 105 seeders — the best copy of the show, dropped. Sending the aliases
+// fixes that, but sending ALL of them breaks something else:
+//
+//   "獵人 Hunter x Hunter" tokenizes to exactly the primary title's own tokens.
+//   An alias that adds no new word gives perfect RECALL to anything containing
+//   one of them, so "Sword of the Demon Hunter Kijin Gentosho" jumps 0.29 -> 0.76
+//   and sails over the floor. Measured: 42 wrong-show results rescued that way
+//   on Hunter x Hunter alone.
+//
+// So an alias is only worth sending when it contributes a token the primary
+// title hasn't got. That keeps Dungeon Meshi / Sousou no Frieren / Shingeki no
+// Kyojin / Ore dake Level Up na Ken and drops the two decorated Hunter x Hunter
+// spellings that caused the damage.
+function _relevantAkas(meta, title){
+  const prim=_relTokens(title);
+  const seen=new Set([String(title||"").toLowerCase()]);
+  const out=[];
+  const add=t=>{
+    if(!t) return;
+    const k=String(t).toLowerCase();
+    if(seen.has(k)) return;
+    const tk=_relTokens(t);
+    if(!tk.size) return;
+    let adds=false; tk.forEach(x=>{ if(!prim.has(x)) adds=true; });
+    if(!adds) return;                      // redundant alias — see above
+    seen.add(k); out.push(t);
+  };
+  ((meta||{}).aka||[]).forEach(add);
+  if(meta&&meta.original_title&&/[A-Za-z]/.test(meta.original_title)) add(meta.original_title);
+  return out.slice(0,3);
+}
+
+async function _bgQuery(q, ctx){
   try{
     let url=`/api/search?q=${encodeURIComponent(q)}`;
+    const ak=(ctx&&ctx.akas)||[];
+    if(ak.length) url+=`&aka=${encodeURIComponent(ak.join(","))}`;
     if(profile.id) url+=`&profile_id=${encodeURIComponent(profile.id)}`;
     const r=await fetch(url);
     if(!r.ok) return [];
@@ -15587,7 +15638,13 @@ function _bgIngest(ctx, results){
   // scored across every alias, which is a different measurement. Absent `rel`
   // (a caller that isn't `_group_search_results`) passes, as it does for packs.
   const plausible=r=>typeof r.rel!=="number"||r.rel>=0.7;
-  const eps=results.filter(r=>r.kind==="episode"&&plausible(r));
+  // `special` is a FRACTIONAL episode code — "S01E07.5", the scene's form for a
+  // recap. It parses as episode 7 because that is what the code says, and it is
+  // emphatically not episode 7; handing one to somebody who pressed Get on
+  // episode 7 is a silent wrong answer. Excluded here rather than in the parser
+  // so the release still groups and still shows on the search page, where a
+  // person can see what it is (see `_TT_EP_FRAC_RE` in main.py).
+  const eps=results.filter(r=>r.kind==="episode"&&!r.special&&plausible(r));
   eps.forEach(r=>{
     let e=ctx.episodes.find(x=>x.season===r.season&&x.episode===r.episode);
     if(!e){ e={season:r.season,episode:r.episode,sources:[]}; ctx.episodes.push(e); }
@@ -15607,14 +15664,14 @@ function _bgIngest(ctx, results){
 // on a long-running show.
 async function _bgSeasonSearch(ctx, sn){
   if(ctx.swept) ctx.swept.add(sn);   // the pack attempt and the gap sweep share these
-  const out=await _bgQuery(`${ctx.query} S${String(sn).padStart(2,"0")}`);
+  const out=await _bgQuery(`${ctx.query} S${String(sn).padStart(2,"0")}`, ctx);
   _bgIngest(ctx, out.filter(r=>r.kind!=="episode" || r.season===sn));
 }
 // One "<title> S04E09" query (bare episode number for absolute-numbered anime).
 async function _bgEpisodeSearch(ctx, season, episode){
   const abs=(season<=1 && episode>=100);
   const code=`S${String(season).padStart(2,"0")}E${String(episode).padStart(2,"0")}`;
-  const out=await _bgQuery(`${ctx.query} ${abs?episode:code}`);
+  const out=await _bgQuery(`${ctx.query} ${abs?episode:code}`, ctx);
   _bgIngest(ctx, out.filter(r=>r.kind==="episode" && r.season===season && r.episode===episode));
 }
 
@@ -25259,6 +25316,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.4.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.4.2</div>
 </body>
 </html>

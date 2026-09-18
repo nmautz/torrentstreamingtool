@@ -4945,6 +4945,27 @@ def parse_season_episode(name: str) -> tuple[int, int]:
 # behind, so ten different episodes of Hunter x Hunter all parsed as episode 1
 # and flooded every S01E01 search.
 _TT_EP_RE          = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,3})(?!\d)")
+# A FRACTIONAL episode code — "S01E07.5", the scene's form for a recap or
+# summary special. It is not episode 7, and handing one to somebody who asked
+# for episode 7 is a silent wrong answer (live: a 2160p ToonsHub Solo Leveling
+# S01E07.5 at 38 seeders, which the seeder-led pick took).
+#
+# Two things make this fiddly. It is matched against the RAW title, because
+# `norm` flattens dots to spaces and "S01E07.5" is "S01E07 5" by then. And the
+# single-digit requirement is the whole discriminator: ".5" is a fraction,
+# ".720p"/".1080p"/".2160p" is a resolution tag. Measured on live results: 1
+# release of the first shape, 111 of the second, so a rule that cannot tell
+# them apart would break a hundred titles to fix one.
+#
+# Only the dotted/underscored form is matched. A space-separated
+# "S01E07 5" is conceivable but was not observed, and widening the
+# separator class would start reading an ordinary trailing number as a
+# fraction for no measured gain.
+#
+# It is a FLAG, not a failed match, and that is deliberate: dropping the match
+# would fall through to `_TT_SEASON_RE`, which sees the "S01" and classifies a
+# 300 MB recap as a whole SEASON PACK — strictly worse than the bug it fixes.
+_TT_EP_FRAC_RE     = re.compile(r"[Ss]\d{1,2}[Ee]\d{1,3}[._]\d(?!\d)")
 _TT_EP_X_RE        = re.compile(r"\b(\d{1,2})x(\d{2})\b")
 # Multi-season packs. The trailing (?!\d) stops the second number from matching a
 # resolution/year *prefix* — "S01 - 720p" must NOT read as S1-72, "S08 - 2019"
@@ -5016,6 +5037,8 @@ def parse_torrent_title(title: str) -> dict:
     Breaking Bad" or "Moonshiners S15E12 Braking Badly" hit out of a search for
     "breaking bad" into their own groups instead of polluting the show."""
     raw = _html.unescape(title or "")   # Jackett titles can carry &amp; etc.
+    # Checked on `raw`: the next line destroys the dot this depends on.
+    frac_ep = bool(_TT_EP_FRAC_RE.search(raw))
     norm = re.sub(r"[._]+", " ", raw)
     norm = re.sub(r"\s+", " ", norm).strip()
     # Drop size tags so "- 1.85GB" / "- 700 MB" aren't misread as absolute episodes.
@@ -5147,6 +5170,11 @@ def parse_torrent_title(title: str) -> dict:
         "season": season, "episode": episode,
         "season_from": season_from, "season_to": season_to,
         "ep_from": ep_from, "ep_to": ep_to, "year": year,
+        # "S01E07.5" — a recap/summary special, NOT episode 7. Only meaningful
+        # on an `episode` kind; consumers that resolve a specific episode must
+        # skip it (see `_bgIngest`), consumers that just group results need not
+        # care. See `_TT_EP_FRAC_RE` for why this is a flag and not a non-match.
+        "special": frac_ep and kind == "episode",
     }
 
 
@@ -18013,6 +18041,7 @@ def _group_search_results(shaped: list, query: str,
             "ep_from": p["ep_from"], "ep_to": p["ep_to"],
             "rel": round(rel, 3),
             "audio": aud, "audio_lang": aud_lang, "tracks": trk,
+            "special": p["special"],
         })
         key = p["show_key"] or "?"
         g = groups.get(key)

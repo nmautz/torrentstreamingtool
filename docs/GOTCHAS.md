@@ -115,6 +115,32 @@ Measured live: `Hunter x Hunter S01` returns `Interview With The Vampire S01E05 
 
 **Do not raise it to `_ssEpisodeAccept`'s 0.95.** That check earns its threshold by running against a *single* title (passed as `aka=`) with the year, country and article tests beside it — a different measurement. `_bgQuery` sends no `aka` and no `year`, so `rel` here is scored against the bare query string, and the *correct* Hunter x Hunter release scores 0.9. A 0.95 gate throws out the answer along with the noise. Absent `rel` passes, exactly as it does for packs.
 
+### Send a show's aliases to the background finder — but only the ones that add a word (17.4.2)
+
+`_bgQuery` sends `aka=` (it didn't before 17.4.2) because `_bgIngest`'s 0.7 relevance floor is scored against the **query string alone**, and a release named in romaji scores nothing against the English title. Live, across ten anime, the floor was cutting **50 correct releases** — including `[COPiUM] Dungeon Meshi - S01E09 [Dual Audio]` at 105 seeders, the best copy of Delicious in Dungeon on the box.
+
+**Sending the whole alias list makes it worse, not better.** An alias whose tokens are already in the primary title gives perfect *recall* to anything sharing one of them:
+
+```
+"獵人 Hunter x Hunter"  ->  tokens {hunter, x}  ==  the primary title's own tokens
+"Sword of the Demon Hunter Kijin Gentosho"  rel 0.29 -> 0.76   over the floor
+```
+
+That was **42 wrong-show results** on Hunter x Hunter alone. `_relevantAkas` therefore drops any alias contributing no new token, which is what separates the two cases: `Dungeon Meshi` adds *meshi*, `Sousou no Frieren` adds *sousou*, `Shingeki no Kyojin` adds both — kept; the two decorated Hunter x Hunter spellings add nothing — dropped. Measured after the filter: 50 rescues kept, 42 false ones gone.
+
+Known and accepted: a spin-off whose title *contains* the parent's (`Boku no Hero Academia Illegals` → My Hero Academia) still scores 0.94 and passes. `_ssEpisodeAccept`'s 0.95-plus-year-plus-country test is what handles that case on the targeted search path; the coarse floor was never going to.
+
+### A fractional episode code is a recap, not that episode (17.4.2)
+
+The scene writes summary specials as `S01E07.5`. `_TT_EP_RE` reads the `E07` and stops at the dot, so it parsed as episode 7 — and a 2160p `Solo Leveling S01E07.5` at 38 seeders was a live candidate for anyone pressing Get on episode 7.
+
+Two things make the fix fiddly, and both are load-bearing:
+
+- **It is matched on the RAW title.** `parse_torrent_title` flattens `[._]` to spaces on its second line, so by the time `norm` exists the release reads `S01E07 5` and the dot the rule depends on is gone.
+- **The single digit IS the rule.** `.5` is a fraction; `.720p` / `.1080p` / `.2160p` is a resolution tag. Live results carry **1** of the first shape and **111** of the second, so anything that cannot tell them apart breaks a hundred titles to fix one.
+
+And it is a **flag (`special`), not a failed match**. Dropping the match falls through to `_TT_SEASON_RE`, which sees the `S01` and classifies a 300 MB recap as a whole **season pack** — which `_packCoversScope` would then happily offer as the season. Strictly worse than the bug. `_bgIngest` skips `special` results; they still group and still render on the search page, where a person can see what they are.
+
 ### The primary pick compares seeders in BUCKETS, not exactly (17.3.0)
 
 `_pickCmp` ([static/index.html](../static/index.html)) orders unattended picks by Dolby-Vision risk → **availability bucket** → track richness → exact seeders. The bucket is `_availRank`, the very same `0 / ≤8 / ≤30 / >30` ladder `_availLabel` has rendered as Unavailable/Low/Good/Excellent since the vocabulary rewrite — extracted, not invented, so "Excellent" can never come to mean two different numbers in two places.

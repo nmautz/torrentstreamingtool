@@ -175,7 +175,13 @@ def pack_line(p, meta, want):
 # ── One target ───────────────────────────────────────────────────────────────
 
 def run(title, year, season):
-    meta = get("/api/tmdb/lookup", title=title, year=year, kind="tv")
+    # NESTED: /api/tmdb/lookup answers {enabled, img_base, metadata:{...},
+    # anime:{...}}. Reading `all_seasons` / `anime` off the top level returns
+    # nothing and makes `abs_batch_ok` unconditionally false — which is not a
+    # measurement, it is a test that cannot fire. Cost one wrong conclusion.
+    look = get("/api/tmdb/lookup", title=title, year=year, kind="tv")
+    meta = dict(look.get("metadata") or {})
+    meta["anime"] = look.get("anime") or {}
     q = "%s S%02d" % (title, season)
     data = get("/api/search", q=q, year=year or 0)
     rows = [r for g in (data.get("groups") or []) for r in (g.get("results") or [])]

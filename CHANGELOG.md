@@ -1,5 +1,32 @@
 # Changelog
 
+## [17.4.2] — 2026-09-18
+**Two ways Get could hand you the wrong file, both found by measuring rather than reading.**
+
+* **A show named in romaji was being thrown away by its own safety net.** 17.3.0 added a 0.7
+  relevance floor so a "Hunter x Hunter S01" query could stop returning *Interview With The
+  Vampire*. But the background finder sends no alternative titles, so `rel` is scored against
+  the English name alone — and `[COPiUM] Dungeon Meshi - S01E09 [Dual Audio]`, the best copy
+  of Delicious in Dungeon on the box at **105 seeders**, scores 0.38 and was cut. Measured
+  across ten anime: **50 correct releases** lost that way (39 of Delicious in Dungeon, 6 Solo
+  Leveling as *Ore dake Level Up na Ken*, 3 Frieren as *Sousou no Frieren*, 2 Attack on Titan
+  as *Shingeki no Kyojin*).
+* **But sending every alias is worse.** `獵人 Hunter x Hunter` tokenizes to exactly the primary
+  title's own words, which hands perfect recall to anything containing one of them — *Sword of
+  the Demon Hunter* jumped 0.29 → 0.76 and sailed over the floor. That is **42 wrong-show
+  results** on Hunter x Hunter alone. So an alias is now only sent when it contributes a word
+  the primary title hasn't got (`_relevantAkas`). Measured after the filter: all 50 correct
+  rescues kept, all 42 Hunter x Hunter false ones gone.
+* **"S01E07.5" is a recap, not episode 7.** The scene writes summary specials with a
+  fractional code, and it parsed as the plain episode — so a 2160p `Solo Leveling S01E07.5`
+  at 38 seeders was a candidate for anyone asking for episode 7. Now flagged and skipped.
+  The single digit is the whole discriminator: live results carry **1** release of the
+  `.5` shape against **111** of the `.720p`/`.1080p`/`.2160p` shape, so a rule that cannot
+  tell them apart would break a hundred titles to fix one.
+* It is a **flag, not a failed match** — deliberately. Refusing the match falls through to the
+  season regex, which sees the "S01" and files a 300 MB recap as a whole **season pack**,
+  which is worse than the bug being fixed.
+
 ## [17.4.1] — 2026-09-18
 * The whole-season download toast repeated itself on a neighbouring-pack fetch — "…none of
   which you already have. **season 2**, excellent availability, 144.7 GB", where the sentence
