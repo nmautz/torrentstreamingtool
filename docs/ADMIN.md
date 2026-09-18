@@ -229,7 +229,7 @@ For each profile:
 
 ### 7. System
 
-Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Automatic Stream Prep**, **Auto-Prep on Play**, **Show Missing Content**, **Force Stream Prep**, **Validate & Repair on Prep**, **File Validator**, **Storage & Compression**, **Network Adapter**, **VPN Kill Switch**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
+Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Automatic Stream Prep**, **Auto-Prep on Play**, **Show Missing Content**, **Force Stream Prep**, **Validate & Repair on Prep**, **File Validator**, **Storage & Compression**, **Network Adapter**, **VPN Kill Switch**, **Race Download Sources**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
 
 #### System Health
 
@@ -275,6 +275,27 @@ Chooses how far the Mullvad kill switch reaches when the VPN drops. A single tog
 
 - `GET /api/admin/vpn-killswitch` → `{block_ui}`.
 - `POST /api/admin/vpn-killswitch` → `{block_ui}`; broadcasts a `state` snapshot so the overlay appears/clears immediately.
+
+#### Race Download Sources
+
+**Ships disabled.** When on, a download the user started **without choosing a torrent** runs several candidate releases at once and progressively drops the slow ones, so a dead or crawling pick costs seconds rather than the ten minutes the serial dead-swarm retry takes to notice. Scope is deliberately narrow: one-press **Get** (a film, a season pack) and **Stream Now** on an auto-picked source. Picking a specific release from the source list always downloads exactly that one, and bulk season downloads never race — ten episodes x three candidates would put thirty torrents in qBittorrent at once.
+
+The help text says the cost out loud and should keep doing so: **for the length of a race every candidate downloads in full**, so with the defaults (3 candidates, 2 concurrent races) six torrents share one connection and each is individually slower. Racing improves time-to-first-byte and immunity to a bad pick; it does not improve aggregate throughput.
+
+- **Enabled** — the master switch. Off ⇒ every path behaves exactly as 15.6.3, and no `race` field is ever written to `library.json`.
+- **Sources Per Race** — 2 / 3 / 4 (default 3).
+- **Races At Once** — 1 / 2 / 3 (default 2), box-wide. Downloads over the cap start normally and are unaffected; the item records `race.state:"skipped", reason:"cap"`.
+- **Keep A Better Copy** — the HQ two-track. When the fastest release is a low-quality one, also keep the best copy at or under the quality limit. It is **paused while anyone is watching that item** (a file being streamed before it finishes needs the whole link) and resumed on stop. When it completes it swaps itself in automatically: the item repoints, watch progress and track preferences migrate to the new paths, the old copy and its HLS bundles are deleted, and playback — if it was live — picks up where it left off.
+- **Quality Limit** — 720p / 1080p / 4K (default 1080p), the highest tier the better copy may aim at. Disabled while *Keep A Better Copy* is off.
+
+Quality is read from the release name (`2160p`, `WEB-DL`, `x265`, `REMUX`…) and sanity-checked against the file size versus the TMDb runtime, so a release that merely *claims* 4K is judged on what it actually contains. The cross-check only ever **demotes**; an unknown runtime costs nothing. Note that with a 1080p limit most races produce no two-track at all, because the auto-pick usually already *is* the best 1080p — that is correct, and the card only shows an upgrade chip once a two-track genuinely engages.
+
+Enums are validated server-side, not coerced: an unrecognised size / cap / ceiling is a **400**, so the panel can never show a value the server didn't agree to. Both settings live in `library.json → settings.download_race` and are mirrored onto `state`, so flipping them reaches every open dashboard in the next `state` SSE event without a reload.
+
+- `GET /api/admin/download-race` → `{enabled, size, max_items, quality_ceiling, hq_upgrade}`
+- `POST /api/admin/download-race` → same shape.
+
+See [BACKEND.md § Parallel download racing](BACKEND.md), [LIBRARY_DATA.md](LIBRARY_DATA.md) § `race`, and [GOTCHAS.md](GOTCHAS.md).
 
 #### Seeding & Bandwidth
 

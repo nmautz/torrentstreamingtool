@@ -39,6 +39,8 @@ All four services (VLC, qBittorrent, Jackett, dashboard) run on the same host ex
 | `analyzer.py` | 540 | Smart Skip — chromaprint fingerprinting (fingerprint-only credits detection) |
 | `episodes.py` | — | Season/episode attribution — folder-aware structural parse + TMDb-aware absolute-number resolution. Pure, no deps. See [LIBRARY_DATA.md](LIBRARY_DATA.md) § Season/episode attribution |
 | `dvprobe.py` | — | Dolby Vision / HDR signalling read from a container header (MKV EBML + MP4 boxes). Pure stdlib, no ffmpeg. Flags Profile 5 — the green-picture case. See [GOTCHAS.md](GOTCHAS.md) |
+| `relquality.py` | — | Release quality from a torrent title (resolution / source / codec), cross-checked against file size vs TMDb runtime. Only ever demotes. Pure, no deps. Feeds the download race |
+| `racerules.py` | — | The download race's pure decision arithmetic — who is leading, who to drop. Split out so it is testable without qBittorrent. Pure, imports only `relquality` |
 | `stt.py` | — | AI subtitles — whisper.cpp wrapper (audio extract → transcribe/translate). See [STT.md](STT.md) |
 | `remote_input.py` | — | HID wireless remote (air-mouse) — global pynput keyboard/mouse hooks: media keys + 🏠 Home → playback control, any-input feed → TV UI wake. See [REMOTE.md](REMOTE.md) |
 | `static/index.html` | 3608 | Main UI — vanilla JS, Tailwind CDN, SSE-driven |

@@ -4395,8 +4395,18 @@ function formatDlStat(d){
 // episode is many items behind one tile, and until now that tile showed only a
 // blinking "Downloading" badge — no size, no percentage, no speed — and even
 // that only appeared on a full library repaint.
+// True for an ISO timestamp inside the last 24 h. Used to age out the
+// "Upgraded" chip so a swap that happened last month doesn't sit on the card
+// forever.
+function _recent24h(iso){
+  if(!iso) return false;
+  const t=Date.parse(iso);
+  return isFinite(t) && (Date.now()-t) < 86400000;
+}
+
 function _libDlAgg(ids){
   let total=0, done=0, speed=0, eta=0, any=false, allPaused=true, awaiting=false;
+  let racing=false;
   ids.forEach(id=>{
     const d=libDownloadStats.get(id);
     if(!d) return;
@@ -4405,6 +4415,11 @@ function _libDlAgg(ids){
     eta=Math.max(eta, d.eta_secs||0);          // the show is done when the slowest is
     if(!d.paused) allPaused=false;
     if(d.awaiting_metadata) awaiting=true;
+    // `race` is a per-item object, NOT a number. Everything else here is
+    // summed across a merged show tile; adding this would render garbage, so
+    // it collapses to a single boolean for the tile and the per-item detail is
+    // read straight from libDownloadStats where it is actually needed.
+    if(d.race && (d.race.state==="racing"||d.race.state==="upgrading")) racing=true;
   });
   if(!any) return null;
   return {
@@ -4414,6 +4429,7 @@ function _libDlAgg(ids){
     // Only claim "finding peers" while nothing at all has a size yet — one
     // stalled member of a six-episode show must not hide the other five.
     awaiting_metadata: awaiting && total<=0,
+    racing,
   };
 }
 
@@ -6984,10 +7000,28 @@ function _libItemChrome(item){
   const retryBadge=(isDownloading&&item.retry_count>0)
     ?`<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 border border-gray-700" title="The previous release never sent any data, so StreamLink switched to another one automatically.">${ic("resume")} Release ${item.retry_count}</span>`
     :"";
-  const statusBadge=isDownloading
-    ?dlBadge+retryBadge
+  // Racing / upgrade chips. `item.race` is the DERIVED summary the server
+  // builds (_race_summary), never the raw sampler blob.
+  const _race=item.race||null;
+  const raceBadge=(_race&&_race.state==="racing"&&(_race.entries||[]).length>1)
+    ?`<span class="text-[10px] px-1.5 py-0.5 bg-indigo-950 text-indigo-300 border border-indigo-900" title="Several sources are downloading at once; the slow ones are dropped automatically so you are not left waiting on a bad pick.">${ic("resume")} Racing ${_race.entries.length}</span>`
+    :"";
+  // Only shown once the two-track has ACTUALLY engaged. Advertising an upgrade
+  // that never arrives (the common case, where the auto-pick already is the
+  // best copy available) would be worse than saying nothing.
+  const upgBadge=(_race&&_race.upgrade)
+    ?`<span class="text-[10px] px-1.5 py-0.5 bg-amber-950 text-amber-300 border border-amber-900" title="A higher-quality copy is still downloading. It will replace this one automatically when it finishes, and playback will pick up where you left off.">${ic("down")} HQ ${escHtml(_race.upgrade.label||"")} ${Math.round(_race.upgrade.pct||0)}%${_race.upgrade.paused?" · held":""}</span>`
+    :"";
+  const upgradedBadge=(_race&&_race.state==="settled"&&_race.upgraded_from&&_recent24h(_race.upgraded_from.at))
+    ?`<span class="text-[10px] px-1.5 py-0.5 bg-emerald-950 text-emerald-300 border border-emerald-900" title="This was replaced automatically by a better copy (was ${escHtml(_race.upgraded_from.label||_race.upgraded_from.title||"a lower-quality release")}).">${ic("check")} Upgraded</span>`
+    :"";
+  const statusBadge=(isDownloading
+    ?dlBadge+retryBadge+raceBadge
     :isError?`<span class="text-[10px] px-1.5 py-0.5 bg-red-900/50 text-red-400 border border-red-800"${item.error?` title="${escHtml(item.error)}"`:""}>Error</span>`
-    :allDone?`<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-500 border border-gray-700"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg> All watched</span>`:"";
+    :allDone?`<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-500 border border-gray-700"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg> All watched</span>`:"")
+    // The HQ chip rides on a READY item too: once the low-quality copy lands,
+    // the item stops being "downloading" while its upgrade is still running.
+    + upgBadge + upgradedBadge;
 
   let skipBadge = "";
   if (isReady) {
@@ -7771,13 +7805,21 @@ async function grpGetFilm(tmdbId, btn){
     // year mismatch is what demotes them (see _title_relevance).
     const best=results.reduce((m,x)=>Math.max(m, typeof x.rel==="number"?x.rel:0), 0);
     const cands=results.filter(x=>(typeof x.rel==="number"?x.rel:0) >= Math.max(0.7, best-0.125));
-    const src=cands.length ? _ssAutoPick(cands, _ssParseBulkFilters()) : null;
+    const rc=cands.length ? _ssAutoPickRace(cands, _ssParseBulkFilters(), {})
+                          : {pick:null, candidates:[]};
+    const src=rc.pick;
     if(!src){ showAlert(`Couldn't find ${f.title} anywhere right now — try again in a few minutes.`,"warn"); return; }
     let res=null;
     try{
+      // One-press Get on a group page: the user named a film, not a release,
+      // so this races. `runtime` comes off the group's TMDb row when it has one.
+      const race=rc.candidates.length>1
+        ? {auto_picked:true, candidates:rc.candidates,
+           ...(f.runtime?{runtime_min:+f.runtime, episode_count:1}:{})}
+        : {};
       const r=await postLibraryDownload({magnet:src.magnet, title:src.title, series:"", season:0, episode:0,
                              save_path:"", profile_id:profile.id, admin_only:false,
-                             tmdb_id:f.tmdb_id, tmdb_kind:"movie"}, {alternatives:cands});
+                             tmdb_id:f.tmdb_id, tmdb_kind:"movie", ...race}, {alternatives:cands});
       if(r.cancelled) return;
       res=await r.json().catch(()=>null);
       if(!r.ok){ showAlert(_errDetail(res,"Download failed."),"error"); return; }
@@ -10221,8 +10263,10 @@ async function postLibraryDownload(body, opts={}){
   if(!go) return {ok:false, cancelled:true, info};
   if(go===true) return send({...body, allow_unreleased:true});
   // A different source: a torrent prepared for the original (hash + file picks)
-  // doesn't apply to it.
-  const {torrent_hash, selected_file_indices, ...rest}=body;
+  // doesn't apply to it - and neither does the candidate shortlist. The user
+  // just picked a specific release by hand, which is the one case racing must
+  // never override.
+  const {torrent_hash, selected_file_indices, candidates, auto_picked, ...rest}=body;
   const r2=await send({...rest, magnet:go.magnet, title:go.title||body.title, allow_unreleased:true});
   r2.source=go;
   return r2;
@@ -12396,17 +12440,53 @@ async function openStreamPicker(magnet, title, btn, ctx){
   streamPrepAbort=new AbortController();
 
   try{
-    const r=await fetch("/api/stream/prepare",{
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({magnet,title}),
-      signal:streamPrepAbort.signal,
-    });
-
-    if(!r.ok){
-      const e=await r.json().catch(()=>({detail:"Failed to fetch file list"}));
-      throw new Error(e.detail);
+    // When the caller auto-picked and handed us alternatives, race them: add
+    // every candidate, buffer them in parallel and take the first one ready.
+    // It returns the /api/stream/prepare shape, so everything below is
+    // unchanged. Any failure falls straight back to the single-source prepare,
+    // which is exactly today's behaviour.
+    const cands=(ctx&&ctx.candidates)||[];
+    let d=null, raced=false;
+    if(app.download_race && cands.length>1){
+      document.getElementById("streamPickerSubtitle").textContent=
+        `Finding the fastest of ${cands.length} sources…`;
+      try{
+        const rr=await fetch("/api/stream/race",{
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({candidates:cands, series:(ctx&&ctx.series)||"",
+                               season:(ctx&&ctx.season)||0, episode:(ctx&&ctx.episode)||0,
+                               profile_id:profile.id}),
+          signal:streamPrepAbort.signal,
+        });
+        if(rr.ok){
+          d=await rr.json();
+          raced=true;
+          if(d.magnet) magnet=d.magnet;
+          if(d.title) title=d.title;
+        }
+      }catch(err){
+        if(err.name==="AbortError"){
+          // The server race outlives an aborted fetch, so say so explicitly -
+          // otherwise three torrents keep buffering until its own timeout.
+          fetch("/api/stream/race",{method:"DELETE"}).catch(()=>{});
+          return;
+        }
+      }
+      document.getElementById("streamPickerSubtitle").textContent="Connecting to peers…";
     }
-    const d=await r.json();
+    if(!d){
+      const r=await fetch("/api/stream/prepare",{
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({magnet,title}),
+        signal:streamPrepAbort.signal,
+      });
+
+      if(!r.ok){
+        const e=await r.json().catch(()=>({detail:"Failed to fetch file list"}));
+        throw new Error(e.detail);
+      }
+      d=await r.json();
+    }
 
     // If modal was closed while we waited, cancel the torrent and bail
     if(document.getElementById("streamPickerModal").classList.contains("hidden")){
@@ -12430,6 +12510,12 @@ async function openStreamPicker(magnet, title, btn, ctx){
     // streamability flag so the user sees it'll buffer and decides — instead of
     // silently casting a source that never keeps up. (Play is one more tap.)
     if(videoFiles.length===1){
+      // A raced winner has ALREADY proved it delivers - it is the one that got
+      // to the buffer gate first, out of three. The streamability warning
+      // exists for the case where a source may never buffer, which the race
+      // has just answered, so re-asking would be a scary modal about a problem
+      // that is already solved.
+      if(raced){ await selectStreamFile(videoFiles[0].index); return; }
       const h=_streamHealth(videoFiles[0].size_bytes, streamPrepData.seeders);
       if(_streamHealthAutoPlay(h)){ await selectStreamFile(videoFiles[0].index); return; }
       document.getElementById("streamPickerSubtitle").textContent=_streamHealthSubtitle(h);
@@ -14202,7 +14288,16 @@ async function ssSimpleGetSeason(season, btn){
       if(pack){
         // season on the request (not 0) so the item is series-shaped from the
         // moment it is created, whatever the release name looks like.
-        await _ssDownloadOne(pack, sn, 0);
+        //
+        // This branch is a one-press auto choice, so it races. The `else`
+        // below hands off to ssBulkAuto (per-episode), which deliberately does
+        // NOT - a ten-episode season would otherwise put thirty torrents in
+        // qBittorrent at once.
+        const rc=_ssAutoPickRace(_ssPacksForSeason(sn), _ssParseBulkFilters(), {});
+        await _ssDownloadOne(pack, sn, 0, {
+          race:true,
+          candidates:(rc.pick&&rc.pick.magnet===pack.magnet)?rc.candidates:[],
+          ..._ssRuntimeHint(sn, 0)});
         return;
       }
     }
@@ -14226,9 +14321,11 @@ async function ssSimpleGetMovie(btn){
       showAlert("Couldn't find this anywhere right now — try again in a few minutes.","warn");
       return;
     }
-    const src=_ssAutoPick(_ssPacks, _ssParseBulkFilters());
+    const rc=_ssAutoPickRace(_ssPacks, _ssParseBulkFilters(), {});
+    const src=rc.pick;
     if(!src){ showAlert("Couldn't find a usable copy right now.","warn"); return; }
-    await _ssDownloadOne(src, 0, 0);
+    await _ssDownloadOne(src, 0, 0,
+      {race:true, candidates:rc.candidates, ..._ssRuntimeHint(0, 0)});
   });
 }
 
@@ -14393,7 +14490,16 @@ async function ssPlayEpisode(season,episode,btn){
   const go=await _ssConfirmOut(season,episode,best.magnet);
   if(!go) return;
   if(go!==true) best=go;
-  openStreamPicker(best.magnet,best.title,btn,{series:_ssGroup&&_ssGroup.title,season,episode,seeders:best.seeders,size:best.size});
+  // The source here was AUTO-PICKED, so it can be raced: several candidates
+  // buffer at once and whichever is ready first is the one that plays. That is
+  // the whole answer to "Play sat at 0% because the release had no seeds".
+  // ssPlaySource (a specific row the user tapped) never passes candidates.
+  const rc=(go===true) ? _ssAutoPickRace(e.sources, _ssParseBulkFilters(), {})
+                       : {pick:best, candidates:[]};
+  const cands=(rc.pick && rc.pick.magnet===best.magnet) ? rc.candidates : [];
+  openStreamPicker(best.magnet,best.title,btn,{series:_ssGroup&&_ssGroup.title,season,episode,
+                                               seeders:best.seeders,size:best.size,
+                                               candidates:cands});
 }
 
 // Stream-now for a specific source inside the per-episode source sheet.
@@ -14806,6 +14912,16 @@ async function _ssDownloadOne(src, season, episode, opts={}){
               // The show the user picked. A detached background run may outlive
               // the open page, so the caller can pass its own snapshot.
               ...((opts.tmdb!==undefined)?opts.tmdb:_ssTmdbBinding())};
+  // Racing is opt-in PER CALL SITE and only ever set where the user pressed
+  // one button and let us choose. The download modal and the per-episode
+  // source sheet never pass `opts.race`, so they send no candidates and take
+  // the identical path they always have.
+  if(opts.race && opts.candidates && opts.candidates.length>1){
+    body.auto_picked=true;
+    body.candidates=opts.candidates;
+    if(opts.runtime_min) body.runtime_min=opts.runtime_min;
+    if(opts.episode_count) body.episode_count=opts.episode_count;
+  }
   const r=await postLibraryDownload(body, {silent:!!opts.silent,
                                           alternatives:opts.silent?[]:_ssAlternativeSources(season, episode)});
   if(r.cancelled) return false;
@@ -15414,6 +15530,98 @@ function _ssAutoPickFrom(sources, filt){
   c=sources.filter(okSeed).sort(bySeed);
   if(c.length) return c[0];
   return [...sources].sort(bySeed)[0];
+}
+
+// The resolution a release title claims, or 0. A deliberately thin mirror of
+// relquality.parse() used only to ORDER the shortlist we hand the server - the
+// server re-scores every candidate authoritatively (including the TMDb runtime
+// cross-check that catches a release lying about its tier), so this never has
+// to be clever, only cheap.
+function _ssRelHeight(t){
+  const m=/\b(2160|1440|1080|720|576|480)[pi]\b/i.exec(t||"");
+  if(m) return +m[1];
+  return /\b(4k|uhd)\b/i.test(t||"") ? 2160 : 0;
+}
+
+// The best candidate at or below `ceiling` - the HQ track's target. Respects
+// the Auto-pick size/seeder limits, because a household that capped downloads
+// at 8 GB did not mean "except when we are racing".
+function _ssBestAtOrBelow(pool, ceiling, filt){
+  const ok=pool.filter(s=>{
+    const h=_ssRelHeight(s.title);
+    if(!h || h>ceiling) return false;
+    const z=s.size||0;
+    return (s.seeders||0)>=filt.minSeed && z>=filt.minBytes && z<=filt.maxBytes;
+  });
+  if(!ok.length) return null;
+  return ok.sort((a,b)=>(_ssRelHeight(b.title)-_ssRelHeight(a.title))
+                        ||((a.dv_risk?1:0)-(b.dv_risk?1:0))
+                        ||((b.seeders||0)-(a.seeders||0)))[0];
+}
+
+// An ordered shortlist for the server to race, best first.
+//
+// `pick` is IDENTICAL to what _ssAutoPick returns today: racing never changes
+// WHICH release is primary, it only offers alternates to run beside it. That
+// property is what makes this safe to switch on - with racing disabled, or
+// with one source found, the behaviour is byte-for-byte what it was.
+function _ssAutoPickRace(sources, filt, opts){
+  const pick=_ssAutoPick(sources, filt);
+  if(!pick) return {pick:null, candidates:[]};
+  if(!app.download_race || !sources || sources.length<2) return {pick, candidates:[]};
+  const pref=sources.filter(_ssAudioMatch);
+  const pool=pref.length?pref:sources;
+  // De-duplicate by release identity, mirroring the server's _release_key: the
+  // same release indexed by two trackers must never eat two race slots.
+  const key=x=>((x&&x.title)||"").toLowerCase().replace(/[^a-z0-9]+/g,"");
+  const seen=new Set(), out=[];
+  const push=x=>{ if(!x||!x.magnet) return; const k=key(x);
+                  if(k&&!seen.has(k)){ seen.add(k); out.push(x); } };
+  push(pick);
+  const hq=_ssBestAtOrBelow(pool, (opts&&opts.ceiling)||app.download_race_ceiling||1080, filt);
+  if(hq && _ssRelHeight(hq.title) > _ssRelHeight(pick.title)) push(hq);
+  [...pool].sort((a,b)=>((a.dv_risk?1:0)-(b.dv_risk?1:0))||((b.seeders||0)-(a.seeders||0)))
+           .forEach(push);
+  return {pick, candidates:out.slice(0,6).map(x=>({
+    magnet:x.magnet, title:x.title, size:x.size||0,
+    seeders:x.seeders||0, dv_risk:!!x.dv_risk, audio:x.audio||"",
+  }))};
+}
+
+// (runtime_min, episode_count) for the server's bytes-per-minute quality
+// cross-check, read off the open show page's TMDb metadata. Worth sending even
+// though the server has its own fallback: a BRAND NEW item has no metadata yet
+// (it is fetched after the row is created), so at race-planning time the page
+// is the only place this is known.
+//
+// Returns {} when it cannot tell, which relquality reads as "unknown" and
+// handles by letting the release name stand. Never guess an episode count -
+// for a pack the divisor is the whole calculation.
+function _ssRuntimeHint(season, episode){
+  const m=_ssMeta; if(!m) return {};
+  if(m.tmdb_kind==="movie" || (!season && !episode))
+    return m.runtime ? {runtime_min:+m.runtime, episode_count:1} : {};
+  const sn=(m.seasons&&m.seasons[String(+season||0)])||null;
+  const eps=(sn&&sn.episodes)||[];
+  let pool=eps.filter(e=>+e.runtime>0);
+  if(episode){
+    const one=eps.find(e=>+e.episode===+episode && +e.runtime>0);
+    if(one) return {runtime_min:+one.runtime, episode_count:1};
+  }
+  if(!pool.length){
+    // Fall back to the show-level typical length, then to any fetched season.
+    const showRt=(m.episode_run_time||[]).filter(x=>+x>0);
+    if(showRt.length) pool=showRt.map(x=>({runtime:+x}));
+    else Object.values(m.seasons||{}).forEach(x=>{
+      ((x&&x.episodes)||[]).forEach(e=>{ if(+e.runtime>0) pool.push(e); });
+    });
+  }
+  if(!pool.length) return {};
+  const avg=pool.reduce((a,e)=>a+(+e.runtime||0),0)/pool.length;
+  if(episode) return {runtime_min:avg, episode_count:1};
+  // A whole-season pack: the divisor is every episode in it.
+  const cnt=((m.all_seasons||[]).find(x=>+x.season===+season)||{}).episode_count||0;
+  return cnt ? {runtime_min:avg, episode_count:+cnt} : {};
 }
 
 // Warning chip for a release whose title claims Dolby Vision with no HDR10/SDR
@@ -23891,6 +24099,25 @@ function connectSSE(){
     // series and a new member is by definition not in the list yet.
     if(_epConcerns(d.item_id, true)) _epLiveRefresh();
   });
+  // Discrete race transitions. Separate from library_progress because a 5 s
+  // sampler cannot express "a candidate was dropped" or "the upgrade landed" -
+  // those want a toast and a repaint, not a moved bar.
+  es.addEventListener("library_race",e=>{
+    _noteSSEMsg();
+    const d=JSON.parse(e.data||"{}");
+    if(!d.item_id) return;
+    if(d.event==="upgraded"){
+      showAlert(`Upgraded to ${d.label||d.title||"a better copy"}.`
+        +" Playback continued where you left off.","success");
+    } else if(d.event==="upgrade_available"){
+      showAlert(`A ${d.label||"higher-quality"} copy is downloading and will`
+        +" replace this one automatically when it finishes.","info");
+    }
+    // started / culled / settled / exhausted are visible in the card chips, so
+    // they only need a repaint - a toast per dropped candidate would be noise.
+    if(activeTab==="library") loadLibrary();
+    if(_epConcerns(d.item_id, true)) _epLiveRefresh();
+  });
   es.addEventListener("progress_saved",e=>{
     _noteSSEMsg();
     // Re-render library silently when episode progress is saved
@@ -24298,6 +24525,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">15.6.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">16.0.0</div>
 </body>
 </html>

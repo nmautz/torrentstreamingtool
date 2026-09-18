@@ -77,3 +77,6 @@ tools/
 
 
 streamlink_service.py
+# Integration-harness magnets. The example is committed; the real one is not
+# (it names specific torrents and is per-machine).
+tests/race_magnets.json

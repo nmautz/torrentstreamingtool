@@ -1279,6 +1279,57 @@
       </div>
     </div>
 
+    <!-- Parallel download racing -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Race Download Sources<span class="help-tip" tabindex="0" data-tip="Only applies when nobody chose a torrent: one-press Get, and Stream Now on an auto-picked source. Picking a specific release from the source list always downloads exactly that one. Bulk season downloads never race.">?</span></h2>
+          <p class="text-xs text-gray-500 mt-0.5">When you ask for something without choosing a release, start several at once and drop the slow ones, so a dead or crawling pick costs seconds instead of ten minutes. <strong>Costs bandwidth:</strong> the candidates share your connection for up to ~90 s, so each is individually slower while the race runs.</p>
+        </div>
+        <button id="drEnabledBtn" onclick="toggleDownloadRace()"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                 bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">
+          &hellip;
+        </button>
+      </div>
+
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h3 class="text-xs font-black uppercase tracking-wide text-gray-200">Sources Per Race</h3>
+          <p class="text-xs text-gray-500 mt-0.5">How many releases compete. More means a better chance of finding a fast one and more bandwidth divided between them while they race.</p>
+        </div>
+        <div id="drSizeBtns" class="flex-shrink-0 flex"></div>
+      </div>
+
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h3 class="text-xs font-black uppercase tracking-wide text-gray-200">Races At Once</h3>
+          <p class="text-xs text-gray-500 mt-0.5">How many downloads may be racing box-wide. The rest start normally and are unaffected.</p>
+        </div>
+        <div id="drMaxBtns" class="flex-shrink-0 flex"></div>
+      </div>
+
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h3 class="text-xs font-black uppercase tracking-wide text-gray-200">Keep A Better Copy</h3>
+          <p class="text-xs text-gray-500 mt-0.5">When the fastest release is a low-quality one, also keep the best copy at or under the quality limit below. It is held while you are watching, and swaps itself in when it finishes — playback picks up where you left off and the old copy is deleted.</p>
+        </div>
+        <button id="drHqBtn" onclick="toggleDownloadRaceHq()"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                 bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">
+          &hellip;
+        </button>
+      </div>
+
+      <div class="px-5 py-4 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h3 class="text-xs font-black uppercase tracking-wide text-gray-200">Quality Limit</h3>
+          <p class="text-xs text-gray-500 mt-0.5">The highest the better copy may aim for. Quality is read from the release name and sanity-checked against the file size and the TMDb runtime, so a release that merely <em>claims</em> 4K is judged on what it actually contains.</p>
+        </div>
+        <div id="drCeilBtns" class="flex-shrink-0 flex"></div>
+      </div>
+    </div>
+
     <!-- qBittorrent seeding & bandwidth limits -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
@@ -1985,7 +2036,7 @@ function switchTab(tab){
   else                   stopCompressionPolling();
   if(tab==="cleanup")    loadCleanup();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")   { loadNetwork(); loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadMissingContent(); loadAutoMaint(); loadPrepValidate(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
+  if(tab==="system")   { loadNetwork(); loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadMissingContent(); loadDownloadRace(); loadAutoMaint(); loadPrepValidate(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
   else                 { stopSysHealthPolling(); stopForcePrepPolling(); stopFileValidationPolling(); stopFileRepairPolling(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); if(!_auChangelogLoaded) loadChangelog(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
@@ -2645,6 +2696,96 @@ async function togglePlayPrep(){
 
 // ── Library missing content (not-yet-downloaded seasons/episodes) ─────────────
 let _mcCfg = {enabled:true, show_unaired:false};
+
+// ── Parallel download racing ─────────────────────────────────────────
+let _drCfg = {enabled:false, size:3, max_items:2, quality_ceiling:1080, hq_upgrade:true};
+const _DR_BTNS = ["drEnabledBtn","drHqBtn"];
+
+function _drSegment(containerId, values, current, labels, onPick){
+  const el = document.getElementById(containerId);
+  if(!el) return;
+  el.innerHTML = values.map((v,i)=>{
+    const on = v === current;
+    return `<button data-v="${v}" class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors ${
+      on ? "bg-emerald-950 border-emerald-700 text-emerald-300"
+         : "bg-gray-800 border-gray-700 text-gray-400 hover:text-white"
+    } ${i ? "border-l-0" : ""} disabled:opacity-50">${labels[i]}</button>`;
+  }).join("");
+  Array.from(el.children).forEach(b=>{
+    b.disabled = !_drCfg.enabled;
+    b.onclick = () => onPick(parseInt(b.dataset.v, 10));
+  });
+}
+
+function _drRender(){
+  _mcRenderBtn("drEnabledBtn", _drCfg.enabled, "Enabled", "Disabled");
+  _mcRenderBtn("drHqBtn", _drCfg.hq_upgrade, "On", "Off");
+  const hq = document.getElementById("drHqBtn");
+  if(hq) hq.disabled = !_drCfg.enabled;
+  _drSegment("drSizeBtns", [2,3,4], _drCfg.size, ["2","3","4"],
+             v => _drSave({..._drCfg, size:v}, `Racing ${v} sources.`));
+  _drSegment("drMaxBtns", [1,2,3], _drCfg.max_items, ["1","2","3"],
+             v => _drSave({..._drCfg, max_items:v},
+                          `Up to ${v} download${v===1?"":"s"} may race at once.`));
+  _drSegment("drCeilBtns", [720,1080,2160], _drCfg.quality_ceiling,
+             ["720p","1080p","4K"],
+             v => _drSave({..._drCfg, quality_ceiling:v},
+                          `Better copies capped at ${v===2160?"4K":v+"p"}.`));
+  // The quality limit only means anything while the better-copy track is on.
+  if(!_drCfg.hq_upgrade){
+    const c = document.getElementById("drCeilBtns");
+    if(c) Array.from(c.children).forEach(b=>{ b.disabled = true; });
+  }
+}
+
+async function loadDownloadRace(){
+  try{
+    const r = await fetch("/api/admin/download-race", {headers: authHeader()});
+    if(!r.ok) return;
+    _drCfg = await r.json();
+    _drRender();
+  }catch(_){}
+}
+
+async function _drSave(next, okMsg){
+  const btns = _DR_BTNS.map(id=>document.getElementById(id));
+  btns.forEach(b=>{ if(b) b.disabled = true; });
+  try{
+    const r = await fetch("/api/admin/download-race",{
+      method:"POST",
+      headers:{...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify(next),
+    });
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      showToast(`Save failed: ${d.detail || r.status}`, true);
+      return;
+    }
+    const d = await r.json();
+    _drCfg = {enabled:!!d.enabled, size:d.size, max_items:d.max_items,
+              quality_ceiling:d.quality_ceiling, hq_upgrade:!!d.hq_upgrade};
+    showToast(okMsg);
+  }catch(_){
+    showToast("Save failed.", true);
+  }finally{
+    btns.forEach(b=>{ if(b) b.disabled = false; });
+    _drRender();
+  }
+}
+
+function toggleDownloadRace(){
+  const on = !_drCfg.enabled;
+  _drSave({..._drCfg, enabled:on},
+          on ? "Racing on - auto-picked downloads will try several sources."
+             : "Racing off - downloads use a single source, as before.");
+}
+
+function toggleDownloadRaceHq(){
+  const on = !_drCfg.hq_upgrade;
+  _drSave({..._drCfg, hq_upgrade:on},
+          on ? "A better copy will be kept and swapped in when it finishes."
+             : "Pure speed race - no second, higher-quality copy.");
+}
 
 function _mcRenderBtn(id, on, onLabel, offLabel){
   const btn = document.getElementById(id);

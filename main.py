@@ -52,6 +52,8 @@ import analyzer
 import refiner
 import dvprobe
 import episodes
+import racerules
+import relquality
 import stt
 import subpack
 import updater
@@ -1237,6 +1239,8 @@ class AppState:
     background_video_path: str = ""
     downloading_count: int = 0                            # active library downloads (ALL, incl. admin-only — drives host-busy/idle gating)
     downloading_count_visible: int = 0                    # active downloads a non-elevated viewer may know about (excludes admin_only) — drives the user-facing badge
+    racing_count: int = 0                                 # items running a parallel download race (ALL, incl. admin-only)
+    racing_count_visible: int = 0                         # …and the subset a non-elevated viewer may know about
     play_when_ready_item_id: Optional[str] = None        # auto-play this item on download complete
     play_when_ready_profile_id: Optional[str] = None
     play_when_ready_file_path: Optional[str] = None      # if set, wait for this specific file
@@ -1253,6 +1257,20 @@ class AppState:
     vlc_duration: int = 0                                 # VLC total duration (seconds)
     vlc_volume: int = 100                                 # VLC volume 0-200 (100 = normal)
     prepare_hash: Optional[str] = None                    # hash added by /stream/prepare, pending user selection
+    # Info-hashes of the candidates a /api/stream/race is currently running.
+    # In-memory and transient (the race lives inside one request), but it is the
+    # anchor everything else hangs off: admin Cleanup must not call them orphans
+    # while the race runs, and /api/stop has to tear them down if the user
+    # bails mid-race. A crash loses this set, which is what the `streamlink-race`
+    # qBit tag + the startup sweep exist to catch.
+    race_hashes: set = field(default_factory=set)
+    # The detached `_finalize_stopped_file` task `stop()` fires. `stop()` clears
+    # the playback fields SYNCHRONOUSLY but flushes the outgoing file's final
+    # position in the background, so "library_item_id is None" does NOT mean the
+    # progress write has landed. Anything that renames or deletes that file
+    # straight after a stop must await this first, or the finalize resurrects
+    # the old path's progress key afterwards. See `_apply_race_upgrade`.
+    finalize_task: Optional[asyncio.Task] = None
     skip_offer: Optional[dict] = None                     # {"type": "intro"|"credits", "end_at": s, "next_item_id": id?, "next_file_path": p?}
     skip_offer_file: Optional[str] = None                 # path the current skip offer corresponds to
     skip_countdown: Optional[dict] = None                 # {"type", "file_path", "n"} active auto-skip countdown (TV marquee)
@@ -1283,6 +1301,8 @@ class AppState:
     subtitle_single_option: bool = True                   # settings.subtitles.single_option, mirrored for client/UI
     missing_content_enabled: bool = True                  # settings.missing_content.enabled — library surfaces not-yet-downloaded seasons/episodes; mirrored for state_snapshot
     missing_content_unaired: bool = False                 # settings.missing_content.show_unaired — render future-dated TMDb episodes as "Upcoming" instead of hiding them
+    download_race_enabled: bool = False                   # settings.download_race.enabled — mirrored so the UI knows whether to send candidate shortlists
+    download_race_ceiling: int = 1080                     # settings.download_race.quality_ceiling — the HQ track's target tier
     shotscan_current: str = ""                            # basename of the file the shot-boundary credit scan is decoding ("" = idle); surfaced in the admin Activity tab so the most expensive pass in the app is never invisible
     sub_auto_ai_path: str = ""                            # abs path of the AI sidecar currently auto-applied in VLC ("" = none); the upgrade loop watches this and swaps in a real sub when one arrives
     last_activity: float = 0.0                            # time.time() of last user-initiated interaction (drives scheduled-reboot idle check)
@@ -1623,6 +1643,13 @@ def state_snapshot() -> dict:
         # profiles that can't see them. Internal busy/idle gating still reads the
         # true `state.downloading_count`. See docs/ADMIN.md § Content Lock.
         "downloading_count": state.downloading_count_visible,
+        # Same content-lock reasoning as downloading_count: a locked item that is
+        # racing must leave no trace in a non-elevated viewer's badge.
+        "racing_count": state.racing_count_visible,
+        # Mirrored so the frontend knows whether to bother collecting a candidate
+        # shortlist for an auto-pick, and what tier the HQ track aims at.
+        "download_race": state.download_race_enabled,
+        "download_race_ceiling": state.download_race_ceiling,
         "vlc_time": state.vlc_time,
         "vlc_duration": state.vlc_duration,
         "vlc_volume": state.vlc_volume,
@@ -1906,6 +1933,7 @@ async def qbit_add_magnet(
     magnet: str,
     save_path: Optional[str] = None,
     sequential: bool = False,
+    tags: str = "",
 ) -> Optional[str]:
     h = extract_hash(magnet)
     before: Optional[set] = None
@@ -1920,6 +1948,12 @@ async def qbit_add_magnet(
         # Set sequential download at add-time so it applies before any pieces download.
         # This is the qBittorrent /add API field, separate from the toggle endpoint.
         data["sequentialDownload"] = "true"
+    if tags:
+        # A qBit-side marker that survives StreamLink losing its own record of
+        # the torrent. `library.json` is written after the add, so a power cut in
+        # between leaves a download nothing in the library points at; the startup
+        # sweep finds those by tag and cleans them up. Mirrors `_INSPECT_TAG`.
+        data["tags"] = tags
     r = await qreq("POST", "/api/v2/torrents/add", data=data)
     ok = bool(r and r.text.strip() == "Ok.")
     if ok and h:
@@ -2100,7 +2134,17 @@ async def qbit_delete(h: str, delete_files: bool = True) -> None:
 
 async def _hash_backs_library_item(h: Optional[str]) -> bool:
     """True when a library item is backed by this info-hash (i.e. its files are
-    saved media, not an ad-hoc stream's scratch download)."""
+    saved media, not an ad-hoc stream's scratch download).
+
+    A **racing** item is backed by more than one torrent: `torrent_hash` names
+    the incumbent, and `race["entries"]` names the challengers still competing
+    with it. Both are owned. Missing the challengers here is the single easiest
+    way to break download racing, because this function guards
+    `_qbit_delete_transient`, which every stream teardown reaches - a Stop
+    during a race would silently delete a live challenger, and the race engine
+    would then poll a hash qBit no longer has. See docs/GOTCHAS.md, "A racing
+    item still has exactly ONE torrent_hash".
+    """
     if not h:
         return False
     want = h.lower()
@@ -2108,8 +2152,13 @@ async def _hash_backs_library_item(h: Optional[str]) -> bool:
         lib = await get_library()
     except Exception:
         return True   # can't tell ⇒ assume it's owned; never delete on a guess
-    return any((it.get("torrent_hash") or "").lower() == want
-               for it in lib.get("items", []))
+    for it in lib.get("items", []):
+        if (it.get("torrent_hash") or "").lower() == want:
+            return True
+        for e in ((it.get("race") or {}).get("entries") or []):
+            if (e.get("hash") or "").lower() == want:
+                return True
+    return False
 
 
 async def _qbit_delete_transient(h: Optional[str], why: str = "stream cleanup") -> None:
@@ -3051,6 +3100,13 @@ async def _tmdb_fetch_tv(show_id: int, seasons: list[int]) -> dict:
         "poster_path":   details.get("poster_path") or "",
         "backdrop_path": details.get("backdrop_path") or "",
         "first_air_date": details.get("first_air_date") or "",
+        # Show-level fallback runtime, in minutes. Per-episode runtimes only
+        # exist for seasons that have actually been fetched, so without this a
+        # download race for an unfetched season has no divisor at all for its
+        # bytes-per-minute cross-check. TMDb returns a list (a show can have
+        # several typical lengths); the consumer averages it.
+        "episode_run_time": [int(x) for x in (details.get("episode_run_time") or [])
+                             if isinstance(x, (int, float)) and x > 0],
         "vote_average":  details.get("vote_average") or 0,
         "genres":        [g.get("name", "") for g in details.get("genres", []) or []],
         "trailer":       _tmdb_pick_trailer(details.get("videos")),
@@ -6626,6 +6682,41 @@ def _missing_content_cfg(lib: dict) -> dict:
     }
 
 
+# Quality ceilings a download race may aim its HQ track at, and how many
+# candidates it may run. Validated rather than coerced - an unrecognised value
+# is a 400, not a silent fallback to the default.
+_RACE_CEILINGS = (720, 1080, 2160)
+_RACE_SIZES = (2, 3, 4)
+_RACE_MAX_ITEMS_CHOICES = (1, 2, 3)
+
+
+def _download_race_cfg(lib: dict) -> dict:
+    """Read settings.download_race - parallel candidate downloads for an
+    auto-picked title.
+
+    When the user asks for something without choosing a torrent, StreamLink can
+    start several releases at once and progressively drop the slow ones, so a
+    dead or crawling pick costs seconds instead of the ten minutes
+    `_DOWNLOAD_STALL_SECS` would otherwise take to notice. `quality_ceiling`
+    caps what the second, higher-quality track may aim at; `hq_upgrade` turns
+    that second track off entirely, leaving a pure speed race.
+
+    **Ships disabled.** Racing multiplies bandwidth and disk for the length of
+    the race, so it is opt-in from Admin rather than something a box starts
+    doing after an update. See docs/ADMIN.md and docs/GOTCHAS.md."""
+    cfg = (lib.get("settings", {}) or {}).get("download_race") or {}
+    size = cfg.get("size", 3)
+    ceiling = cfg.get("quality_ceiling", 1080)
+    max_items = cfg.get("max_items", 2)
+    return {
+        "enabled":         bool(cfg.get("enabled", False)),
+        "size":            size if size in _RACE_SIZES else 3,
+        "max_items":       max_items if max_items in _RACE_MAX_ITEMS_CHOICES else 2,
+        "quality_ceiling": ceiling if ceiling in _RACE_CEILINGS else 1080,
+        "hq_upgrade":      bool(cfg.get("hq_upgrade", True)),
+    }
+
+
 _PREP_VALIDATE_MODES = ("off", "before", "after")
 
 
@@ -8101,8 +8192,14 @@ _DOWNLOAD_STALL_SECS = 600
 # would be retried within 5 s of boot without being given a chance to move.
 _DOWNLOAD_STALL_BOOT_GRACE = 180
 _PROCESS_START = time.monotonic()
-# How many alternative releases to work through before giving up and erroring.
+# How many retry ROUNDS to work through before giving up and erroring. A round
+# replaces the dead pick once - and, when racing is on, may start a whole race
+# behind that replacement. Tracked on the item as `retry_rounds`.
 _MAX_DOWNLOAD_RETRIES = 3
+# Candidates a single round may try to hand to qBittorrent before giving up on
+# the round. Only a qBit *reject* consumes one of these; the first accepted add
+# ends the loop.
+_RETRY_ADDS_PER_ROUND = 3
 
 
 def _note_download_stall(item: dict, info: dict) -> bool:
@@ -8294,9 +8391,14 @@ async def _retry_dead_download(item: dict, lib: dict) -> str:
                          "outcome": "dead"})
         item["download_attempts"] = attempts
 
-    # `attempts` counts every release tried, the original included, so the budget
-    # is one more than the number of REPLACEMENTS allowed.
-    if len(attempts) > _MAX_DOWNLOAD_RETRIES:
+    # The budget counts RETRY ROUNDS, not releases. It used to count entries in
+    # `download_attempts`, which was equivalent only while each round tried
+    # exactly one release - the moment a round can start a RACE of three, one
+    # round would exhaust a three-release budget and the second dead pick could
+    # never be replaced. `download_attempts` is now purely the de-dupe ledger
+    # its docstring always said it was.
+    rounds = int(item.get("retry_rounds") or 0)
+    if rounds >= _MAX_DOWNLOAD_RETRIES:
         return _fail_dead_download(item, len(attempts))
     if not state.vpn_secure:
         return ""   # qBit is stopped anyway — hold the count and wait
@@ -8325,7 +8427,7 @@ async def _retry_dead_download(item: dict, lib: dict) -> str:
     # reject burns the attempt but must never end the call with the item left
     # `downloading` and hash-less — the monitor skips hash-less items, so that
     # would strand it exactly the way the vanished-torrent bug used to.
-    budget = max(0, _MAX_DOWNLOAD_RETRIES + 1 - len(attempts))
+    budget = _RETRY_ADDS_PER_ROUND
     pick: dict = {}
     new_hash = ""
     for key, cand in cands[:budget]:
@@ -8338,6 +8440,7 @@ async def _retry_dead_download(item: dict, lib: dict) -> str:
         log.warning("[download] qBittorrent rejected %r — trying the next release",
                     cand.get("title", ""))
     item["download_attempts"] = attempts
+    item["retry_rounds"] = rounds + 1
     if not new_hash:
         return _fail_dead_download(item, len(attempts))
 
@@ -8356,6 +8459,24 @@ async def _retry_dead_download(item: dict, lib: dict) -> str:
     _missing_torrent_ticks.pop(iid, None)
     await broadcast("library_update", {"item_id": iid, "status": "downloading",
                                        "message": f"Switched to {item['title']}"})
+    # Race the replacement too. A ranked candidate list is already in hand, and
+    # the release that just died is evidence this title's field is unreliable -
+    # exactly the situation racing exists for. Detached, and `_race_start`
+    # waits for `new_hash` to be persisted before it adds anything.
+    try:
+        _rcfg = _download_race_cfg(lib)
+        if _rcfg["enabled"]:
+            _rest = [c for _k, c in cands
+                     if (c.get("magnet") or "") != pick.get("magnet")][:_rcfg["size"] - 1]
+            if _rest:
+                _rt, _ec = _race_runtime_hint(item)
+                _shape = [{"magnet": c.get("magnet", ""), "title": c.get("title", ""),
+                           "size": int(c.get("size") or 0),
+                           "seeders": int(c.get("seeders") or 0)}
+                          for c in [pick] + _rest]
+                _spawn_bg(_race_start(iid, _shape, _rt, _ec, expect_hash=new_hash))
+    except Exception:
+        log.exception("[race] could not start a race behind the retry for %s", iid)
     return "retried"
 
 
@@ -8552,6 +8673,1073 @@ async def _repair_empty_ready_items(lib: dict) -> list:
     return fixed
 
 
+# ── Parallel download racing ──────────────────────────────────────────────────
+#
+# When the user asks for a title and does NOT choose a torrent, StreamLink can
+# start several candidate releases at once and progressively drop the slow ones.
+# A dead pick then costs seconds rather than the ten minutes
+# `_DOWNLOAD_STALL_SECS` takes to notice one.
+#
+# **The invariant that makes this safe: `item["torrent_hash"]` still names
+# exactly ONE torrent** - the *incumbent*. `files`, `size_bytes`, `download`,
+# `prep` and `progress` describe only the incumbent, so every existing consumer
+# keeps working untouched. Challengers live in `item["race"]["entries"]` and in
+# qBittorrent, nowhere else, and changing the incumbent is one explicit
+# operation (`_race_promote`) with the same shape as the dead-swarm swap in
+# `_retry_dead_download`. The places that additionally have to know about
+# challengers are the ones answering "is this hash ours?" or "delete everything
+# belonging to this item": `_hash_backs_library_item`, `delete_library_item`,
+# `_cleanup_in_use_hashes`, `_cleanup_inventory_sync` and the download dedup in
+# `library_download`. See docs/GOTCHAS.md.
+
+# qBit-side marker. `library.json` is written after a torrent is added, so a
+# power cut in between leaves a racer nothing points at; the startup sweep finds
+# those by tag. Mirrors `_INSPECT_TAG`.
+_RACE_TAG = "streamlink-race"
+
+# Every threshold the CULL decision turns on - the grace period, the minimum
+# sample count, the ratio, the confirmation ticks, the leader floor, the
+# keep-past-this-much-progress rule and the 2-to-1 bar - lives in `racerules`
+# and is documented there. They are deliberately NOT re-exported here: two
+# names for one number is an invitation to tune the wrong one. Only
+# `_RACE_CULL_RATIO` is mirrored, because the engine has to increment the
+# under-ratio counter that `racerules.should_cull` then reads.
+_RACE_CULL_RATIO = racerules.CULL_RATIO
+# Zero file list for this long is a dead swarm, not a slow one. The serial path
+# waits `_DOWNLOAD_STALL_SECS` (600 s) before reaching the same conclusion; it
+# can afford to be patient because it has nothing else running. A race cannot.
+_RACE_META_GRACE = 120
+_RACE_HQ_DEAD_SECS = 900
+_RACE_HQ_MAX_ETA = 12 * 3600
+_RACE_MISS_TICKS = 2
+# Free space required on the save drive before a race is allowed to start,
+# as a multiple of the largest candidate.
+_RACE_DISK_HEADROOM = 3.0
+
+# qBit states that mean "this torrent is in its download phase".
+_RACE_PAUSED_STATES = ("pausedDL", "stoppedDL", "pausedUP", "stoppedUP")
+
+# `_apply_race_upgrade` awaits `stop()` and a bundle purge, so without this the
+# next 5 s monitor tick re-enters it halfway through. Mandatory.
+_race_upgrading: set = set()
+
+
+def _race_runtime_hint(item: dict) -> tuple:
+    """(runtime_minutes, episode_count) for the bytes-per-minute cross-check.
+
+    Returns `(0.0, 0)` when it cannot tell, which `relquality.cross_check`
+    reads as "unknown" and lets the release name stand unchallenged. That is a
+    deliberately common outcome - never guess an episode count, because the
+    divisor is the whole ballgame for a pack (see relquality's docstring).
+    """
+    meta = item.get("metadata") or {}
+    season = int(item.get("season") or 0)
+    episode = int(item.get("episode") or 0)
+    if meta.get("tmdb_kind") == "movie" or (not season and not episode
+                                            and meta.get("runtime")):
+        return float(meta.get("runtime") or 0), 1
+    seasons = meta.get("seasons") or {}
+    runtimes: list = []
+    if season:
+        for ep in ((seasons.get(str(season)) or {}).get("episodes") or []):
+            if episode and int(ep.get("episode") or 0) != episode:
+                continue
+            if ep.get("runtime"):
+                runtimes.append(float(ep["runtime"]))
+    if not runtimes:
+        for sn in seasons.values():
+            for ep in ((sn or {}).get("episodes") or []):
+                if ep.get("runtime"):
+                    runtimes.append(float(ep["runtime"]))
+    if not runtimes:
+        try:
+            runtimes = [float(x) for x in (meta.get("episode_run_time") or []) if x]
+        except (TypeError, ValueError):
+            runtimes = []
+    if not runtimes:
+        return 0.0, 0
+    avg = sum(runtimes) / len(runtimes)
+    if episode:
+        return avg, 1
+    if season:
+        cnt = next((int(sn.get("episode_count") or 0)
+                    for sn in (meta.get("all_seasons") or [])
+                    if int(sn.get("season") or 0) == season), 0)
+        return avg, cnt
+    return avg, 0
+
+
+def _item_all_torrent_hashes(item: dict) -> list:
+    """Every torrent this item owns: the incumbent plus any race challengers.
+
+    Deleting an item means deleting all of them. `torrent_hash` alone is the
+    right answer for every item that is not racing and the WRONG one for every
+    item that is - a race runs two or three torrents and only one of them is
+    named there, so the rest would be left running with nothing pointing at
+    them. See docs/GOTCHAS.md.
+    """
+    out: list = []
+    h = (item.get("torrent_hash") or "").lower()
+    if h:
+        out.append(h)
+    for e in (item.get("race") or {}).get("entries") or []:
+        eh = (e.get("hash") or "").lower()
+        if eh and eh not in out:
+            out.append(eh)
+    return out
+
+
+# The pure decision arithmetic lives in `racerules` so it can be tested without
+# a running qBittorrent (tests/test_race_rules.py). Aliased rather than wrapped:
+# these are hot-path calls inside a 5 s tick and an extra frame buys nothing.
+_race_entry_progress = racerules.entry_progress
+_race_leader = racerules.leader
+_race_should_cull = racerules.should_cull
+
+
+def _race_active(race: dict) -> list:
+    """Entries still in the race - live, or deliberately paused."""
+    return [e for e in (race.get("entries") or [])
+            if e.get("status") in ("live", "paused")]
+
+
+def _race_live_count(lib: dict) -> int:
+    """How many items are currently racing, box-wide.
+
+    Derived rather than stored, so it cannot drift and needs no repair after a
+    restart. `upgrading` counts: an HQ track is still burning bandwidth.
+    """
+    return sum(1 for it in lib.get("items", [])
+               if ((it.get("race") or {}).get("state") in ("racing", "upgrading")))
+
+
+def _race_item_is_playing(item: dict) -> bool:
+    """True when this item's content is on screen right now.
+
+    Used to hold the HQ track still while someone is watching: a file being
+    streamed before it has finished needs every byte of the link, and the
+    rebuffer guard already has a hard time on a slow one.
+    """
+    if state.stream_status not in ("playing", "buffering"):
+        return False
+    if state.library_item_id == item.get("id"):
+        return True
+    # A merged-series playlist spans several items, so `library_item_id` alone
+    # is not the answer - the path map is.
+    return bool(state.library_current_file
+                and state.library_series_map.get(state.library_current_file) == item.get("id"))
+
+
+def _race_summary(item: dict) -> Optional[dict]:
+    """The derived, UI-shaped view of an item's race (None when there isn't one).
+
+    Derived rather than the raw blob so `/api/library` can paint a card on first
+    load without the frontend having to understand sampler internals.
+    """
+    race = item.get("race") or {}
+    st = race.get("state") or ""
+    if st not in ("racing", "upgrading") and not race.get("upgraded_from"):
+        return None
+    cur = (item.get("torrent_hash") or "").lower()
+    out: dict = {"state": st, "entries": [], "upgrade": None,
+                 "upgraded_from": race.get("upgraded_from") or None}
+    for e in _race_active(race):
+        row = {
+            "label": e.get("label") or "",
+            "title": e.get("title") or "",
+            "role": e.get("role") or "challenger",
+            "pct": round(_race_entry_progress(e) * 100, 1),
+            "rate_bps": int(e.get("rate_ewma") or 0),
+            "paused": e.get("status") == "paused",
+            "leader": (e.get("hash") or "").lower() == cur,
+        }
+        out["entries"].append(row)
+        if e.get("role") == "hq" and not row["leader"]:
+            out["upgrade"] = {"label": row["label"], "pct": row["pct"],
+                              "paused": row["paused"]}
+    return out
+
+
+async def _race_event(item_id: str, event: str, **kw) -> None:
+    """Broadcast a discrete race transition.
+
+    Separate from `library_progress` on purpose: these are things a 5 s sampler
+    cannot express (a candidate was dropped, an upgrade landed) and they want a
+    toast and a repaint, not a bar update.
+    """
+    await broadcast("library_race", {"item_id": item_id, "event": event, **kw})
+
+
+def _race_bank_attempt(item: dict, entry: dict, outcome: str) -> None:
+    """Record a raced release in `download_attempts`.
+
+    `_retry_dead_download` rebuilds its exclusion set from that field
+    (`tried`, see its body), so banking here is what stops the serial retry
+    re-picking a release the race already proved dead.
+    """
+    attempts = item.setdefault("download_attempts", [])
+    key = (entry.get("hash") or "").lower() or _release_key(entry.get("title", ""))
+    if any((a.get("key") or "") == key for a in attempts):
+        return
+    attempts.append({"key": key, "title": entry.get("title", ""),
+                     "at": _now_iso(), "outcome": outcome, "raced": True})
+
+
+async def _race_drop(item: dict, entry: dict, reason: str) -> None:
+    """Take a candidate out of the race and delete its torrent and its bytes.
+
+    Always `delete_files=True`. A dropped candidate is by construction either
+    empty or far behind, its partial data is worthless, and on Windows only
+    qBittorrent can unlink its own `.!qB` partials - never `os.remove` a
+    torrent-backed file.
+    """
+    entry["status"] = "dropped"
+    entry["drop_reason"] = reason
+    entry["dropped_at"] = _now_iso()
+    _race_bank_attempt(item, entry, "raced_out:" + reason)
+    h = (entry.get("hash") or "").lower()
+    if h and h != (item.get("torrent_hash") or "").lower():
+        await qbit_delete(h, delete_files=True)
+    log.info("[race] %s: dropped %r (%s)", item.get("title", ""),
+             entry.get("title", ""), reason)
+    await _race_event(item["id"], "culled", title=entry.get("title", ""),
+                      label=entry.get("label", ""), reason=reason)
+
+
+async def _race_promote(item: dict, entry: dict) -> None:
+    """Make `entry` the incumbent, in place, and destroy the one it replaces.
+
+    Deliberately the same shape as the dead-swarm swap in `_retry_dead_download`
+    - same fields, same ordering - because that path is proven and a second,
+    subtly different way of repointing an item would be a new class of bug.
+
+    The item keeps its id, its place in the library and its watch history; only
+    the torrent behind it changes.
+    """
+    old = (item.get("torrent_hash") or "").lower()
+    old_title = item.get("title", "")
+    new = (entry.get("hash") or "").lower()
+    if not new or new == old:
+        return
+    # The race may have paused it. `_reconcile_item_downloads` returns early for
+    # a plain "now" item, so nothing else will ever resume it for us.
+    await qbit_resume(new)
+    prev = next((e for e in (item.get("race") or {}).get("entries") or []
+                 if (e.get("hash") or "").lower() == old), None)
+    if prev is not None:
+        prev["status"] = "dropped"
+        prev.setdefault("drop_reason", "promoted-over")
+        prev["dropped_at"] = _now_iso()
+        _race_bank_attempt(item, prev, "raced_out:promoted-over")
+    item["torrent_hash"] = new
+    item["title"] = entry.get("title", "") or old_title
+    item["download_source"] = {"magnet": entry.get("magnet", ""),
+                               "save_path": entry.get("save_path", "")}
+    # The old release's file list and size describe a torrent we are deleting.
+    item["files"] = []
+    item["size_bytes"] = 0
+    item.pop("error", None)
+    item.pop("stalled_since", None)
+    _missing_torrent_ticks.pop(item["id"], None)
+    entry["role"] = "primary"
+    log.warning("[race] %s: promoted %r over %r", item.get("id", ""),
+                entry.get("title", ""), old_title)
+    # Persist the repoint BEFORE destroying the torrent it replaces. The monitor
+    # merges this item back at the end of its tick anyway, but a crash in
+    # between would leave library.json pointing at a hash we had already
+    # deleted - an item that can never recover.
+    async with mutate_library() as fresh:
+        cur = next((it for it in fresh["items"] if it["id"] == item["id"]), None)
+        if cur is not None:
+            cur.update(item)
+    if old:
+        await qbit_delete(old, delete_files=True)
+    await broadcast("library_update", {"item_id": item["id"], "status": "downloading",
+                                       "message": "Switched to " + item["title"]})
+
+
+async def _race_settle(item: dict, winner: Optional[dict], reason: str) -> None:
+    """End the race, keeping only `winner` (None when everything died)."""
+    race = item.get("race") or {}
+    for e in race.get("entries") or []:
+        if e is winner:
+            continue
+        if e.get("status") in ("live", "paused"):
+            await _race_drop(item, e, reason)
+    if winner is not None:
+        winner["status"] = "won"
+        race["entries"] = [winner]
+        race["state"] = "settled"
+    else:
+        race["state"] = "exhausted"
+    race["settled_at"] = _now_iso()
+    await _race_event(item["id"], race["state"],
+                      title=(winner or {}).get("title", ""),
+                      label=(winner or {}).get("label", ""))
+
+
+async def _race_start(item_id: str, candidates: list, runtime_min: float,
+                      episode_count: int, expect_hash: str = "") -> None:
+    """Plan and launch a race for an item whose incumbent is already downloading.
+
+    Runs detached from `library_download_pipeline` so the normal add path keeps
+    its current latency: `candidates[0]` is the release the frontend auto-picked
+    and the pipeline has already added, and nothing about that changes. This
+    only ever ADDS alternatives beside it.
+
+    `expect_hash` is the incumbent this race is meant to run behind. Both
+    callers write that hash in their own transaction and then spawn this
+    detached, so it can briefly still be reading the previous value - and
+    racing against a hash that is about to be replaced would add challengers
+    to a torrent nobody owns any more.
+    """
+    try:
+        if expect_hash:
+            want = expect_hash.lower()
+            for _ in range(20):
+                _lib = await get_library()
+                _it = next((x for x in _lib.get("items", []) if x["id"] == item_id), None)
+                if _it is None:
+                    return
+                if (_it.get("torrent_hash") or "").lower() == want:
+                    break
+                await asyncio.sleep(1)
+            else:
+                log.info("[race] %s never became the incumbent for %s - not racing",
+                         want[:12], item_id)
+                return
+        lib = await get_library()
+        cfg = _download_race_cfg(lib)
+        if not cfg["enabled"] or len(candidates) < 2:
+            return
+        item = next((it for it in lib.get("items", []) if it["id"] == item_id), None)
+        if not item or item.get("status") != "downloading":
+            return
+        # A settled or exhausted race must not block a new one - the dead-swarm
+        # retry starts a fresh race behind each replacement it picks.
+        if (item.get("race") or {}).get("state") in ("racing", "upgrading"):
+            return
+        incumbent_hash = (item.get("torrent_hash") or "").lower()
+        if not incumbent_hash:
+            return
+        # Never race a download the user deliberately deferred: it is paused by
+        # design, its whole point is to not use the line now, and racing it
+        # would run three torrents during the hours they asked us not to.
+        if _download_cfg(item)["mode"] != "now":
+            return
+        if not state.vpn_secure:
+            return
+
+        info = await qbit_info(incumbent_hash) or {}
+        save_path = info.get("save_path") or (
+            (item.get("download_source") or {}).get("save_path")) or settings.qbit_download_path
+
+        biggest = max((int(c.get("size") or 0) for c in candidates), default=0)
+        if biggest:
+            try:
+                free = shutil.disk_usage(save_path).free
+            except OSError:
+                free = 0
+            if free and free < biggest * _RACE_DISK_HEADROOM:
+                log.info("[race] %s: not racing - only %.1f GB free on %s",
+                         item.get("title", ""), free / 1e9, save_path)
+                return
+
+        ceiling = cfg["quality_ceiling"]
+        scored = []
+        seen_keys = set()
+        for c in candidates:
+            mag = (c.get("magnet") or "").strip()
+            title = c.get("title") or ""
+            if not mag:
+                continue
+            # One release indexed by two trackers must never eat two slots.
+            key = _release_key(title) or (extract_hash(mag) or "").lower()
+            if not key or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            q = relquality.score(title, int(c.get("size") or 0), runtime_min,
+                                 episode_count, ceiling=ceiling,
+                                 seeders=int(c.get("seeders") or 0))
+            scored.append({"magnet": mag, "title": title, "quality": q})
+        if len(scored) < 2:
+            return
+
+        primary = scored[0]
+        rest = scored[1:]
+        picks = [primary]
+        # The HQ track: the best candidate at or under the ceiling, but only if
+        # it is genuinely a resolution better than what we are already fetching.
+        # When the auto-pick already IS the best 1080p - the common case - there
+        # is no two-track and all the candidates race as peers.
+        hq = None
+        if cfg["hq_upgrade"]:
+            eligible = [c for c in rest if c["quality"].get("hq_eligible")]
+            if eligible:
+                best = max(eligible, key=lambda c: relquality.rank_key(c["quality"]))
+                if relquality.is_upgrade(primary["quality"], best["quality"]):
+                    hq = best
+                    picks.append(best)
+        for c in sorted(rest, key=lambda c: relquality.rank_key(c["quality"]),
+                        reverse=True):
+            if len(picks) >= cfg["size"]:
+                break
+            if c is not hq:
+                picks.append(c)
+        if len(picks) < 2:
+            return
+
+        def _entry(c, role, h):
+            return {"hash": h, "title": c["title"], "magnet": c["magnet"],
+                    "save_path": save_path, "role": role, "quality": c["quality"],
+                    "label": c["quality"].get("label", ""), "status": "live",
+                    "added_at": _now_iso(), "first_bytes_at": "", "completed": 0,
+                    "total": 0, "rate_ewma": 0.0, "samples": 0,
+                    "last_sample_at": 0.0, "under_ratio_ticks": 0, "miss_ticks": 0,
+                    "meta_ok": False, "file_count": 0,
+                    "drop_reason": "", "dropped_at": ""}
+
+        # CLAIM THE SLOT ATOMICALLY, before adding anything to qBittorrent.
+        # Check-then-add would let two downloads started a second apart both see
+        # a free slot and both take it.
+        claimed = False
+        async with mutate_library() as fresh:
+            cur = next((it for it in fresh["items"] if it["id"] == item_id), None)
+            if cur is None or cur.get("status") != "downloading":
+                return
+            if (cur.get("race") or {}).get("state") in ("racing", "upgrading"):
+                return
+            if _race_live_count(fresh) >= cfg["max_items"]:
+                cur["race"] = {"v": 1, "state": "skipped", "reason": "cap",
+                               "started_at": _now_iso(), "entries": []}
+                return
+            # Don't race a release another live race is already running: qBit
+            # answers `Fails.` for a duplicate and `qbit_add_magnet` adopts the
+            # existing hash, which would hand one torrent to two items.
+            busy = {(e.get("hash") or "").lower()
+                    for it in fresh.get("items", [])
+                    for e in _race_active(it.get("race") or {})}
+            busy.discard("")
+            cur["race"] = {"v": 1, "state": "racing", "reason": "",
+                           "started_at": _now_iso(), "settled_at": "",
+                           "ceiling": ceiling, "runtime_min": runtime_min,
+                           "episode_count": episode_count, "upgraded_from": None,
+                           "entries": [_entry(primary, "primary", incumbent_hash)]}
+            claimed = True
+        if not claimed:
+            return
+
+        added: list = []
+        for c in picks[1:]:
+            if not state.vpn_secure:
+                break
+            h = await qbit_add_magnet(c["magnet"], save_path=save_path,
+                                      tags=_RACE_TAG)
+            if not h:
+                log.info("[race] qBittorrent rejected %r - skipping it",
+                         c["title"])
+                continue
+            if h.lower() == incumbent_hash or h.lower() in busy:
+                continue   # the same torrent under a different title
+            added.append(_entry(c, "hq" if c is hq else "challenger", h.lower()))
+
+        async with mutate_library() as fresh:
+            cur = next((it for it in fresh["items"] if it["id"] == item_id), None)
+            if cur is None:
+                # Deleted while we were adding. Nothing owns these now.
+                for e in added:
+                    await qbit_delete(e["hash"], delete_files=True)
+                return
+            race = cur.get("race") or {}
+            if not added:
+                race["state"] = "skipped"
+                race["reason"] = "single"
+                return
+            race["entries"] = (race.get("entries") or []) + added
+        log.info("[race] %s: racing %d candidates (%s)", item.get("title", ""),
+                 len(added) + 1,
+                 ", ".join([primary["quality"].get("label", "?")]
+                           + [e["label"] for e in added]))
+        await _race_event(item_id, "started", size=len(added) + 1)
+    except Exception:
+        log.exception("[race] failed to start a race for %s", item_id)
+
+
+async def _reconcile_item_race(item: dict, by_hash: Optional[dict]) -> bool:
+    """One tick of an item's race. Returns True when `item` was mutated.
+
+    Called from `library_download_monitor` BEFORE that tick reads
+    `item["torrent_hash"]`, so a promotion this tick takes effect immediately
+    and a just-culled incumbent never reaches `_handle_missing_torrent`.
+    """
+    race = item.get("race") or {}
+    if race.get("state") not in ("racing", "upgrading"):
+        return False
+
+    # THE most important guard in the feature. A kill-switch blip or an
+    # unreachable qBittorrent looks exactly like every candidate dying at once,
+    # and without this one VPN hiccup culls the whole field in a single tick.
+    if not state.vpn_secure or by_hash is None:
+        return False
+
+    changed = False
+    now = time.time()
+    playing = _race_item_is_playing(item)
+    incumbent = (item.get("torrent_hash") or "").lower()
+
+    for e in list(_race_active(race)):
+        h = (e.get("hash") or "").lower()
+        info = by_hash.get(h)
+
+        if info is None:
+            # qBit is reachable (guarded above) and does not have this hash.
+            e["miss_ticks"] = int(e.get("miss_ticks") or 0) + 1
+            if e["miss_ticks"] >= _RACE_MISS_TICKS:
+                # A magnet whose metadata never arrived leaves qBit no resume
+                # data, so a restart or a VPN kill loses it outright - that is
+                # why every entry carries its own magnet. Re-add once.
+                got = await qbit_add_magnet(e.get("magnet", ""),
+                                            save_path=e.get("save_path") or None,
+                                            tags=_RACE_TAG)
+                if got:
+                    e["hash"] = got.lower()
+                    e["miss_ticks"] = 0
+                    e["last_sample_at"] = 0.0
+                    e["samples"] = 0
+                else:
+                    e["status"] = "failed"
+                    e["drop_reason"] = "vanished"
+                    e["dropped_at"] = _now_iso()
+                    _race_bank_attempt(item, e, "raced_out:vanished")
+                changed = True
+            continue
+        e["miss_ticks"] = 0
+
+        qstate = info.get("state", "")
+        completed = int(info.get("completed", 0) or 0)
+        total = int(info.get("size", 0) or 0)
+
+        # ── Early kills: facts, not judgements, so no grace applies ──────────
+        if qstate in ("error", "missingFiles"):
+            await _race_drop(item, e, "qbit-error")
+            changed = True
+            continue
+
+        age = 0.0
+        started = _parse_iso_dt(e.get("added_at"))
+        if started is not None:
+            age = (datetime.now(timezone.utc) - started).total_seconds()
+
+        if not e.get("meta_ok"):
+            qfiles = await qbit_files(h) if total else []
+            if qfiles:
+                vids = build_file_list(qfiles, info.get("save_path",
+                                                        settings.qbit_download_path))
+                if not vids:
+                    # Metadata arrived and there is no video in it. Today's
+                    # fake-release rule only fires once a torrent reaches 100%;
+                    # in a race we can throw it out the moment we can see inside.
+                    await _race_drop(item, e, "no-video")
+                    changed = True
+                    continue
+                e["meta_ok"] = True
+                e["file_count"] = len(vids)
+                # Re-score against what the torrent ACTUALLY contains. This is
+                # where the bytes-per-minute cross-check earns its keep: the
+                # real video size and the real episode count replace the
+                # torrent-total-and-a-guess used at plan time.
+                if h != incumbent:
+                    # NB `largest_video` keys on qBit's `size`; `build_file_list`
+                    # emits `size_bytes`, so it would compare zeroes and return
+                    # whichever file happened to be first.
+                    biggest = max(vids, key=lambda f: int(f.get("size_bytes") or 0))
+                    # Episode count 1, deliberately: the largest single video
+                    # divided by the per-episode runtime IS the per-episode
+                    # bitrate, so once metadata exists the pack divisor - the
+                    # least reliable input to the whole cross-check - drops out
+                    # of the calculation entirely.
+                    q = relquality.score(
+                        e.get("title", ""), int(biggest.get("size_bytes") or 0),
+                        float(race.get("runtime_min") or 0), 1,
+                        ceiling=int(race.get("ceiling") or 1080),
+                        seeders=int((e.get("quality") or {}).get("seeders") or 0))
+                    if q.get("verdict") != "unknown":
+                        e["quality"] = q
+                        e["label"] = q.get("label", e.get("label", ""))
+                changed = True
+            elif age >= _RACE_META_GRACE:
+                await _race_drop(item, e, "no-metadata")
+                changed = True
+                continue
+
+        # ── Sampling. Rate comes from `completed` deltas, NEVER `dlspeed`:
+        # qBit's instantaneous figure dips to zero between piece batches, and
+        # one unlucky tick would kill a perfectly healthy challenger. ─────────
+        last = float(e.get("last_sample_at") or 0.0)
+        dt = now - last
+        if e.get("status") == "paused" or last <= 0 or dt <= 0 or dt > 60:
+            # No usable interval (first sight, a restart, or a long pause).
+            # Re-anchor rather than inventing a rate from a huge delta.
+            e["last_sample_at"] = now
+            e["completed"] = completed
+            e["total"] = total
+        else:
+            inst = max(0, completed - int(e.get("completed") or 0)) / dt
+            prior = float(e.get("rate_ewma") or 0.0)
+            e["rate_ewma"] = inst if not int(e.get("samples") or 0) else (
+                0.3 * inst + 0.7 * prior)
+            e["samples"] = int(e.get("samples") or 0) + 1
+            e["last_sample_at"] = now
+            e["completed"] = completed
+            e["total"] = total
+            if completed > 0 and not e.get("first_bytes_at"):
+                e["first_bytes_at"] = _now_iso()
+            changed = True
+
+        # An HQ track is exempt from being outpaced, not from being hopeless.
+        if e.get("role") == "hq" and h != incumbent:
+            rate = float(e.get("rate_ewma") or 0.0)
+            if completed == 0 and age >= _RACE_HQ_DEAD_SECS:
+                await _race_drop(item, e, "hq-dead")
+                changed = True
+                continue
+            if (rate > 0 and total > completed
+                    and (total - completed) / rate > _RACE_HQ_MAX_ETA):
+                await _race_drop(item, e, "hq-too-slow")
+                changed = True
+                continue
+            # Hold it still while the household is watching this item: the file
+            # being streamed needs the whole link, and the rebuffer guard is
+            # already stretched on a slow one.
+            want_paused = playing
+            is_paused = qstate in _RACE_PAUSED_STATES
+            if want_paused and not is_paused:
+                await qbit_pause(h)
+                e["status"] = "paused"
+                changed = True
+            elif not want_paused and e.get("status") == "paused":
+                await qbit_resume(h)
+                e["status"] = "live"
+                e["last_sample_at"] = 0.0     # don't read the pause as a stall
+                changed = True
+
+    # ── Cull ────────────────────────────────────────────────────────────────
+    active = _race_active(race)
+    live = [e for e in active if e.get("status") == "live"]
+    leader = _race_leader(active)
+    rates = sorted((float(e.get("rate_ewma") or 0.0) for e in live), reverse=True)
+    second_rate = rates[1] if len(rates) > 1 else 0.0
+    if leader is not None:
+        for e in list(live):
+            if e.get("status") != "live":
+                continue
+            lr = float(leader.get("rate_ewma") or 0.0)
+            if e is not leader and lr > 0 and float(e.get("rate_ewma") or 0.0) < _RACE_CULL_RATIO * lr:
+                e["under_ratio_ticks"] = int(e.get("under_ratio_ticks") or 0) + 1
+            else:
+                e["under_ratio_ticks"] = 0
+            age = 0.0
+            started = _parse_iso_dt(e.get("added_at"))
+            if started is not None:
+                age = (datetime.now(timezone.utc) - started).total_seconds()
+            reason = _race_should_cull(
+                e, leader, second_rate,
+                len([x for x in active if x.get("status") == "live"]), age)
+            if reason:
+                await _race_drop(item, e, reason)
+                changed = True
+
+    # ── Promote / settle ────────────────────────────────────────────────────
+    active = _race_active(race)
+    if not active:
+        race["state"] = "exhausted"
+        race["settled_at"] = _now_iso()
+        await _race_event(item["id"], "exhausted")
+        return True
+
+    incumbent = (item.get("torrent_hash") or "").lower()
+    inc_entry = next((e for e in active
+                      if (e.get("hash") or "").lower() == incumbent), None)
+
+    # Promotion happens ONLY because the incumbent left the race - it was
+    # dropped for being dead, fake or outpaced, or it vanished. It must NOT
+    # happen merely because another candidate is quicker this instant:
+    # `_race_promote` destroys the outgoing torrent's bytes, so swapping on a
+    # momentary lead would throw away a perfectly good part-download every time
+    # two candidates traded places. Culling decides the winner; this only makes
+    # the survivor official.
+    if inc_entry is None:
+        repl = (_race_leader(active)
+                or next((e for e in active if e.get("role") != "hq"), None)
+                or active[0])
+        await _race_promote(item, repl)
+        changed = True
+        incumbent = (item.get("torrent_hash") or "").lower()
+        inc_entry = repl
+
+    hq = next((e for e in active if e.get("role") == "hq"
+               and (e.get("hash") or "").lower() != incumbent), None)
+    others = [e for e in active if (e.get("hash") or "").lower() != incumbent
+              and e is not hq]
+
+    if hq is not None:
+        still_better = relquality.is_upgrade(inc_entry.get("quality") or {},
+                                             hq.get("quality") or {})
+        if not still_better:
+            # Re-scoring the incumbent against its real contents put it at the
+            # same tier or better, so there is nothing left to upgrade to.
+            # Never leave the card promising an upgrade that cannot arrive.
+            await _race_drop(item, hq, "no-longer-an-upgrade")
+            hq = None
+            changed = True
+        elif race.get("state") != "upgrading" and not others:
+            race["state"] = "upgrading"
+            changed = True
+            await _race_event(item["id"], "upgrade_available",
+                              label=hq.get("label", ""), title=hq.get("title", ""))
+
+    # The incumbent has finished. Anything still running lost - EXCEPT a
+    # genuine HQ upgrade, which is the entire point of the two-track and
+    # carries on alone. Settling here rather than waiting for the last
+    # challenger to be culled matters: once the item is on disk there is no
+    # reason to keep spending the line on other copies of it.
+    inc_done = (int(inc_entry.get("total") or 0) > 0
+                and int(inc_entry.get("completed") or 0) >= int(inc_entry.get("total") or 0))
+    if inc_done and others:
+        for e in others:
+            await _race_drop(item, e, "incumbent-finished")
+        others = []
+        changed = True
+
+    if not others and hq is None and race.get("state") == "racing":
+        await _race_settle(item, inc_entry, "settled")
+        changed = True
+
+    return changed
+
+
+async def _race_maybe_upgrade(item: dict, by_hash: Optional[dict]) -> None:
+    """Fire the HQ swap once the high-quality copy has finished downloading."""
+    race = item.get("race") or {}
+    if race.get("state") != "upgrading" or by_hash is None:
+        return
+    incumbent = (item.get("torrent_hash") or "").lower()
+    hq = next((e for e in _race_active(race) if e.get("role") == "hq"
+               and (e.get("hash") or "").lower() != incumbent), None)
+    if hq is None:
+        return
+    info = by_hash.get((hq.get("hash") or "").lower())
+    if not info:
+        return
+    if int(info.get("completed", 0) or 0) < int(info.get("size", 0) or 0) or not info.get("size"):
+        return
+    if item["id"] in _race_upgrading:
+        return
+    _spawn_bg(_apply_race_upgrade(item["id"]))
+
+
+def _race_path_map(old_files: list, new_files: list) -> dict:
+    """Map each of the outgoing copy's paths onto its counterpart in the new one.
+
+    Episode attribution first (`build_file_list` has already worked out the
+    season and episode for every file, and that is the only correct answer for a
+    pack), then a single-video shortcut, then positional order. Anything with no
+    counterpart is simply absent from the map - its watch-progress entry is left
+    behind, which `_canonical_item_path` will fail to resolve and nothing else
+    reads.
+    """
+    old_v = [f for f in old_files if f.get("path")]
+    new_v = [f for f in new_files if f.get("path")]
+    if not old_v or not new_v:
+        return {}
+    out: dict = {}
+    used: set = set()
+    for of in old_v:
+        se = (int(of.get("season") or 0), int(of.get("episode") or 0))
+        if se == (0, 0):
+            continue
+        for nf in new_v:
+            if nf["path"] in used:
+                continue
+            if (int(nf.get("season") or 0), int(nf.get("episode") or 0)) == se:
+                out[of["path"]] = nf["path"]
+                used.add(nf["path"])
+                break
+    if len(old_v) == 1 and len(new_v) == 1 and not out:
+        return {old_v[0]["path"]: new_v[0]["path"]}
+    rem_old = [f for f in old_v if f["path"] not in out]
+    rem_new = [f for f in new_v if f["path"] not in used]
+    for of, nf in zip(sorted(rem_old, key=lambda f: f.get("path", "")),
+                      sorted(rem_new, key=lambda f: f.get("path", ""))):
+        out[of["path"]] = nf["path"]
+    return out
+
+
+async def _apply_race_upgrade(item_id: str) -> None:
+    """Swap the finished high-quality copy in for the low-quality one in place.
+
+    The ordering here is the whole function and every step earns its place:
+
+      1. Capture the playhead from `state` (library progress is saved every 15 s
+         and can be that stale) BEFORE anything moves.
+      2. `stop()` if it is being watched. VLC holds an open handle and Windows
+         refuses to unlink a file another process has open - superseding the
+         playback is not enough, the handle has to close. Then WAIT for the
+         finalize to land, or it writes the OLD path's progress key back after
+         we have moved it.
+      3. Purge the HLS bundles for the old paths BEFORE deleting anything: the
+         cache key is derived from each file's name and size and cannot be
+         computed once the file is gone.
+      4. One library transaction, no network IO inside it.
+      5. Only then delete the old torrent, outside the lock.
+    """
+    if item_id in _race_upgrading:
+        return
+    _race_upgrading.add(item_id)
+    try:
+        lib = await get_library()
+        item = next((it for it in lib.get("items", []) if it["id"] == item_id), None)
+        if item is None:
+            return
+        race = item.get("race") or {}
+        if race.get("state") != "upgrading":
+            return
+        incumbent = (item.get("torrent_hash") or "").lower()
+        hq = next((e for e in _race_active(race) if e.get("role") == "hq"
+                   and (e.get("hash") or "").lower() != incumbent), None)
+        if hq is None:
+            return
+        hq_hash = (hq.get("hash") or "").lower()
+        info = await qbit_info(hq_hash)
+        if not info or int(info.get("completed", 0) or 0) < int(info.get("size", 0) or 0):
+            return
+        qfiles = await qbit_files(hq_hash)
+        save_path = info.get("save_path", settings.qbit_download_path)
+        new_files = build_file_list(qfiles, save_path)
+        if not new_files:
+            # The "better" copy turned out to contain no video. Never swap to it.
+            log.warning("[race] %s: HQ copy %r has no video - abandoning the upgrade",
+                        item.get("title", ""), hq.get("title", ""))
+            # Mutate under the lock, talk to qBit and the SSE clients OUTSIDE
+            # it - `_lib_lock` is global and a network round trip inside it
+            # stalls every reader, the 2 s stat broadcaster included.
+            async with mutate_library() as fresh:
+                cur = next((it for it in fresh["items"] if it["id"] == item_id), None)
+                if cur is not None:
+                    r = cur.get("race") or {}
+                    for e in r.get("entries") or []:
+                        if (e.get("hash") or "").lower() == hq_hash:
+                            e["status"] = "dropped"
+                            e["drop_reason"] = "no-video"
+                            e["dropped_at"] = _now_iso()
+                    r["state"] = "settled"
+                    r["settled_at"] = _now_iso()
+            await qbit_delete(hq_hash, delete_files=True)
+            await _race_event(item_id, "settled", title=hq.get("title", ""),
+                              label=hq.get("label", ""))
+            return
+
+        old_files = list(item.get("files") or [])
+        old_paths = [f.get("path", "") for f in old_files if f.get("path")]
+        mapping = _race_path_map(old_files, new_files)
+        old_title = item.get("title", "")
+        old_label = next((e.get("label", "") for e in _race_active(race)
+                          if (e.get("hash") or "").lower() == incumbent), "")
+
+        # 1. Capture the live position before anything moves.
+        watching = _race_item_is_playing(item)
+        resume_old = state.library_current_file or ""
+        resume_pos = float(state.vlc_time or 0)
+        resume_profile = state.library_profile_id or ""
+
+        # 2. Close VLC's handle on the file we are about to delete.
+        if watching:
+            try:
+                await stop()
+            except Exception as exc:
+                log.warning("[race] stop() before the upgrade of %s failed: %s",
+                            item_id, exc)
+            # Let stop()'s progress finalize land first. It writes the OLD
+            # path's key, and if it lands after the transaction below it
+            # resurrects a key we just migrated - the resume would then point
+            # at a file that no longer exists.
+            #
+            # Waiting on the playback fields would NOT work: stop() clears them
+            # synchronously and flushes the position in a detached task, so
+            # they are already clear by the time we look. `state.finalize_task`
+            # is the actual signal.
+            _fin = state.finalize_task
+            if _fin is not None and not _fin.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(_fin), timeout=10)
+                except asyncio.TimeoutError:
+                    log.warning("[race] progress finalize still running after 10 s; "
+                                "continuing with the upgrade of %s", item_id)
+                except Exception:
+                    pass
+
+        # 3. Bundles before bytes - the cache key needs the files still on disk.
+        if old_paths:
+            await _purge_offline_bundles(old_paths)
+
+        # 4. One transaction. No network IO in here.
+        async with mutate_library() as fresh:
+            cur = next((it for it in fresh["items"] if it["id"] == item_id), None)
+            if cur is None:
+                # Deleted mid-swap. Nothing owns the HQ torrent now.
+                await qbit_delete(hq_hash, delete_files=True)
+                return
+            was_downloading = cur.get("status") == "downloading"
+            cur["torrent_hash"] = hq_hash
+            cur["title"] = hq.get("title", "") or cur.get("title", "")
+            cur["files"] = new_files
+            cur["size_bytes"] = sum(f.get("size_bytes", 0) for f in new_files)
+            cur["download_source"] = {"magnet": hq.get("magnet", ""),
+                                      "save_path": save_path}
+            dl = cur.get("download") or {}
+            if isinstance(dl.get("files"), dict):
+                dl["files"] = {mapping[k]: v for k, v in dl["files"].items()
+                               if k in mapping}
+            prep = cur.get("prep") or {}
+            if isinstance(prep.get("files"), dict):
+                prep["files"] = {mapping[k]: v for k, v in prep["files"].items()
+                                 if k in mapping}
+            # Smart Skip boundaries are DROPPED rather than carried. Two releases
+            # of the same episode routinely differ by a few frames of black or a
+            # recut intro, and a skip that fires at the wrong moment is worse
+            # than no skip; re-analysis rides along with the next prep for free.
+            # See docs/ANALYZER.md.
+            if cur.get("skip_data"):
+                cur["skip_data"] = {k: v for k, v in cur["skip_data"].items()
+                                    if k not in mapping}
+            for prof in (cur.get("progress") or {}).values():
+                fp = prof.get("file_progress") or {}
+                for old_p, new_p in mapping.items():
+                    if old_p not in fp:
+                        continue
+                    # MOVE the dict rather than rebuilding it: the sibling keys
+                    # (audio_sel / subtitle_sel / audio_offset_ms) live in the
+                    # same record and must survive the rename.
+                    moved = fp.pop(old_p)
+                    prev = fp.get(new_p)
+                    if prev and (prev.get("updated_at") or "") > (moved.get("updated_at") or ""):
+                        continue          # never regress a newer position
+                    fp[new_p] = moved
+                if prof.get("last_file") in mapping:
+                    prof["last_file"] = mapping[prof["last_file"]]
+            r = cur.get("race") or {}
+            hq_live = dict(hq)
+            hq_live["role"] = "primary"
+            hq_live["status"] = "won"
+            r["entries"] = [hq_live]
+            r["state"] = "settled"
+            r["settled_at"] = _now_iso()
+            r["upgraded_from"] = {"title": old_title, "label": old_label,
+                                  "at": _now_iso()}
+            cur["status"] = "ready"
+            cur.pop("stalled_since", None)
+            cur.pop("error", None)
+            if was_downloading:
+                state.downloading_count = max(0, state.downloading_count - 1)
+                if not cur.get("admin_only"):
+                    state.downloading_count_visible = max(
+                        0, state.downloading_count_visible - 1)
+
+        # 5. Now the old copy can go.
+        if incumbent:
+            await qbit_delete(incumbent, delete_files=True)
+            for _ in range(20):
+                if not await qbit_info(incumbent):
+                    break
+                await asyncio.sleep(0.25)
+            left = [p for p in old_paths if Path(p).exists()]
+            if left:
+                # Logged, not forced. Never os.remove a torrent-backed file;
+                # the admin Cleanup tab will offer these as stray.
+                log.warning("[race] %s: %d old file(s) survived the delete: %s",
+                            item_id, len(left), left[:3])
+
+        _spawn_bg(_probe_item_video_async(item_id))
+        new_label = hq.get("label", "")
+        log.warning("[race] %s: upgraded %r -> %r", item_id, old_title,
+                    hq.get("title", ""))
+        await broadcast("library_update", {
+            "item_id": item_id, "status": "ready",
+            "message": "Upgraded to " + (new_label or hq.get("title", ""))})
+        await _race_event(item_id, "upgraded", label=new_label,
+                          from_label=old_label, title=hq.get("title", ""))
+
+        # 6. Pick playback back up where it was interrupted.
+        if watching and resume_old in mapping:
+            new_path = mapping[resume_old]
+            state.active_hash = hq_hash
+            state.active_file = new_path
+            state.library_item_id = item_id
+            state.library_profile_id = resume_profile
+            state.library_current_file = new_path
+            state.library_playlist = [new_path]
+            state.library_series_map = {}
+            state.track_pref_applied_file = None
+            # The HQ file is COMPLETE, so this is the plain library-play path:
+            # no buffer gate, no sequential mode, no rebuffer guard. That is
+            # exactly why a resume seek is safe here when it is not for a file
+            # still being streamed ahead of its download.
+            await _library_play_launch([new_path], item_id, resume_profile,
+                                       resume_pos, "auto")
+    except Exception:
+        log.exception("[race] upgrade failed for %s", item_id)
+    finally:
+        _race_upgrading.discard(item_id)
+
+
+# How long after startup the orphan sweep runs - long enough that a race being
+# started right this second has written its entries.
+_RACE_SWEEP_DELAY = 90
+
+
+async def _race_orphan_sweep() -> None:
+    """Delete `streamlink-race`-tagged torrents that nothing in the library owns.
+
+    The last line of defence, and the reason the tag exists at all. Every other
+    failure mode is covered by reconciling `race.entries` against qBittorrent -
+    but a power cut between the qBit add and the `library.json` write leaves a
+    torrent no record mentions, and only qBit itself remembers it was ours.
+
+    Deliberately late (`_RACE_SWEEP_DELAY`): an add that is in flight right now
+    has a hash qBit knows about and the library does not, and killing that would
+    break the very race it is meant to protect.
+    """
+    try:
+        await asyncio.sleep(_RACE_SWEEP_DELAY)
+        torrents = await qbit_info_all()
+        if not torrents:
+            return
+        lib = await get_library()
+        owned: set = set()
+        for it in lib.get("items", []):
+            h = (it.get("torrent_hash") or "").lower()
+            if h:
+                owned.add(h)
+            for e in (it.get("race") or {}).get("entries") or []:
+                eh = (e.get("hash") or "").lower()
+                if eh:
+                    owned.add(eh)
+        owned |= {h.lower() for h in state.race_hashes}
+        for t in torrents:
+            tags = str(t.get("tags") or "")
+            h = (t.get("hash") or "").lower()
+            if _RACE_TAG not in tags or not h or h in owned:
+                continue
+            log.warning("[race] sweeping orphaned racer %s (%s)", h[:12],
+                        t.get("name", ""))
+            await qbit_delete(h, delete_files=True)
+    except Exception:
+        log.exception("[race] orphan sweep failed")
+
+
+_monitor_err_at = 0.0
+
+
 async def library_download_monitor() -> None:
     """Poll qBit every 5 s for pending library downloads and mark them complete."""
     while True:
@@ -8564,11 +9752,82 @@ async def library_download_monitor() -> None:
             # The visible count excludes admin-locked items so a non-elevated
             # viewer's download badge never reveals hidden content is fetching.
             state.downloading_count_visible = sum(1 for it in pending if not it.get("admin_only"))
-            if not pending and not repaired:
+            # An item whose LOW-quality copy has already landed is `ready`, but
+            # its HQ track is still running - so the watched set cannot just be
+            # the downloading ones or the upgrade would never fire.
+            racing = [it for it in lib["items"] if it.get("status") != "downloading"
+                      and ((it.get("race") or {}).get("state") in ("racing", "upgrading"))]
+            watch = pending + racing
+            state.racing_count = _race_live_count(lib)
+            state.racing_count_visible = sum(
+                1 for it in lib["items"] if not it.get("admin_only")
+                and ((it.get("race") or {}).get("state") in ("racing", "upgrading")))
+            if not watch and not repaired:
                 continue
+            # One snapshot for every race entry this tick. Six per-hash round
+            # trips (2 items x 3 candidates) would otherwise ride on top of the
+            # per-item polls below. The incumbent keeps its own `qbit_info`
+            # call: that path's None handling feeds `_handle_missing_torrent`
+            # and must not start meaning "qBit was slow to list".
+            by_hash: Optional[dict] = None
+            if any(it.get("race") for it in watch):
+                _all = await qbit_info_all()
+                if _all is not None:
+                    by_hash = {(t.get("hash") or "").lower(): t for t in _all}
             changed = bool(repaired)
-            for item in pending:
-                h = item.get("torrent_hash")
+            for item in watch:
+                # Race first: a promotion this tick must take effect before the
+                # body below reads `torrent_hash`, or a just-culled incumbent
+                # goes straight into `_handle_missing_torrent`.
+                if item.get("race"):
+                    if await _reconcile_item_race(item, by_hash):
+                        changed = True
+                    await _race_maybe_upgrade(item, by_hash)
+                    # Every candidate died. Hand straight back to the serial
+                    # retry rather than making the user wait out another full
+                    # `_DOWNLOAD_STALL_SECS` on a field we already know is dead;
+                    # `_race_drop` banked each raced title in
+                    # `download_attempts`, so `_retry_dead_download` will not
+                    # re-pick any of them.
+                    _r = item.get("race") or {}
+                    if (_r.get("state") == "exhausted"
+                            and not _r.get("handed_off")
+                            and item.get("status") == "downloading"):
+                        _r["handed_off"] = True
+                        changed = True
+                        _inc = (by_hash or {}).get((item.get("torrent_hash") or "").lower())
+                        # `_retry_dead_download` deletes the current torrent WITH
+                        # its files, on the documented assumption that there are
+                        # none. Only hand over when that actually holds.
+                        if _inc is not None and int(_inc.get("completed", 0) or 0) == 0:
+                            outcome = await _retry_dead_download(item, lib)
+                            if outcome == "exhausted":
+                                state.downloading_count = max(0, state.downloading_count - 1)
+                                if not item.get("admin_only"):
+                                    state.downloading_count_visible = max(
+                                        0, state.downloading_count_visible - 1)
+                                await broadcast("library_update", {
+                                    "item_id": item["id"], "status": "error",
+                                    "message": item.get("error", "")})
+                                continue
+                if item.get("status") != "downloading":
+                    # A `ready` item whose HQ track is still running falls out
+                    # of the download branch below, so nothing would keep the
+                    # client's per-item cache current for it. Send a stats-free
+                    # event carrying only `race`, so `libDownloadStats` (and the
+                    # merged-tile `racing` flag derived from it) stay truthful
+                    # while the upgrade runs. The chips themselves repaint on
+                    # `library_race` / `library_update`, which is the right
+                    # granularity - an upgrade is minutes, not seconds.
+                    await broadcast("library_progress", {
+                        "item_id": item["id"], "race": _race_summary(item),
+                        "speed_bps": 0, "downloaded_bytes": 0, "total_bytes": 0,
+                        "progress_pct": 100.0, "eta_secs": -1,
+                        "download_mode": _download_cfg(item)["mode"],
+                        "awaiting_metadata": False, "paused": False,
+                    })
+                    continue      # `racing` item - the race tick was all it needed
+                h = item.get("torrent_hash")      # RE-READ: the race may have repointed it
                 if not h:
                     continue
                 info = await qbit_info(h)
@@ -8689,6 +9948,13 @@ async def library_download_monitor() -> None:
                     # same episode. See `_retry_dead_download`.
                     if waiting_idle:
                         item.pop("stalled_since", None)
+                    elif (item.get("race") or {}).get("state") == "racing":
+                        # A race has its own, much faster clocks (120 s with no
+                        # metadata, 90 s before a speed cull) AND alternatives
+                        # already running. Letting the 600 s serial stall timer
+                        # fire underneath it would swap the torrent out from
+                        # under the race engine.
+                        item.pop("stalled_since", None)
                     elif _note_download_stall(item, info):
                         outcome = await _retry_dead_download(item, lib)
                         if outcome:
@@ -8706,6 +9972,12 @@ async def library_download_monitor() -> None:
                         # indexers unreachable). Fall through and keep reporting.
                     await broadcast("library_progress", {
                         "item_id": item["id"],
+                        # Rides on library_progress rather than a new event
+                        # because the client already caches this payload per
+                        # item and repaints the card from it. NOTE `_libDlAgg`
+                        # SUMS fields across items for a merged show tile - it
+                        # must treat `race` as pass-through, not add it up.
+                        "race": _race_summary(item),
                         "speed_bps": info.get("dlspeed", 0),
                         "downloaded_bytes": info.get("completed", 0),
                         "total_bytes": info.get("size", 0),
@@ -8746,7 +10018,7 @@ async def library_download_monitor() -> None:
                 #
                 # An item that vanished mid-tick stays vanished: skipping it is what
                 # stops the monitor resurrecting a download the user just deleted.
-                touched = {it["id"]: it for it in pending + repaired}
+                touched = {it["id"]: it for it in watch + repaired}
                 async with mutate_library() as fresh:
                     by_id = {it["id"]: it for it in fresh["items"]}
                     for iid, mutated in touched.items():
@@ -8754,7 +10026,14 @@ async def library_download_monitor() -> None:
                         if cur is not None:
                             cur.update(mutated)
         except Exception:
-            pass
+            # This used to be a bare `pass`, which meant a bug anywhere in the
+            # tick (the race engine now included) stalled every download with
+            # no trace at all. Throttled so a persistent fault doesn't write a
+            # traceback every 5 s.
+            global _monitor_err_at
+            if time.monotonic() - _monitor_err_at > 300:
+                _monitor_err_at = time.monotonic()
+                log.exception("[download] monitor tick failed")
 
 
 # ── Smart Skip helpers ────────────────────────────────────────────────────────
@@ -10115,6 +11394,65 @@ async def _recover_interrupted_downloads() -> None:
         recovered += 1
     if recovered:
         print(f"[download] re-driving {recovered} interrupted download(s) after restart")
+    await _recover_races()
+
+
+async def _recover_races() -> None:
+    """Reconcile every live race against what qBittorrent actually still has.
+
+    A restart loses nothing persistent (entries live in library.json) but it
+    does invalidate the SAMPLER: `last_sample_at` is an epoch stamp, and the
+    delta across a restart would read as either a colossal burst or a dead
+    stall. Every surviving entry is therefore re-anchored with its counters
+    cleared, so each candidate gets a fresh `racerules.MIN_SAMPLES` before anything
+    can be culled on speed.
+
+    Entries qBit no longer has are failed rather than re-added here - the
+    monitor's per-tick miss handling owns the re-add, and doing it twice would
+    race with it."""
+    try:
+        torrents = await qbit_info_all()
+        if torrents is None:
+            return          # qBit not up yet; the monitor will reconcile later
+        have = {(t.get("hash") or "").lower() for t in torrents}
+        async with mutate_library() as lib:
+            for it in lib.get("items", []):
+                race = it.get("race") or {}
+                if race.get("state") not in ("racing", "upgrading"):
+                    continue
+                incumbent = (it.get("torrent_hash") or "").lower()
+                for e in race.get("entries") or []:
+                    if e.get("status") not in ("live", "paused"):
+                        continue
+                    if (e.get("hash") or "").lower() not in have:
+                        e["status"] = "failed"
+                        e["drop_reason"] = "gone-after-restart"
+                        e["dropped_at"] = _now_iso()
+                        continue
+                    # Survived. Re-anchor the sampler rather than trusting a
+                    # stamp from before the restart.
+                    e["last_sample_at"] = 0.0
+                    e["samples"] = 0
+                    e["rate_ewma"] = 0.0
+                    e["under_ratio_ticks"] = 0
+                    e["miss_ticks"] = 0
+                    # A pause is a runtime decision (someone was watching), not
+                    # a durable one - let this tick decide again.
+                    if e.get("status") == "paused":
+                        e["status"] = "live"
+                alive = [e for e in race.get("entries") or []
+                         if e.get("status") in ("live", "paused")]
+                if not alive:
+                    race["state"] = "exhausted"
+                    race["settled_at"] = _now_iso()
+                elif not any((e.get("hash") or "").lower() == incumbent for e in alive):
+                    # The incumbent is gone but a challenger survived. Let the
+                    # monitor promote it on its next tick (it has the qBit
+                    # snapshot and the broadcast machinery); just make sure the
+                    # race is still in a state that keeps it being ticked.
+                    race["state"] = "racing"
+    except Exception:
+        log.exception("[race] restart reconciliation failed")
 
 
 async def _purge_background_video_progress() -> None:
@@ -10196,8 +11534,16 @@ async def library_download_pipeline(
     torrent_hash: str = "",
     selected_file_indices: Optional[list[int]] = None,
     download_mode: str = "now",
+    race_candidates: Optional[list] = None,
+    runtime_min: float = 0.0,
+    episode_count: int = 0,
 ) -> None:
-    """Add magnet to qBit for a full download; no streaming mode, never auto-deleted."""
+    """Add magnet to qBit for a full download; no streaming mode, never auto-deleted.
+
+    `race_candidates` (set only when the caller auto-picked the release) is an
+    ordered shortlist whose head is `magnet`. The race starts DETACHED once this
+    torrent hash is durable, so the normal add path keeps its latency and a
+    failure to race can never fail the download itself."""
     try:
         # No explicit choice ⇒ the emptiest configured drive, not always the
         # primary (which otherwise fills to 100% while a second drive sits idle).
@@ -10250,6 +11596,22 @@ async def library_download_pipeline(
                     # metadata is still pending, so it's no longer an orphan to recover.
                     it.pop("pending_download", None)
                     break
+
+        # Start the race behind the incumbent now its hash is durable. Detached
+        # on purpose: everything below is the normal download path and must not
+        # wait on candidate adds.
+        if race_candidates and len(race_candidates) > 1:
+            _rt, _ec = runtime_min, episode_count
+            if not _rt or not _ec:
+                _lib_rt = await get_library()
+                _it_rt = next((x for x in _lib_rt.get("items", [])
+                               if x["id"] == item_id), None)
+                if _it_rt is not None:
+                    _hrt, _hec = _race_runtime_hint(_it_rt)
+                    _rt = _rt or _hrt
+                    _ec = _ec or _hec
+            _spawn_bg(_race_start(item_id, race_candidates, float(_rt or 0),
+                                  int(_ec or 0), expect_hash=h))
 
         # Wait for torrent metadata to appear, then build the file list
         for _ in range(30):
@@ -10398,6 +11760,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         _mc0 = _missing_content_cfg(_lib0)
         state.missing_content_enabled = _mc0["enabled"]
         state.missing_content_unaired = _mc0["show_unaired"]
+        _dr0 = _download_race_cfg(_lib0)
+        state.download_race_enabled = _dr0["enabled"]
+        state.download_race_ceiling = _dr0["quality_ceiling"]
         _ks0 = _vpn_killswitch_cfg(_lib0)
         state.vpn_block_ui = _ks0["block_ui"]
         state.vpn_mode = _ks0["mode"]
@@ -10451,6 +11816,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     guard       = asyncio.create_task(vpn_guard())
     broadcaster = asyncio.create_task(stat_broadcaster())
     dl_monitor  = asyncio.create_task(library_download_monitor())
+    # Last-resort cleanup for racers a lost library.json write orphaned. Runs
+    # once, late (_RACE_SWEEP_DELAY), so it can never kill an add in flight.
+    _spawn_bg(_race_orphan_sweep())
     dvbackfill  = asyncio.create_task(video_probe_backfill())
     vlc_tracker = asyncio.create_task(vlc_progress_tracker())
     bg_loop     = asyncio.create_task(background_video_loop())
@@ -10734,6 +12102,27 @@ class DownloadReq(BaseModel):
     # PIN-verified elevated profile (the content-lock permission) — see
     # _unreleased_gate.
     allow_unreleased: bool = False
+    # ── Parallel download racing (16.0.0). All optional, all default-off, so a
+    # request that doesn't set them behaves exactly as it always did.
+    #
+    # `auto_picked` is THE gate: racing only happens where the USER did not
+    # choose a torrent. The download modal and the per-episode source sheet
+    # never set it, so those paths are untouched by construction.
+    auto_picked: bool = False
+    # Ordered alternatives for the same content, best first. `candidates[0]`
+    # must be `magnet` — it is the release the frontend auto-picked and the one
+    # the normal pipeline adds; the rest are only ever added BESIDE it. Sent by
+    # the client rather than re-derived here because the pick depends on page
+    # state the server doesn't have (audio preference, size/seeder filters, the
+    # relevance cut), and a second implementation of that ranking would
+    # disagree with the one the user can actually see.
+    candidates: list[dict] = []
+    # TMDb runtime (minutes) and episode count for the bytes-per-minute quality
+    # cross-check. 0 means "unknown", which `relquality` handles by letting the
+    # release name stand — never guessed. The server falls back to
+    # `_race_runtime_hint` when the client doesn't know either.
+    runtime_min: float = 0
+    episode_count: int = 0
 
 
 class VisibilityReq(BaseModel):
@@ -10886,6 +12275,14 @@ class AutoPrepReq(BaseModel):
 
 class PlayPrepReq(BaseModel):
     enabled: bool = True                       # auto on-device prep of the playing episode (+ playlist tail) on every VLC play
+
+
+class DownloadRaceReq(BaseModel):
+    enabled: bool = False                      # off by default: racing multiplies bandwidth and disk
+    size: int = 3                              # candidates per race (2-4)
+    max_items: int = 2                         # concurrent races, box-wide
+    quality_ceiling: int = 1080                # the HQ track's target tier (720/1080/2160)
+    hq_upgrade: bool = True                    # keep a better copy and swap it in when it lands
 
 
 class MissingContentReq(BaseModel):
@@ -11261,6 +12658,10 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
             # Releases tried so far, the original included — so it reads directly
             # as the ordinal in the card's "Release N" chip.
             "retry_count": len(it.get("download_attempts") or []),
+            # Derived race view (None when this item isn't racing) so a card can
+            # paint its candidate rows on first load rather than waiting for the
+            # first `library_progress`. See `_race_summary`.
+            "race": _race_summary(it),
             "torrent_hash": it.get("torrent_hash", ""),
             "series_key": _series_key(it),   # groups same-series items into one show tile
             "resume": resume,
@@ -13224,6 +14625,28 @@ async def library_download(request: Request, req: DownloadReq) -> JSONResponse:
                 dup = next((it for it in lib["items"]
                             if (extract_hash((it.get("pending_download") or {}).get("magnet", "")) or "").lower() == want_hash
                             and it.get("status") != "error"), None)
+            if dup is None:
+                # ...and a torrent currently running as somebody's race
+                # CHALLENGER. qBit answers `Fails.` for a duplicate add and
+                # `qbit_add_magnet` then adopts the existing hash, so without
+                # this the new item and the race would share one torrent - and
+                # whichever settled first would delete it out from under the
+                # other. The user asked for this release by name, so the
+                # deliberate choice wins: drop it from the race (leaving the
+                # torrent running) and let the new item own it.
+                for _it in lib["items"]:
+                    _r = _it.get("race") or {}
+                    if _r.get("state") not in ("racing", "upgrading"):
+                        continue
+                    for _e in _r.get("entries") or []:
+                        if ((_e.get("hash") or "").lower() == want_hash
+                                and _e.get("status") in ("live", "paused")
+                                and (_it.get("torrent_hash") or "").lower() != want_hash):
+                            _e["status"] = "dropped"
+                            _e["drop_reason"] = "claimed-by-user"
+                            _e["dropped_at"] = _now_iso()
+                            log.info("[race] %s: %r claimed by a manual download",
+                                     _it.get("id", ""), _e.get("title", ""))
             if dup is not None:
                 # Only ever tighten. A re-download that asks for the lock applies it to
                 # the item already backing this hash; one that doesn't must never
@@ -13276,11 +14699,29 @@ async def library_download(request: Request, req: DownloadReq) -> JSONResponse:
     # The monitor re-derives both counts authoritatively each tick.
     if not item.get("admin_only"):
         state.downloading_count_visible += 1
+    # Only an AUTO-PICKED download races, and only when the client actually
+    # offered alternatives. A specific-torrent download (the modal, the source
+    # sheet) sets neither field and therefore takes the identical code path it
+    # always has.
+    _race_cands: list = []
+    if req.auto_picked and len(req.candidates or []) > 1:
+        _first = ((req.candidates[0] or {}).get("magnet") or "").strip()
+        if _first and _first == (req.magnet or "").strip():
+            _race_cands = req.candidates
+        else:
+            # candidates[0] must BE the release being added. Anything else means
+            # the caller and the server disagree about what is downloading, and
+            # racing on that basis would add challengers to the wrong title.
+            log.warning("Ignoring a candidate shortlist whose head is not the "
+                        "magnet being downloaded (%s)", req.title)
     asyncio.create_task(library_download_pipeline(
         item["id"], req.magnet, save_path,
         torrent_hash=req.torrent_hash,
         selected_file_indices=req.selected_file_indices or None,
         download_mode=item["download"]["mode"],
+        race_candidates=_race_cands,
+        runtime_min=float(req.runtime_min or 0),
+        episode_count=int(req.episode_count or 0),
     ))
     # Tell every open dashboard the moment the row exists, rather than leaving
     # them to find out on `library_download_monitor`'s next tick. Starting a
@@ -13290,7 +14731,11 @@ async def library_download(request: Request, req: DownloadReq) -> JSONResponse:
     # appeared seconds later, or not until the user pulled to refresh.
     await broadcast("library_update", {"item_id": item["id"], "status": "downloading"})
     return JSONResponse({"ok": True, "item_id": item["id"],
-                         "default_save_path": save_path})
+                         "default_save_path": save_path,
+                         # So the card can say "racing 3 sources" right away
+                         # rather than waiting for the monitor's next tick.
+                         "race": {"started": bool(_race_cands),
+                                  "size": len(_race_cands)}})
 
 
 async def _purge_offline_bundles(paths: list[str]) -> int:
@@ -13338,7 +14783,7 @@ async def delete_library_item(request: Request, item_id: str,
         item = next((it for it in lib["items"] if it["id"] == item_id), None)
         if not item:
             raise HTTPException(404, "Item not found.")
-        h = item.get("torrent_hash")
+        hashes = _item_all_torrent_hashes(item)
         file_paths = [f.get("path", "") for f in item.get("files", []) if f.get("path")]
         lib["items"] = [it for it in lib["items"] if it["id"] != item_id]
     # Deleting what is on screen: stop first, outside the library lock.
@@ -13361,8 +14806,8 @@ async def delete_library_item(request: Request, item_id: str,
     # Bundles first — their cache key needs the media files to still be on disk.
     if delete_file:
         await _purge_offline_bundles(file_paths)
-    if h:
-        await qbit_delete(h, delete_files=delete_file)
+    for _h in hashes:
+        await qbit_delete(_h, delete_files=delete_file)
     return JSONResponse({"ok": True})
 
 
@@ -15893,6 +17338,235 @@ async def stream_cancel(hash: str) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+class StreamRaceReq(BaseModel):
+    # Ordered, best first. Only sent when the SOURCE WAS AUTO-PICKED - a user
+    # who chose a specific release goes to /api/stream/prepare exactly as before.
+    candidates: list[dict] = []
+    series: str = ""
+    season: int = 0
+    episode: int = 0
+    profile_id: str = ""
+
+
+# A stream race is bounded by the user's patience, not by the download's.
+_RACE_STREAM_TIMEOUT = 180.0
+_RACE_STREAM_META_GRACE = 60.0
+
+
+def _race_stream_pick_file(qfiles: list, save_path: str, season: int,
+                           episode: int) -> Optional[dict]:
+    """The file in this candidate equivalent to the one we mean to play.
+
+    Only ever *always* correct for an episode, which is why an ambiguous pack
+    is refused outright rather than guessed at:
+
+      1. season+episode known -> the file `build_file_list` attributed to it.
+         The only correct answer for a season pack.
+      2. exactly one video -> that one.
+      3. several videos and nothing to disambiguate -> None. The caller drops
+         the candidate from the race; if it was the last one standing its file
+         list is returned and the picker opens, because a pack needs a human.
+    """
+    vids = build_file_list(qfiles, save_path)
+    if not vids:
+        return None
+    if season and episode:
+        for f in vids:
+            if int(f.get("season") or 0) == season and int(f.get("episode") or 0) == episode:
+                return f
+        return None
+    if len(vids) == 1:
+        return vids[0]
+    return None
+
+
+@app.post("/api/stream/race")
+async def stream_race(req: StreamRaceReq) -> JSONResponse:
+    """Buffer several candidate releases at once; return the first one ready.
+
+    The point of Stream Now is not waiting, and the single worst outcome today
+    is picking a release that turns out to have no reachable seeds: the buffer
+    bar sits at zero and the only recovery is for the user to notice, back out
+    and try a different source by hand. Racing the buffer removes that entirely.
+
+    Deliberately runs **before** the torrent is adopted into the library, so
+    `/api/library/play-now` -> `_begin_library_file_stream` ->
+    `_library_stream_file_launch` are reached with a single, already-buffering
+    hash and are byte-for-byte unchanged. Racing *inside* the launch would mean
+    repointing `torrent_hash` underneath a live `state.active_hash`, which is
+    precisely the desync docs/GOTCHAS.md warns about.
+
+    Returns the `/api/stream/prepare` shape plus `raced`/`beaten`, so the client
+    can hand the winner straight to the existing flow. 504 when nobody clears
+    the gate - the caller then falls back to today's behaviour on candidates[0].
+    """
+    if not state.vpn_secure:
+        raise HTTPException(403, "VPN not connected — streaming blocked.")
+    cands = [c for c in (req.candidates or []) if (c.get("magnet") or "").strip()]
+    if not cands:
+        raise HTTPException(400, "No candidates supplied.")
+    lib = await get_library()
+    cfg = _download_race_cfg(lib)
+    if not cfg["enabled"]:
+        raise HTTPException(409, "Download racing is disabled.")
+    cands = cands[:cfg["size"]]
+
+    # Same stale-prepare cleanup /api/stream/prepare does.
+    if state.prepare_hash:
+        await _qbit_delete_transient(state.prepare_hash, "stale prepare")
+        state.prepare_hash = None
+
+    save_path = await _auto_save_path()
+    runners: list = []
+    try:
+        for c in cands:
+            h = await qbit_add_magnet(c["magnet"], save_path=save_path,
+                                      sequential=True, tags=_RACE_TAG)
+            if not h:
+                continue
+            h = h.lower()
+            if any(r["hash"] == h for r in runners):
+                continue
+            # Register BEFORE any further await. This set is what keeps admin
+            # Cleanup from calling these orphans, and what `/api/stop` tears
+            # down if the user bails mid-race - a hash that exists in qBit but
+            # not here is a leak.
+            state.race_hashes.add(h)
+            runners.append({"hash": h, "title": c.get("title", ""),
+                            "magnet": c["magnet"], "dead": False, "pct": 0.0,
+                            "speed": 0, "file": None})
+            # The tail piece is what lets VLC demux a moov-at-end container;
+            # asking early costs nothing and the launch path waits for it.
+            await qbit_first_last_piece_prio(h)
+        if not runners:
+            raise HTTPException(500, "qBittorrent rejected every candidate.")
+
+        started = time.monotonic()
+        winner: Optional[dict] = None
+        while time.monotonic() - started < _RACE_STREAM_TIMEOUT:
+            await asyncio.sleep(1)
+            alive = [r for r in runners if not r["dead"]]
+            if not alive:
+                break
+            age = time.monotonic() - started
+            for r in alive:
+                info = await qbit_info(r["hash"])
+                if not info:
+                    if age >= _RACE_STREAM_META_GRACE:
+                        r["dead"] = True
+                    continue
+                if info.get("state") in ("error", "missingFiles"):
+                    r["dead"] = True
+                    continue
+                qfiles = await qbit_files(r["hash"])
+                if not qfiles:
+                    if age >= _RACE_STREAM_META_GRACE:
+                        r["dead"] = True
+                    continue
+                sp = info.get("save_path", save_path)
+                if r["file"] is None:
+                    picked = _race_stream_pick_file(qfiles, sp, req.season, req.episode)
+                    if picked is None:
+                        # Either no video at all (a fake) or a pack we cannot
+                        # resolve without the user. Out of the race either way,
+                        # but a PACK is still worth handing back if it turns out
+                        # to be the last one standing - the picker can open on it
+                        # and a human can choose. A fake is not, so only keep the
+                        # file list when there is actually a video in it.
+                        r["dead"] = True
+                        r["save_path"] = sp
+                        if build_file_list(qfiles, sp):
+                            r["files"] = qfiles
+                        continue
+                    r["file"] = picked
+                    r["files"] = qfiles
+                    r["save_path"] = sp
+                target = r["file"]
+                qf = next((q for q in qfiles
+                           if str(Path(sp) / q.get("name", "")) == target.get("path")), None)
+                if qf is None:
+                    continue
+                prog = float(qf.get("progress", 0.0) or 0.0)
+                done_b = prog * float(qf.get("size", 0) or 0)
+                r["pct"] = round(prog * 100, 1)
+                r["speed"] = int(info.get("dlspeed", 0) or 0)
+                # Exactly the gate `_library_stream_file_launch` uses. NOT the
+                # tail-piece wait: the launch re-checks and waits for that
+                # anyway, so doing it here would only delay the decision.
+                if (prog >= 0.999
+                        or done_b / 1e6 >= settings.buffer_min_mb
+                        or prog * 100 >= settings.buffer_min_pct):
+                    winner = r
+                    break
+            if winner:
+                break
+            # Report the race WITHOUT claiming a playback status: nothing is
+            # buffering for VLC yet, and saying so would leave the dashboard
+            # showing "buffering" if the race ends in a 504 and the caller
+            # falls back to the ordinary picker.
+            await broadcast("stream_status", {
+                "status": state.stream_status,
+                "race": [{"title": r["title"], "pct": r["pct"],
+                          "speed_bps": r["speed"], "dead": r["dead"]}
+                         for r in runners],
+            })
+
+        if winner is None:
+            # Nobody cleared the gate. If one of them was a multi-file pack we
+            # refused to guess inside, hand that back so the picker can open on
+            # it - a pack needs a human, and that is not a failure.
+            winner = next((r for r in runners if r.get("files")), None)
+            if winner is None:
+                raise HTTPException(
+                    504, "None of the sources started delivering in time.")
+
+        # Order matters: take the winner OUT of the sweep set before anything
+        # iterates it to delete losers.
+        state.race_hashes.discard(winner["hash"])
+        state.prepare_hash = winner["hash"]
+        for r in runners:
+            if r["hash"] != winner["hash"]:
+                _spawn_bg(_race_stream_drop(r["hash"]))
+        files = winner.get("files") or await qbit_files(winner["hash"])
+        result = [{"index": f.get("index", i), "name": f.get("name", ""),
+                   "size_bytes": f.get("size", 0),
+                   "size_human": human_size(f.get("size", 0))}
+                  for i, f in enumerate(files)]
+        log.info("[race] stream race won by %r (%d candidates)",
+                 winner["title"], len(runners))
+        return JSONResponse({
+            "hash": winner["hash"], "files": result,
+            "magnet": winner["magnet"], "title": winner["title"],
+            "raced": len(runners),
+            "beaten": [r["title"] for r in runners if r["hash"] != winner["hash"]],
+        })
+    except HTTPException:
+        for r in runners:
+            _spawn_bg(_race_stream_drop(r["hash"]))
+        raise
+    except Exception:
+        for r in runners:
+            _spawn_bg(_race_stream_drop(r["hash"]))
+        log.exception("[race] stream race failed")
+        raise HTTPException(500, "The source race failed — try again.")
+
+
+async def _race_stream_drop(h: str) -> None:
+    """Delete a losing stream-race candidate and stop tracking it."""
+    try:
+        await _qbit_delete_transient(h, "stream race loser")
+    finally:
+        state.race_hashes.discard(h)
+
+
+@app.delete("/api/stream/race")
+async def stream_race_cancel() -> JSONResponse:
+    """Abandon an in-flight stream race (the user backed out of the picker)."""
+    for h in list(state.race_hashes):
+        await _race_stream_drop(h)
+    return JSONResponse({"ok": True})
+
+
 @app.post("/api/library/prepare")
 async def library_prepare(req: StreamPrepareReq) -> JSONResponse:
     """Fetch the file list for a torrent so the library file-picker UI can show checkboxes.
@@ -17452,7 +19126,10 @@ async def stop() -> JSONResponse:
     fin_pos = float(state.vlc_time or 0)
     fin_dur = float(state.vlc_duration or 0)
     if library_item_id and fin_profile and fin_file:
-        asyncio.create_task(_finalize_stopped_file(
+        # Tracked, not fire-and-forget: the playback fields are cleared below
+        # immediately, so this task is the only remaining signal that the
+        # outgoing file's progress has actually been written.
+        state.finalize_task = asyncio.create_task(_finalize_stopped_file(
             library_item_id, fin_profile, fin_file, fin_pos, fin_dur,
         ))
 
@@ -17520,6 +19197,11 @@ async def stop() -> JSONResponse:
                 await _qbit_delete_transient(ah, "stop")
             if ph:
                 await _qbit_delete_transient(ph, "stop prepare")
+            # Any stream-race candidate still in flight. The winner is removed
+            # from this set the instant it wins, so Stop during a race tears
+            # down exactly the losers and never the torrent about to play.
+            for _rh in list(state.race_hashes):
+                await _race_stream_drop(_rh)
             if yt:
                 # Give the page a beat to pause via the SSE 'close' command, then
                 # kill the dedicated kiosk Chrome instance (matched by profile dir).
@@ -21057,6 +22739,45 @@ async def admin_set_missing_content(request: Request,
     cfg = _missing_content_cfg(lib)
     state.missing_content_enabled = cfg["enabled"]
     state.missing_content_unaired = cfg["show_unaired"]
+    return JSONResponse({"ok": True, **cfg})
+
+
+@app.get("/api/admin/download-race")
+async def admin_get_download_race(request: Request) -> JSONResponse:
+    """Return the parallel-download-race policy."""
+    _require_admin(request)
+    return JSONResponse(_download_race_cfg(await get_library()))
+
+
+@app.post("/api/admin/download-race")
+async def admin_set_download_race(request: Request,
+                                  body: DownloadRaceReq) -> JSONResponse:
+    """Save the parallel-download-race policy.
+
+    The enums are VALIDATED, not coerced: silently rounding an unrecognised
+    ceiling to 1080 would leave the admin panel showing a value the server
+    never agreed to. Mirrored onto `state` so it rides in every `state` SSE
+    event and open dashboards start (or stop) sending candidate shortlists
+    without a reload."""
+    _require_admin(request)
+    if body.size not in _RACE_SIZES:
+        raise HTTPException(400, f"size must be one of {list(_RACE_SIZES)}.")
+    if body.max_items not in _RACE_MAX_ITEMS_CHOICES:
+        raise HTTPException(
+            400, f"max_items must be one of {list(_RACE_MAX_ITEMS_CHOICES)}.")
+    if body.quality_ceiling not in _RACE_CEILINGS:
+        raise HTTPException(
+            400, f"quality_ceiling must be one of {list(_RACE_CEILINGS)}.")
+    async with mutate_library() as lib:
+        dr = lib.setdefault("settings", {}).setdefault("download_race", {})
+        dr["enabled"]         = bool(body.enabled)
+        dr["size"]            = int(body.size)
+        dr["max_items"]       = int(body.max_items)
+        dr["quality_ceiling"] = int(body.quality_ceiling)
+        dr["hq_upgrade"]      = bool(body.hq_upgrade)
+    cfg = _download_race_cfg(lib)
+    state.download_race_enabled = cfg["enabled"]
+    state.download_race_ceiling = cfg["quality_ceiling"]
     return JSONResponse({"ok": True, **cfg})
 
 
@@ -30039,14 +31760,26 @@ def _invalidate_cleanup_inventory() -> None:
 
 def _cleanup_in_use_hashes(lib: dict) -> set[str]:
     """Torrent hashes cleanup must NEVER touch destructively: the live stream /
-    prepare torrent, and any torrent backing a still-downloading library item."""
+    prepare torrent, any torrent backing a still-downloading library item, and
+    every candidate of a live download race.
+
+    A race runs several torrents for one item and only ONE of them is that
+    item's `torrent_hash`; without the loop below, a Cleanup refresh mid-race
+    lists the challengers as orphans and will cheerfully delete the candidate
+    that was winning. `state.race_hashes` covers the Stream-Now race, whose
+    candidates are not in the library at all until one of them wins."""
     in_use: set[str] = set()
     for h in (state.active_hash, state.prepare_hash):
         if h:
             in_use.add(h.lower())
+    in_use |= {h.lower() for h in state.race_hashes if h}
     for it in lib.get("items", []):
         if it.get("status") == "downloading" and it.get("torrent_hash"):
             in_use.add(it["torrent_hash"].lower())
+        if (it.get("race") or {}).get("state") in ("racing", "upgrading"):
+            for e in (it.get("race") or {}).get("entries") or []:
+                if e.get("hash") and e.get("status") in ("live", "paused"):
+                    in_use.add(e["hash"].lower())
     return in_use
 
 
@@ -30066,6 +31799,14 @@ def _cleanup_inventory_sync(lib: dict, torrents: list[dict], in_use: set[str],
         h = (it.get("torrent_hash") or "").lower()
         if h:
             lib_hashes[h] = it
+        # Map a race's challengers onto their owning item too. Without this an
+        # in-use challenger is merely *protected* from deletion but still reads
+        # as an orphan in the list; mapped, the row names the item it belongs
+        # to and is explicable rather than alarming.
+        for e in (it.get("race") or {}).get("entries") or []:
+            eh = (e.get("hash") or "").lower()
+            if eh and e.get("status") in ("live", "paused"):
+                lib_hashes.setdefault(eh, it)
         for f in it.get("files", []):
             p = f.get("path", "")
             if p:
@@ -30410,13 +32151,13 @@ async def admin_cleanup_delete_item(item_id: str, request: Request,
         item = next((it for it in lib["items"] if it["id"] == item_id), None)
         if not item:
             raise HTTPException(404, "Item not found.")
-        h = item.get("torrent_hash")
+        hashes = _item_all_torrent_hashes(item)
         file_paths = [f.get("path", "") for f in item.get("files", []) if f.get("path")]
         lib["items"] = [it for it in lib["items"] if it["id"] != item_id]
     if delete_files:
         await _purge_offline_bundles(file_paths)
-    if h:
-        await qbit_delete(h, delete_files=delete_files)
+    for _h in hashes:
+        await qbit_delete(_h, delete_files=delete_files)
     _invalidate_cleanup_inventory()
     return JSONResponse({"ok": True})
 

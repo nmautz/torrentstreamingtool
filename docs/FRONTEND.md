@@ -86,6 +86,7 @@ Single `EventSource('/api/events')`. Every handler first calls `_noteSSEMsg()` (
 - `state` — full snapshot; `Object.assign(app, d)`, then `renderVpn` + `renderPlayer` + `updateDlBadge`. Also re-renders the library (`loadLibrary()`) when `download_idle_open` flips while on the Library tab, so the cards' "Idle — waiting" ↔ "Idle download" chips update as the idle/night window opens/closes
 - `vpn_status` — show alert; update VPN pill + overlay (`renderVpn` → `applyVpnGate`); re-render the library so downloading rows flip their badge to/from "⚠ VPN down — paused"
 - `stream_status` — phase transitions (`buffering`/`playing`/`error`/`idle`); push progress fields
+- `library_race` — a download race changed state (16.0.0). `upgraded` / `upgrade_available` toast; `started`/`culled`/`settled`/`exhausted` only repaint, because the card chips already show them and a toast per dropped candidate would be noise. Always `loadLibrary()` on the library tab and `_epLiveRefresh()` for a concerned episode page.
 - `library_progress` — per-item dl speed/ETA (~every 5 s while item is downloading). Stored in `libDownloadStats` and rendered into `#dl-stat-<itemId>` (`formatDlStat` shows "Waiting for idle window" when `paused`, and "Finding peers…" when `awaiting_metadata` — qBit has no file list yet, so nothing is actually transferring). Also calls `refreshDownloadFiles(item_id)` so an expanded per-file list's progress bars + ✓complete badges stay live, **and `_epLiveRefresh()` when the open episode page shows that item** (see § Keeping the episode page live)
 - `library_update` — item status changed (`downloading`→`ready`/`error`); triggers `loadLibrary()` if on the Library tab, and `_epLiveRefresh()` (via `_epConcerns(id, true)`) when the episode page is open — `loose`, because the payload carries no series and a brand-new member is by definition not in the list yet
 - `progress_saved` — quiet refresh of the library tab so watch-progress bars update, plus `_epLiveRefresh()` when the open episode page is concerned. Before 12.7.2 this was gated on `epItemId`, so a show opened as a **merged series** (where `epItemId` is null) never refreshed at all
@@ -925,3 +926,64 @@ Password-protected at `/admin`. Token stored in `sessionStorage.admin_token` and
 - [BACKEND.md](BACKEND.md) — what each endpoint actually does
 - [API.md](API.md) — endpoint signatures
 - [ADMIN.md](ADMIN.md) — admin auth, indexer flow, content lock semantics
+
+## Download racing (16.0.0)
+
+Racing is **server-side**; the frontend's only job is to offer an ordered shortlist
+of alternatives when — and only when — the user did not pick a release themselves.
+
+**`_ssAutoPickRace(sources, filt, opts)`** sits beside `_ssAutoPickFrom` and returns
+`{pick, candidates}`. `pick` is **identical** to what `_ssAutoPick` returns today:
+racing never changes *which* release is primary, it only offers alternates to run
+beside it. That is the property that makes the feature safe to switch on — with
+racing off, or with one source found, behaviour is byte-for-byte what it was. It
+de-duplicates by release identity (a JS mirror of the server's `_release_key`, so
+one release on two trackers can't eat two race slots) and caps the list at six; the
+server takes the first `settings.download_race.size`.
+
+Two thin helpers back it: **`_ssRelHeight(title)`** (a deliberately cheap mirror of
+`relquality.parse` — ordering only; the server re-scores authoritatively, including
+the TMDb-runtime cross-check) and **`_ssBestAtOrBelow(pool, ceiling, filt)`**, which
+finds the HQ track's target while respecting the Auto-pick size/seeder limits — a
+household that capped downloads at 8 GB did not mean "except while racing".
+
+**`_ssRuntimeHint(season, episode)`** reads `runtime_min` / `episode_count` off the
+open show page's `_ssMeta` for the bytes-per-minute cross-check. Worth sending even
+though the server has its own fallback: a brand-new item has no metadata yet, so at
+race-planning time the page is the only place this is known. Returns `{}` rather
+than guessing — for a pack the divisor is the whole calculation.
+
+**Which call sites race** (`opts.race` on `_ssDownloadOne`, default false):
+
+| Caller | Races? |
+|---|---|
+| `ssSimpleGetMovie`, `grpGetFilm`, `ssSimpleGetSeason`'s single-pack branch | yes |
+| `ssPlayEpisode` (auto-picked Stream Now) → `openStreamPicker(…, {candidates})` | yes |
+| `_bgStartDownloads` (`ssBulkAuto`, `_epGetMissing`) | **no** — ten episodes × three candidates would put thirty torrents in qBittorrent at once |
+| The download modal, `ssPickSource`, `ssPlaySource`, `ssPlayPack` | **no** — the user chose a specific release |
+
+Note `ssSimpleGetSeason` races in one branch and not the other: it falls through to
+`ssBulkAuto` when the user already owns part of the season.
+
+`postLibraryDownload`'s "different source" retry **strips `candidates`/`auto_picked`**
+— the user just picked a release by hand, which is the one case racing must not
+override.
+
+**`openStreamPicker`** branches to `POST /api/stream/race` when it was handed more
+than one candidate and `app.download_race` is on, then carries on with the winner in
+the ordinary `/api/stream/prepare` shape; any failure falls straight back to the
+single-source prepare. A raced winner **skips the `_streamHealthRisky` confirm** — it
+has already proved it delivers by beating two others to the buffer gate, so re-asking
+would be a scary modal about a problem the race just solved. An aborted fetch fires
+`DELETE /api/stream/race`, or the server race runs on to its own 180 s timeout.
+
+**Card chips** (`renderLibraryItem`): `RACING n` while candidates compete, an amber
+`HQ <label> <pct>%` while a better copy is still coming (shown **only once the
+two-track has actually engaged** — the common case is that the auto-pick already *is*
+the best copy, and promising an upgrade that never arrives is worse than saying
+nothing), and a green `UPGRADED` for 24 h after a swap (`_recent24h`). All fed by the
+server's derived `race` summary, never the raw sampler blob.
+
+⚠ **`_libDlAgg` sums every field across a merged show tile.** `race` is an object, so
+it is explicitly pass-through — the aggregate exposes only a boolean `racing`. Adding
+it up renders garbage on a two-episode tile.

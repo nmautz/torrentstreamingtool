@@ -736,6 +736,69 @@ Stream-now uses sequential. Library downloads do NOT — they should download no
 
 For any item with `download.mode=="idle"` or per-file overrides, `download_scheduler_loop` reconciles qBit **every 15 s** from `library.json → item.download`. So a raw `qbit_set_file_priority` / `qbit_pause` / `qbit_resume` written **outside** `_reconcile_item_downloads` for such an item is reverted on the next tick. If you add a new "boost this file" / "pause this torrent" path, write the **model** (`download.files[path]=…` or `download.mode=…`) and call `_reconcile_item_downloads` — don't poke qBit directly. This is exactly why `queue-play` and `library_download_pipeline` were rewritten to set the model instead of calling `filePrio` (v4.7.0). Plain `mode=="now"` items with no overrides are left untouched (fast path), so unscheduled downloads behave exactly as before.
 
+### A racing item still has exactly ONE `torrent_hash` — the challengers live beside it
+
+Parallel download racing (16.0.0) runs up to three torrents for one library item, but the item model is unchanged: **`item["torrent_hash"]` still names exactly one torrent, the *incumbent*.** `files`, `size_bytes`, `download`, `prep`, `progress` and every playback path describe only the incumbent. Challengers exist in qBittorrent and in `item["race"]["entries"]`, nowhere else, and the incumbent is only ever changed by one explicit operation (`_race_promote`) that deliberately has the same shape as the proven dead-swarm swap in `_retry_dead_download`.
+
+That invariant is what lets every existing reader of `torrent_hash` keep working untouched. The places that must additionally know about challengers are exactly those answering *"is this hash ours?"* or *"remove everything belonging to this item"*:
+
+- **`_hash_backs_library_item`** — the critical one. It guards `_qbit_delete_transient`, which **every stream teardown reaches**, so missing the challengers means a Stop during a race silently deletes a live candidate and the engine then polls a hash qBit no longer has.
+- **`delete_library_item`** and **`admin_cleanup_delete_item`** — both collect `_item_all_torrent_hashes(item)`, not `torrent_hash`. Deleting only the incumbent leaves two guaranteed orphans per racing item.
+- **`_cleanup_in_use_hashes`** — protects every live/paused entry, plus `state.race_hashes` (the Stream-Now racers, which are not in the library at all until one wins). Without it a Cleanup refresh mid-race offers the challengers as orphans.
+- **`_cleanup_inventory_sync`** — maps challenger hashes onto their owning item so a row reads as a known racer rather than an unexplained orphan.
+- **`library_download`'s dedup** — a manual download of a release that happens to be racing must not end up sharing one torrent with the race (qBit answers `Fails.` and `qbit_add_magnet` adopts the existing hash). The user's deliberate pick wins: the entry is dropped from the race and the new item owns the torrent.
+
+**The race engine is the single writer of challenger pause + priority**, exactly as `download_scheduler_loop` is for the incumbent's (see the entry above). They never collide because a challenger is never `torrent_hash` — but that is a consequence of the invariant, not an accident, so don't add a path that pauses or re-prioritises an entry outside `_reconcile_item_race`.
+
+Promotion happens **only because the incumbent left the race**, never because another candidate is quicker this instant. `_race_promote` destroys the outgoing torrent's bytes, so swapping on a momentary lead would throw away a perfectly good part-download every time two candidates traded places. Culling decides the winner; promotion just makes the survivor official.
+
+### Never judge a racer while the VPN is down or qBittorrent is unreachable
+
+`_reconcile_item_race` returns immediately unless `state.vpn_secure` holds **and** its `qbit_info_all()` snapshot came back. This is the single highest-value defensive line in the feature: **a kill-switch blip looks exactly like three simultaneously-dead swarms.** qBit is *killed* on a VPN drop (see [§ VPN](#vpn)), so without the guard every candidate reads as missing on the same tick and the whole field is culled at once — turning a five-second network hiccup into a download that has to start over.
+
+The same reasoning drives the rest of the timing rules:
+
+- Rate is sampled from `completed` **deltas, never `dlspeed`**. qBit's instantaneous figure dips to zero between piece batches, and `dlspeed` is right there in the payload looking like the obvious field — one unlucky tick would kill a healthy challenger.
+- A cull needs `racerules.CULL_CONFIRM` **consecutive** ticks under the ratio, and the counter resets on any tick that isn't, so a momentary dip never accumulates.
+- Nothing is culled before `racerules.GRACE_SECS` (90 s), because DHT resolution plus a first peer handshake is routinely 30–60 s over a VPN; a candidate judged inside that window is being judged on connection latency, not throughput.
+- A restart re-anchors every sampler (`_recover_races`) instead of trusting a `last_sample_at` from before it, which would read as either a colossal burst or a dead stall.
+
+Note also that `_race_leader` returns **`None` when nothing has fetched anything**. Three dead swarms are not a race, and naming a "leader" among them would hand the cull predicate a baseline of zero that every other candidate fails.
+
+### Upgrading to the better copy: capture the position, stop VLC, wait for the finalize, purge bundles, transact, *then* delete
+
+`_apply_race_upgrade` swaps a finished high-quality copy in for the low-quality one that won the race. The order **is** the function:
+
+1. **Capture the playhead from `state`, not from library progress** — the progress saver runs every 15 s and can be that stale.
+2. **`stop()` if it is being watched.** VLC holds an open handle and **Windows refuses to unlink a file another process has open** — the same failure `delete_library_item` documents. Superseding the playback is not enough; the handle has to close.
+3. **Wait for `stop()`'s `_finalize_stopped_file` to land** before migrating the progress keys. It writes the *old* path's key, and if it lands after the migration it resurrects a key pointing at a file that is about to be deleted.
+   Waiting on the playback fields does **not** work, and this is the trap: `stop()` clears `library_item_id` / `library_current_file` **synchronously** and flushes the position in a **detached task**, so by the time anything looks they are already clear while the write is still in flight. `stop()` therefore records that task as `state.finalize_task` and the upgrade awaits it (10 s cap). Anything else that renames or deletes a file straight after a stop needs the same wait.
+4. **Purge the HLS bundles for the old paths BEFORE deleting anything** — `_offline_cache_dir` derives its key from each file's name+size and cannot be computed once the file is gone. The `.streamlink_cache` sidecar is not qBit's, so `delete_files=True` will not take it either.
+5. **One library transaction, no network IO inside it** (`_lib_lock` is global; a qBit round trip in there stalls every reader, the 2 s stat broadcaster included).
+6. **Only then** `qbit_delete(old, delete_files=True)`, outside the lock, followed by a poll until the hash is gone. Never `os.remove` a torrent-backed file; anything that survives is logged and left for the Cleanup tab.
+
+Two more rules inside the transaction. **Progress keys are MOVED, not rebuilt** (`fp[new] = fp.pop(old)`) so the sibling `audio_sel` / `subtitle_sel` / `audio_offset_ms` keys in the same record survive the rename. And **`skip_data` is dropped, not carried**: two releases of the same episode routinely differ by a few frames of black or a recut intro, and a Smart Skip that fires at the wrong moment is worse than no skip — re-analysis rides along with the next prep for free.
+
+`_race_upgrading` (a module-level set) guards re-entry. The function awaits `stop()` and a bundle purge, so without it the next 5 s monitor tick walks straight into the middle of it.
+
+### Racing costs up to 3× the bytes, so it ships disabled
+
+For the length of a race — up to ~90 s before the first cull can fire — every candidate is downloading in full. With the default 3 candidates and 2 concurrent races that is six live torrents sharing one connection, so each is *individually slower* than a solo download would be. **Racing improves time-to-first-byte and immunity to a dead pick; it does not improve aggregate throughput**, and on a modest link it reduces it.
+
+Mitigations built in: an `idle`-mode download never races (it is deferred on purpose, and racing it would spend the line during exactly the hours the user asked us not to); a race is refused when the save drive has less than 3× the largest candidate free; the global cap is 2 concurrent races; and the whole feature is **off by default**, opt-in from Admin → Race Download Sources. Bulk season downloads deliberately never race — ten episodes × three candidates would put thirty torrents in qBittorrent at once.
+
+The mitigation deliberately **rejected** is a per-torrent `dlLimit` on challengers: it would corrupt the very rate measurement the cull depends on.
+
+Also note the retry budget change this forced. `_MAX_DOWNLOAD_RETRIES` now counts **rounds** (`item["retry_rounds"]`), not entries in `download_attempts`. Those were equivalent only while each round tried exactly one release — the moment a round can start a race of three, one round exhausts a three-release budget and a second dead pick can never be replaced. `download_attempts` is now purely the de-dupe ledger its docstring always said it was.
+
+### `TS` in a release name is usually a group, not a telesync
+
+`relquality`'s source parser matches `CAMRIP`, `HDCAM`, `TELESYNC`, `HDTS` and friends unconditionally, but a **bare `TS` / `TC` / `SCR` is only believed when nothing else in the title names a source**. `Movie.2024.1080p.WEB-DL.x264-TSuRRouNDeD` does not match at all (there is no word boundary after `TS`), but a group literally *named* `TS` does — and classifying a clean WEB-DL as a telesync would bury it under genuine junk in every ranking. A real cam release is exactly the shape where no other source token is present, so the guard costs nothing.
+
+A related rule in the same parser: **`_norm` keeps dots and dashes, flattening only brackets, underscores and `+`.** `\b` already treats a dot as a separator, so `Show.1080p.WEB-DL` tokenises correctly untouched — whereas flattening dots splits `H.265` into `H 265`, `h\.?265` then matches nothing, and every dotted scene name comes back codec-less and is banded at the unknown multiplier.
+
+The cross-check that backs all of this only ever **demotes**. Running it the other way ("this file is big, so promote it") turns every mis-counted season pack into a fake 4K remux, which is why `suspect_oversize` explicitly leaves the claim alone. An unknown TMDb runtime therefore costs nothing — the release name simply stands.
+
 ### A download's magnet must be persisted, or a restart orphans it
 
 `library_download` creates the item with `status="downloading"` **synchronously** and runs the actual qBit magnet-add in a **detached** `library_download_pipeline` task — the hash isn't known until that task finishes (it waits up to ~60 s for torrent metadata). If the process restarts in that gap, the item is stuck forever: `library_download_monitor` skips items with no `torrent_hash` (`if not h: continue`) and nothing re-runs the pipeline, so the download sits in the ongoing list at 0% (the "queued downloads stuck after restart" bug). The magnet itself lived only in the now-dead task's arguments — it was never on disk — so there was nothing to recover from either. Fix: `library_download` persists the magnet + add params in `item["pending_download"]`; the pipeline **clears it the instant it records the hash** (so a fully-added item never carries it); and `_recover_interrupted_downloads` (awaited in `lifespan` before the monitor spawns) re-drives the pipeline for any `downloading` item still carrying a `pending_download.magnet`. Re-adding a magnet qBit already has is a no-op, so the recovery is idempotent even if the add had actually gone through before the crash. **If you add another path that creates a `downloading` item, persist its recovery params the same way** — the monitor will not resurrect a hash-less item on its own.

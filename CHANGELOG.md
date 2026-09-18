@@ -1,5 +1,58 @@
 # Changelog
 
+## [16.0.0] — 2026-09-17
+**When you ask for something without picking a release, start three and drop the slow ones.**
+
+Until now a download committed to one torrent the moment it started. If that pick was
+dead or crawling you waited **ten minutes** (`_DOWNLOAD_STALL_SECS`) before the retry
+noticed, and then the clock started again on the replacement. A dead magnet parks in
+qBittorrent's `metaDL` at zero bytes and the card reads "Finding peers..." the whole time.
+
+**Ships disabled.** Turn it on in Admin → System → **Race Download Sources**. Until you
+do, every path behaves exactly as 15.6.3 and no `race` field is written to `library.json`.
+
+* **Racing.** A download started *without the user choosing a torrent* runs up to 3
+  candidates at once. Stragglers are dropped continuously (under 25% of the leader's
+  rate, confirmed over 3 ticks), a candidate whose metadata reveals no video at all is
+  thrown out the moment we can see inside it — rather than at 100% as before — and a
+  swarm that delivers no metadata in 120 s is dropped instead of costing 600.
+* **Keep a better copy.** When the fastest release turns out to be low-quality, the best
+  copy at or under a quality limit (default 1080p) keeps downloading beside it. It is
+  **held while you are watching** — a file being streamed before it finishes needs the
+  whole link — and when it lands it swaps itself in: the item repoints, watch progress
+  and track preferences move to the new paths, the old copy and its HLS bundles are
+  deleted, and playback picks up where you left off.
+* **Stream Now races too**, when the source was auto-picked. Several candidates buffer in
+  parallel and whichever reaches the play gate first is the one that plays; the rest are
+  deleted. This is the direct answer to "Play sat at 0% because the release had no seeds",
+  so a raced winner also skips the "this source looks slow" confirm — it just proved
+  otherwise by beating two others.
+* **Quality is guessed name-first** (`2160p`, `WEB-DL`, `x265`, `REMUX`...) and
+  cross-checked against file size versus the TMDb runtime. The cross-check is
+  **codec-aware** — an HEVC encode is judged against an HEVC band, so it is not punished
+  for the efficiency that makes it good — and it only ever **demotes**: run it the other
+  way and every mis-counted season pack becomes a fake 4K remux. An unknown runtime
+  costs nothing; the release name simply stands. New leaf modules `relquality.py` and
+  `racerules.py`, both pure, both with unit tests (`make test`).
+* **The honest cost:** for the length of a race every candidate downloads in full, so
+  with the defaults (3 candidates, 2 concurrent races) six torrents share one connection
+  and each is individually slower. Racing improves time-to-first-byte and immunity to a
+  bad pick; it does **not** improve aggregate throughput. Mitigations: idle-mode
+  downloads never race, a race is refused with under 3x the largest candidate free on the
+  drive, bulk season downloads never race, and the whole thing is opt-in.
+* **Bug fix found on the way:** the dead-swarm retry budget counted *releases* in
+  `download_attempts`, which was only ever equivalent to "rounds" while each round tried
+  exactly one. It is now `item["retry_rounds"]`, so a round that starts a race cannot
+  exhaust the budget in one go and leave a second dead pick unreplaceable.
+* `library_download_monitor`'s tick no longer swallows exceptions silently — a bug in
+  there stalled every download with no trace at all. Now a throttled `log.exception`.
+
+Every place that answers "is this torrent ours?" or "delete everything belonging to this
+item" learned about race challengers: `_hash_backs_library_item` (without which a Stop
+during a race deleted a live candidate), both delete paths, and admin Cleanup's in-use
+and inventory passes. The item model is unchanged — `torrent_hash` still names exactly
+one torrent. See docs/GOTCHAS.md.
+
 ## [15.6.3] — 2026-09-17
 **Clears the watch-history entries the background video left behind.**
 

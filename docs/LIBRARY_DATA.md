@@ -50,6 +50,13 @@ The only persistent server-side state. Lives at the project root. Accessed via `
       "enabled":      true,             // diff the show's TMDb inventory against what's on disk. Absent ⇒ true
       "show_unaired": false             // future/undated TMDb episodes render as "Upcoming" instead of being hidden. Absent ⇒ false
     },
+    "download_race": {                  // parallel candidate downloads for an auto-picked title (admin System tab)
+      "enabled":         false,         // OFF by default: racing multiplies bandwidth + disk for the length of the race
+      "size":            3,             // candidates per race; 2 | 3 | 4
+      "max_items":       2,             // concurrent races, box-wide; 1 | 2 | 3
+      "quality_ceiling": 1080,          // highest tier the HQ track may aim at; 720 | 1080 | 2160
+      "hq_upgrade":      true           // keep a better copy beside the fast one and swap it in when it lands
+    },
     "prep_validate": {                  // validate-and-repair source files during bulk/idle prep (admin System tab)
       "mode": "off"                     // "off" | "before" | "after" — deep-decode + remux-repair as prep rides through. Default "off"
     },
@@ -313,12 +320,31 @@ See [BACKEND.md](BACKEND.md) and [GOTCHAS.md](GOTCHAS.md).
 ```
 
 Appended by `_retry_dead_download` each time a release is abandoned for fetching
-zero bytes in 10 minutes. Two jobs: it caps the retries at `_MAX_DOWNLOAD_RETRIES`
-(3), and it is the exclusion list for the next search — matched on **both** the
-info-hash and `_release_key(title)`, because the same release is routinely indexed
-under two hashes by two trackers and re-downloading its twin would waste an attempt
-on identical, identically-dead content. Persisted, so a restart mid-retry does not
+zero bytes in 10 minutes, and by `_race_drop` for every candidate a download race
+throws out (those carry `"raced": true` and an `outcome` of `raced_out:<reason>`).
+It is the exclusion list for the next search — matched on **both** the info-hash
+and `_release_key(title)`, because the same release is routinely indexed under two
+hashes by two trackers and re-downloading its twin would waste an attempt on
+identical, identically-dead content. Persisted, so a restart mid-retry does not
 start the cycle over. `len()` of it is surfaced as `retry_count` on `/api/library`.
+
+It is **no longer the retry budget** — see `retry_rounds` below.
+
+### `retry_rounds` (dead-swarm retry budget, 16.0.0)
+
+```jsonc
+"retry_rounds": 1
+```
+
+How many times `_retry_dead_download` has replaced this item's release. Capped at
+`_MAX_DOWNLOAD_RETRIES` (3), after which the item errors out.
+
+This used to be `len(download_attempts)`, which was equivalent only while each
+round tried exactly **one** release. A retry round can now start a whole race
+behind its replacement, so three raced titles would exhaust a three-release budget
+in a single round and a second dead pick could never be replaced. Counting rounds
+restores the intent and leaves `download_attempts` as the pure de-dupe ledger it
+was always documented to be.
 
 Note the item is swapped **in place** — same `id`, same `progress`, same position in
 the library — so `title`, `torrent_hash`, `download_source`, `files` and `size_bytes`
@@ -339,6 +365,59 @@ forever and never reach 10 minutes. Because it now outlives the process, the
 monitor additionally ignores it for `_DOWNLOAD_STALL_BOOT_GRACE` (3 min) after
 startup: qBit restarts with the service and deserves a moment to find peers before
 being judged on a stamp written before the reboot.
+
+### `race` (parallel download race, 16.0.0)
+
+Present only on an item whose download was started **without the user choosing a
+torrent** (one-press Get, or the auto-picked Stream Now source), and only while
+`settings.download_race.enabled`.
+
+```jsonc
+"race": {
+  "v": 1,
+  "state": "racing",              // racing | upgrading | settled | exhausted | skipped
+  "reason": "",                   // when skipped: cap | single
+  "started_at": "2026-09-17T…", "settled_at": "",
+  "ceiling": 1080,                // the HQ track's target tier for this race
+  "runtime_min": 42.0,            // divisors for the bytes-per-minute cross-check
+  "episode_count": 1,
+  "upgraded_from": {"title": "…", "label": "720p WEBRip x264", "at": "…"},
+  "entries": [{
+    "hash": "abc…", "title": "Show.S04E02.1080p.WEB-DL.x265-NTb",
+    "magnet": "magnet:?xt=…",     // per entry: a qBit kill loses a metadata-less magnet
+    "save_path": "D:\\Media2",    // shared, so a loser delete never crosses drives
+    "role": "primary",            // primary | hq | challenger
+    "quality": { /* relquality.score() */ },
+    "label": "1080p WEB-DL HEVC",
+    "status": "live",             // live | paused | dropped | failed | won
+    "added_at": "…", "first_bytes_at": "",
+    "completed": 0, "total": 0,
+    "rate_ewma": 0.0, "samples": 0, "last_sample_at": 0.0,
+    "under_ratio_ticks": 0, "miss_ticks": 0,
+    "meta_ok": false, "file_count": 0,
+    "drop_reason": "", "dropped_at": ""
+  }]
+}
+```
+
+**`item["torrent_hash"]` still names exactly one torrent** — the *incumbent*. Every
+other entry is a challenger that exists in qBittorrent and here, and nowhere else
+in the item: `files`, `size_bytes`, `download`, `prep` and `progress` all describe
+only the incumbent. See [GOTCHAS.md](GOTCHAS.md) § "A racing item still has exactly
+ONE `torrent_hash`" for the consumers that must know about the challengers anyway.
+
+`state` transitions: `racing` → `settled` (one winner left, or the incumbent
+finished), → `upgrading` (the winner is low-quality and a better copy is still
+coming), or → `exhausted` (every candidate died, which hands straight back to
+`_retry_dead_download`). `skipped` records that a race was *wanted* but not run —
+the global cap was full, or only one usable candidate was offered.
+
+`rate_ewma` is smoothed from `completed` **deltas**, never qBit's `dlspeed`.
+`last_sample_at` is a bare epoch float and is deliberately not trusted across a
+restart — `_recover_races` re-anchors every sampler on startup.
+
+`upgraded_from` survives the swap so the card can show an "Upgraded" chip for 24 h;
+it is the only part of `race` that outlives a settled race in a meaningful way.
 
 ### `download` (download schedule)
 
@@ -612,6 +691,19 @@ The profile-level **`shuffle`** / **`shuffle_scope`** fields are the *persisted*
 **`base_synced_at` watermark (iOS offline sync, M3).** This is **not** a stored library field — it lives only in the iOS device's native `OfflineStore` (and on the wire). It records, per `(profile, item, file)`, the server's `updated_at` at the moment the device last successfully synced *that file*. `POST /api/sync/progress` uses it to decide each incoming offline event: if the server's `file_progress[path].updated_at` is **≤ `base_synced_at`**, the server hasn't moved since the device's last sync → the device value is **applied**; if it's **>** (both sides advanced), the endpoint auto-resolves close/`completed` cases (newest timestamp wins, `completed` monotonic) and reports a **conflict** for genuine divergence (writing nothing). Each applied/acknowledged file's response `server_updated_at` becomes the device's new `base_synced_at`, so a server-won case isn't re-sent forever. Genuine **conflicts** are not written by `/sync/progress`; the device shows a "keep mine / keep server" UI (M4) and posts the choice to **`POST /api/sync/resolve`** (plan A3), which writes the device values when the user keeps theirs (bumping `updated_at`) or leaves the host untouched when they keep the server's — returning the authoritative `server` values + `server_updated_at` the device records as the file's new watermark (forcibly re-baselining its own unsynced record on a server win). The library's own progress entry is unchanged in shape — only `updated_at` is the watermark's reference. See [API.md](API.md) "POST /api/sync/progress" / "sync/resolve".
 
 **Deferred "watched" on skip-to-next-episode.** Skipping to the next episode — from **any** position in the current one — is treated as having finished it, even though progress never crosses the 0.92 `completed` threshold. So `_arm_credit_skip_watch` schedules a grace timer (`CREDIT_SKIP_WATCH_DELAY_SEC = 60`) instead of marking immediately; `_credit_skip_watch_grace` then calls `_mark_file_watched_internal` (sets `completed: true`, preserving any track prefs, never clobbering an already-completed entry) **unless** the viewer returned to that file. It's armed from `/api/vlc/next`, the credits branch of `/api/skip-now`, and the auto-skip-credits countdown, and held on `state.pending_watch` (one at a time — a newer skip supersedes it). The cancel-on-return is in `vlc_progress_tracker`: if the live file matches `pending_watch.file_path`, the timer is dropped — so a wrong-early credits guess that the viewer corrects by going back leaves their real progress untouched. See [ANALYZER.md](ANALYZER.md).
+
+**A download-race upgrade MOVES these keys, it does not rebuild them (16.0.0).** When
+`_apply_race_upgrade` swaps a finished high-quality copy in for the low-quality one
+that won the race, the file paths change, so every `file_progress` key and any
+`last_file` pointing at an old path is re-pointed at its counterpart in the new
+copy. The migration is a `fp[new] = fp.pop(old)` — the whole record moves — because
+the sibling `audio_sel` / `subtitle_sel` / `audio_offset_ms` keys live inside it and
+rebuilding a bare `{position_sec, duration_sec}` would silently discard every track
+preference the viewer had set. If both keys somehow exist, the newer `updated_at`
+wins and a position is never regressed. An old path with no counterpart in the new
+release is left behind (harmless — nothing resolves it). The old copy's `skip_data`
+is deliberately **dropped** rather than migrated; see [GOTCHAS.md](GOTCHAS.md)
+§ "Upgrading to the better copy".
 
 ### `skip_data` (per file)
 

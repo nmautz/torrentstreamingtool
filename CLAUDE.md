@@ -47,6 +47,7 @@ Each entry is a short hook so future Claude instances can jump straight to the r
 | `episodes.py` (top-level) | Season/episode attribution. Folder-aware structural parse (`attribute_paths`/`parse_slot`) + TMDb-aware absolute-number resolution (`resolve_absolute`) + canonical `sort_key`. Pure and dependency-free. Wired in `main.py` via `parse_season_episode`, `build_file_list`, `_migrate_item`, `_reattribute_item_files`, `_settle_attribution`. See [docs/LIBRARY_DATA.md § Season/episode attribution](docs/LIBRARY_DATA.md). |
 | `diagnostics.py` (top-level) | Runtime health instrumentation. Leaf module (stdlib + optional psutil, no `main` import). Wired in `main.py` (init, `diag_track_requests` middleware, `/healthz`, `InstrumentedLock` on `_lib_lock`, three lifespan tasks), `run.py` and `daemon.py` (`uvicorn_log_config`). See [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md). |
 | `dvprobe.py` (top-level) | Green-picture / Dolby Vision detection. Reads the `DOVIDecoderConfigurationRecord` out of a Matroska or MP4 header with stdlib only (no ffmpeg) and flags **Profile 5**, the one DV profile with no displayable base layer. Pure. Wired in `main.py` via `_probe_item_video`, `video_probe_backfill`, `green` on `/files`, `dv_risk` on `/api/search`. See [docs/GOTCHAS.md](docs/GOTCHAS.md). |
+| `relquality.py` / `racerules.py` (top-level) | **Parallel download racing.** `relquality.py` estimates a release's real quality from its title (resolution / source / codec) cross-checked against file size vs TMDb runtime — name-first, and the size check only ever *demotes*. `racerules.py` holds the race's pure decision arithmetic (who leads, who to drop). Both leaf modules (stdlib only, no `main` import) with unit tests in `tests/`. The engine itself lives in `main.py` (`_race_start`, `_reconcile_item_race`, `_apply_race_upgrade`, `/api/stream/race`) inside `library_download_monitor`'s tick. See [docs/BACKEND.md § Parallel download racing](docs/BACKEND.md) and [docs/GOTCHAS.md](docs/GOTCHAS.md). |
 | `refiner.py` / `mediabin.py` (top-level) | Smart Skip boundary evidence. `refiner.py` is a leaf module holding every non-fingerprint detector — chapters, silence, subtitles, shot boundaries — plus the shared `snap_boundary`. `mediabin.py` holds ffmpeg/ffprobe/fpcalc discovery and `run_capture`. Both pure (stdlib + the media binaries); `analyzer` imports them, never the reverse. See [docs/ANALYZER.md](docs/ANALYZER.md). |
 | `subpack.py` (top-level) | Timed subtitle **image packs** — styled ASS and bitmap PGS/VOBSUB pre-rendered to transparent PNGs + a timing manifest, so clients that can't run libass (native iOS `AVPlayer`) or can't decode image subs at all can still show them. Leaf module (stdlib + `mediabin`, no `main` import). Purely additive to a bundle — no re-prep, no cache-version bump. Wired in `main.py` (`/api/library/offline-cache/<key>/subpack/*`). See [docs/STREAMING.md § 2c](docs/STREAMING.md). |
 | [docs/ANALYZER.md](docs/ANALYZER.md) | Touching Smart Skip — `analyzer.py`, the orchestrator in `main.py`, skip-offer UI logic, or the admin editor. Algorithm + thresholds + fallback chain. |
@@ -67,6 +68,15 @@ Each entry is a short hook so future Claude instances can jump straight to the r
 python3 setup.py          # first-time configuration (or re-run to refresh)
 python3 run.py            # launch all services + dashboard
 make setup / make run     # shortcuts
+
+make test                 # pure unit tests for the leaf modules (no deps, no venv,
+                          # no running services). On Windows, where `make` and
+                          # `python3` usually aren't on PATH, run them directly:
+                          #   python tests/test_relquality.py
+                          #   python tests/test_race_rules.py
+                          # tests/race_harness.py is the LIVE integration driver
+                          # for download racing - needs a running StreamLink +
+                          # qBittorrent and its own magnets file. See its docstring.
 
 python3 run.py --install  # register as a system service (delegates to daemon.py)
 python3 run.py --status   # service status
