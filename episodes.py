@@ -37,7 +37,7 @@ from typing import Iterable, Optional
 
 # ── Basename patterns ────────────────────────────────────────────────────────
 # Authoritative: the file states both numbers itself.
-_SXXEXX_RE = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,3})")
+_SXXEXX_RE = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,3})(?!\d)")
 _NXNN_RE   = re.compile(r"\b(\d{1,2})x(\d{2})\b")
 
 # Episode-only forms, combined with a season taken from the directory. Ordered

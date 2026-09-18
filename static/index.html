@@ -13740,7 +13740,7 @@ function _ssBuildEpisodes(results){
     e.sources.push(r);
   });
   const eps=[...map.values()];
-  eps.forEach(e=>e.sources.sort((a,b)=>b.seeders-a.seeders));
+  eps.forEach(e=>_ssSortSources(e.sources, e.season, e.episode));
   eps.sort((a,b)=>(a.season-b.season)||(a.episode-b.episode));
   return eps;
 }
@@ -14015,7 +14015,7 @@ async function ssSearchShowEpisodes(btn, opts={}){
       if(!e){ e={season:ne.season,episode:ne.episode,sources:[]}; _ssEpisodes.push(e); }
       const have=new Set(e.sources.map(s=>s.magnet));
       ne.sources.forEach(s=>{ if(!have.has(s.magnet)){ e.sources.push(s); have.add(s.magnet); } });
-      e.sources.sort((a,b)=>b.seeders-a.seeders);
+      _ssSortSources(e.sources, e.season, e.episode);
     });
     _ssEpisodes.sort((a,b)=>(a.season-b.season)||(a.episode-b.episode));
     _ssEpisodesSearched=true;
@@ -14098,7 +14098,7 @@ function _ssMergeEpisodes(results){
     e.sources.push(res); added++;
   });
   if(added){
-    _ssEpisodes.forEach(e=>e.sources.sort((a,b)=>b.seeders-a.seeders));
+    _ssEpisodes.forEach(e=>_ssSortSources(e.sources, e.season, e.episode));
     _ssEpisodes.sort((a,b)=>(a.season-b.season)||(a.episode-b.episode));
   }
   return added;
@@ -14741,27 +14741,110 @@ function _ssEpisodeQueries(season, episode){
 // 3. A country tag must be the show's own country — "The Office US" is not the
 //    UK show, "Utopia AU" is not the UK one.
 const _SS_CC = {US:"US", UK:"GB", AU:"AU", NZ:"NZ", CA:"CA"};
-function _ssShowYears(){
+
+// Years this episode could carry: its own season's, or the show's first — the
+// two a release uses to say which version it is. NOT any season's year: "One
+// Piece S01E01 2023" passed that way (One Piece has a 2023 season) while being
+// the live-action remake, not 1999's season 1.
+function _ssVersionYears(season){
   const m=_ssMeta||{}; const out=[];
   const add=d=>{ const y=parseInt((d||"").slice(0,4),10); if(y) out.push(y); };
   add(m.first_air_date);
-  Object.values(m.seasons||{}).forEach(s=>add(((s.episodes||[])[0]||{}).air_date));
+  add((_tmdbSeasonEpisodes(m, season)[0]||{}).air_date);
   return out;
 }
-function _ssEpisodeAccept(res){
+function _ssTitleWords(t){
+  return String(t||"").toLowerCase().replace(/'/g,"").replace(/[^a-z0-9 ]+/g," ").split(/\s+/).filter(Boolean);
+}
+// "The Dark" is not "Dark". A leading article the show hasn't got is the whole
+// difference between two show names, so it can't be treated as noise the way
+// _rel_tokens treats it for scoring.
+function _ssArticleOk(res){
+  const name=_ssTitleWords(res.title);
+  const titles=[_ssQueryTitle(), ...((_ssMeta&&_ssMeta.aka)||[])].map(_ssTitleWords).filter(t=>t.length);
+  if(!titles.length) return true;
+  const starts=t=>t.every((w,i)=>name[i]===w);
+  if(titles.some(starts)) return true;
+  if(["the","a","an"].includes(name[0]) && titles.some(t=>t.every((w,i)=>name[i+1]===w))) return false;
+  return true;
+}
+const _SS_EPTAG=/^(\d{3,4}p|2160p|4k|uhd|web|webdl|web-dl|webrip|hdtv|pdtv|bluray|blu-ray|bdrip|brrip|dvdrip|remux|x26[45]|h ?26[45]|hevc|avc|xvid|divx|av1|aac.*|ac3|dts.*|ddp?\d?|dd|flac.*|opus|atmos|repack|proper|internal|uncut|extended|ws|hr|dubbed|subbed|multi.*|vostfr|swesub|subfrench|french|truefrench|german|spanish|ita|eng|spa|jap|jpn|nl|nf|amzn|hulu|pcok|dsnp|atvp|hmax|max|cr|all4|ip|bbc|itv|iqy|viu|shahid|mp4|mkv|avi|ts|e\d{1,3}|v\d|s\d{1,2}|part|cour|batch|complete)$/i;
+// Does the episode title in the release agree with TMDb's? +1 agrees, 0 says
+// nothing, -1 contradicts. "Doctor Who S01E01 Rose" cannot be the 1963 show,
+// whose first episode is "An Unearthly Child".
+function _ssEpTitleVerdict(res, season, episode){
+  const te=_tmdbSeasonEpisodes(_ssMeta, season).find(x=>+x.episode===+episode);
+  const drop=new Set(["the","a","an","of","to","and","in","on","at","for","with","from","episode","chapter","ep","pt"]);
+  const key=t=>new Set(_ssTitleWords(t).filter(w=>!drop.has(w) && !/^\d+$/.test(w)));
+  const want=key(te&&te.name);
+  if(!want.size) return 0;
+  const m=/[Ss]\d{1,2}[Ee]\d{1,3}(?!\d)/.exec(res.title||"");
+  if(!m) return 0;
+  const seg=[];
+  for(const w of String(res.title).slice(m.index+m[0].length).split(/[ ._\[\]()]+/)){
+    if(!w) continue;
+    if(_SS_EPTAG.test(w) || (w.includes("-") && w.length>6)) break;
+    seg.push(w);
+    if(seg.length>=8) break;
+  }
+  const got=key(seg.join(" "));
+  if(!got.size) return 0;
+  return [...got].some(w=>want.has(w)) ? 1 : -1;
+}
+function _ssYearsIn(title){
+  return String(title||"").split(/[^0-9A-Za-z]+/).filter(t=>/^(19|20)\d{2}$/.test(t)).map(Number);
+}
+function _ssYearConfirms(res, season){
+  const ys=_ssVersionYears(season), yr=_ssYearsIn(res.title);
+  return !!yr.length && yr.some(y=>ys.some(sy=>Math.abs(y-sy)<=1));
+}
+function _ssCountryConfirms(res){
+  const cc=(_ssMeta&&_ssMeta.origin_country)||"";
+  const tags=String(res.title||"").split(/[^0-9A-Za-z]+/).filter(t=>_SS_CC[t]).map(t=>_SS_CC[t]);
+  return !!cc && tags.includes(cc);
+}
+// Sort tier for sources of one episode. A release whose year, country tag or
+// episode title confirms the version outranks one that says nothing, which
+// outranks one whose episode title contradicts. Inside a tier, seeders decide.
+// This is what puts the 2024 Avatar above the 2005 one on the 2024 show's page,
+// and the US Shameless above the UK release on the US show's.
+function _ssSourceTier(res, season, episode){
+  const v=_ssEpTitleVerdict(res, season, episode);
+  if(v<0 && !_ssYearConfirms(res, season)) return -1;
+  return (v>0 || _ssYearConfirms(res, season) || _ssCountryConfirms(res)) ? 1 : 0;
+}
+function _ssSortSources(list, season, episode){
+  return list.sort((a,b)=>(_ssSourceTier(b,season,episode)-_ssSourceTier(a,season,episode))
+                          || ((b.seeders||0)-(a.seeders||0)));
+}
+
+// Is this result really the episode we asked for? The parser already agreed on
+// the season/episode numbers, so what is left is telling the show apart from its
+// remakes, sequels and namesakes. Hand-labelling 1691 indexer results for 69
+// confusable shows: numbers alone showed 63 wrong sources against 402 right and
+// took the wrong top row — the one Play now and Auto use — for 10 of 69 shows.
+// These checks plus the tier sort above: 41 wrong / 387 right, 4 bad top rows.
+// (Nine local LLMs were measured on the same set and beat none of it; see
+// CHANGELOG 16.6.0.)
+//
+// 1. The name must match almost exactly ("Trigun Stampede" is not "Trigun"),
+//    including its article ("The Dark" is not "Dark").
+// 2. A year in the name must be this season's or the show's first.
+// 3. A country tag must be the show's own country.
+function _ssEpisodeAccept(res, season){
   if((typeof res.rel==="number"?res.rel:0) < 0.95) return false;
   // Split on punctuation so a group name that ends in digits ("Mooi1990") is one
   // token and never reads as a year.
   const toks=String(res.title||"").split(/[^0-9A-Za-z]+/).filter(Boolean);
   const years=toks.filter(t=>/^(19|20)\d{2}$/.test(t)).map(Number);
   if(years.length){
-    const show=_ssShowYears();
+    const show=_ssVersionYears(season);
     if(show.length && !years.some(y=>show.some(sy=>Math.abs(y-sy)<=1))) return false;
   }
   const tags=toks.filter(t=>_SS_CC[t]).map(t=>_SS_CC[t]);
   const cc=(_ssMeta&&_ssMeta.origin_country)||"";
   if(tags.length && cc && !tags.includes(cc)) return false;
-  return true;
+  return _ssArticleOk(res);
 }
 
 // Spawn a targeted follow-up search for one missing episode, merging any matching
@@ -14788,7 +14871,7 @@ async function ssSearchEpisode(season, episode, opts={}){
         const data=await r.json();
         (data.groups||[]).forEach(g=>(g.results||[]).forEach(res=>{
           if(res.kind==="episode" && res.season===season && res.episode===episode
-             && _ssEpisodeAccept(res)) found.push(res);
+             && _ssEpisodeAccept(res, season)) found.push(res);
         }));
       }
     }catch(_){}
@@ -14799,7 +14882,7 @@ async function ssSearchEpisode(season, episode, opts={}){
     if(!e){ e={season,episode,sources:[]}; _ssEpisodes.push(e); _ssEpisodes.sort((a,b)=>(a.season-b.season)||(a.episode-b.episode)); }
     const have=new Set(e.sources.map(s=>s.magnet));
     found.forEach(f=>{ if(!have.has(f.magnet)){ e.sources.push(f); have.add(f.magnet); } });
-    e.sources.sort((a,b)=>b.seeders-a.seeders);
+    _ssSortSources(e.sources, season, episode);
   }
   _ssSearching.delete(key);
   if(_ssGroup===grp && !opts.silent){
@@ -24727,6 +24810,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">16.5.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">16.6.0</div>
 </body>
 </html>

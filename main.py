@@ -3106,11 +3106,18 @@ def _tmdb_akas(alt_results: list, primary: str, original: str) -> list[str]:
             return
         seen.add(k)
         bucket.append(t)
+    def _split(t: str):
+        """"Bron/Broen" is two names, and a release uses one of them. Scored as
+        one string it matched neither ("Bron S01E01" only got the squashed-name
+        0.9, below the show page's gate)."""
+        parts = [p.strip() for p in re.split(r"\s*/\s*", t or "") if p.strip()]
+        return parts if len(parts) > 1 and all(len(p) >= 3 for p in parts) else [t]
     for a in alt_results or []:
-        t = a.get("title") or ""
+        raw = a.get("title") or ""
         romaji = (a.get("iso_3166_1") == "JP"
                   or "roman" in (a.get("type") or "").lower())
-        _add(t, prefer if romaji else rest)
+        for t in _split(raw):
+            _add(t, prefer if romaji else rest)
     _add(original, rest)   # original_name, only if it's already Latin script
     return (prefer + rest)[:6]
 
@@ -4779,7 +4786,10 @@ def parse_season_episode(name: str) -> tuple[int, int]:
 # ── Search-result title parsing (show grouping) ──────────────────────────────
 # Structural markers that separate a show's name from its season/episode/release
 # info. Used by parse_torrent_title() to group flat search results into shows.
-_TT_EP_RE          = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,2})")
+# `\d{1,3}` + `(?!\d)`: without them "S01E015" matched "E01" and left the 5
+# behind, so ten different episodes of Hunter x Hunter all parsed as episode 1
+# and flooded every S01E01 search.
+_TT_EP_RE          = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,3})(?!\d)")
 _TT_EP_X_RE        = re.compile(r"\b(\d{1,2})x(\d{2})\b")
 # Multi-season packs. The trailing (?!\d) stops the second number from matching a
 # resolution/year *prefix* — "S01 - 720p" must NOT read as S1-72, "S08 - 2019"

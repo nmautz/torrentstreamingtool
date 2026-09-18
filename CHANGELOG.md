@@ -1,5 +1,31 @@
 # Changelog
 
+## [16.6.0] — 2026-09-17
+**Four more ways Find told two versions of a show apart — and the answer on whether a local AI would do it better.**
+
+* Measured on a wider hand-checked set: 1691 results from your indexers across 69 shows that are
+  easy to confuse (remakes, UK/US/AU versions, sequels, same-name shows). 16.5.0's checks showed
+  63 wrong sources against 402 right, with the wrong top row for 10 of the 69.
+* **The episode title now counts.** "Doctor Who S01E01 Rose" cannot be the 1963 series, whose
+  first episode is "An Unearthly Child". A release naming a different episode sinks to the bottom
+  and is only offered if nothing else is.
+* **A year must be this season's, or the show's first.** "One Piece S01E01 2023" used to pass
+  because One Piece has a 2023 season; it's the live-action remake, not 1999's episode 1. Same
+  for "The Bridge 2013" under the 2011 Swedish original.
+* **Confirmed sources sort first.** A release whose year, country tag or episode title matches now
+  outranks one that says nothing, so the 2024 Avatar wins on the 2024 show's page and the US
+  Shameless on the US show's.
+* **"The Dark" is not "Dark".** A leading article the show hasn't got now counts as a different name.
+* **Episode numbers over 99 parse correctly.** "S01E015" is episode 15, but was read as episode 1 —
+  so ten different Hunter x Hunter episodes turned up as sources for episode 1.
+* **Alternative titles written "Bron/Broen" are two names now**, so "Bron S01E01" is recognised.
+* Result on the same set: 41 wrong against 387 right, and 4 bad top rows instead of 10.
+* **The local-AI question, answered.** Nine local model runs (Qwen3 8B/4B/4B-thinking/1.7B,
+  Llama 3.2 3B, Phi-4-mini, Gemma 3 4B, plus few-shot and two-stage prompt variants) were scored
+  against the same hand-checked set. The best of them matched the plain checks above on wrong top
+  rows and lost on shows found at all, while needing ~20 s per show and 2.5 GB of video memory on
+  the box. Not adopted. The mistakes are mechanical, so mechanical checks handle them.
+
 ## [16.5.0] — 2026-09-17
 **Find on an episode kept handing you the wrong show: the sequel, the remake, or the American version.**
 
