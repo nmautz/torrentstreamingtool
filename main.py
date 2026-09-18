@@ -56,6 +56,7 @@ import dvprobe
 import episodes
 import racerules
 import relquality
+import reltracks
 import stt
 import subpack
 import tmdbcache
@@ -5149,90 +5150,20 @@ def parse_torrent_title(title: str) -> dict:
     }
 
 
-# ── Release audio-language classification ───────────────────────────────────
-# Anime (and foreign-content) releases mix audio variants under one show:
-# original audio + subs (SubsPlease/Erai-raws), English DUBBED, Dual/Multi-
-# Audio, and foreign-language dubs (ArabicDub, Korean Dub, VOSTFR, LATINO…). A
-# seeder sort is blind to this — an English-dub household bulk-grabbing a season
-# gets a language lottery. Classify each release title so the UI can badge
-# sources and the auto-picker can honour an audio preference.
-# "MULTi" (no sub suffix) is a multi-*language* scene tag, but it does NOT
-# imply English — the French scene uses it for FR+original (Tsundere-Raws) —
-# so it's resolved contextually in _parse_release_audio, not treated as dual
-# outright. Explicit Dual/Multi-Audio and bare DUAL do imply English.
-_AUD_DUAL_RE  = re.compile(r"\b(?:dual|multi)[ ._-]?audio\b|\bdual\b", re.IGNORECASE)
-_AUD_MULTI_RE = re.compile(r"\bmulti\b(?![ ._-]?subs?)", re.IGNORECASE)
-_AUD_DUB_RE   = re.compile(r"\bdub(?:bed|s)?\b", re.IGNORECASE)
-# "Multiple Subtitle" is the Erai-raws batch form whose bracketed language list
-# ([ENG][POR-BR]…) describes SUBS, not audio — it must win over those tokens.
-_AUD_SUB_RE   = re.compile(
-    r"\bmulti(?:ple)?[ ._-]?sub(?:title)?s?\b|\bsubbed\b|\beng(?:lish)?[ ._-]?subs?\b",
-    re.IGNORECASE)
-# English *audio* evidence ("ENG-ITA", "[Eng-Hindi-Tam-Tel]", "AUDIO #1 ENGLISH")
-# — checked only after eng-subs phrases are stripped, so "ENG SUBS" never counts.
-_AUD_ENG_RE      = re.compile(r"\beng(?:lish)?\b", re.IGNORECASE)
-_AUD_ENG_SUB_RE  = re.compile(r"\beng(?:lish)?[ ._-]?sub(?:title)?s?\b", re.IGNORECASE)
-# Release groups whose language is known but untagged in the title.
-_AUD_FRENCH_GROUP_RE = re.compile(r"tsundere[ ._-]?raws", re.IGNORECASE)
-# Token → display language for non-English tags. Deliberately conservative —
-# only unambiguous full words / well-known scene tags (no "GER"/"SPA"/"POR"
-# abbreviations that collide with title words).
-_AUD_LANGS = {
-    "french": "French", "truefrench": "French", "vf": "French", "vff": "French",
-    "vfq": "French", "vostfr": "French subs", "subfrench": "French subs",
-    "ita": "Italian", "italian": "Italian",
-    "spanish": "Spanish", "castellano": "Spanish", "latino": "Latino",
-    "german": "German", "hindi": "Hindi", "tamil": "Tamil", "telugu": "Telugu",
-    "russian": "Russian", "rus": "Russian",
-    "arabic": "Arabic", "korean": "Korean",
-    "portuguese": "Portuguese", "dublado": "Portuguese",
-    "polish": "Polish", "lektor": "Polish",
-}
+# ── Release audio-language classification ───────────────────────────
+# The classifier itself lives in `reltracks.py` (17.3.0). It moved out because a
+# SECOND reader arrived - `track_rank`, which scores how many audio/subtitle
+# tracks a release carries - and the two answers have to come off one parse or
+# they disagree: an Erai-raws "[Multiple Subtitle] [ENG][POR-BR]" language list
+# read a second time, without the sub-marker context, is three audio tracks.
+# Keeping both in one pure leaf module is what makes that shareable, and it
+# finally puts the context rules in docs/GOTCHAS.md under test - `main` needs
+# fastapi to import, so nothing here could ever be covered by `make test`.
 
 
 def _parse_release_audio(title: str) -> tuple:
-    """Classify a release title's audio → ``(audio, lang)``:
-        "dual"  – carries original *and* English audio (Dual/Multi-Audio, DUAL,
-                  or an explicit English token alongside foreign ones: ENG-ITA)
-        "other" – non-English language tag(s), no English audio; ``lang`` names it
-        "dub"   – English dub
-        "sub"   – explicitly subtitled (original audio)
-        ""      – no language markers (plain English content, or an untagged
-                  fansub release — original audio + English subs for anime)
-    Precedence: dual > other > dub > sub, with two context rules: a foreign tag
-    next to "dub" ("ArabicDub", "Korean Dub") must not read as an English dub,
-    and a multi-SUB marker means the language tokens describe subtitles
-    (Erai-raws "[Multiple Subtitle] [ENG][POR-BR]…" is original audio + subs,
-    not an English/Portuguese release)."""
-    t = re.sub(r"[._]+", " ", title or "").lower()
-    t = re.sub(r"\b([a-z]{3,})dub\b", r"\1 dub", t)   # split fused "arabicdub"
-    toks = set(re.sub(r"[^a-z0-9]+", " ", t).split())
-    langs = sorted({v for k, v in _AUD_LANGS.items() if k in toks})
-    sub_marked = bool(_AUD_SUB_RE.search(t))
-    # English *audio* token — strip eng-subs phrases first so they don't count.
-    eng_audio = bool(_AUD_ENG_RE.search(_AUD_ENG_SUB_RE.sub(" ", t)))
-    if _AUD_DUAL_RE.search(t):
-        return "dual", ""
-    if _AUD_FRENCH_GROUP_RE.search(t):
-        # Known French release group: its MULTi/Multi-Subs releases are
-        # FR+original audio, no English — the sub-marker rule must not fire.
-        return "other", "French"
-    if langs:
-        if sub_marked and not _AUD_DUB_RE.search(t):
-            return "sub", ""          # the language tokens are the subs list
-        if eng_audio:
-            return "dual", "/".join(langs)   # multi-language incl. English
-        return "other", "/".join(langs)
-    if _AUD_MULTI_RE.search(t):
-        # Bare "MULTi" with no language context: multi-audio from an English-
-        # facing scene (ToonsHub) — treat as dual. (Foreign MULTi carries its
-        # own language tokens/group names and is caught above.)
-        return "dual", ""
-    if _AUD_DUB_RE.search(t):
-        return "dub", ""
-    if sub_marked:
-        return "sub", ""
-    return "", ""
+    """``(audio, lang)`` for a release title - see `reltracks.classify_audio`."""
+    return reltracks.classify_audio(title)
 
 
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".m2ts", ".webm"}
@@ -18070,14 +18001,18 @@ def _group_search_results(shaped: list, query: str,
         if (rel < 1.0 and name_tokens and name_tokens <= known_words
                 and any(t and t <= name_tokens for t in cand_tokens)):
             rel = 1.0
-        aud, aud_lang = _parse_release_audio(r["title"])
+        # One parse, three answers. `audio`/`audio_lang` filter (can this
+        # household watch it); `tracks` ranks (how much choice does it give you)
+        # and is a TIEBREAK below availability, never a language preference of
+        # its own - see reltracks.track_rank and `_pickCmp` in index.html.
+        aud, aud_lang, trk = reltracks.analyse(r["title"])
         er = dict(r)
         er.update({
             "kind": p["kind"], "season": p["season"], "episode": p["episode"],
             "season_from": p["season_from"], "season_to": p["season_to"],
             "ep_from": p["ep_from"], "ep_to": p["ep_to"],
             "rel": round(rel, 3),
-            "audio": aud, "audio_lang": aud_lang,
+            "audio": aud, "audio_lang": aud_lang, "tracks": trk,
         })
         key = p["show_key"] or "?"
         g = groups.get(key)

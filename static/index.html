@@ -10770,6 +10770,10 @@ function _epBgCtx(scope, only){
     scope: scope,
     seasons: seasons.length?seasons:(epSeasonList||[]),
     episodes: [],
+    // No show page to inherit from — the season query below fills this, and it
+    // is what lets Get offer one whole-season download instead of N hunts.
+    packs: [],
+    swept: new Set(),
   };
 }
 
@@ -10785,7 +10789,32 @@ function _epGetMissing(scope, label, btn, only){
   const ctx=_epBgCtx(scope, only);
   if(!ctx){ showAlert("No metadata for this show — can't search for it.","warn"); return; }
   const filt=_ssParseBulkFilters();
+  const sn=+scope;
+  // Pack-first, and ONLY when this box holds none of the season. A whole-season
+  // copy is the better buy — one download, one group, consistent quality and
+  // audio across every episode — where seventy-four separate hunts return
+  // seventy-four different groups' idea of the show. Owning part of it, a pack
+  // would re-fetch what is already downstairs, so the gap fill is right and
+  // stays. Same rule and same reasoning as ssSimpleGetSeason; this is that
+  // behaviour finally reaching the library page, which is where most people
+  // actually press the button.
+  //
+  // _covSeasonEps counts PENDING as owned, which is what stops a season already
+  // mid-download triggering a second whole-pack grab. The `!only` guard is
+  // belt-and-braces — _epBgCtx already marks every other episode owned when it
+  // is set — but it states the intent where a reader will look for it.
+  const packFirst = !only && sn>0 && _covSeasonEps(ctx.owned, sn).size===0;
   const started=_bgRun(`${ctx.title} — ${label}`, async(ctl,report)=>{
+    if(packFirst){
+      report(`Looking for a whole Season ${sn}`,
+             "One download beats hunting each episode.", 0.02);
+      await _bgSeasonSearch(ctx, sn);   // fills ctx.packs AND ctx.episodes
+      if(ctl.cancel) return;
+      const pack=_bgBestPackForScope(ctx, sn);
+      // A pack that fails to start falls through rather than leaving the user
+      // with nothing — the episode results from that same query are in hand.
+      if(pack && await _bgStartPack(ctx, ctl, report, pack, sn, filt)) return;
+    }
     const eps=await _bgEnsureSources(ctx,ctl,report);
     if(!eps) return;
     const jobs=[], unsourced=[];
@@ -11325,7 +11354,7 @@ function renderEpList(){
            ${TV_MODE?"":`<div class="flex items-center gap-1.5">
              <button onclick="epGetSeason(${epCurrentSeason},this)"
                class="text-xs px-4 py-2 bg-amber-700 hover:bg-amber-600 text-white uppercase tracking-wide transition-colors flex items-center gap-1.5"
-               title="Find the best copy of each episode and start downloading them">
+               title="Download the whole season in one copy when a complete one exists, otherwise find each episode.">
                ${ic("down")} Get this season
              </button>
              ${SIMPLE?"":`<button onclick="epFindSeason(${epCurrentSeason})"
@@ -11387,9 +11416,15 @@ function renderEpList(){
     } else if(epSeasonList.length && epCurrentSeason>0 && missingEps.length){
       const n=missingEps.length;
       // When every gap in this season is really the head of a neighbouring
-      // release pack, name it once here as well as on the rows — and make the
-      // secondary button offer that pack instead of a per-episode hunt, which
-      // on this kind of show turns up a lone fansub rip beside a Blu-ray library.
+      // release pack, name it once here as well as on the rows — and ADD a
+      // secondary button offering that pack, which on this kind of show is the
+      // copy you actually want (a per-episode hunt turns up a lone fansub rip to
+      // sit beside a Blu-ray library).
+      //
+      // 17.2.0 had it REPLACE the Get button rather than join it, which left
+      // Simple mode — where the secondary is hidden — with an amber strip saying
+      // four episodes are missing and no way at all to get them. Both buttons
+      // now render; Simple keeps the automatic one, which is the point of Simple.
       const packs=missingEps.map(te=>_animeForeignPack(epMetadata, epCurrentSeason, +te.episode));
       const one=(packs.length && packs.every(p=>p && p.grid_season===packs[0].grid_season))
         ? packs[0] : null;
@@ -11402,11 +11437,11 @@ function renderEpList(){
               : ""}
           </span>
           <div class="flex items-center gap-1.5 flex-shrink-0">
-            ${one?"":`<button onclick="epGetSeason(${epCurrentSeason},this)"
+            <button onclick="epGetSeason(${epCurrentSeason},this)"
               class="text-[11px] px-2.5 py-1 bg-amber-700 hover:bg-amber-600 text-white uppercase tracking-wide transition-colors flex items-center gap-1"
-              title="Find the best copy of each missing episode and start downloading them">
+              title="Download the whole season in one copy when a complete one exists, otherwise find each missing episode.">
               ${ic("down")} Get ${n>1?"them":"it"}
-            </button>`}
+            </button>
             ${SIMPLE?"":(one
               ? `<button onclick="epGetPack(${one.grid_season})"
               class="text-[11px] px-2.5 py-1 bg-amber-700 hover:bg-amber-600 text-white uppercase tracking-wide transition-colors flex items-center gap-1"
@@ -13775,13 +13810,19 @@ function _streamHealth(bytes, seeders){
 // and a bare number can't answer that unless you already know what a good
 // number looks like. Same thresholds the colour coding always used, said in
 // words; the exact count stays in the tooltip for anyone who wants it.
-function _availLabel(seeders){
+const _AVAIL=[{txt:"Unavailable", cls:"text-red-400"},
+              {txt:"Low",         cls:"text-red-400"},
+              {txt:"Good",        cls:"text-yellow-400"},
+              {txt:"Excellent",   cls:"text-green-400"}];
+// The ordinal behind the words. One ladder, two readings: _availLabel renders it
+// and the auto-pickers compare on it (see _pickCmp), so "Excellent" can never
+// come to mean two different numbers in two places. Thresholds unchanged — these
+// are the ones the colour coding has always used.
+function _availRank(seeders){
   const n=seeders||0;
-  if(n<=0)  return {txt:"Unavailable", cls:"text-red-400"};
-  if(n<=8)  return {txt:"Low",         cls:"text-red-400"};
-  if(n<=30) return {txt:"Good",        cls:"text-yellow-400"};
-  return    {txt:"Excellent",          cls:"text-green-400"};
+  return n<=0 ? 0 : n<=8 ? 1 : n<=30 ? 2 : 3;
 }
+function _availLabel(seeders){ return _AVAIL[_availRank(seeders)]; }
 function _availHtml(seeders, extraCls){
   const a=_availLabel(seeders);
   return `<span class="font-bold ${a.cls} ${extraCls||""}"
@@ -15078,16 +15119,37 @@ function _ssPackLabel(p){
 // (a Dual-Audio pack at 0.9 beats a subbed one at 1.0 for a dub household)
 // while an actually-unrelated release (rel ≤ 0.5) can never float up just for
 // carrying a DUB tag.
-function _ssPackCmp(a,b){
+// The shared core. `opts.match` / `opts.prefOn` are injected because a DETACHED
+// run can't read the open page's audio preference — the same seam
+// _ssAutoPickRace already uses for `opts.pick`/`opts.match`. Two hand-copied
+// comparators would be two chances to disagree the first time one learns a new
+// term, which is exactly what 17.3.0 added.
+//
+// Availability and richness go AFTER raw `rel` on purpose: relevance primacy is
+// untouched, so a genuinely-this-season pack can never lose to a franchise
+// sibling for carrying more subtitle tracks.
+function _packCmp(a,b,opts){
   const ra=(typeof a.rel==="number")?a.rel:0, rb=(typeof b.rel==="number")?b.rel:0;
   const ka=Math.round(ra*4), kb=Math.round(rb*4);
   if(kb!==ka) return kb-ka;
-  if(_ssAudioPref!=="any"){
-    const ma=_ssAudioMatch(a)?1:0, mb=_ssAudioMatch(b)?1:0;
+  if(opts.prefOn){
+    const ma=opts.match(a)?1:0, mb=opts.match(b)?1:0;
     if(mb!==ma) return mb-ma;
   }
   if(rb!==ra) return rb-ra;
+  const av=_availRank(b.seeders)-_availRank(a.seeders);
+  if(av) return av;
+  const tk=(b.tracks||0)-(a.tracks||0);
+  if(tk) return tk;
   return (b.seeders||0)-(a.seeders||0);
+}
+function _ssPackCmp(a,b){
+  return _packCmp(a,b,{match:_ssAudioMatch, prefOn:_ssAudioPref!=="any"});
+}
+// The detached twin — same arithmetic, snapshot inputs.
+function _bgPackCmp(ctx){
+  return (a,b)=>_packCmp(a,b,{match:s=>_bgAudioMatch(ctx,s),
+                              prefOn:ctx.audioPref!=="any"});
 }
 
 // Packs belonging to one season. `kind==="season"` with a matching number is the
@@ -15461,6 +15523,13 @@ function _bgCtx(scope){
     seasons:_ssAllSeasons(),
     // Its own copy of the episode buckets: the page's array is emptied on close.
     episodes:_ssEpisodes.map(e=>({season:e.season,episode:e.episode,sources:e.sources.slice()})),
+    // ...and of the packs, for the same reason. Seeded from the page here
+    // because it already has them; a run started from the LIBRARY starts empty
+    // and fills this from its own season query.
+    packs:_ssPacks.slice(),
+    // Seasons this run has already fired the targeted "<title> S0N" query for,
+    // so the pack attempt and the gap sweep can't ask the indexers twice.
+    swept:new Set(),
   };
 }
 // Is the user still looking at the show this run belongs to?
@@ -15482,7 +15551,32 @@ async function _bgQuery(q){
 // Fold results into the run's own buckets, and into the page's when it's still
 // up — so a user who stays put watches the seasons fill in live.
 function _bgIngest(ctx, results){
-  const eps=results.filter(r=>r.kind==="episode");
+  // Packs are kept by the RUN as well as by the page. _bgSeasonSearch's
+  // "<title> S02" query already returns them and already lets them through its
+  // filter; until 17.3.0 the only thing that ever read them was the live show
+  // page, so a run started from the LIBRARY threw away the one download that
+  // would have answered the whole season and hunted every episode instead.
+  results.forEach(r=>{
+    if(r.kind==="episode"||!r.magnet) return;
+    if(!ctx.packs.some(p=>p.magnet===r.magnet)) ctx.packs.push(r);
+  });
+  // A release whose parsed show name scores nothing against the query is not
+  // this show, whatever its episode code says. `_bgQuery` flattens EVERY group
+  // the search returned, so "Hunter x Hunter S01" hands back "Interview With
+  // The Vampire S01E05" at rel 0.0 — and with 94 seeders against the real
+  // release's 37, a seeder-led pick took it. Measured on the live box: the
+  // library's Get would have downloaded the wrong show for three episodes of
+  // Hunter x Hunter season 1 alone.
+  //
+  // 0.7 is the floor `_ssBestPackForScope` already uses for exactly this, and it
+  // is the right one: the correct release above scores **0.9**, not 0.95, so the
+  // stricter `_ssEpisodeAccept` threshold would reject the answer along with the
+  // noise. That check earns its 0.95 by running against ONE title with the year
+  // and country tests beside it (see `ssSearchEpisode`); this is a broad query
+  // scored across every alias, which is a different measurement. Absent `rel`
+  // (a caller that isn't `_group_search_results`) passes, as it does for packs.
+  const plausible=r=>typeof r.rel!=="number"||r.rel>=0.7;
+  const eps=results.filter(r=>r.kind==="episode"&&plausible(r));
   eps.forEach(r=>{
     let e=ctx.episodes.find(x=>x.season===r.season&&x.episode===r.episode);
     if(!e){ e={season:r.season,episode:r.episode,sources:[]}; ctx.episodes.push(e); }
@@ -15501,6 +15595,7 @@ function _bgIngest(ctx, results){
 // see ssSearchSeason for why the targeted query is the one that finds anything
 // on a long-running show.
 async function _bgSeasonSearch(ctx, sn){
+  if(ctx.swept) ctx.swept.add(sn);   // the pack attempt and the gap sweep share these
   const out=await _bgQuery(`${ctx.query} S${String(sn).padStart(2,"0")}`);
   _bgIngest(ctx, out.filter(r=>r.kind!=="episode" || r.season===sn));
 }
@@ -15580,7 +15675,8 @@ async function _bgEnsureSources(ctx, ctl, report){
   }
   const seasons=(ctx.scope==="all")?ctx.seasons:[ctx.scope];
   const bare=ctx.absolute ? []
-    : seasons.filter(sn=>_bgScopeEpisodes(ctx,sn).some(e=>!e.sources.length));
+    : seasons.filter(sn=>!(ctx.swept&&ctx.swept.has(sn))
+                      && _bgScopeEpisodes(ctx,sn).some(e=>!e.sources.length));
   for(let i=0;i<bare.length;i++){
     if(ctl.cancel) return null;
     report(`Finding sources — Season ${bare[i]}`,
@@ -15839,25 +15935,39 @@ function _ssSetBulkScope(v){
 // _ssPackCmp (relevance bucket → audio pref → seeders) picks the best.
 // `want` defaults to the bulk sheet's scope; pass a season number to ask
 // directly (Simple mode, which never opens that sheet).
+// Does one pack cover `want`? The shared test, taking `seasons` as an argument
+// so a detached run can pass its own snapshot instead of _ssSeasonsWithEpisodes.
+function _packCoversScope(p, want, seasons){
+  if(typeof p.rel==="number"&&p.rel<0.7) return false;
+  if(p.ep_from) return false;   // abs-episode batch — coverage unverifiable
+  if(p.kind==="season")
+    return (want==="all")?(seasons.length<=1):(p.season===want);
+  if(p.kind==="multiseason"){
+    const from=p.season_from||0, to=p.season_to||from;
+    if(!from) return true;                       // "Complete series"
+    if(want==="all") return seasons.every(s=>s>=from&&s<=to);
+    return want>=from&&want<=to;
+  }
+  return false;
+}
 function _ssBestPackForScope(want){
   if(want===undefined) want=_ssBulkScope;
   const seasons=_ssSeasonsWithEpisodes();
-  const cand=_ssPacks.filter(p=>{
-    if(typeof p.rel==="number"&&p.rel<0.7) return false;
-    if(p.ep_from) return false;   // abs-episode batch — coverage unverifiable
-    if(p.kind==="season")
-      return (want==="all")?(seasons.length<=1):(p.season===want);
-    if(p.kind==="multiseason"){
-      const from=p.season_from||0, to=p.season_to||from;
-      if(!from) return true;                       // "Complete series"
-      if(want==="all") return seasons.every(s=>s>=from&&s<=to);
-      return want>=from&&want<=to;
-    }
-    return false;
-  });
+  const cand=_ssPacks.filter(p=>_packCoversScope(p, want, seasons));
   if(!cand.length) return null;
   const pref=cand.filter(_ssAudioMatch);
   return (pref.length?pref:cand).sort(_ssPackCmp)[0];
+}
+
+// _ssBestPackForScope against a detached run's snapshot — `ctx.packs` for
+// `_ssPacks`, `ctx.seasons` for the page's season list, `_bgAudioMatch` for the
+// page's audio preference. The library's Get button has no show page open to
+// read any of those from.
+function _bgBestPackForScope(ctx, want){
+  const cand=(ctx.packs||[]).filter(p=>_packCoversScope(p, want, ctx.seasons||[]));
+  if(!cand.length) return null;
+  const pref=cand.filter(s=>_bgAudioMatch(ctx,s));
+  return (pref.length?pref:cand).sort(_bgPackCmp(ctx))[0];
 }
 
 function ssBulkUsePack(){
@@ -15936,20 +16046,47 @@ function _ssAutoPick(sources, filt){
   const pref=sources.filter(_ssAudioMatch);
   return _ssAutoPickFrom(pref.length?pref:sources, filt);
 }
+// The order a release is chosen in when NOBODY picked one by hand. Hoisted out
+// of _ssAutoPickFrom so the race shortlist and the HQ target sort on the same
+// ladder the primary pick does — three copies of this lambda was three chances
+// for them to drift apart.
+//
+//   1. Dolby-Vision risk last   — releases whose titles claim DV with no
+//      compatible base layer go to the back of every tier rather than being
+//      removed: unattended Auto shouldn't hand you a green episode when a plain
+//      one is sitting right there, but a green episode still beats no episode
+//      when it is the only source. The title is a weak witness (see dvprobe) —
+//      the file is re-checked once it lands.
+//   2. availability BUCKET      (17.3.0) — Excellent / Good / Low, the very
+//      ladder _availLabel has always rendered.
+//   3. track richness           (17.3.0) — more audio tracks, then more subs.
+//   4. exact seeders            — the original sort, now the tie-break.
+//
+// **Step 2 is the behaviour change, not step 3.** 31 seeders and 400 seeders
+// used to order 400-first; they are now both "Excellent", and that is what lets
+// richness decide between them. Past the point where a download arrives
+// promptly another 370 seeders buys nothing, while a second audio track buys a
+// dub household the ability to watch the thing at all. Capping richness at the
+// bucket is what stops it ever promoting a Low release over a Good one — it may
+// reorder copies that are equally available, and nothing more.
+//
+// `tracks` comes from the server (reltracks.track_rank) and rides on grouped
+// search results only; absent ⇒ 0, so anything that never saw it sorts exactly
+// as it did before.
+function _pickCmp(a,b){
+  return ((a.dv_risk?1:0)-(b.dv_risk?1:0))
+      || (_availRank(b.seeders)-_availRank(a.seeders))
+      || ((b.tracks||0)-(a.tracks||0))
+      || ((b.seeders||0)-(a.seeders||0));
+}
 function _ssAutoPickFrom(sources, filt){
-  // Releases whose titles claim Dolby Vision with no compatible base layer go to
-  // the back of every tier rather than being removed: unattended Auto shouldn't
-  // hand you a green episode when a plain one is sitting right there, but a
-  // green episode still beats no episode when it is the only source. The title
-  // is a weak witness (see dvprobe) — the file is re-checked once it lands.
-  const bySeed=(a,b)=>((a.dv_risk?1:0)-(b.dv_risk?1:0))||((b.seeders||0)-(a.seeders||0));
   const okSeed=s=>(s.seeders||0)>=filt.minSeed;
   const okSize=s=>{ const z=s.size||0; return z>=filt.minBytes && z<=filt.maxBytes; };
-  let c=sources.filter(s=>okSeed(s)&&okSize(s)).sort(bySeed);
+  let c=sources.filter(s=>okSeed(s)&&okSize(s)).sort(_pickCmp);
   if(c.length) return c[0];
-  c=sources.filter(okSeed).sort(bySeed);
+  c=sources.filter(okSeed).sort(_pickCmp);
   if(c.length) return c[0];
-  return [...sources].sort(bySeed)[0];
+  return [...sources].sort(_pickCmp)[0];
 }
 
 // The resolution a release title claims, or 0. A deliberately thin mirror of
@@ -15974,9 +16111,9 @@ function _ssBestAtOrBelow(pool, ceiling, filt){
     return (s.seeders||0)>=filt.minSeed && z>=filt.minBytes && z<=filt.maxBytes;
   });
   if(!ok.length) return null;
-  return ok.sort((a,b)=>(_ssRelHeight(b.title)-_ssRelHeight(a.title))
-                        ||((a.dv_risk?1:0)-(b.dv_risk?1:0))
-                        ||((b.seeders||0)-(a.seeders||0)))[0];
+  // Resolution first — the HQ track exists to fetch a better PICTURE, so that
+  // question outranks the rest. _pickCmp settles everything below it.
+  return ok.sort((a,b)=>(_ssRelHeight(b.title)-_ssRelHeight(a.title))||_pickCmp(a,b))[0];
 }
 
 // An ordered shortlist for the server to race, best first.
@@ -16004,8 +16141,7 @@ function _ssAutoPickRace(sources, filt, opts){
   push(pick);
   const hq=_ssBestAtOrBelow(pool, (opts&&opts.ceiling)||app.download_race_ceiling||1080, filt);
   if(hq && _ssRelHeight(hq.title) > _ssRelHeight(pick.title)) push(hq);
-  [...pool].sort((a,b)=>((a.dv_risk?1:0)-(b.dv_risk?1:0))||((b.seeders||0)-(a.seeders||0)))
-           .forEach(push);
+  [...pool].sort(_pickCmp).forEach(push);
   // A release reporting no seeders can't win, it only takes a slot from one
   // that might. Kept only when the pick itself reports none (then nobody's
   // numbers can be trusted).
@@ -16025,8 +16161,16 @@ function _ssAutoPickRace(sources, filt, opts){
 // Returns {} when it cannot tell, which relquality reads as "unknown" and
 // handles by letting the release name stand. Never guess an episode count -
 // for a pack the divisor is the whole calculation.
-function _ssRuntimeHint(season, episode){
-  const m=_ssMeta; if(!m) return {};
+function _ssRuntimeHint(season, episode){ return _runtimeHint(_ssMeta, season, episode); }
+// The detached twin. `_ssMeta` is null the moment no show page is open, so the
+// library's Get would have sent NO divisor at all — and for a pack the divisor
+// is the whole bytes-per-minute calculation, which is how a perfectly good
+// release gets demoted for being "too big".
+function _bgRuntimeHint(ctx, season, episode){
+  return _runtimeHint(ctx&&ctx.meta, season, episode);
+}
+function _runtimeHint(m, season, episode){
+  if(!m) return {};
   if(m.tmdb_kind==="movie" || (!season && !episode))
     return m.runtime ? {runtime_min:+m.runtime, episode_count:1} : {};
   const sn=(m.seasons&&m.seasons[String(+season||0)])||null;
@@ -16156,6 +16300,51 @@ async function _bgStartDownloads(ctx, ctl, report, jobs, note="", opts={}){
   // Only take the user somewhere if they're still standing on the page this came
   // from; a background run must never yank the screen out from under them.
   if(_bgLive(ctx)){ closeSearchShow(); switchTab("library"); }
+}
+
+// One pack instead of N episodes — the twin of _bgStartDownloads for the case
+// where the whole scope is answered by a single torrent. Returns false when
+// nothing was started, so the caller can fall through to the gap fill.
+//
+// **This branch races, where _bgStartDownloads deliberately does not.** That one
+// abstains for an arithmetic reason — ten episodes times three candidates is
+// thirty torrents in qBittorrent at once — and it simply does not apply to one
+// download. What does apply is the rule racing exists for: nobody picked this
+// release, we did, so run the alternates and keep whichever actually moves.
+// ssSimpleGetSeason's pack branch has raced since 16.0.0 for exactly this
+// reason, and reaching the same pack from the library page without racing would
+// be a difference nobody could see and nobody intended.
+async function _bgStartPack(ctx, ctl, report, pack, season, filt){
+  if(ctl.cancel) return false;
+  const lbl=_ssPackLabel(pack);
+  report(`Starting download — ${lbl}`, pack.title, 0.95);
+  const pool=(ctx.packs||[]).filter(p=>p===pack||_packCoversScope(p, season, ctx.seasons||[]));
+  const rc=_ssAutoPickRace(pool, filt, {pick:pack, match:s=>_bgAudioMatch(ctx,s)});
+  // `season` with episode 0, so the item is series-shaped from the moment it is
+  // created whatever the release name looks like. Still right for a pack whose
+  // season numbering disagrees with TMDb's (every long-running anime): this only
+  // sets the item's initial shape — _reattribute_item_files and animemap's
+  // remap_slots decide where each FILE lands, across seasons, once it arrives.
+  // Don't "fix" this to the pack's own season number.
+  const done=await _ssDownloadOne(pack, season, 0, {
+    silent:true, race:true,
+    candidates:(rc.pick&&rc.pick.magnet===pack.magnet)?rc.candidates:[],
+    series:ctx.title, locked:ctx.locked, tmdb:ctx.tmdb,
+    ..._bgRuntimeHint(ctx, season, 0)});
+  // `silent` is not optional: _ssDownloadOne's loud path ends in
+  // closeSearchShow() + switchTab("library"), and there is no search show open —
+  // it would yank the user off the episode page they are standing on, which is
+  // the thing _bgStartDownloads goes out of its way to avoid. So the toast below
+  // replaces what silence suppresses, and says more than the generic one would.
+  if(!done || done.unreleased) return false;
+  showAlert(done.duplicate
+    ? `That whole-season copy is already downloading — nothing new was started.`
+    : `Downloading the whole of Season ${season} in one go — ${lbl.toLowerCase()}, `
+     +`${_availLabel(pack.seeders).txt.toLowerCase()} availability, ${pack.size_human}. `
+     +`Switch to Library to track progress.`,
+    done.duplicate?"warn":"success");
+  refreshCoverage();
+  return true;
 }
 
 // "Choose per episode" needs sources before it can show a list. The find runs in
@@ -24956,6 +25145,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.2.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.3.0</div>
 </body>
 </html>

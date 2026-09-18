@@ -708,6 +708,16 @@ two parts and TMDb numbers them 1-12 and 13-22 inside one season 3, which is exa
 releases label them. What disagrees is a cour landing on a *different* season, the way
 【OSHI NO KO】's season 2 is TMDb's season 1 from episode 12.
 
+**What this makes safe to download (17.3.0).** Because a pack's files are reattributed onto TMDb's
+grid on arrival (`_reattribute_item_files` → `animemap.remap_slots`), a pack whose season numbering
+disagrees with TMDb's is safe to fetch as-is. That is what lets the library's **Get** button offer a
+whole-season download for a show like Hunter x Hunter, where the iAHD `S02` Blu-ray pack holds 78
+episodes against TMDb's 74: the download is queued with `season = <the TMDb season>, episode = 0`,
+which only sets the item's initial *shape* — where each individual file lands is decided afterwards,
+across season boundaries, by the three attribution passes. Don't "fix" that season number to the
+pack's own. Absolute-numbered *batches* (`Episodes 1-148`) are still refused as season coverage, on
+measured evidence — see [GOTCHAS.md](GOTCHAS.md).
+
 **Sections (15.0.0).** A `bucket` promoted to a first-class unit by
 `episodes.sections_for(files, show_title)` — derived, never persisted, so no migration.
 `section_key(f)` is `"main"` for a file with no bucket (including season-0 absolute-numbered

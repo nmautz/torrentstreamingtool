@@ -18,6 +18,7 @@ indexers; the unit tests next door need nothing.
 | `verify.py` | **The one to run.** Replays what the show page would show for every target, live, and scores it against `labels.json`. |
 | `score.py`, `rule2.py`, `rule3.py` | Offline scoring of rule variants over a collected set, including the ones that shipped and the ones that didn't. |
 | `bench.py` | Runs a local LLM (llama-server, OpenAI-compatible) over the same set, for the periodic "would a model do better?" question. |
+| `pickdiff.py` | **Ranking, not matching.** Prints old pick vs new pick — season pack and per-episode — over live results for 11 shows. A differ, not a scorer; see below. |
 
 ## Running it
 
@@ -76,3 +77,34 @@ came back empty and the harness scored them all "no" — a 1.9-hour run that
 measured nothing. `bench.py --maxtok 6000 --batch 5` is what worked.
 
 Worth re-testing only for a judgement no rule can express.
+
+## What `pickdiff.py` measures, and what it can't (17.3.0)
+
+Everything else here grades against `labels.json`, which can exist because "is this
+release episode 7 of that show" has a right answer a person can check. **"Is this the
+*better* release" does not.** Ground truth for it would be seventeen hundred subjective
+calls encoding one person's taste, and a score computed from that would look
+authoritative while meaning nothing.
+
+So `pickdiff.py` prints the diff and leaves the judgement where it belongs. Two lines in
+its summary are objective and worth watching:
+
+- **`bucket downgrades` must be 0.** Track richness is capped at the availability bucket
+  by construction, so it can reorder two equally-available copies and can never promote a
+  Low one over a Good one. Non-zero means `_pickCmp` is mis-wired — a bug, not a trade-off.
+- **`seeder drop >10x`** is the cost line. It is what "richness dragged in a worse-seeded
+  release" actually looks like, with the titles printed beside it so they can be read.
+
+It mirrors `_pickCmp`, `_ssAutoPickFrom`, `_packCoversScope` and `_bgAbsBatchOk` from
+`static/index.html`. When one of those changes, change it here too, or it stops measuring
+the shipping code.
+
+**The 17.3.0 baseline**, live on 11 shows / 171 episode picks: 16 changed (9%), **0 bucket
+downgrades**, **0 picks losing more than 10x in seeders**, 11 gaining an audio track and 11
+gaining subtitles. All four English-original controls (Breaking Bad, The Bear, Futurama, Hacks)
+moved not at all, which is the shape to expect — a single-track release scores 0.
+
+**It has already decided one thing.** Accepting absolute-numbered batches (`Episodes
+1-148`) as season coverage was built for Hunter x Hunter and dropped on this harness's
+evidence: across all 11 targets it found no pack the ordinary season/multi-season rule
+hadn't already found. `abs_batch_ok` is still in the file, so re-testing is cheap.

@@ -1,5 +1,60 @@
 # Changelog
 
+## [17.3.0] — 2026-09-18
+**"Get them" on a season you own none of now gets the season, not seventy-four separate downloads.**
+
+* **The bug, in one screen.** Hunter x Hunter, Season 2, *0 of 74*. The amber strip offers **Get
+  them**, and until now that meant seventy-four indexer hunts and seventy-four torrents — seventy-four
+  different groups' idea of the show, in seventy-four different encodes, with whatever audio each one
+  happened to carry. A single 78-episode Blu-ray pack with dual audio was sitting in the same search
+  results the whole time, at 102 seeders.
+* **It was already being found and thrown away.** The season query the button fires returns packs and
+  episodes together; the background runner kept the episodes and discarded everything else unless the
+  *search* show page happened to be open — which, pressing this button from your library, it never is.
+  The search screen's Simple mode has done the right thing since 14.0.0. The library page just never
+  got the branch.
+* **The rule is the one that was already shipping: pack first, but only when you own none of the
+  season.** Own part of it and a whole-season copy would re-fetch what is already on the box, so those
+  still fill gap by gap, exactly as before. The pack download **races** its alternates the way every
+  other one-press choice does — nobody picked the release, we did.
+* **Releases that give you more than one way to watch now win ties.** Availability is compared in the
+  same Excellent / Good / Low buckets the interface has always shown, and within a bucket a copy
+  carrying two audio tracks beats one carrying a single track. Past the point where a download
+  arrives promptly, another three hundred seeders buys you nothing, while a second audio track buys a
+  dubbed household the ability to watch the thing at all. **This can pick a less-seeded release:** a
+  31-seeder dual-audio copy now beats a 400-seeder single-audio one. It can never pick a *worse
+  seeded* one — richness is capped at the bucket, so it cannot promote a Low copy over a Good one.
+* **An amber strip in Simple mode that offered nothing.** 17.2.0 made the "in the Season 2 pack" note
+  *replace* the Get button with a Browse-the-packs button — which Simple mode hides. On a Simple
+  profile the result was a strip announcing four missing episodes with no way to get them. Both
+  buttons now render.
+* **Found while measuring: "Get them" could download a different show entirely.** The background
+  source-finder flattens every group a search returns, so `Hunter x Hunter S01` handed back
+  `Interview With The Vampire S01E05` — relevance 0.0, ninety-four seeders — and a seeder-led pick
+  took it over the real release's thirty-seven. Three episodes of Hunter x Hunter season 1 on this
+  box would have fetched the wrong programme. Results now have to clear the same **0.7 relevance
+  floor** whole-season packs already had. Not 0.95 (what the targeted per-episode search uses): the
+  *correct* Hunter x Hunter release scores 0.9, so the stricter bar would have thrown out the answer
+  with the noise.
+* **Measured, not assumed.** A new `tests/search_eval/pickdiff.py` prints old pick versus new pick
+  over live indexer results for eleven shows, with the cost line (picks that dropped more than 10x in
+  seeders) spelled out rather than summarised. It is a differ, not a scorer: "which release is better"
+  has no ground truth, and a number computed from one person's taste would look authoritative while
+  meaning nothing. Live result over 171 episode picks across 11 shows: **16 changed, 0 dropped an
+  availability bucket, 0 lost more than 10x in seeders**, and all four English-original controls
+  (Breaking Bad, The Bear, Futurama, Hacks) moved not at all — which is the point, since a release
+  with one audio track and one subtitle track scores zero and nothing about it changes. Accepting absolute-numbered batches (`Episodes 1-148`) as season coverage was
+  planned and **dropped on its evidence** — across all eleven targets it found no pack the ordinary
+  season/multi-season rule had not already found, and a mis-parsed range costs tens of gigabytes.
+* The audio classifier moved to a new pure leaf module, `reltracks.py`, so the track count and the
+  language class are read off **one** parse — a second sweep reads Erai-raws' `[Multiple Subtitle]
+  [ENG][POR-BR][RUS]` subtitle list as three audio tracks. Its context rules (that one, plus
+  `ArabicDub`, Tsundere-Raws `MULTi` and `ENG SUBS`) are under test for the first time.
+* **Known next step:** on a Simple profile, a season whose gaps all live in a neighbouring release
+  pack still hands you the per-episode fill rather than fetching that pack. Doing it automatically
+  needs an ownership rule across the grid-to-TMDb mapping — that pack spans two TMDb seasons, and you
+  usually own most of one of them.
+
 ## [17.2.0] — 2026-09-18
 **The library now says where a missing anime episode actually is.**
 
