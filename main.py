@@ -30518,8 +30518,11 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
         _bundle_index_register(key, out_dir)
         meta = _read_meta(out_dir)
         # Nothing in the preferred language? Look one up while the viewer starts
-        # watching (see _maybe_auto_fetch_for_device).
-        await _maybe_auto_fetch_for_device(item, target, meta.get("subtitles") or [], sidecar_subs)
+        # watching (see _maybe_auto_fetch_for_device). Interactive plays only:
+        # `bulk` is "prep for later", and prepping a season would otherwise fire
+        # one search + audio decode per episode and spend the day's downloads.
+        if not req.bulk:
+            await _maybe_auto_fetch_for_device(item, target, meta.get("subtitles") or [], sidecar_subs)
         return JSONResponse({
             "ready":             True,
             "needs_processing":  False,

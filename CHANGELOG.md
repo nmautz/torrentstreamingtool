@@ -1,5 +1,11 @@
 # Changelog
 
+## [17.7.2] — 2026-09-18
+* **Fixed: bulk prep no longer triggers a subtitle search per episode.** `/offline-prepare`
+  serves both an interactive play and "prep for later"; only the former looks for subtitles
+  now. Prepping a season would otherwise have spent the day's download budget, and run an
+  audio decode per file, for episodes nobody is watching.
+
 ## [17.7.1] — 2026-09-18
 * **Fixed: the automatic subtitle fetch almost never ran.** It was wired into VLC's
   track-selection policy, but the TV plays through the kiosk's own player whenever it can
