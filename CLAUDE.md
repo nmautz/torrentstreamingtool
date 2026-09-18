@@ -76,6 +76,7 @@ make test                 # pure unit tests for the leaf modules (no deps, no ve
                           #   python tests/test_relquality.py
                           #   python tests/test_race_rules.py
                           #   python tests/test_tmdbcache.py
+                          #   python tests/test_http_clients.py
                           # tests/race_harness.py is the LIVE integration driver
                           # for download racing - needs a running StreamLink +
                           # qBittorrent and its own magnets file. See its docstring.

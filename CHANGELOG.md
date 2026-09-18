@@ -1,5 +1,18 @@
 # Changelog
 
+## [16.3.3] — 2026-09-17
+**Every search froze the whole server for about a second, and several at once made the box crawl.**
+
+* Each search made 6 new HTTP clients (one per indexer, plus one to list them). Making a
+  client loads the full list of trusted certificates, which takes ~150 ms and blocks
+  everything else the server is doing, even for Jackett, which doesn't use HTTPS. Every
+  uncached poster on Explore paid the same cost.
+* Measured on the box: 4 searches at once pushed the event loop 1-3 s behind and took
+  `/healthz` (normally 2 ms) to 7 s.
+* The certificates are now loaded once at startup and shared by every client, so making one
+  takes ~0.5 ms instead of ~150 ms. `tests/test_http_clients.py` fails the build if a
+  per-call client comes back.
+
 ## [16.3.2] — 2026-09-17
 **The now-playing card's status line was always blank while buffering, except on the TV kiosk.**
 

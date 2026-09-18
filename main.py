@@ -1557,6 +1557,24 @@ def _save_device_tokens() -> None:
     except Exception as e:
         log.warning("Could not persist device tokens: %s", e)
 
+# ── Outbound HTTP clients ─────────────────────────────────────────────────────
+# Constructing an `httpx.AsyncClient` builds a fresh SSL context and loads the
+# whole certifi CA bundle into it — ~150 ms of synchronous CPU, on the event
+# loop, even for a plain-http target like Jackett. A search built six of them,
+# so every search froze the whole server for about a second, and four searches
+# at once pushed /healthz past 7 s. Built once here and shared, construction
+# is ~0.5 ms. Always go through `_http_client`, never `httpx.AsyncClient`
+# directly (tests/test_http_clients.py enforces it).
+_HTTPX_SSL = httpx.create_ssl_context()
+
+
+def _http_client(**kw) -> httpx.AsyncClient:
+    """An `httpx.AsyncClient` on the shared SSL context. An explicit
+    `verify=` (e.g. False for an arbitrary user link) still wins."""
+    kw.setdefault("verify", _HTTPX_SSL)
+    return httpx.AsyncClient(**kw)
+
+
 # ── Jackett Session ───────────────────────────────────────────────────────────
 _jackett_cookie: str = ""
 _jackett_cookie_expiry: float = 0.0
@@ -1565,7 +1583,7 @@ _jackett_cookie_lock: asyncio.Lock  # initialised in lifespan
 
 async def _jackett_login() -> str:
     """Login to Jackett and return the session cookie value."""
-    async with httpx.AsyncClient(follow_redirects=True, timeout=10.0) as tmp:
+    async with _http_client(follow_redirects=True, timeout=10.0) as tmp:
         await tmp.get(f"{settings.indexer_url}/UI/Login")
         r = await tmp.post(
             f"{settings.indexer_url}/UI/Dashboard",
@@ -1589,7 +1607,7 @@ async def _jackett_admin():
                 _jackett_cookie = await _jackett_login()
                 _jackett_cookie_expiry = time.time() + 3600
         cookies = {"Jackett": _jackett_cookie}
-    async with httpx.AsyncClient(cookies=cookies, timeout=15.0) as c:
+    async with _http_client(cookies=cookies, timeout=15.0) as c:
         yield c
 
 
@@ -2361,7 +2379,7 @@ def _vlc_http() -> httpx.AsyncClient:
     """
     global vlc_client
     if vlc_client is None or vlc_client.is_closed:
-        vlc_client = httpx.AsyncClient(
+        vlc_client = _http_client(
             base_url=settings.vlc_url,
             auth=httpx.BasicAuth("", settings.vlc_password),
             timeout=httpx.Timeout(5.0, connect=2.0),
@@ -2613,7 +2631,7 @@ async def _opensubtitles_search(
             f"https://rest.opensubtitles.org/search/query-{quote(query)}{lang_seg}"
         )
     raw: list[dict] = []
-    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as c:
+    async with _http_client(timeout=20.0, follow_redirects=True) as c:
         for url in urls:
             try:
                 r = await c.get(url, headers=headers)
@@ -2695,7 +2713,7 @@ async def _tmdb_img_bytes(size: str, filename: str,
         return None
     try:
         url = f"{TMDB_IMG_BASE}/{size}/{filename}"
-        async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0),
+        async with _http_client(timeout=httpx.Timeout(12.0, connect=5.0),
                                      follow_redirects=True) as c:
             r = await c.get(url)
         if r.status_code == 200 and r.content:
@@ -2776,7 +2794,7 @@ _tmdb_fresh: contextvars.ContextVar[bool] = contextvars.ContextVar(
 def _tmdb_http() -> httpx.AsyncClient:
     global _tmdb_client
     if _tmdb_client is None or _tmdb_client.is_closed:
-        _tmdb_client = httpx.AsyncClient(
+        _tmdb_client = _http_client(
             # Short connect timeout so a dead/unreachable internet link fails
             # fast (the read timeout stays generous for slow-but-working ones).
             timeout=httpx.Timeout(15.0, connect=5.0),
@@ -6564,7 +6582,7 @@ async def jackett_health_monitor() -> None:
 
         serving = False
         try:
-            async with httpx.AsyncClient(timeout=5.0) as c:
+            async with _http_client(timeout=5.0) as c:
                 await c.get(f"{base}/UI/Login")
             serving = True   # any HTTP status means the web stack is answering
         except Exception:
@@ -12276,7 +12294,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     _analysis_gate = asyncio.Semaphore(ANALYSIS_CONCURRENCY)
     _load_device_tokens()   # M5: restore paired-device bearer tokens
     _load_profile_sessions()   # PIN-verified profile sessions (survive a restart)
-    qbit = httpx.AsyncClient(timeout=10.0)
+    qbit = _http_client(timeout=10.0)
     _vlc_http()   # build the persistent keep-alive VLC client up front
     await qbit_login()
     Path(settings.qbit_download_path).mkdir(parents=True, exist_ok=True)
@@ -15025,7 +15043,7 @@ def _torrent_file_list(blob: bytes) -> list[dict]:
 async def _inspect_link(url: str) -> tuple[Optional[list[dict]], Optional[str], str]:
     """Fetch an indexer link. → (files, magnet, reason): the .torrent's file list,
     or the magnet it redirects to, or neither with a reason."""
-    async with httpx.AsyncClient(timeout=20, follow_redirects=False, verify=False) as c:
+    async with _http_client(timeout=20, follow_redirects=False, verify=False) as c:
         for _ in range(6):
             r = await c.get(url)
             loc = r.headers.get("location", "")
@@ -17814,7 +17832,7 @@ async def _indexer_query(q: str, lib: dict, *, profile_id: str = "",
         # endpoint so search still works, just without per-indexer isolation (and
         # without per-indexer filtering — best effort; the picker just won't apply).
         try:
-            async with httpx.AsyncClient(timeout=20.0) as c:
+            async with _http_client(timeout=20.0) as c:
                 r = await c.get(
                     f"{settings.indexer_url}/api/v2.0/indexers/all/results",
                     params=params,
@@ -17843,7 +17861,7 @@ async def _indexer_query(q: str, lib: dict, *, profile_id: str = "",
     async def _query_one(ix: dict) -> tuple:
         ixid, name = ix["id"], ix["name"]
         try:
-            async with httpx.AsyncClient(timeout=PER_INDEXER_TIMEOUT) as c:
+            async with _http_client(timeout=PER_INDEXER_TIMEOUT) as c:
                 r = await c.get(
                     f"{settings.indexer_url}/api/v2.0/indexers/{ixid}/results",
                     params=params,
@@ -21209,7 +21227,7 @@ async def _download_and_attach_subtitle(
     httpx/OS errors for the caller to map; the auto-search wrapper swallows them.
     """
     headers = {"User-Agent": settings.opensubtitles_user_agent}
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as c:
+    async with _http_client(timeout=30.0, follow_redirects=True) as c:
         r = await c.get(link, headers=headers)
     r.raise_for_status()
     data = r.content
@@ -22038,7 +22056,7 @@ async def _flaresolverr_running() -> bool:
     Its root route returns `{"msg": "FlareSolverr is ready!"}` with HTTP 200."""
     base = settings.flaresolverr_url.rstrip("/")
     try:
-        async with httpx.AsyncClient(timeout=3.0) as c:
+        async with _http_client(timeout=3.0) as c:
             r = await c.get(base + "/")
         return r.status_code == 200 and "FlareSolverr" in r.text
     except Exception:
@@ -29358,7 +29376,7 @@ async def _download_to(url: str, dest: Path, job: dict) -> None:
     Follows redirects (GitHub/HuggingFace assets resolve to signed CDN URLs)."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".part")
-    async with httpx.AsyncClient(follow_redirects=True,
+    async with _http_client(follow_redirects=True,
                                  timeout=httpx.Timeout(60.0, read=600.0)) as c:
         async with c.stream("GET", url, headers={"User-Agent": "StreamLink"}) as r:
             r.raise_for_status()

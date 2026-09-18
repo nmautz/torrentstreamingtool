@@ -187,6 +187,9 @@ in-flight ≥ 60 s.
    The first anomaly line marks the onset.
 3. **`vitals.log` — scroll back to the onset** and read across: `lag`, `tp=`,
    `lock_held=`, `inflight=`. These name the starvation mode directly.
+   High `lag` with `lock_held=0.0s` and spare pool threads means synchronous work
+   on the loop itself, e.g. the per-call `httpx.AsyncClient` construction fixed
+   in 16.3.3 (see GOTCHAS).
 4. **`stall_*.txt`** — the stacks say exactly what every task was awaiting.
 
 ### Two traps
