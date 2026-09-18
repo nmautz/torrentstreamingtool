@@ -1625,6 +1625,13 @@ async def broadcast(event: str, data: dict) -> None:
         state.sse_queues.remove(q)
 
 
+# AI subtitles were retired in 17.0.0 — the transcripts were not good enough to
+# offer. This forces every AI-subtitle affordance off regardless of what is
+# installed on the host; `_retire_ai_subtitles` (below) removes the artefacts.
+# Set it False, re-enable the setting and reinstall whisper to bring it back.
+AI_SUBTITLES_RETIRED = True
+
+
 def state_snapshot() -> dict:
     playlist = state.library_playlist
     current  = state.library_current_file
@@ -1761,9 +1768,12 @@ def state_snapshot() -> dict:
         "analysis_jobs": state.analysis_jobs,
         # False on macOS hosts — the UI hides stream-to-device / Prep affordances.
         "hls_available": HLS_AVAILABLE,
-        # True ⇒ whisper.cpp + a model are installed; drives the "Generate subtitles
-        # (AI)" affordance in the subtitle menus. See docs/STT.md.
-        "stt_available": _stt_available(),
+        # Drives the "Generate subtitles (AI)" affordances in the subtitle menus.
+        # AI subtitles were retired in 17.0.0, so this is now the setting AND the
+        # binaries: with the feature off, the buttons stay gone even on a host
+        # that still has whisper lying around (or gets it back on PATH). See
+        # docs/STT.md.
+        "stt_available": _stt_available() and not AI_SUBTITLES_RETIRED,
         # True ⇒ bulk stream-prep is paused (drives the global prep bar's Resume control).
         "prep_paused": state.prep_paused,
         # Window control pause (non-admin "use the computer normally" override).

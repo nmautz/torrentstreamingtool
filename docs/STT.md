@@ -7,9 +7,13 @@
 > generated `*.ai.*.srt` sidecars and `tools/whisper` on first start after the
 > update, guarded by a `.ai_subs_retired` marker file.
 >
+> The `stt_available` flag on the `state` SSE is forced off by `AI_SUBTITLES_RETIRED`
+> in `main.py`, so the player's Generate-with-AI buttons stay hidden even on a
+> host that still has whisper on PATH.
+>
 > **Nothing was deleted from the tree** — `stt.py`, the job machinery, the
 > endpoints and the UI actions all still work. To bring it back: set
-> `AI_SUBTITLES_RETIRED = False` in `setup.py` and re-run it (or install whisper
+> `AI_SUBTITLES_RETIRED = False` in **both** `main.py` and `setup.py`, re-run setup (or install whisper
 > from the admin Components card after restoring its rows in `static/admin.html`),
 > un-hide the "Auto-Generated Subtitles (AI)" card in `static/admin.html`, and
 > turn the setting on (`POST /api/admin/stt {"enabled": true}`). The rest of this

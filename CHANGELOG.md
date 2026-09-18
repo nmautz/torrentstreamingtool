@@ -9,7 +9,8 @@
   generated (`*.ai.*.srt`) is deleted, and so is the bundled whisper.cpp and its model — about
   1.5 GB back. It runs once and leaves a `.ai_subs_retired` note in the app folder saying what it
   removed.
-* A fresh install no longer downloads whisper at all.
+* A fresh install no longer downloads whisper at all, and the player's AI buttons stay hidden
+  even on a box that still has whisper installed.
 * **Nothing was deleted from the code.** If you ever want it back, docs/STT.md has the four steps.
 * Real subtitles are unaffected: embedded tracks, sidecar files, and the online search all work
   exactly as before.
