@@ -29,8 +29,9 @@
 //                                                                  durationSec, completed,
 //                                                                  clientUpdatedAt, baseSyncedAt }
 //    seedProgress({ itemId, filePath, positionSec, durationSec,
-//                   completed, serverUpdatedAt, profileId?, force? }) -> {}  // server→device baseline
+//                   completed, serverUpdatedAt, playedSec?, profileId?, force? }) -> {}  // server→device baseline
 //                                                                  // force: M4 "server wins" overwrite of a dirty record
+//                                                                  // playedSec: server's play count to build on
 //    pending()                                               -> { events:[ <event> ] }
 //    markSynced({ applied:[ { itemId, filePath, serverUpdatedAt, profileId? } ] }) -> {}
 //    all()                                                   -> { events:[ <event> ] }
@@ -45,8 +46,16 @@
 //  device-facing endpoints. Same cross-origin reason the progress log is native.
 //
 //  <event> = { profileId, itemId, filePath, positionSec, durationSec, completed,
-//              clientUpdatedAt, baseSyncedAt, subtitleSel?, audioSel?,
+//              clientUpdatedAt, baseSyncedAt, playedSec?, subtitleSel?, audioSel?,
 //              localAudioIdx?, localSubtitleIdx? }
+//
+//  playedSec (17.5.0): seconds of this file genuinely PLAYED, as opposed to where
+//  the playhead is. An offline session reaches the host as ONE coalesced position,
+//  so the host can't tell watching up to the end from scrubbing there. The store
+//  measures it instead, on every saveProgress, by the host's own rule
+//  (watchrule.py): add the position advance since the last save, capped by the
+//  wall clock between them. Playback earns real time; a seek earns about a second.
+//  Absent on records written by an older build, which then sync position-only.
 //
 
 import Foundation
@@ -128,6 +137,7 @@ public class OfflineStore: CAPPlugin, CAPBridgedPlugin {
             durationSec: call.getDouble("durationSec") ?? 0,
             completed: call.getBool("completed") ?? false,
             serverUpdatedAt: call.getString("serverUpdatedAt") ?? "",
+            playedSec: call.getDouble("playedSec"),
             // M4: a "server wins" conflict resolution must overwrite the device's
             // own unsynced (dirty) record; the normal seed must not.
             force: call.getBool("force") ?? false)
@@ -254,8 +264,28 @@ final class OfflineProgressStore {
             let k = key(pid, itemId, filePath)
             var rec = (records[k] as? [String: Any]) ?? [:]
 
-            let pct = durationSec > 0 ? positionSec / durationSec : 0
-            let nowCompleted = pct > 0.92
+            // Play accrual: the host's rule (watchrule.played_after), on the
+            // device's clock. A brand-new record starts at 0; one written before
+            // playedSec existed is seeded from its position, as the host does.
+            let hadRecord = !rec.isEmpty
+            let prevPos = Self.num(rec["positionSec"])
+            var played = rec["playedSec"].map { Self.num($0) } ?? (hadRecord ? prevPos : 0)
+            let step = positionSec - prevPos
+            if hadRecord, step > 0,
+               let prevAt = (rec["clientUpdatedAt"] as? String).flatMap({ Self.parse($0) }) {
+                let elapsed = Date().timeIntervalSince(prevAt)
+                if elapsed > 0 {
+                    played += min(step, elapsed * Self.playedRateCap, Self.playedStepCapSec)
+                }
+            }
+            played = (played * 10).rounded() / 10
+
+            // Same verdict the host reaches for the no-credits case: the tail
+            // reached AND most of it actually played. (Was `pct > 0.92`, which a
+            // scrub to the end satisfied.)
+            let nowCompleted = durationSec > 0
+                && positionSec >= durationSec * Self.finishTailPct
+                && played >= durationSec * Self.minPlayedPct
             // `completed` is monotonic on-device too (mirrors the server merge).
             let prevCompleted = (rec["completed"] as? Bool) ?? false
 
@@ -265,6 +295,7 @@ final class OfflineProgressStore {
             rec["positionSec"] = (positionSec * 10).rounded() / 10
             rec["durationSec"] = (durationSec * 10).rounded() / 10
             rec["completed"] = nowCompleted || prevCompleted
+            rec["playedSec"] = played
             rec["clientUpdatedAt"] = Self.isoNow()
             // `dirty` (NOT a timestamp comparison) is the source of truth for
             // "needs pushing": a local watch always sets it, markSynced clears it.
@@ -318,7 +349,8 @@ final class OfflineProgressStore {
     /// Otherwise it writes a settled (`dirty:false`) record so pending() ignores it.
     func seedProgress(profileId: String?, itemId: String, filePath: String,
                       positionSec: Double, durationSec: Double, completed: Bool,
-                      serverUpdatedAt: String, force: Bool = false) {
+                      serverUpdatedAt: String, playedSec: Double? = nil,
+                      force: Bool = false) {
         queue.sync {
             var obj = read()
             let pid = (profileId?.isEmpty == false ? profileId! : activeProfileLocked(obj))
@@ -335,6 +367,10 @@ final class OfflineProgressStore {
                 "positionSec": (positionSec * 10).rounded() / 10,
                 "durationSec": (durationSec * 10).rounded() / 10,
                 "completed": completed,
+                // The host's play count, so offline viewing builds on it (the host
+                // merges by max). An older host sends none: trust the position,
+                // exactly as the host's own rule seeds a legacy record.
+                "playedSec": ((playedSec ?? positionSec) * 10).rounded() / 10,
                 "clientUpdatedAt": stamp,
                 "baseSyncedAt": stamp,   // server watermark for conflict detection
                 "dirty": false,          // settled — pending() will not re-push it
@@ -425,11 +461,30 @@ final class OfflineProgressStore {
             // Surfaced for the on-device sync diagnostic; the flush ignores it.
             "dirty": rec["dirty"] ?? true,
         ]
+        // Present once this build has written or seeded the record. A record left
+        // dirty by an older build syncs without it: the host goes position-only.
+        if let p = rec["playedSec"] { e["playedSec"] = p }
         if let s = rec["subtitleSel"] { e["subtitleSel"] = s }
         if let a = rec["audioSel"] { e["audioSel"] = a }
         if let a = rec["localAudioIdx"] { e["localAudioIdx"] = a }
         if let s = rec["localSubtitleIdx"] { e["localSubtitleIdx"] = s }
         return e
+    }
+
+    // Mirrors watchrule.py on the host. Keep the two in step.
+    private static let finishTailPct = 0.90      // FINISH_TAIL_PCT
+    private static let minPlayedPct = 0.60       // MIN_PLAYED_PCT
+    private static let playedRateCap = 2.5       // PLAYED_RATE_CAP
+    private static let playedStepCapSec = 60.0   // PLAYED_STEP_CAP_SEC
+
+    /// A finite, non-negative Double out of a JSON value (NSNumber / Double / Int).
+    private static func num(_ v: Any?) -> Double {
+        let d: Double
+        if let x = v as? Double { d = x }
+        else if let x = v as? Int { d = Double(x) }
+        else if let x = v as? NSNumber { d = x.doubleValue }
+        else { return 0 }
+        return d.isFinite ? max(0, d) : 0
     }
 
     // ISO-8601 UTC, seconds precision — matches the server's _now_iso shape

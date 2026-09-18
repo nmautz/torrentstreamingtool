@@ -11274,10 +11274,17 @@ def _watch_state(item: dict, file_path: str, prev: Optional[dict],
 
 
 def _offline_watch_state(item: dict, file_path: str, prev: Optional[dict],
-                         pos: float, dur: float, at_iso: str) -> tuple[float, bool]:
-    """(played_sec, completed) for the offline sync's one coalesced position."""
-    return watchrule.offline_watch_state(prev, pos, dur,
-                                         _credits_start_for(item, file_path), at_iso)
+                         pos: float, dur: float, at_iso: str,
+                         reported_played: Optional[float] = None) -> tuple[float, bool]:
+    """(played_sec, completed) for the offline sync's one coalesced position.
+
+    With `reported_played` — the iOS OfflineStore measures play on the device from
+    17.5.0 and sends it — the full rule applies. Without it (an older app build),
+    the tail test alone."""
+    cs = _credits_start_for(item, file_path)
+    if reported_played is not None:
+        return watchrule.reported_watch_state(prev, pos, dur, cs, reported_played)
+    return watchrule.offline_watch_state(prev, pos, dur, cs, at_iso)
 
 
 async def _finalize_stopped_file(
@@ -12077,6 +12084,59 @@ async def _recover_races() -> None:
         log.exception("[race] restart reconciliation failed")
 
 
+async def _backfill_legacy_tail_stops() -> None:
+    """One-shot (17.5.0): mark watched the episodes the old rule left stuck.
+
+    Before 17.5.0 a file with no detected credits completed only in its last 10 s,
+    so an episode stopped in its ending theme — Hunter x Hunter S01E02 at 93 % —
+    stayed unwatched and kept being offered as a resume target. 17.5.0 moved the
+    tail to the last 10 %. A record written before then that sits in the new tail
+    would complete on its very next write (`watchrule.played_after` seeds a legacy
+    record from its position); this applies that now, for every profile, instead
+    of waiting for someone to reopen the episode. `watchrule.legacy_stopped_in_tail`
+    is the whole test.
+
+    Idempotent without a marker: every writer now stamps `played_sec`, which is
+    what disqualifies a record, and a backfilled record gets one too. So after the
+    first run the pre-check finds nothing and `library.json` is never rewritten.
+    `updated_at` is left alone — this reinterprets an old stop, it isn't a new
+    watch, and bumping it would make an iOS device holding that file see the
+    server as newer than its sync watermark and raise a spurious conflict."""
+    try:
+        lib = await get_library()
+    except Exception:
+        return
+
+    def _targets(l: dict):
+        for it in l.get("items", []):
+            skip = it.get("skip_data") or {}
+            for prof in (it.get("progress") or {}).values():
+                if not isinstance(prof, dict):
+                    continue
+                for fp, rec in (prof.get("file_progress") or {}).items():
+                    # Keys are the stored paths, so skip_data is looked up directly —
+                    # _credits_start_for would canonicalise, which resolves every
+                    # file in the item on disk, for every record, at startup.
+                    cs = (skip.get(fp) or {}).get("credits_start")
+                    if watchrule.legacy_stopped_in_tail(rec, cs):
+                        yield rec
+
+    if next(_targets(lib), None) is None:
+        return
+
+    n = 0
+    async with mutate_library() as wlib:
+        for rec in _targets(wlib):
+            rec["played_sec"] = round(float(rec.get("position_sec") or 0), 1)
+            rec["position_sec"] = rec["duration_sec"]
+            rec["completed"] = True
+            n += 1
+        if not n:
+            raise LibraryUnchanged
+    log.info("Marked %d episode%s watched that were stopped in their ending before "
+             "17.5.0 widened the no-credits tail to the last 10%%.", n, "" if n == 1 else "s")
+
+
 async def _purge_background_video_progress() -> None:
     """Delete watch-history entries pointing at the idle background video.
 
@@ -12489,6 +12549,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
 
     # Strip watch-history entries the background video left behind (see below).
     await _purge_background_video_progress()
+    # Credit episodes the pre-17.5.0 rule left unwatched after a stop in the ED.
+    await _backfill_legacy_tail_stops()
 
     # ── Diagnostics tasks ────────────────────────────────────────────────
     # Together these answer the question the 2026-09-13 logs couldn't: was the
@@ -17120,6 +17182,9 @@ class SyncProgressEvent(BaseModel):
     duration_sec: float
     client_updated_at: str                       # when watched on the device (ISO)
     base_synced_at: Optional[str] = None         # device's last sync of THIS file (ISO)
+    # Seconds genuinely played, measured on the device by watchrule's rule (17.5.0+
+    # app builds). Absent from older builds → tail test only. See watchrule.py.
+    played_sec: Optional[float] = None
     subtitle_sel: Optional[dict] = None          # preserved track picks (optional)
     audio_sel: Optional[dict] = None
     local_audio_idx: Optional[int] = None
@@ -17172,7 +17237,8 @@ async def sync_progress(req: SyncProgressReq, request: Request) -> JSONResponse:
             # measure: tail test only, and the position itself is taken as played
             # so that finishing the episode online later can still complete it.
             ev_played, ev_completed = _offline_watch_state(
-                item, ev.file_path, existing, ev.position_sec, ev.duration_sec, now)
+                item, ev.file_path, existing, ev.position_sec, ev.duration_sec, now,
+                ev.played_sec)
 
             def _apply() -> None:
                 prev = existing or {}
@@ -17309,6 +17375,8 @@ async def sync_pull(req: SyncPullReq, request: Request) -> JSONResponse:
             "position_sec": fp.get("position_sec", 0),
             "duration_sec": fp.get("duration_sec", 0),
             "completed":    bool(fp.get("completed")),
+            # The device seeds its own play count from this (watchrule.played_of).
+            "played_sec":   watchrule.played_of(fp),
             "updated_at":   fp.get("updated_at") or "",
         })
     return JSONResponse({"progress": out})
@@ -17326,6 +17394,7 @@ class SyncResolution(BaseModel):
     audio_sel: Optional[dict] = None
     local_audio_idx: Optional[int] = None
     local_subtitle_idx: Optional[int] = None
+    played_sec: Optional[float] = None           # device-measured play (17.5.0+ builds)
 
 
 class SyncResolveReq(BaseModel):
@@ -17369,7 +17438,7 @@ async def sync_resolve(req: SyncResolveReq, request: Request) -> JSONResponse:
                 pos = max(0.0, _finite(rz.position_sec, 0.0))
                 dur = max(0.0, _finite(rz.duration_sec, 0.0))
                 played, done = _offline_watch_state(item, rz.file_path, existing,
-                                                    pos, dur, now)
+                                                    pos, dur, now, rz.played_sec)
                 merged = {
                     "position_sec": round(pos, 1),
                     "duration_sec": round(dur, 1),
@@ -17416,6 +17485,7 @@ async def sync_resolve(req: SyncResolveReq, request: Request) -> JSONResponse:
                     "position_sec": float(server_view.get("position_sec", 0) or 0),
                     "duration_sec": float(server_view.get("duration_sec", 0) or 0),
                     "completed": bool(server_view.get("completed")),
+                    "played_sec": watchrule.played_of(server_view),
                 },
             })
 
@@ -30981,6 +31051,7 @@ async def bundle_manifest(item_id: str, request: Request, file_path: str = "", p
                 "position_sec": fp.get("position_sec", 0),
                 "duration_sec": fp.get("duration_sec", 0),
                 "completed":    bool(fp.get("completed")),
+                "played_sec":   watchrule.played_of(fp),
                 "updated_at":   fp.get("updated_at") or "",
             }
 

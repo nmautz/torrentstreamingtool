@@ -1713,7 +1713,7 @@ The fix is a second, independent fact: **`played_sec`**, accrued per write as th
 - **Never write `pos = dur` to "credit" something.** `_handle_playback_ended` did, for a VLC that went idle — which is also what a crash, a closed window or a still-downloading file running out of bytes looks like. Pass the real position; a genuine end is inside the tail anyway. (The device player's `_lpAdvanceOrEnd` still posts `(d, d)` on a real `ended` — harmless now, because the played-time half can't be bought by it.)
 - **"Leaving for the next episode" is not "finished".** Finalise at the live position and let the rule decide.
 - **`ended` within 2.5 s of a `seeked` is a seek overshoot** — HLS lands a seek on a segment boundary, so asking for 5 s before the end lands on the end. The device player now holds on the last frame instead of advancing (`LP_SEEK_END_GRACE_MS`).
-- **Offline sync can't measure play** — one coalesced position per file — so it keeps the tail test alone. A scrub to the end in the *offline* player still counts until the device sends its own `played_sec`.
+- **The host can't measure offline play** — one coalesced position per file — so from 17.6.0 the iOS `OfflineStore` measures it by the same rule on the device's clock and sends `played_sec`; the host merges by **max**, never sum (the device seeded from the host's count). Its constants are a Swift copy of `watchrule.py`'s — change one, change both. An older app build sends nothing and gets the tail test alone.
 
 ### `/api/state` saying `idle` does not mean nobody is watching
 

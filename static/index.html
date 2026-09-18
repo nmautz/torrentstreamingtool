@@ -17009,6 +17009,8 @@ async function _appFlushOfflineProgress() {
             item_id: e.itemId, file_path: e.filePath,
             position_sec: e.positionSec, duration_sec: e.durationSec,
             client_updated_at: e.clientUpdatedAt, base_synced_at: e.baseSyncedAt || null,
+            // Device-measured play (OfflineStore, 17.5.0+ app); null from older builds.
+            played_sec: (typeof e.playedSec === "number" ? e.playedSec : null),
             subtitle_sel: e.subtitleSel || null,
             audio_sel: e.audioSel || null,
             local_audio_idx: (e.localAudioIdx ?? null),
@@ -17068,6 +17070,8 @@ async function _appSeedFromServer() {
           itemId: p.item_id, filePath: p.file_path,
           positionSec: p.position_sec || 0, durationSec: p.duration_sec || 0,
           completed: !!p.completed, serverUpdatedAt: p.updated_at || "",
+          // Seeds the device's own play count so offline viewing adds to it.
+          ...(typeof p.played_sec === "number" ? { playedSec: p.played_sec } : {}),
           profileId: profile.id,
         });
       } catch (_) {}
@@ -17172,6 +17176,7 @@ async function _appApplyConflictResolutions() {
       position_sec: (ev.positionSec != null ? ev.positionSec : cl.position_sec) || 0,
       duration_sec: (ev.durationSec != null ? ev.durationSec : cl.duration_sec) || 0,
       client_updated_at: ev.clientUpdatedAt || cl.client_updated_at || null,
+      played_sec: (typeof ev.playedSec === "number" ? ev.playedSec : null),
       subtitle_sel: (ev.subtitleSel || null),
       audio_sel: (ev.audioSel || null),
       local_audio_idx: (ev.localAudioIdx ?? null),
@@ -17201,6 +17206,7 @@ async function _appApplyConflictResolutions() {
               itemId: rz.item_id, filePath: rz.file_path,
               positionSec: sv.position_sec || 0, durationSec: sv.duration_sec || 0,
               completed: !!sv.completed, serverUpdatedAt: rz.server_updated_at,
+              ...(typeof sv.played_sec === "number" ? { playedSec: sv.played_sec } : {}),
               profileId: pid, force: true,
             });
           }
@@ -17279,6 +17285,7 @@ async function _appSyncDebug() {
           item_id: e.itemId, file_path: e.filePath,
           position_sec: e.positionSec, duration_sec: e.durationSec,
           client_updated_at: e.clientUpdatedAt, base_synced_at: e.baseSyncedAt || null,
+          played_sec: (typeof e.playedSec === "number" ? e.playedSec : null),
           subtitle_sel: e.subtitleSel || null,
           audio_sel: e.audioSel || null,
           local_audio_idx: (e.localAudioIdx ?? null),
@@ -18271,6 +18278,8 @@ async function appDownloadBundle(itemId, filePath, name, btn, quality) {
             durationSec: manifest.progress.duration_sec || 0,
             completed: !!manifest.progress.completed,
             serverUpdatedAt: manifest.progress.updated_at || "",
+            ...(typeof manifest.progress.played_sec === "number"
+                ? { playedSec: manifest.progress.played_sec } : {}),
             profileId: profile.id,
           });
         } catch (_) {}
@@ -25319,6 +25328,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.5.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.6.0</div>
 </body>
 </html>

@@ -30,9 +30,11 @@ a second and earns only that second. No client has to say which is which, so
 the rule holds for the dashboard, the TV kiosk, the iOS app (web and native
 background) and every stale build of them.
 
-The one exception is the offline batch sync: the device's OfflineStore coalesces
-an offline session into ONE final position, so there is no history to measure
-and `offline_watch_state` falls back to the tail test alone.
+The offline batch sync is the one place the server can't measure: the device's
+OfflineStore coalesces an offline session into ONE final position. So the store
+measures play itself, by this same rule against the device's own clock, and sends
+`played_sec` with each event (`reported_watch_state`). An app build from before
+that sends none, and `offline_watch_state` falls back to the tail test alone.
 
 See docs/LIBRARY_DATA.md and docs/GOTCHAS.md.
 """
@@ -97,6 +99,16 @@ def tail_start(dur: float, credits_start: Optional[float]) -> float:
     return dur * FINISH_TAIL_PCT
 
 
+def played_of(rec: Optional[dict]) -> float:
+    """A record's played time: its `played_sec`, or - for a record written before
+    `played_sec` existed - its position (the old rule believed that was watched).
+    0 for no record. What a client seeds its own measurement from."""
+    if not rec:
+        return 0.0
+    base = rec.get("played_sec")
+    return _num(rec.get("position_sec") if base is None else base)
+
+
 def played_after(prev: Optional[dict], pos: float, at_iso: str) -> float:
     """`played_sec` after a write landing at `pos` at time `at_iso`.
 
@@ -107,8 +119,7 @@ def played_after(prev: Optional[dict], pos: float, at_iso: str) -> float:
     episode could never accrue enough to finish."""
     if not prev:
         return 0.0
-    base = prev.get("played_sec")
-    base = _num(prev.get("position_sec") if base is None else base)
+    base = played_of(prev)
     step = _num(pos) - _num(prev.get("position_sec"))
     then, now = _parse_iso(prev.get("updated_at")), _parse_iso(at_iso)
     if step <= 0 or not (then and now):
@@ -147,3 +158,44 @@ def offline_watch_state(prev: Optional[dict], pos: float, dur: float,
     played, done = watch_state(prev, pos, dur, credits_start, at_iso,
                                measure_play=False)
     return max(played, round(_num(pos), 1)), done
+
+
+def reported_watch_state(prev: Optional[dict], pos: float, dur: float,
+                         credits_start: Optional[float],
+                         reported_played: float) -> tuple[float, bool]:
+    """`watch_state` for a client that measured its own play - the iOS OfflineStore
+    from 17.5.0, which accrues `playedSec` by this module's rule on the device's
+    clock (so no server/device clock skew enters it) and sends it on sync.
+
+    Merged with what the server already credits by MAX, not sum: the device seeds
+    its count from the server's (`played_of`, via /sync/pull), so the two share a
+    baseline and adding them would count that baseline twice - and a re-sent event
+    whose ack was lost would count everything twice. Capped at the duration: a
+    buggy or hostile client can't buy completion with a huge number."""
+    prev = prev or {}
+    played = round(min(max(played_of(prev or None), _num(reported_played)),
+                       max(_num(dur), played_of(prev or None))), 1)
+    if prev.get("completed"):
+        return played, True
+    if dur <= 0 or pos < tail_start(dur, credits_start):
+        return played, False
+    return played, played >= dur * MIN_PLAYED_PCT
+
+
+def legacy_stopped_in_tail(rec: dict, credits_start: Optional[float]) -> bool:
+    """Whether a pre-17.5.0 record is a finished episode the old rule missed.
+
+    The old no-credits rule wanted the last 10 s, so an episode stopped in its
+    ending theme (93 % of Hunter x Hunter S01E02) stayed unwatched. Such a record
+    is recognisable: no `played_sec` (written before it existed), not completed,
+    and parked inside today's tail. Nothing before 17.5.0 recorded how it got
+    there, so this trusts the position - exactly what `played_after` does on the
+    record's next write anyway (seeded from a position >= 90 %, it clears both
+    tests at once). The backfill applies that now instead of on the next play.
+    A record WITH `played_sec` never qualifies: sitting in the tail without
+    enough play is precisely what a scrub looks like now."""
+    if not isinstance(rec, dict) or "played_sec" in rec or rec.get("completed"):
+        return False
+    dur = _num(rec.get("duration_sec"))
+    pos = _num(rec.get("position_sec"))
+    return dur > 0 and tail_start(dur, credits_start) <= pos <= dur

@@ -213,6 +213,60 @@ played, done = wr.offline_watch_state({"position_sec": 900, "played_sec": 1000,
 ok("offline: never lowers credited play", played == 1000.0, repr(played))
 
 
+# ── Offline sync with device-measured play (iOS OfflineStore, 17.5.0+) ─────────
+
+R = wr.reported_watch_state
+played, done = R(None, 1400, DUR, None, 1300)
+ok("device: watched offline, reached the tail -> completes", done and played == 1300.0,
+   repr((played, done)))
+played, done = R(None, 1410, DUR, None, 45)
+ok("device: scrubbed to the end offline -> not watched", not done and played == 45.0,
+   repr((played, done)))
+played, done = R({"position_sec": 700, "played_sec": 900, "updated_at": iso(0)},
+                 1300, DUR, None, 300)
+ok("device: merged with the host by max, not sum", played == 900.0 and done,
+   repr((played, done)))
+played, _ = R(None, 1400, DUR, None, 99999)
+ok("device: an absurd count is capped at the duration", played == DUR, repr(played))
+played, done = R({"position_sec": 600, "duration_sec": DUR, "updated_at": iso(0)},
+                 1350, DUR, None, 200)
+ok("device: a legacy host record still seeds from its position",
+   played == 600.0 and not done, repr((played, done)))
+ok("played_of: stored value, legacy position, nothing",
+   wr.played_of({"played_sec": 12, "position_sec": 99}) == 12.0
+   and wr.played_of({"position_sec": 99}) == 99.0 and wr.played_of(None) == 0.0)
+
+
+# ── One-shot backfill of pre-17.5.0 stops in the tail ────────────────────────
+
+L = wr.legacy_stopped_in_tail
+ok("backfill: HxH E02 stopped at 93 % qualifies",
+   L({"position_sec": 1321.5, "duration_sec": DUR, "completed": False}, None))
+ok("backfill: stopped at 78 % does not",
+   not L({"position_sec": 1115.7, "duration_sec": DUR, "completed": False}, None))
+ok("backfill: already completed does not",
+   not L({"position_sec": 1321.5, "duration_sec": DUR, "completed": True}, None))
+ok("backfill: a record carrying played_sec never does (that's a scrub now)",
+   not L({"position_sec": 1321.5, "duration_sec": DUR, "completed": False,
+          "played_sec": 40}, None))
+ok("backfill: detected credits move the tail (before it)",
+   not L({"position_sec": 1270, "duration_sec": DUR, "completed": False}, 1290.0))
+ok("backfill: detected credits move the tail (inside it)",
+   L({"position_sec": 1285, "duration_sec": DUR, "completed": False}, 1290.0))
+ok("backfill: no duration does not",
+   not L({"position_sec": 1321.5, "duration_sec": 0, "completed": False}, None))
+ok("backfill: position past duration (corrupt) does not",
+   not L({"position_sec": DUR + 50, "duration_sec": DUR, "completed": False}, None))
+ok("backfill: track-pref-only stub does not",
+   not L({"subtitle_sel": {"off": True}}, None))
+ok("backfill: non-dict does not", not L(None, None) and not L("x", None))
+# The backfill must agree with what the record's next live write would decide.
+legacy = {"position_sec": 1321.5, "duration_sec": DUR, "completed": False,
+          "updated_at": iso(0)}
+_, next_write_done = wr.watch_state(legacy, 1321.5, DUR, None, iso(1))
+ok("backfill: agrees with the next write's verdict", L(legacy, None) == next_write_done)
+
+
 print("%d passed, %d failed" % (_PASS, len(_FAIL)))
 for f in _FAIL:
     print("  FAIL", f)

@@ -1,5 +1,24 @@
 # Changelog
 
+## [17.6.0] — 2026-09-18
+**The two loose ends of 17.5.0: episodes already stuck at "unwatched", and offline viewing.**
+
+* **Episodes you stopped in the ending theme before 17.5.0 are now marked watched.** The old
+  rule wanted the last 10 seconds, so an episode stopped during its ED (Hunter x Hunter
+  S01E02 at 93 %) sat unwatched and kept coming back as the resume target. A one-time pass on
+  startup applies the new rule to those old records, for every profile — the same verdict
+  their next play would have reached, just now. It only touches records written before
+  17.5.0; anything newer that sits near the end without enough time played is what a scrub
+  looks like, and stays as it is.
+* **Offline viewing on the iPhone now counts play time too.** A downloaded episode watched
+  offline reaches the server as a single final position, so the server couldn't tell watching
+  it from scrubbing to the end — 17.5.0 left that path position-only. The app's offline store
+  now measures play itself, by the same rule on the phone's own clock, and sends it when it
+  syncs; the phone's own "watched" marks follow the same rule. Older app builds keep working
+  and simply sync position-only.
+* `watchrule.py` gains the pieces both need (`legacy_stopped_in_tail`,
+  `reported_watch_state`, `played_of`); `tests/test_watchrule.py` is 48 cases.
+
 ## [17.5.0] — 2026-09-18
 **"Watched" now means you watched it, not that the playhead got near the end.**
 
