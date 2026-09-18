@@ -1,5 +1,45 @@
 # Changelog
 
+## [17.5.0] — 2026-09-18
+**"Watched" now means you watched it, not that the playhead got near the end.**
+
+Driven live against the box on a 23-minute Hunter x Hunter episode nobody had watched, four
+ordinary actions marked it watched: scrubbing into the last few seconds on the TV (VLC ran out
+the file and the session ended); scrubbing into the last ~10 s on the device player (credited
+instantly, zero playback); scrubbing to the very end on the device (credited **and** rolled
+into the next episode, so the scrub back went into the wrong one); and pressing **Next 33 s
+in** on the TV (credited a minute later). A plain Stop mid-episode was always fine. Every
+completion rule until now tested *where the playhead was* — and it gets to the end the same
+way whether you watched the episode or dragged the bar there.
+
+* **Completion now also needs time actually played.** Each progress write accrues
+  `played_sec` — the position advance since the last write, capped by the wall clock between
+  them — so playback counts and a seek earns about a second. An episode completes when it
+  reached its tail **and** at least 60 % of it was played. Nothing on the client has to change,
+  so it holds on the TV, the dashboard, the TV kiosk, the iOS app and stale builds of each.
+  New pure module `watchrule.py`, unit-tested against the exact sequences measured live
+  (`tests/test_watchrule.py`, 31 cases).
+* **Pressing Next / skipping credits no longer marks the episode you left watched from any
+  position.** The 60 s deferred-watch timer is gone; leaving an episode records where you
+  were, and it counts as watched only if you'd played into its tail. The TV now behaves like
+  the device player always did.
+* **VLC going idle is no longer "finished".** A crash, a closed VLC window or a
+  still-downloading file running out of bytes were all credited at 100 % and lost their
+  resume point. The real last position is kept now.
+* **Stopping in the ending theme now counts.** With no detected credits the tail used to be
+  the last 10 s, which almost nobody reaches — an anime episode stopped in its ED at 93 %
+  stayed unwatched forever. It's the last 10 % now (safe only because a scrub can no longer
+  buy it).
+* **Device player: scrubbing to the very end holds on the last frame** instead of rolling
+  into the next episode.
+* **Watched episodes stay in the episode list, in order.** They used to fold into a collapsed
+  "Watched" section at the bottom, which read as episodes going missing. Now what's left to
+  watch carries a bright bar and what's done recedes to grey.
+* Existing progress is untouched. Records from before this seed their played time from their
+  saved position, so a half-watched episode can still be finished. Offline-downloaded
+  playback on the iOS app syncs a single position per episode, so it keeps the position-only
+  test for now.
+
 ## [17.4.2] — 2026-09-18
 **Two ways Get could hand you the wrong file, both found by measuring rather than reading.**
 

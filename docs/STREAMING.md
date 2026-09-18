@@ -1543,7 +1543,17 @@ write doesn't wipe any track-pref system. The canonical list is
 
 When `<video>` fires `ended`, `_lpAdvanceOrEnd` saves a final 100% progress
 write, increments `lp.pi`, and calls `_lpLoadIndex(0)`. That re-runs the
-prep flow for the next file. If the next episode has already been prepped,
+prep flow for the next file. The 100% write does **not** by itself make the
+episode watched — the server also requires `played_sec` (see
+[LIBRARY_DATA.md § What counts as watched](LIBRARY_DATA.md)).
+
+**`ended` right after a seek is not the end of watching (17.5.0).** HLS lands a
+seek on a segment boundary, so asking for 5 s before the end lands *on* the end
+and fires `ended`. Measured live, that rolled the viewer into the next episode
+mid-scrub, so their scrub back landed in the wrong one. The `seeked` listener
+stamps `lp.lastSeekAt`; an `ended` within `LP_SEEK_END_GRACE_MS` (2.5 s) of it
+just holds on the last frame with the controls up — Next or the scrub bar take
+it from there. If the next episode has already been prepped,
 playback resumes within a network round-trip; otherwise the user sees the
 same "Building stream…" overlay.
 

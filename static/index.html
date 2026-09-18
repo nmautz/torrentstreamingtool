@@ -143,6 +143,17 @@
     .ep-prog-bar { position:absolute; left:0; right:0; bottom:0; height:3px;
                    background:rgba(0,0,0,.4); }
     .ep-prog-fill { height:100%; background:#22c55e; }
+    /* Watched state, in one list in episode order. What's left to watch (untouched
+       or part-way) carries a bright bar; what's done recedes to grey. The bar is an
+       inset shadow, not a border, so neither state shifts the card's content. Near-
+       white rather than indigo: indigo is the TV D-pad focus ring and the playing
+       row, and an "unwatched" bar in that colour read as focus on the TV. */
+    .ep-card.ep-unwatched { box-shadow: inset 3px 0 0 #e5e7eb; }
+    .ep-card.ep-watched   { box-shadow: inset 3px 0 0 #374151; }
+    .ep-card.ep-watched .ep-title        { color:#9ca3af; font-weight:600; }
+    .ep-card.ep-watched .ep-still img    { filter:grayscale(.75); opacity:.5; }
+    .ep-card.ep-watched p                { color:#6b7280; }
+    .ep-card.ep-watched .ep-prog-fill    { background:#15803d; }
     /* An episode/season the show HAS but this box hasn't downloaded. Same card
        geometry as a real episode so the list reads as one run; drained of colour
        and with no play affordance so it can't be mistaken for something playable. */
@@ -4216,7 +4227,6 @@ let epHeroTitle = "";      // fallback title for late metadata repaints (SSE)
 let _epMetaRetryTimer = null; // fallback re-pull while server metadata fetch is pending
 let epCurrentSeason = 0;   // active season tab; 0 = "all" / no season info
 let epSeasonList = [];     // sorted seasons present in epFiles (positive ints only)
-let epWatchedExpanded = new Set(); // season keys whose watched-episode section is expanded
 let epHasTorrent = false;  // item has a qBit torrent → download-scheduling controls apply
 let epDownloadMode = "now"; // item-level download mode (now | idle) from /files
 let epPrepPrioDefault = "mid"; // item/series-level stream-prep queue priority default
@@ -4275,6 +4285,9 @@ let lp = {
   // reset the media element while suspended — reading currentTime at that moment
   // would restart playback (and the next progress save) at the beginning.
   lastKnownT: 0,
+  // Date.now() of the last completed seek. `ended` inside LP_SEEK_END_GRACE_MS of
+  // one is the scrub bar overshooting the final segment, not the end of watching.
+  lastSeekAt: 0,
   // Streaming mode: "bundle" (a fully-prepped .offline_cache/<sha>/ HLS bundle)
   // or "ondemand" (just-in-time — segments transcoded as the player requests
   // them, used when the file isn't fully prepped yet). See STREAMING.md.
@@ -9978,7 +9991,7 @@ function closeEpisodePage(){
   document.body.style.overflow="";
   epItemId=null; epSeriesKey=null; epFileItem={}; _epSeriesResume=null;
   epFiles=[]; epChecked=new Set();
-  epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[]; epWatchedExpanded=new Set();
+  epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[];
   epHeroTitle=""; clearTimeout(_epMetaRetryTimer); _epMetaRetryTimer=null;
   epIsMovie=false; _epApplyMovieChrome(false);
 }
@@ -10517,20 +10530,23 @@ function _epCardHtml(f){
   // Headline: "S01·E02 · Episode Title" if title present, else just "S01E02"
   let headline;
   if(f.season&&f.episode && epName){
-    headline = `<span class="text-[10px] sm:text-xs font-mono text-indigo-400 mr-1">S${pad2(f.season)}·E${pad2(f.episode)}</span><span class="text-sm sm:text-base font-bold text-gray-100">${escHtml(epName)}</span>`;
+    headline = `<span class="text-[10px] sm:text-xs font-mono text-indigo-400 mr-1">S${pad2(f.season)}·E${pad2(f.episode)}</span><span class="ep-title text-sm sm:text-base font-bold text-gray-100">${escHtml(epName)}</span>`;
   } else if(f.season&&f.episode){
-    headline = `<span class="text-sm sm:text-base font-mono font-bold text-gray-100">S${pad2(f.season)} · E${pad2(f.episode)}</span>`;
+    headline = `<span class="ep-title text-sm sm:text-base font-mono font-bold text-gray-100">S${pad2(f.season)} · E${pad2(f.episode)}</span>`;
   } else if(epName){
-    headline = `<span class="text-sm sm:text-base font-bold text-gray-100">${escHtml(epName)}</span>`;
+    headline = `<span class="ep-title text-sm sm:text-base font-bold text-gray-100">${escHtml(epName)}</span>`;
   } else {
-    headline = `<span class="text-sm sm:text-base text-gray-200 truncate">${escHtml(f.name)}</span>`;
+    headline = `<span class="ep-title text-sm sm:text-base text-gray-200 truncate">${escHtml(f.name)}</span>`;
   }
 
   const subOverview = overview
     ? `<p class="text-[11px] sm:text-xs text-gray-400 mt-1 line-clamp-2">${escHtml(overview)}</p>`
     : `<p class="text-[11px] text-gray-600 mt-1 truncate font-mono">${escHtml(f.name)}</p>`;
 
-  return `<div class="ep-card px-2 sm:px-5 ${isNowPlaying?'playing':''} ${notDownloaded?'opacity-60':''}" data-path="${escHtml(f.path)}">
+  // Watched recedes, everything still to watch (untouched or part-way) carries the
+  // accent bar. The playing row keeps its own highlight instead.
+  const watchCls = isNowPlaying ? "" : (isComplete ? "ep-watched" : "ep-unwatched");
+  return `<div class="ep-card px-2 sm:px-5 ${isNowPlaying?'playing':''} ${watchCls} ${notDownloaded?'opacity-60':''}" data-path="${escHtml(f.path)}">
       <!-- Still / thumbnail; click plays from this episode. A not-yet-downloaded
            torrent-backed file streams NOW (sequential fetch → play when buffered);
            only a compressed/torrentless missing file stays unplayable. -->
@@ -11380,11 +11396,6 @@ function renderEpList(){
     updateEpCount(); return;
   }
 
-  const unwatched = visibleFiles.filter(f=>!f.progress?.completed);
-  const watched   = visibleFiles.filter(f=> f.progress?.completed);
-  const seasonKey = epCurrentSeason;
-  const watchedExpanded = epWatchedExpanded.has(seasonKey);
-
   let html = "";
   // Optional: season-level header with TMDb season overview when present
   if(epSeasonList.length){
@@ -11556,7 +11567,7 @@ function renderEpList(){
     // The heading spans both columns so the grid stays aligned. No missing-row
     // interleave here — a diff only ever runs on a real season.
     let lastBucket=null;
-    unwatched.forEach(f=>{
+    visibleFiles.forEach(f=>{
       const b=f.bucket||"";
       if(b!==lastBucket){
         html += `<h3 class="xl:col-span-2 px-3 sm:px-5 pt-4 pb-2 text-[10px] font-black text-gray-500 uppercase tracking-widest border-b border-gray-800">${escHtml(b||"Other")}</h3>`;
@@ -11565,11 +11576,13 @@ function renderEpList(){
       html += _epCardHtml(f);
     });
   } else {
-    // Missing episodes ride in the unwatched grid, interleaved by episode number:
-    // the union IS the list, so a gap mid-season reads as a gap instead of the list
-    // closing over it. Only re-sorted when there's something to interleave, so a
-    // fully-downloaded season keeps exactly the order it had before.
-    const rows = unwatched.map(f=>({ep:+f.episode||0, html:_epCardHtml(f)}))
+    // One list, in episode order: watched episodes stay where they are (styled to
+    // recede, see .ep-watched) instead of being folded into a collapsed section at
+    // the bottom, where a finished episode vanishing from its place read as it
+    // having gone missing. Missing episodes interleave by episode number, so a gap
+    // mid-season reads as a gap. Only re-sorted when there's something to
+    // interleave, so a fully-downloaded season keeps exactly its natural order.
+    const rows = visibleFiles.map(f=>({ep:+f.episode||0, html:_epCardHtml(f)}))
       .concat(missingEps.map(te=>({ep:+te.episode||0,
                                    html:_epMissingCardHtml(epCurrentSeason, te)})));
     if(missingEps.length) rows.sort((a,b)=>a.ep-b.ep);
@@ -11577,31 +11590,11 @@ function renderEpList(){
   }
   html += `</div>`;
 
-  if(watched.length){
-    html += `<button class="w-full flex items-center justify-between px-3 sm:px-5 py-3 bg-gray-900/60 text-gray-500 hover:text-gray-300 hover:bg-gray-800/60 transition-colors border-t border-gray-800"
-               onclick="epToggleWatchedSection(${seasonKey})">
-               <span class="text-[11px] font-bold uppercase tracking-widest"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg> Watched · ${watched.length}</span>
-               <svg class="w-4 h-4 transition-transform ${watchedExpanded?'rotate-180':''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
-               </svg>
-             </button>`;
-    if(watchedExpanded){
-      html += `<div class="grid grid-cols-1 xl:grid-cols-2 items-start opacity-70">`;
-      watched.forEach(f=>{ html += _epCardHtml(f); });
-      html += `</div>`;
-    }
-  }
-
   el.innerHTML=html;
   updateEpCount();
   applyVpnGate();   // title the recheck button if it rendered while VPN is down
 }
 
-function epToggleWatchedSection(seasonKey){
-  if(epWatchedExpanded.has(seasonKey)) epWatchedExpanded.delete(seasonKey);
-  else epWatchedExpanded.add(seasonKey);
-  renderEpList();
-}
 
 function epToggle(cb){
   const path=cb.dataset.path;
@@ -23948,6 +23941,7 @@ function lpDismissSkipOffer() {
   _lpHideSkipOffer();
 }
 
+const LP_SEEK_END_GRACE_MS = 2500;   // see the `ended` listener in _lpAttachVideoEvents
 async function _lpAdvanceOrEnd() {
   const v = document.getElementById("lpVideo");
   const d = v.duration || lp.duration || 0;
@@ -24198,8 +24192,17 @@ function _lpAttachVideoEvents() {
   // An iOS suspend reset never fires `seeked`, so it can't sneak in here.
   // _lpCtlTick here repaints the bar at the landed position immediately — during
   // an MMS timeupdate gap the next natural repaint could otherwise be seconds out.
-  v.addEventListener("seeked", () => { lp.lastKnownT = v.currentTime || 0; _lpCtlTick(); _lpFlushProgress(false); _npArm(); });
-  v.addEventListener("ended", () => { _lpAdvanceOrEnd(); });
+  v.addEventListener("seeked", () => { lp.lastKnownT = v.currentTime || 0; lp.lastSeekAt = Date.now(); _lpCtlTick(); _lpFlushProgress(false); _npArm(); });
+  // `ended` straight after a seek is the scrub bar overshooting the last HLS
+  // segment — asking for 5 s before the end lands ON the end — not the viewer
+  // finishing the episode. Measured live (17.5.0): it rolled straight into the
+  // next episode, so the viewer's scrub back landed in the wrong one. Hold on
+  // the last frame with the controls up; Next or the scrub bar go from there.
+  // (Whether it counts as watched is the server's call — see watchrule.py.)
+  v.addEventListener("ended", () => {
+    if (Date.now() - (lp.lastSeekAt || 0) < LP_SEEK_END_GRACE_MS) { _lpCtlSync(); _lpCtlShow(); return; }
+    _lpAdvanceOrEnd();
+  });
   // On-demand: when playback stalls waiting for data (initial start, or a seek
   // into a not-yet-generated region) the segment request is being held open
   // server-side while ffmpeg transcodes that part. Surface a light "Loading…"
@@ -25316,6 +25319,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.4.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.5.0</div>
 </body>
 </html>

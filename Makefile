@@ -13,6 +13,7 @@ test:
 	python3 tests/test_tmdbcache.py
 	python3 tests/test_animemap.py
 	python3 tests/test_http_clients.py
+	python3 tests/test_watchrule.py
 
 clean:
 	rm -rf .venv __pycache__ .env

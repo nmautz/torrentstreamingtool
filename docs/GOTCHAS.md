@@ -1661,7 +1661,7 @@ collection film drops the absorption and pins the remaining films explicitly.
 
 ### Frontend drops saveProgress writes under t=5 s
 
-The server recomputes `completed` on every `/api/library/{id}/progress` write as `pct = position/duration > 0.92`. A save at `t≈0` therefore wipes a previously-watched episode back to unwatched. The local player can fire those near-zero writes from at least three places: the very first `timeupdate` event before the resume seek lands, the `pause` event that browsers fire during initial load, and `lpStop` if the user opens the player and closes immediately. `saveProgress` and `_lpFlushProgress` both early-return when `posSec < 5` to keep watched marks stable. The 5 s threshold matches the resume hint's "meaningful in-progress" cutoff, so dropping these writes also has no resume-UX cost.
+Originally the server recomputed `completed` from `position/duration` on every `/api/library/{id}/progress` write, so a save at `t≈0` wiped a watched episode back to unwatched. `completed` is monotonic now (see "A position is not evidence" below), but a t≈0 write still destroys the **resume point**. The local player can fire those near-zero writes from at least three places: the very first `timeupdate` event before the resume seek lands, the `pause` event that browsers fire during initial load, and `lpStop` if the user opens the player and closes immediately. `saveProgress` and `_lpFlushProgress` both early-return when `posSec < 5` to keep watched marks stable. The 5 s threshold matches the resume hint's "meaningful in-progress" cutoff, so dropping these writes also has no resume-UX cost.
 
 ### `profile_id` is a claim, not proof — elevation and deletes need a PIN-verified session token
 
@@ -1694,15 +1694,36 @@ The tokens are **persisted** (`profile_sessions.json`, gitignored), unlike `_adm
 
 Client side: `static/index.html` attaches the header in a single same-origin `fetch` wrapper, so call sites don't have to know. `GET /api/profiles` echoes `verified_profile_id`, and the UI clears a token the server no longer recognises — without that, an expired session degrades into "some content is missing and deletes fail" with no prompt to re-enter the PIN.
 
-### "Watched" has one rule — the outro window — and client-reported positions must use it too
+### A position is not evidence — "watched" needs time actually played (17.5.0)
 
-Host playback credits a file only when playback reached the **outro**: `_position_is_finished()`, a 10 s window before the detected `credits_start`, or before the real end when no credits were detected. That's deliberate (see the comments on `_finalize_stopped_file`) — an episode stopped in the middle, even well past the old 0.92 mark, stays resumable.
+Until 17.5.0 every completion rule — the outro window, and the flat `pct > 0.92` before it — was a test on **where the playhead is**. The playhead reaches the end identically whether the episode was watched or the scrub bar was dragged there, so any seek near the end credited the episode, and `completed` is monotonic, so nothing ever took it back. Driven live against the box on a 23:36 Hunter x Hunter episode nobody had watched:
 
-The client-reported paths didn't follow it. `POST /api/library/{id}/progress` (the on-device player), `POST /api/sync/progress` (iOS batch sync) and `POST /api/sync/resolve` all used a flat `pct > 0.92`. Same profile, same file, two different answers: on a 45-minute episode the two rules sit **~3.4 minutes apart**, so finishing on the phone marked it watched while stopping at the same position on the TV left it resumable — and the resume hint then jumped back into an episode the viewer considered done.
+| Action | Before 17.5.0 |
+|---|---|
+| VLC: scrub to 99.6 % | VLC ran out the last ~6 s, the playlist ended, `_handle_playback_ended` wrote `pos == dur`, **watched**, session over |
+| Device: scrub to d−10 | the HLS seek landed at d−5.7 and the `seeked` flush credited it **instantly** — zero playback |
+| Device: scrub to d−5 | landed **on** d, the element fired `ended`: **watched** AND auto-advanced into the next episode, so the scrub back went into the wrong one |
+| VLC: Next, 33 s in | **watched** 60 s later — `_arm_credit_skip_watch` credited "moved on" from any position |
+| Device: Next, 24 s in | correctly unwatched (the phone and the TV disagreed) |
+| Either: plain Stop mid-episode | correctly unwatched |
 
-All three now go through **`_device_reported_finished(item, file_path, pos, dur)`**, which canonicalises the path (clients key progress by whatever path they were handed, and the `credits_start` lookup needs the stored form) and defers to `_position_is_finished`. If you add another surface that reports a position, use it — don't reintroduce a percentage.
+The fix is a second, independent fact: **`played_sec`**, accrued per write as the position advance capped by the wall clock since the previous write (`watchrule.py`; rules in [LIBRARY_DATA.md § What counts as watched](LIBRARY_DATA.md)). A file completes when it reached its tail **and** `played_sec ≥ 0.6 × duration`. Rules for anything you add:
 
-`completed` stays **monotonic** everywhere regardless: a late or out-of-order position must never un-finish an episode.
+- **Every writer that records a position goes through `_watch_state`** (or `_offline_watch_state` for a single coalesced position). Don't compute `completed` inline, and don't reintroduce a percentage.
+- **Never write `pos = dur` to "credit" something.** `_handle_playback_ended` did, for a VLC that went idle — which is also what a crash, a closed window or a still-downloading file running out of bytes looks like. Pass the real position; a genuine end is inside the tail anyway. (The device player's `_lpAdvanceOrEnd` still posts `(d, d)` on a real `ended` — harmless now, because the played-time half can't be bought by it.)
+- **"Leaving for the next episode" is not "finished".** Finalise at the live position and let the rule decide.
+- **`ended` within 2.5 s of a `seeked` is a seek overshoot** — HLS lands a seek on a segment boundary, so asking for 5 s before the end lands on the end. The device player now holds on the last frame instead of advancing (`LP_SEEK_END_GRACE_MS`).
+- **Offline sync can't measure play** — one coalesced position per file — so it keeps the tail test alone. A scrub to the end in the *offline* player still counts until the device sends its own `played_sec`.
+
+### `/api/state` saying `idle` does not mean nobody is watching
+
+`stream_status` describes **VLC / the TV surface**. On-device playback (a phone, a tablet, the dashboard's local player) streams from the box without touching it, so a household member can be mid-episode while `/api/state` reads `idle, active_title: null`. The 17.5.0 completion testing started VLC plays on the TV while someone was watching Hunter x Hunter on their phone — it only showed up afterwards as a steady 15 s cadence of `POST …/progress` from their IP in `access.log`. Before driving playback on the box, check that too:
+
+```bash
+curl -sk https://<box>/api/admin/logs/access.log -H "Authorization: Bearer $TOK" | grep "/progress" | tail
+```
+
+Writes from another IP in the last minute mean someone is watching.
 
 ### `_current_playback_path()` returns None while the idle background video is on screen
 

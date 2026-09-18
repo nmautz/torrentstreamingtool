@@ -62,6 +62,7 @@ import subpack
 import tmdbcache
 import updater
 import vpncheck
+import watchrule
 import winaccept_patch
 
 # Harden the Windows Proactor accept loop before uvicorn starts serving: a
@@ -1288,8 +1289,6 @@ class AppState:
     skip_countdown: Optional[dict] = None                 # {"type", "file_path", "n"} active auto-skip countdown (TV marquee)
     skip_countdown_task: Optional[asyncio.Task] = None    # in-flight countdown coroutine
     resume_offer: Optional[dict] = None                   # {"position_sec": N, "file_path": "..."} when resume_mode="prompt"
-    pending_watch: Optional[dict] = None                  # {"item_id","profile_id","file_path","duration_sec"} deferred "mark watched" armed when the viewer skips to the next episode from any position. Cleared if they return to that file.
-    pending_watch_task: Optional[asyncio.Task] = None     # in-flight grace-period coroutine for pending_watch (one at a time)
     analysis_jobs: dict = field(default_factory=dict)     # series_key → {status, stage, current, total, message, item_ids, started_at, finished_at}
     # Ring buffer of Smart Skip events (most recent first). Each entry:
     # {ts, level: "info"|"warn"|"error", series_key, item_id, file_path,
@@ -8457,9 +8456,12 @@ async def _handle_playback_ended() -> bool:
     loop retried every 3 s forever and never won, so the TV kept a dead VLC on screen
     and only a manual Stop (or starting something else) broke the cycle.
 
-    Reaching the end of the media counts as watched, so the finalise below uses the
-    last good position/duration pair — VLC zeroes both at EOF, and
-    `_finalize_stopped_file` ignores a zero duration.
+    The finalise below uses the last good position/duration pair — VLC zeroes both
+    at EOF, and `_finalize_stopped_file` ignores a zero duration. It passes the
+    REAL last position, never `dur`: "VLC went idle" is also what a crash, a closed
+    VLC window, or a still-downloading file running out of bytes looks like, and
+    crediting those at 100 % marked an episode watched and threw its resume point
+    away. A genuine end has the last 2 s sample inside the tail anyway.
     """
     # On-device TV playback deliberately leaves VLC idle, so "VLC stopped" says
     # nothing about whether the episode ended. The page reports its own end.
@@ -8474,10 +8476,7 @@ async def _handle_playback_ended() -> bool:
     fin_pos  = state.last_play_pos
     fin_dur  = state.last_play_dur
     if item_id and profile and fin_file and fin_dur > 0:
-        # Credit the outro rather than the last sampled position: the 2 s poll can
-        # sit a couple of seconds short of the end, which is enough to fall outside
-        # STOP_OUTRO_WINDOW_SEC and leave a fully-watched file resumable.
-        await _finalize_stopped_file(item_id, profile, fin_file, fin_dur, fin_dur)
+        await _finalize_stopped_file(item_id, profile, fin_file, fin_pos, fin_dur)
 
     log.info("Playback ended (VLC idle) — returning to idle surface: %s",
              state.active_title or fin_file or "?")
@@ -11246,20 +11245,14 @@ def _intro_skip_at(start: float, end: float) -> float:
     """Playback position at which an intro skip should fire."""
     return min(start + SKIP_INTRO_START_PAD_SEC, end)
 
-# Deferred "mark watched" on skip-to-next-episode. When the viewer advances to
-# the next episode, treat the current one as finished — regardless of how far in
-# they were when they skipped. We arm a grace timer instead of marking
-# immediately: if they were actually skipping real content (or skipped by
-# mistake), the viewer comes back to that file within the window and we leave
-# their real progress alone. If they don't return, we mark it watched.
-CREDIT_SKIP_WATCH_DELAY_SEC = 60   # grace period before marking watched
-# A stop / supersede / periodic save counts a file finished only once playback
-# has reached the OUTRO: within this many seconds of the detected credits start,
-# or — when no credits were detected — within this many seconds of the file's
-# real end. Deliberately tighter than a blanket %-of-duration: stopping mid-
-# episode (even well past the old 0.92 mark) leaves the file resumable; only
-# reaching the outro credits it.
-STOP_OUTRO_WINDOW_SEC = 10
+# ── What counts as "watched" ─────────────────────────────────────────────────
+# The rule lives in watchrule.py (pure, unit-tested): an episode completes only
+# when the playhead reaches its tail AND enough of it was genuinely PLAYED — the
+# position alone can't tell watching up to the end from scrubbing there. These
+# wrappers only add the file's detected `credits_start`. Every writer that records
+# a playback position goes through them: the VLC tracker's periodic save, Stop /
+# supersede / end-of-playlist finalisation, the on-device and native POSTs, and
+# the offline sync. See docs/LIBRARY_DATA.md § What counts as watched.
 
 # Track-preference sibling keys carried across every file_progress rewrite, so a
 # periodic/stop/supersede save never clobbers a subtitle/audio pick. See GOTCHAS.md.
@@ -11268,137 +11261,23 @@ _TRACK_PREF_KEYS = ("audio_track", "subtitle_track",
                     "subtitle_sel", "audio_sel", "audio_offset_ms")
 
 
-def _cancel_pending_watch() -> None:
-    """Drop any armed deferred-watch timer (viewer returned, or it's superseded)."""
-    t = state.pending_watch_task
-    state.pending_watch_task = None
-    state.pending_watch = None
-    if t and not t.done():
-        t.cancel()
+def _credits_start_for(item: dict, file_path: str) -> Optional[float]:
+    meta = _find_file_meta(item, _canonical_item_path(file_path, item)) or {}
+    return meta.get("credits_start")
 
 
-def _arm_credit_skip_watch(
-    item_id: Optional[str], profile_id: Optional[str], file_path: Optional[str],
-    pos_sec: float, dur_sec: float,
-) -> None:
-    """Schedule `file_path` to be marked watched after a grace period when the
-    viewer skips away from it to the next episode, from any position. Only one
-    timer is armed at a time — a newer skip supersedes an older pending one.
-
-    Supersession semantics: if a watch is already pending for a *different* file
-    when a new skip arrives, the viewer has skipped forward again without ever
-    returning to that earlier episode. Their intent is unambiguous — they're
-    done with it — so we mark it watched immediately rather than letting its
-    grace timer get silently cancelled (which would lose the watch entirely if
-    they keep skipping faster than the grace period). The new file then begins
-    its own grace period as usual."""
-    if not (item_id and profile_id and file_path) or dur_sec <= 0:
-        return
-    prior = state.pending_watch
-    if prior and prior.get("file_path") != file_path:
-        # Skipped past the prior episode without returning — finish it now.
-        asyncio.create_task(_mark_file_watched_internal(
-            prior["item_id"], prior["profile_id"],
-            prior["file_path"], prior.get("duration_sec", 0) or 0,
-        ))
-    _cancel_pending_watch()
-    state.pending_watch = {
-        "item_id": item_id, "profile_id": profile_id,
-        "file_path": file_path, "duration_sec": round(dur_sec, 1),
-    }
-    state.pending_watch_task = asyncio.create_task(
-        _credit_skip_watch_grace(item_id, profile_id, file_path, dur_sec)
-    )
+def _watch_state(item: dict, file_path: str, prev: Optional[dict],
+                 pos: float, dur: float, at_iso: str) -> tuple[float, bool]:
+    """(played_sec, completed) for a live progress write. See watchrule.py."""
+    return watchrule.watch_state(prev, pos, dur,
+                                 _credits_start_for(item, file_path), at_iso)
 
 
-async def _credit_skip_watch_grace(
-    item_id: str, profile_id: str, file_path: str, dur_sec: float,
-) -> None:
-    """Wait out the grace period, then mark `file_path` watched unless the viewer
-    has returned to it (vlc_progress_tracker cancels us on return; this is the
-    backstop check for the case where playback simply stopped on a different
-    file)."""
-    try:
-        await asyncio.sleep(CREDIT_SKIP_WATCH_DELAY_SEC)
-    except asyncio.CancelledError:
-        return
-    cur = state.library_current_file
-    if cur and file_path:
-        try:
-            if Path(cur).resolve() == Path(file_path).resolve():
-                return  # viewer came back to it — leave their real progress alone
-        except OSError:
-            if cur == file_path:
-                return
-    await _mark_file_watched_internal(item_id, profile_id, file_path, dur_sec)
-    if state.pending_watch and state.pending_watch.get("file_path") == file_path:
-        state.pending_watch = None
-        state.pending_watch_task = None
-
-
-async def _mark_file_watched_internal(
-    item_id: str, profile_id: str, file_path: str, dur_sec: float,
-) -> None:
-    """Set completed=True for one file/profile (used by the deferred credit-skip
-    watch). Preserves any saved track prefs; never clobbers an already-completed
-    entry."""
-    async with mutate_library() as lib:
-        item = next((it for it in lib["items"] if it["id"] == item_id), None)
-        if not item:
-            return
-        canon = _canonical_item_path(file_path, item)
-        prof_prog = item.setdefault("progress", {}).setdefault(profile_id, {})
-        file_prog = prof_prog.setdefault("file_progress", {})
-        existing = file_prog.get(canon) or file_prog.get(file_path) or {}
-        if existing.get("completed"):
-            return
-        dur = existing.get("duration_sec") or dur_sec or 0
-        file_prog[canon] = {
-            "position_sec": round(dur, 1),
-            "duration_sec": round(dur, 1),
-            "completed": True,
-            "updated_at": _now_iso(),
-            **{k: v for k, v in existing.items() if k in _TRACK_PREF_KEYS},
-        }
-    await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "ready")})
-
-
-def _position_is_finished(item: dict, file_path: str, pos: float, dur: float) -> bool:
-    """Whether a stop/supersede/periodic-save at `pos` should count the file as
-    finished — i.e. playback reached the outro.
-
-    Finished only when `pos` is within `STOP_OUTRO_WINDOW_SEC` of the outro: the
-    detected `skip_data[...].credits_start`, or the file's real end when no
-    credits were detected. Completion is tied to the outro, not an arbitrary
-    fraction — an episode the viewer stopped in the middle of (even past the old
-    0.92 mark) stays resumable, which is the behaviour requested for a plain
-    Stop. The next-episode / credit-skip path finalises via its own grace timer,
-    so this stricter rule doesn't affect skip-to-next completion."""
-    if dur <= 0:
-        return False
-    meta = _find_file_meta(item, file_path) or {}
-    cs = meta.get("credits_start")
-    outro = float(cs) if cs else dur
-    return pos >= outro - STOP_OUTRO_WINDOW_SEC
-
-
-def _device_reported_finished(item: dict, file_path: str,
-                              pos: float, dur: float) -> bool:
-    """Completion rule for positions reported by a CLIENT (on-device player, iOS
-    batch sync, sync conflict resolution) — the same outro test the host uses.
-
-    These paths used to credit a file at a flat `pct > 0.92`, while VLC playback on
-    the host required reaching the outro (`_position_is_finished`, a 10 s window
-    before `credits_start` or the real end). Same profile, same file, two different
-    answers: stopping a 45-minute episode at 93% marked it watched on the phone and
-    left it resumable on the TV, ~3.4 minutes apart. The host rule is the intended
-    one — see the comments on `_position_is_finished` — so it wins everywhere.
-
-    `file_path` is canonicalised first: clients key progress by the path they were
-    handed, which may not be the exact string stored in `item["files"]`, and the
-    credits lookup needs the stored form.
-    """
-    return _position_is_finished(item, _canonical_item_path(file_path, item), pos, dur)
+def _offline_watch_state(item: dict, file_path: str, prev: Optional[dict],
+                         pos: float, dur: float, at_iso: str) -> tuple[float, bool]:
+    """(played_sec, completed) for the offline sync's one coalesced position."""
+    return watchrule.offline_watch_state(prev, pos, dur,
+                                         _credits_start_for(item, file_path), at_iso)
 
 
 async def _finalize_stopped_file(
@@ -11415,9 +11294,9 @@ async def _finalize_stopped_file(
     credit-skip grace timer. So stopping — or jumping to another episode from the
     library list — while at the outro left the episode `completed:false` and
     therefore resumable: the next Play jumped back into an episode the viewer
-    considered finished. This closes that gap. Completion is gated on reaching
-    the outro (see `_position_is_finished`), so a stop partway through — even past
-    the old 0.92 mark — is preserved as a resume point rather than credited.
+    considered finished. This closes that gap. Completion goes through
+    `_watch_state`, so a stop partway through is preserved as a resume point, and
+    one that lands in the tail only by a scrub is too.
 
     A non-finished stop still refreshes the position (closing the ≤15 s periodic
     gap) but never regresses a newer saved position — which also makes an
@@ -11434,14 +11313,16 @@ async def _finalize_stopped_file(
         existing = file_prog.get(canon) or file_prog.get(file_path) or {}
         if existing.get("completed"):
             return
-        finished = _position_is_finished(item, canon, pos, dur)
+        now = _now_iso()
+        played, finished = _watch_state(item, canon, existing, pos, dur, now)
         if not finished and pos <= existing.get("position_sec", 0):
             return  # older/stale snapshot (or an EOF-race t≈0) — keep what we have
         file_prog[canon] = {
             "position_sec": round(dur if finished else pos, 1),
             "duration_sec": round(dur, 1),
             "completed": finished,
-            "updated_at": _now_iso(),
+            "played_sec": played,
+            "updated_at": now,
             **{k: v for k, v in existing.items() if k in _TRACK_PREF_KEYS},
         }
 
@@ -11458,7 +11339,7 @@ async def _series_finalize_and_switch(new_item_id: str,
     they're preferred over the last saved progress record, which on a natural
     end-of-file advance can sit up to a 15 s save-tick short of the real end —
     enough to fall outside the outro window and leave a finished episode
-    un-completed (see `_position_is_finished`)."""
+    un-completed (see `_watch_state`)."""
     old_id = state.library_item_id
     old_prof = state.library_profile_id
     lib = await get_library()
@@ -11573,7 +11454,9 @@ async def _run_skip_countdown(
             state.skip_offer_file = f"{file_path}#credits-done"
             next_path = _next_file_in_item(item, file_path)
             if next_path and Path(next_path).exists():
-                _arm_credit_skip_watch(
+                # Credit it from where playback actually is — at the credits, so
+                # it completes if it was genuinely watched (see _watch_state).
+                await _finalize_stopped_file(
                     state.library_item_id, state.library_profile_id, file_path,
                     float((vs or {}).get("time", 0) or 0),
                     float((vs or {}).get("length", 0) or 0),
@@ -11836,10 +11719,6 @@ async def vlc_progress_tracker() -> None:
                 if item_q:
                     cur_file = _canonical_item_path(cur_file, item_q)
                     state.library_current_file = cur_file
-                    # Viewer returned to a file we'd armed for deferred-watch
-                    # (the credits were skipped wrong) — cancel the timer.
-                    if state.pending_watch and state.pending_watch.get("file_path") == cur_file:
-                        _cancel_pending_watch()
                     meta = _find_file_meta(item_q, cur_file)
                     prefs = _skip_settings_for_profile(lib_q, state.library_profile_id)
                     if not file_changed:
@@ -11909,16 +11788,17 @@ async def vlc_progress_tracker() -> None:
                 prof_prog["last_file"] = save_file
                 file_prog = prof_prog.setdefault("file_progress", {})
                 existing_fp = file_prog.get(save_file, {})
+                now_iso = _now_iso()
+                # Same rule as every other writer (`_watch_state`): the tail has
+                # to be reached by playing, not by seeking there.
+                played, done = _watch_state(item, save_file, existing_fp,
+                                            save_pos, save_dur, now_iso)
                 file_prog[save_file] = {
                     "position_sec": round(save_pos, 1),
                     "duration_sec": round(save_dur, 1),
-                    # Complete only once playback reaches the outro (never regress an
-                    # already-completed file). Same rule as the stop/supersede
-                    # finalize, so a mid-episode position is never blanket-credited
-                    # at 0.92 and then left un-resumable.
-                    "completed": bool(existing_fp.get("completed"))
-                                 or _position_is_finished(item, save_file, save_pos, save_dur),
-                    "updated_at": _now_iso(),
+                    "completed": done,
+                    "played_sec": played,
+                    "updated_at": now_iso,
                     # Preserve saved track picks — they're sibling keys in the same
                     # file_progress dict, and this write fires every 15 s (a full
                     # replacement here silently wiped a subtitle pick made seconds
@@ -17164,8 +17044,6 @@ async def update_progress(item_id: str, req: ProgressReq) -> JSONResponse:
         # _finite). Negative positions are equally meaningless.
         req.position_sec = max(0.0, _finite(req.position_sec, 0.0))
         req.duration_sec = max(0.0, _finite(req.duration_sec, 0.0))
-        dur = req.duration_sec
-        pct = req.position_sec / dur if dur else 0
         prof_prog = item.setdefault("progress", {}).setdefault(req.profile_id, {})
         prof_prog["last_file"] = req.file_path
         file_progress = prof_prog.setdefault("file_progress", {})
@@ -17173,18 +17051,25 @@ async def update_progress(item_id: str, req: ProgressReq) -> JSONResponse:
         # `completed` is monotonic — a late/out-of-order progress POST (e.g. the
         # on-device player flushing a stale position after a resume) must never
         # un-finish an episode, or find_resume_hint jumps back into one already
-        # watched. Matches the batch-sync endpoint's rule.
+        # watched. `_watch_state` keeps it so.
+        #
+        # This endpoint is where the on-device player's scrub bar lands: it POSTs
+        # on every `seeked`, and on `ended` it POSTs pos == dur. Both used to credit
+        # the episode outright; the played-time half of `_watch_state` is what now
+        # tells a seek into the last seconds apart from watching up to them.
         already_done = bool(existing.get("completed"))
-        _now_done = _device_reported_finished(item, req.file_path,
-                                              req.position_sec, req.duration_sec)
+        now_iso = _now_iso()
+        played, done = _watch_state(item, req.file_path, existing,
+                                    req.position_sec, req.duration_sec, now_iso)
         file_progress[req.file_path] = {
             # Keep a finished episode pinned at the end rather than stamping the
             # incoming (older) mid position, so its resume point stays past-the-end.
-            "position_sec": round(req.duration_sec if already_done and not _now_done
+            "position_sec": round(req.duration_sec if already_done
                                   else req.position_sec, 1),
             "duration_sec": round(req.duration_sec, 1),
-            "completed": _now_done or already_done,
-            "updated_at": _now_iso(),
+            "completed": done,
+            "played_sec": played,
+            "updated_at": now_iso,
             # Preserve VLC + local-player track picks across progress writes —
             # these are sibling keys in the same file_progress dict. subtitle_sel
             # is the resolvable descriptor the on-device player restores from;
@@ -17282,8 +17167,12 @@ async def sync_progress(req: SyncProgressReq, request: Request) -> JSONResponse:
             file_progress = prof_prog.setdefault("file_progress", {})
             existing = file_progress.get(ev.file_path)
 
-            ev_completed = _device_reported_finished(item, ev.file_path,
-                                                     ev.position_sec, ev.duration_sec)
+            # An offline session reaches us as ONE coalesced position (OfflineStore
+            # keeps a single record per file), so there is no playback history to
+            # measure: tail test only, and the position itself is taken as played
+            # so that finishing the episode online later can still complete it.
+            ev_played, ev_completed = _offline_watch_state(
+                item, ev.file_path, existing, ev.position_sec, ev.duration_sec, now)
 
             def _apply() -> None:
                 prev = existing or {}
@@ -17293,6 +17182,7 @@ async def sync_progress(req: SyncProgressReq, request: Request) -> JSONResponse:
                     # `completed` is monotonic — a fresh device position must never
                     # un-complete an episode the server already marked done.
                     "completed": ev_completed or bool(prev.get("completed")),
+                    "played_sec": ev_played,
                     "updated_at": now,
                     # Preserve sibling track picks unless the event carries new ones.
                     **{k: v for k, v in prev.items() if k in _TRACK_KEYS},
@@ -17347,6 +17237,7 @@ async def sync_progress(req: SyncProgressReq, request: Request) -> JSONResponse:
                     _apply()                       # newest wins; _apply keeps completed monotonic
                 elif ev_completed and not server_completed:
                     existing["completed"] = True   # server newer but device finished it
+                    existing["played_sec"] = ev_played
                     existing["updated_at"] = now
                     applied.append({"item_id": ev.item_id, "file_path": ev.file_path,
                                     "server_updated_at": now})
@@ -17475,14 +17366,16 @@ async def sync_resolve(req: SyncResolveReq, request: Request) -> JSONResponse:
             existing = file_progress.get(rz.file_path) or {}
 
             if rz.choice == "client":
-                pos = float(rz.position_sec or 0)
-                dur = float(rz.duration_sec or 0)
+                pos = max(0.0, _finite(rz.position_sec, 0.0))
+                dur = max(0.0, _finite(rz.duration_sec, 0.0))
+                played, done = _offline_watch_state(item, rz.file_path, existing,
+                                                    pos, dur, now)
                 merged = {
                     "position_sec": round(pos, 1),
                     "duration_sec": round(dur, 1),
                     # `completed` stays monotonic even when the user keeps the device side.
-                    "completed": _device_reported_finished(item, rz.file_path, pos, dur)
-                                 or bool(existing.get("completed")),
+                    "completed": done,
+                    "played_sec": played,
                     "updated_at": now,
                     **{k: v for k, v in existing.items() if k in _TRACK_KEYS},
                 }
@@ -17677,14 +17570,18 @@ async def mark_watched(item_id: str, req: MarkWatchedReq) -> JSONResponse:
                     "position_sec": existing.get("duration_sec", 0),
                     "duration_sec": existing.get("duration_sec", 0),
                     "completed": True,
+                    "played_sec": existing.get("duration_sec", 0),
                     "updated_at": _now_iso(),
                     **{k: v for k, v in existing.items() if k in _TRACK_PREF_KEYS},
                 }
             else:
+                # A rewatch starts from nothing, played time included — otherwise
+                # the first scrub to the end would complete it off the old watch.
                 file_prog[path] = {
                     "position_sec": 0,
                     "duration_sec": existing.get("duration_sec", 0),
                     "completed": False,
+                    "played_sec": 0,
                     "updated_at": _now_iso(),
                     **{k: v for k, v in existing.items() if k in _TRACK_PREF_KEYS},
                 }
@@ -21061,10 +20958,13 @@ async def vlc_next() -> JSONResponse:
     if not Path(next_file).exists():
         raise HTTPException(400, f"File not found: {Path(next_file).name}")
 
-    # Skipping forward to the next episode — arm the deferred watch from any
-    # position (cancelled if they return to this file within the grace window).
+    # Leaving this episode for the next one. Record where it was left, and let
+    # the one completion rule decide whether that counts as watched: pressing Next
+    # during the credits finishes it, pressing Next 30 s in leaves a resume point.
+    # (This used to arm a timer that marked it watched from ANY position — the
+    # on-device player never did, so the TV and the phone disagreed.)
     vs_now = await vlc_status()
-    _arm_credit_skip_watch(
+    await _finalize_stopped_file(
         state.library_item_id, state.library_profile_id, current,
         float((vs_now or {}).get("time", 0) or 0),
         float((vs_now or {}).get("length", 0) or 0),
@@ -23168,7 +23068,7 @@ async def skip_now(req: SkipNowReq) -> JSONResponse:
             if not item:
                 raise HTTPException(404, "Item not found.")
             vs_now = await vlc_status()
-            _arm_credit_skip_watch(
+            await _finalize_stopped_file(
                 state.library_item_id, state.library_profile_id, cur_file,
                 float((vs_now or {}).get("time", 0) or 0),
                 float((vs_now or {}).get("length", 0) or 0),
