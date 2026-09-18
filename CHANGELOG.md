@@ -1,5 +1,19 @@
 # Changelog
 
+## [16.4.0] — 2026-09-17
+**Find on a single episode now tries the names anime and old cartoons are actually released under.**
+
+* Find used to search only `<English title> S01E01`. Anime and older cartoons are released as
+  `Title - 01`, often under the Japanese name, so Find came back empty for shows the indexers
+  carry well.
+* When that first search finds nothing, Find now retries with TMDb's alternative titles, then
+  with the bare episode number (`Mushishi 01`), and stops at the first search that finds it.
+  Tested on 45 shows: Mushi-Shi went from 0 results to 23, Anohana 0 to 18, *Land of the
+  Lustrous* 0 to 23, GTO 0 to 11, *Space Brothers* 0 to 9, Moomin 0 to 4.
+* The fallback results must match one of the show's names, so `GTO 01` can't pull in some other
+  show's episode 1. The first search that works is tried first for the next episode, so
+  "Find sources" on a whole season only pays for the misses once.
+
 ## [16.3.3] — 2026-09-17
 **Every search froze the whole server for about a second, and several at once made the box crawl.**
 

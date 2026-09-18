@@ -14683,9 +14683,34 @@ function _ssMissingEpisodes(season){
   return _missingTmdbEpisodes(_ssMeta, season, have, true).map(te=>+te.episode);
 }
 
+// The queries a one-episode search tries, in order, stopping at the first that
+// finds the episode. SxxExx under the main title first; then the same under the
+// alternative titles; then the bare number ("Mushishi 01"), which is how anime
+// and older cartoons are released. Measured against the live indexers, the bare
+// forms took Mushi-Shi from 0 hits to 23, Anohana 0 to 18, GTO 0 to 11. The
+// query form that last worked for this show goes first (_ssEpFormWin), so a
+// Find-missing sweep pays for the misses once, not once per episode.
+// Absolute-numbered anime (season 1, episode 100+) only has the bare forms.
+const _ssEpFormWin=new WeakMap();   // _ssGroup → "bare|title" of the last winner
+function _ssEpisodeQueries(season, episode){
+  const seen=new Set(); const titles=[];
+  [_ssQueryTitle(), ..._ssAkaTitles().slice(0,2)].forEach(t=>{
+    const k=(t||"").trim().toLowerCase(); if(!k||seen.has(k)) return; seen.add(k); titles.push(t.trim());
+  });
+  const code=`S${String(season).padStart(2,"0")}E${String(episode).padStart(2,"0")}`;
+  const abs=(season<=1 && episode>=100);
+  const forms=[...(abs?[]:titles.map(t=>({t, bare:false, q:`${t} ${code}`}))),
+               ...titles.map(t=>({t, bare:true, q:`${t} ${abs?episode:String(episode).padStart(2,"0")}`}))];
+  if(!forms.length) return {forms, titles};
+  forms[0].orig=true;   // what this search always asked; the rest are fallbacks
+  const win=_ssGroup && _ssEpFormWin.get(_ssGroup);
+  const i=win ? forms.findIndex(f=>`${f.bare?1:0}|${f.t}`===win) : -1;
+  if(i>0) forms.unshift(...forms.splice(i,1));
+  return {forms, titles};
+}
+
 // Spawn a targeted follow-up search for one missing episode, merging any matching
-// sources into the show's episode buckets. Absolute-numbered anime (season 1,
-// high episode #) is queried by the bare number, else by SxxExx.
+// sources into the show's episode buckets. See _ssEpisodeQueries for what's asked.
 async function ssSearchEpisode(season, episode, opts={}){
   const key=`${season}-${episode}`;
   if(_ssSearching.has(key)) return 0;
@@ -14693,20 +14718,30 @@ async function ssSearchEpisode(season, episode, opts={}){
   if(!opts.silent) _ssRenderBody();
   const grp=_ssGroup;
   const code=`S${String(season).padStart(2,"0")}E${String(episode).padStart(2,"0")}`;
-  const abs=(season<=1 && episode>=100);   // absolute-numbered anime
-  const q=`${_ssQueryTitle()} ${abs?episode:code}`;
+  const {forms, titles}=_ssEpisodeQueries(season, episode);
+  // Scored against the clean titles, so the number in a bare query doesn't count.
+  const akaParam=`&aka=${encodeURIComponent(titles.join(","))}`;
   let found=[];
-  try{
-    let url=`/api/search?q=${encodeURIComponent(q)}`;
-    if(profile.id) url+=`&profile_id=${encodeURIComponent(profile.id)}`;
-    const r=await fetch(url);
-    if(r.ok){
-      const data=await r.json();
-      (data.groups||[]).forEach(g=>(g.results||[]).forEach(res=>{
-        if(res.kind==="episode" && res.season===season && res.episode===episode) found.push(res);
-      }));
-    }
-  }catch(_){}
+  for(const f of forms){
+    if(_ssGroup!==grp) break;
+    // The original query keeps its old behaviour. The looser fallbacks must also
+    // match one of the show's titles: "GTO 01" alone would take anything
+    // numbered 01 that shares a word with it.
+    const minRel=f.orig ? -Infinity : 0.7;
+    try{
+      let url=`/api/search?q=${encodeURIComponent(f.q)}${akaParam}`;
+      if(profile.id) url+=`&profile_id=${encodeURIComponent(profile.id)}`;
+      const r=await fetch(url);
+      if(r.ok){
+        const data=await r.json();
+        (data.groups||[]).forEach(g=>(g.results||[]).forEach(res=>{
+          if(res.kind==="episode" && res.season===season && res.episode===episode
+             && (typeof res.rel==="number" ? res.rel : 0)>=minRel) found.push(res);
+        }));
+      }
+    }catch(_){}
+    if(found.length){ _ssEpFormWin.set(grp, `${f.bare?1:0}|${f.t}`); break; }
+  }
   if(_ssGroup===grp && found.length){
     let e=_ssEpisodes.find(x=>x.season===season && x.episode===episode);
     if(!e){ e={season,episode,sources:[]}; _ssEpisodes.push(e); _ssEpisodes.sort((a,b)=>(a.season-b.season)||(a.episode-b.episode)); }
@@ -24640,6 +24675,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">16.3.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">16.4.0</div>
 </body>
 </html>
