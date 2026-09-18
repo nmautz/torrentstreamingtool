@@ -1,5 +1,24 @@
 # Changelog
 
+## [16.1.1] — 2026-09-17
+**The 16.1.0 throttle leaked across a restart. Found by rebooting the box mid-stream.**
+
+* `_stream_throttled` — the record of which torrents were capped and what their own
+  limit was before we touched it — lived only in memory, but **qBittorrent persists a
+  per-torrent download limit in its own session**. So a crash, a reboot or an auto-update
+  while something was streaming left every other download capped at a fraction of the
+  link **forever**, with nothing left that knew to release it and no UI admitting to it.
+  Observed live: a reboot with a focus engaged came back with a bystander download still
+  pinned at 256 KB/s. This is the bandwidth twin of the stale `stream_focus` the startup
+  sweep already existed for — the file-priority half was guarded and this one wasn't.
+* Each cap is now also recorded as a qBittorrent tag, `streamlink-dlcap-<previous limit>`,
+  written *before* the limit is applied (a crash in between then leaves a tag with nothing
+  applied, which is harmless, rather than a cap with no record of what to undo). A new
+  startup sweep, `_release_orphan_stream_caps`, restores every tagged torrent to the exact
+  limit it had and drops the tag. Encoding the old value in the tag rather than just
+  marking the torrent means the crash path restores precisely what the live path would
+  have, instead of blanket-unlimiting a cap the user set themselves.
+
 ## [16.1.0] — 2026-09-17
 **Playing something that hasn't finished downloading now actually gets the connection.**
 

@@ -2032,6 +2032,18 @@ async def qbit_set_torrent_dl_limit(h: str, limit_bytes: int) -> None:
                data={"hashes": h, "limit": str(max(0, int(limit_bytes)))})
 
 
+async def qbit_add_tags(h: str, tags: str) -> None:
+    """Add comma-separated tags to a torrent."""
+    await qreq("POST", "/api/v2/torrents/addTags",
+               data={"hashes": h, "tags": tags})
+
+
+async def qbit_remove_tags(h: str, tags: str) -> None:
+    """Remove comma-separated tags from a torrent (absent tags are a no-op)."""
+    await qreq("POST", "/api/v2/torrents/removeTags",
+               data={"hashes": h, "tags": tags})
+
+
 async def qbit_streaming_mode(h: str) -> None:
     """Ensure sequential download is on.
 
@@ -7147,6 +7159,31 @@ _stream_throttled: dict[str, int] = {}
 # Consecutive monitor ticks seen with a focus set but nothing actually playing.
 _stream_focus_idle_ticks = 0
 
+# …and the same record written where a crash cannot lose it. qBittorrent
+# persists a per-torrent download limit in its own session, so the dict above
+# being in-memory meant a restart mid-stream left every throttled torrent
+# capped FOREVER with nothing left that knew to release it — the bandwidth
+# twin of the stale `stream_focus` the startup sweep exists for. The previous
+# limit is encoded into the tag so the crash path restores exactly what the
+# live path would have, rather than blanket-unlimiting a cap the user set.
+_STREAM_CAP_TAG = "streamlink-dlcap-"
+
+
+def _stream_cap_tag(prev: int) -> str:
+    return "%s%d" % (_STREAM_CAP_TAG, max(0, int(prev)))
+
+
+def _stream_cap_tag_value(tags: str) -> Optional[int]:
+    """The previous dl_limit recorded in a torrent's tags, or None."""
+    for t in (tags or "").split(","):
+        t = t.strip()
+        if t.startswith(_STREAM_CAP_TAG):
+            try:
+                return max(0, int(t[len(_STREAM_CAP_TAG):]))
+            except ValueError:
+                return 0
+    return None
+
 
 async def _stream_throttle_release(keep: Optional[set] = None) -> None:
     """Hand every throttled torrent its own download limit back."""
@@ -7156,9 +7193,40 @@ async def _stream_throttle_release(keep: Optional[set] = None) -> None:
         _stream_throttled.pop(th, None)
         try:
             await qbit_set_torrent_dl_limit(th, prev)
+            await qbit_remove_tags(th, _stream_cap_tag(prev))
         except Exception as exc:
             print(f"[focus] could not restore dl limit on {th[:8]}: {exc}")
     state.stream_throttled_count = len(_stream_throttled)
+
+
+async def _release_orphan_stream_caps() -> int:
+    """Undo throttles left behind by a crash or a hard restart.
+
+    Runs at startup, when nothing can be playing, so every torrent still
+    carrying a cap tag is by definition a leftover. Without this a reboot
+    mid-stream would leave the box's other downloads permanently limited to a
+    fraction of the link, with no UI anywhere admitting to it."""
+    try:
+        tors = await qbit_info_all()
+    except Exception:
+        tors = None
+    if not tors:
+        return 0
+    n = 0
+    for t in tors:
+        prev = _stream_cap_tag_value(t.get("tags", ""))
+        if prev is None:
+            continue
+        th = (t.get("hash") or "").lower()
+        try:
+            await qbit_set_torrent_dl_limit(th, prev)
+            await qbit_remove_tags(th, _stream_cap_tag(prev))
+            n += 1
+        except Exception as exc:
+            print(f"[focus] could not release stale cap on {th[:8]}: {exc}")
+    if n:
+        print(f"[focus] released {n} stale download cap(s) left by a restart")
+    return n
 
 
 async def _apply_stream_throttle(torrents: Optional[list] = None,
@@ -7217,6 +7285,10 @@ async def _apply_stream_throttle(torrents: Optional[list] = None,
             if 0 < prev <= per:
                 continue
             _stream_throttled[th] = prev
+            # Tag BEFORE capping, so a crash in between leaves a tag with
+            # nothing applied (harmless) rather than a cap with no record of
+            # what to restore (permanent).
+            await qbit_add_tags(th, _stream_cap_tag(prev))
             await qbit_set_torrent_dl_limit(th, per)
         elif int(t.get("dl_limit", 0) or 0) != per:
             await qbit_set_torrent_dl_limit(th, per)
@@ -11706,6 +11778,7 @@ async def _recover_interrupted_downloads() -> None:
     # deselected forever — nothing else ever clears it.
     try:
         await _clear_all_stream_focus()
+        await _release_orphan_stream_caps()
     except Exception as exc:
         print(f"[focus] startup sweep failed: {exc}")
     await _recover_races()
