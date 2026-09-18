@@ -8418,6 +8418,10 @@ async def _retry_dead_download(item: dict, lib: dict) -> str:
 
     save_path = ((item.get("download_source") or {}).get("save_path")
                  or settings.qbit_download_path)
+    # Any live race is about to be describing a torrent we are replacing, so it
+    # goes first - see `_race_abandon`. This also clears the way for the fresh
+    # race started behind the replacement at the end of this function.
+    await _race_abandon(item, "superseded-by-retry")
     # Drop the dead torrent first so it stops occupying a queue slot. Safe to take
     # its files with it: we only get here at zero bytes.
     if cur_hash:
@@ -8904,6 +8908,37 @@ async def _race_drop(item: dict, entry: dict, reason: str) -> None:
              entry.get("title", ""), reason)
     await _race_event(item["id"], "culled", title=entry.get("title", ""),
                       label=entry.get("label", ""), reason=reason)
+
+
+async def _race_abandon(item: dict, why: str) -> bool:
+    """Tear a live race down because something outside it repointed the item.
+
+    The dead-swarm retry replaces `torrent_hash` wholesale and knows nothing
+    about `race`, so a race left standing across one would be describing a
+    torrent that no longer exists: `_reconcile_item_race` would find no entry
+    matching the new incumbent and promote a challenger straight over the
+    replacement the retry had just picked. Every challenger goes (they were
+    alternatives to a release we have now abandoned), the incumbent's own
+    torrent is left for the caller to deal with, and the race is marked
+    settled so it stops occupying a slot.
+    """
+    race = item.get("race") or {}
+    if race.get("state") not in ("racing", "upgrading"):
+        return False
+    incumbent = (item.get("torrent_hash") or "").lower()
+    for e in _race_active(race):
+        e["status"] = "dropped"
+        e["drop_reason"] = why
+        e["dropped_at"] = _now_iso()
+        _race_bank_attempt(item, e, "raced_out:" + why)
+        h = (e.get("hash") or "").lower()
+        if h and h != incumbent:
+            await qbit_delete(h, delete_files=True)
+    race["state"] = "settled"
+    race["settled_at"] = _now_iso()
+    race["entries"] = []
+    log.info("[race] %s: race abandoned (%s)", item.get("id", ""), why)
+    return True
 
 
 async def _race_promote(item: dict, entry: dict) -> None:
@@ -9411,7 +9446,14 @@ async def _reconcile_item_race(item: dict, by_hash: Optional[dict]) -> bool:
         others = []
         changed = True
 
-    if not others and hq is None and race.get("state") == "racing":
+    if not others and hq is None and race.get("state") in ("racing", "upgrading"):
+        # Note `upgrading` here, not just `racing`. The two-track engages as
+        # soon as an HQ candidate outranks the leader, but the HQ track can
+        # then still be dropped (dead swarm, no video, hopeless ETA) - and when
+        # it is, nothing else would ever settle the race. Observed live: the HQ
+        # entry died on the 120 s metadata kill and the item sat in `upgrading`
+        # with one entry indefinitely, occupying a slot against `max_items`
+        # forever.
         await _race_settle(item, inc_entry, "settled")
         changed = True
 
@@ -9948,7 +9990,7 @@ async def library_download_monitor() -> None:
                     # same episode. See `_retry_dead_download`.
                     if waiting_idle:
                         item.pop("stalled_since", None)
-                    elif (item.get("race") or {}).get("state") == "racing":
+                    elif (item.get("race") or {}).get("state") in ("racing", "upgrading"):
                         # A race has its own, much faster clocks (120 s with no
                         # metadata, 90 s before a speed cull) AND alternatives
                         # already running. Letting the 600 s serial stall timer

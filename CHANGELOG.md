@@ -1,5 +1,26 @@
 # Changelog
 
+## [16.0.1] — 2026-09-17
+**Two faults in 16.0.0's racing, both found by running it on the live box.**
+
+* **A race could never settle once the two-track had engaged.** The HQ track engages as
+  soon as a higher-quality candidate outranks the leader, but it can then still be
+  dropped — and when it was, nothing settled the race. Observed live: the HQ entry died
+  on the 120 s metadata kill and the item sat in `upgrading` with one entry
+  indefinitely, holding one of the two global race slots **forever**. Two of those and
+  nothing could race again until a restart. The settle check now keys on both live
+  states, and so does the stall-clock suppression.
+* **The dead-swarm retry could desync a live race.** `_retry_dead_download` replaces
+  `torrent_hash` wholesale and knew nothing about `race`, so the entries were left
+  describing a torrent that no longer existed — the next tick would find no entry for
+  the new incumbent and promote a challenger straight over the replacement the retry had
+  just picked. New `_race_abandon` tears the race down first (deleting the challengers),
+  which also clears the way for the fresh race the retry starts behind its replacement.
+
+Verified on the live box: 3 candidates raced, roles assigned correctly, the challenger
+culled, the two-track engaged, the dead HQ dropped on schedule, **zero orphaned torrents**
+before or after, and the library unchanged at 71 items on both :80 and :443.
+
 ## [16.0.0] — 2026-09-17
 **When you ask for something without picking a release, start three and drop the slow ones.**
 

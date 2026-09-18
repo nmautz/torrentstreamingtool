@@ -750,6 +750,10 @@ That invariant is what lets every existing reader of `torrent_hash` keep working
 
 **The race engine is the single writer of challenger pause + priority**, exactly as `download_scheduler_loop` is for the incumbent's (see the entry above). They never collide because a challenger is never `torrent_hash` — but that is a consequence of the invariant, not an accident, so don't add a path that pauses or re-prioritises an entry outside `_reconcile_item_race`.
 
+**A race must be able to settle from `upgrading`, not just from `racing`.** The two-track engages the moment an HQ candidate outranks the leader - but that HQ track can then still die (dead swarm, no video, hopeless ETA). Found in live testing of 16.0.0: the HQ entry was dropped on the 120 s metadata kill and the race sat in `upgrading` with a single entry **forever**, holding one of the two global slots against `max_items` for good. The settle check keys on both live states. For the same reason the serial stall-clock suppression covers both: while a race is in either state, `_note_download_stall` must not fire underneath it.
+
+**Anything that repoints `torrent_hash` from outside the race must tear the race down first** (`_race_abandon`). `_retry_dead_download` replaces the torrent wholesale and knows nothing about `race`, so a race left standing across one describes a torrent that no longer exists - `_reconcile_item_race` then finds no entry matching the new incumbent and promotes a challenger straight over the replacement the retry just picked. Abandoning also clears the way for the fresh race the retry starts behind its replacement, which `_race_start` would otherwise refuse (it will not start a second race for an item already racing).
+
 Promotion happens **only because the incumbent left the race**, never because another candidate is quicker this instant. `_race_promote` destroys the outgoing torrent's bytes, so swapping on a momentary lead would throw away a perfectly good part-download every time two candidates traded places. Culling decides the winner; promotion just makes the survivor official.
 
 ### Never judge a racer while the VPN is down or qBittorrent is unreachable
