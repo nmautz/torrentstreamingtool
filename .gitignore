@@ -29,6 +29,9 @@ Downloads/
 # Permanent on-disk cache of TMDb artwork (served via /api/metadata/img)
 .tmdb_img_cache/
 
+# On-disk cache of TMDb API responses (tmdbcache.py)
+.tmdb_cache/
+
 # User library database (profiles + watch history)
 library.json
 library_backups/

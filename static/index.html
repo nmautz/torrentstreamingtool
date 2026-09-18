@@ -9245,7 +9245,12 @@ async function openSeriesPage(seriesKey, title, section, filePath){
 // INVENTORY, not the seasons parsed off disk — the parsed count is exactly what's
 // unreliable, and a season we own nothing from has no files to count at all.
 // `stillOpen` guards against the user navigating away mid-request.
-async function _epTopUpSeasons(stillOpen, title){
+// True while a top-up is in flight, so a season we own nothing from can say
+// "loading" instead of reading as if its episode list will never come. Holds the
+// in-flight call's token (0 = idle) so a stale call from a page the user already
+// left can't clear the flag for the one now open.
+let _epTopUpBusy=0, _epTopUpSeq=0;
+async function _epTopUpSeasons(stillOpen, title, retried){
   // A movie has no seasons to top up, and a cached non-TV entry must never be
   // overwritten by the fuzzy title lookup below.
   if(epMetadata && epMetadata.tmdb_kind!=="tv") return;
@@ -9268,6 +9273,9 @@ async function _epTopUpSeasons(stillOpen, title){
   const noInventory = !(epMetadata && Array.isArray(epMetadata.all_seasons));
   if(epMetadata && !noInventory && need && have>=need) return;   // already complete
   if(!byId && !(title||"").trim()) return;
+  const tok=_epTopUpBusy=++_epTopUpSeq;
+  if(stillOpen()) renderEpList();
+  let short=false;
   try{
     const url=byId
       ? `/api/tmdb/lookup?tmdb_id=${encodeURIComponent(epMetadata.tmdb_id)}&kind=tv`
@@ -9277,12 +9285,21 @@ async function _epTopUpSeasons(stillOpen, title){
     const m=await r.json();
     if(!stillOpen() || !m.metadata) return;
     epMetadata=m.metadata; epMetaImgBase=m.img_base||epMetaImgBase;
+    // The server leaves out a season whose fetch failed rather than caching the
+    // gap, so one retry picks up just the stragglers (the rest come off its cache).
+    const got=Object.keys(epMetadata.seasons||{}).map(Number).filter(n=>n>0).length;
+    short=got<_tmdbSeasonNumbers(epMetadata).length;
     _epRebuildSeasonList();
     _epReconsiderMovieMode();
     if(epSeasonList.length && !epSeasonList.includes(epCurrentSeason))
       epCurrentSeason=pickDefaultSeason();
-    renderEpHero(title); renderEpSeasonTabs(); renderEpList();
-  }catch(_){}
+  }catch(_){
+  }finally{
+    if(_epTopUpBusy===tok) _epTopUpBusy=0;
+    if(stillOpen()){ renderEpHero(title); renderEpSeasonTabs(); renderEpList(); }
+  }
+  if(short && !retried)
+    setTimeout(()=>{ if(stillOpen()) _epTopUpSeasons(stillOpen, title, true); }, 5000);
 }
 
 // Representative item id for series-scoped reads/actions (metadata search, and
@@ -11124,6 +11141,7 @@ function renderEpList(){
       ? `<div class="flex flex-col items-center gap-3 py-12 px-4 text-center">
            <span class="w-2.5 h-2.5 bg-orange-400"></span>
            <p class="text-gray-400 text-sm">None of this season's ${c.total} episode${c.total===1?"":"s"} are on this box.</p>
+           ${_epTopUpBusy?`<p class="text-gray-600 text-xs uppercase tracking-widest">Loading episode list…</p>`:""}
            ${TV_MODE?"":`<div class="flex items-center gap-1.5">
              <button onclick="epGetSeason(${epCurrentSeason},this)"
                class="text-xs px-4 py-2 bg-amber-700 hover:bg-amber-600 text-white uppercase tracking-wide transition-colors flex items-center gap-1.5"
@@ -24525,6 +24543,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">16.1.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">16.2.0</div>
 </body>
 </html>

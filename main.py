@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import contextvars
 import copy
 import gzip
 import hashlib
@@ -56,6 +57,7 @@ import racerules
 import relquality
 import stt
 import subpack
+import tmdbcache
 import updater
 import vpncheck
 import winaccept_patch
@@ -2739,23 +2741,75 @@ async def _tmdb_effective_key() -> str:
     return (override or settings.tmdb_api_key or "").strip()
 
 
+# On-disk cache of TMDb API responses (see tmdbcache.py). Fresh entries are
+# served without a network call; a failed refetch falls back to the stale copy,
+# so metadata survives an internet outage.
+TMDB_API_CACHE = Path(__file__).parent / ".tmdb_cache"
+_tmdb_disk = tmdbcache.TmdbCache(TMDB_API_CACHE)
+
+# Shared keep-alive client. A fresh AsyncClient per call paid a full TLS
+# handshake every time, which a 28-season show paid 30 times over.
+_tmdb_client: Optional[httpx.AsyncClient] = None
+# Caps concurrent TMDb requests below its per-IP connection limit, now that
+# season lists are fetched in parallel.
+_tmdb_net_sem = asyncio.Semaphore(8)
+# Set after a transport failure (DNS, connect, timeout). Until then, calls skip
+# the network and answer from the disk cache straight away. Without it, every
+# call during an outage waits out its own connect timeout, and the season
+# fan-out stacks those into tens of seconds.
+_tmdb_offline_until = 0.0
+_TMDB_OFFLINE_BACKOFF = 30.0
+# True inside an explicit metadata refresh: ignore the fresh-cache fast path
+# (the stale fallback still applies). Set by _fetch_item_metadata.
+_tmdb_fresh: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_tmdb_fresh", default=False)
+
+
+def _tmdb_http() -> httpx.AsyncClient:
+    global _tmdb_client
+    if _tmdb_client is None or _tmdb_client.is_closed:
+        _tmdb_client = httpx.AsyncClient(
+            # Short connect timeout so a dead/unreachable internet link fails
+            # fast (the read timeout stays generous for slow-but-working ones).
+            timeout=httpx.Timeout(15.0, connect=5.0),
+            limits=httpx.Limits(max_connections=8, max_keepalive_connections=8,
+                                keepalive_expiry=30.0),
+        )
+    return _tmdb_client
+
+
 async def _tmdb_get(path: str, params: Optional[dict] = None) -> Optional[dict]:
+    global _tmdb_offline_until
     key = await _tmdb_effective_key()
     if not key:
         return None
+    hit = _tmdb_disk.get(path, params)
+    if hit and hit[1] and not _tmdb_fresh.get():
+        return hit[0]
+    if time.monotonic() < _tmdb_offline_until:
+        return hit[0] if hit else None
     q = dict(params or {})
     q["api_key"] = key
     url = f"https://api.themoviedb.org/3{path}"
     try:
-        # Short connect timeout so a dead/unreachable internet link fails fast
-        # (the read timeout stays generous for slow-but-working networks).
-        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as c:
-            r = await c.get(url, params=q)
-            if r.status_code == 200:
-                return r.json()
+        async with _tmdb_net_sem:
+            r = await _tmdb_http().get(url, params=q)
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, dict):
+                _tmdb_disk.put(path, params, data)
+            return data
+        if r.status_code == 404:
+            return None
+    except httpx.TransportError:
+        if time.monotonic() >= _tmdb_offline_until:   # once per outage window
+            log.info("TMDb unreachable; serving cached responses for %ds",
+                     int(_TMDB_OFFLINE_BACKOFF))
+        _tmdb_offline_until = time.monotonic() + _TMDB_OFFLINE_BACKOFF
     except Exception:
         pass
-    return None
+    # 429 / 5xx / unreachable: stale beats nothing.
+    return hit[0] if hit else None
 
 
 _YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
@@ -3092,36 +3146,47 @@ async def _tmdb_fetch_seasons(show_id: int, seasons: list[int]) -> dict[str, dic
     """Fetch the episode list for each requested season, cache-shaped and keyed
     by season number as a string. Split out of `_tmdb_fetch_tv` so a later pass
     can top up seasons that only became known after the files were re-attributed
-    (see `_settle_attribution`)."""
-    out: dict[str, dict] = {}
-    for sn in seasons:
-        s = await _tmdb_get(f"/tv/{show_id}/season/{sn}",
-                            {"append_to_response": "videos"}) or {}
-        eps = []
-        for ep in s.get("episodes", []) or []:
-            eps.append({
-                "season":      ep.get("season_number", sn),
-                "episode":     ep.get("episode_number", 0),
-                "name":        ep.get("name", "") or "",
-                "overview":    ep.get("overview", "") or "",
-                "still_path":  ep.get("still_path") or "",
-                "air_date":    ep.get("air_date", "") or "",
-                "runtime":     ep.get("runtime") or 0,
-            })
-        if eps or s.get("name"):
-            out[str(sn)] = {
-                "name":     s.get("name", f"Season {sn}"),
-                "overview": s.get("overview", "") or "",
-                "poster_path": s.get("poster_path") or "",
-                "trailer":  _tmdb_pick_trailer(s.get("videos")),
-                "episodes": eps,
-            }
-    return out
+    (see `_settle_attribution`).
+
+    Seasons are fetched concurrently (bounded by `_tmdb_net_sem`). One at a time,
+    a 28-season show took long enough that the library page's missing-season
+    lists looked like they never arrived. A season whose fetch failed is simply
+    absent from the result, so callers can tell a gap from an empty season."""
+    results = await asyncio.gather(
+        *(_tmdb_fetch_one_season(show_id, sn) for sn in seasons))
+    return {str(sn): entry for sn, entry in zip(seasons, results) if entry}
 
 
-async def _tmdb_fetch_tv(show_id: int, seasons: list[int]) -> dict:
+async def _tmdb_fetch_one_season(show_id: int, sn: int) -> Optional[dict]:
+    s = await _tmdb_get(f"/tv/{show_id}/season/{sn}",
+                        {"append_to_response": "videos"}) or {}
+    eps = []
+    for ep in s.get("episodes", []) or []:
+        eps.append({
+            "season":      ep.get("season_number", sn),
+            "episode":     ep.get("episode_number", 0),
+            "name":        ep.get("name", "") or "",
+            "overview":    ep.get("overview", "") or "",
+            "still_path":  ep.get("still_path") or "",
+            "air_date":    ep.get("air_date", "") or "",
+            "runtime":     ep.get("runtime") or 0,
+        })
+    if not eps and not s.get("name"):
+        return None
+    return {
+        "name":     s.get("name", f"Season {sn}"),
+        "overview": s.get("overview", "") or "",
+        "poster_path": s.get("poster_path") or "",
+        "trailer":  _tmdb_pick_trailer(s.get("videos")),
+        "episodes": eps,
+    }
+
+
+async def _tmdb_fetch_tv(show_id: int, seasons: Optional[list[int]]) -> dict:
     """Fetch show details + each requested season's episodes. Returns the
-    cache-shaped dict (see _build_metadata_cache)."""
+    cache-shaped dict (see _build_metadata_cache). `seasons=None` means every
+    real (non-zero) season in the show's inventory, read off the same details
+    call rather than a second one."""
     details = await _tmdb_get(
         f"/tv/{show_id}", {"append_to_response": "alternative_titles,videos"}) or {}
     akas = _tmdb_akas((details.get("alternative_titles") or {}).get("results", []),
@@ -3141,6 +3206,8 @@ async def _tmdb_fetch_tv(show_id: int, seasons: list[int]) -> dict:
         "poster_path":   s.get("poster_path") or "",
     } for s in (details.get("seasons") or [])]
     all_seasons.sort(key=lambda s: s["season"])
+    if seasons is None:
+        seasons = [s["season"] for s in all_seasons if s["season"] > 0]
     # Default to season 1 if no seasons were detected on disk (so a one-off
     # picker that opens before season parsing still gets *something*).
     cache_seasons = await _tmdb_fetch_seasons(show_id, seasons or [1])
@@ -3327,6 +3394,16 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
     concurrent fetches for the same item via a per-id lock."""
     if not await _tmdb_effective_key():
         return None
+    # A plain refresh (the Refresh button, a rename) means "ask TMDb again", so
+    # it skips the fresh-response cache. A re-bind to a picked id doesn't need
+    # to: the cached copy of that entry is as good as a new one.
+    if force and not override_tmdb_id and not _tmdb_fresh.get():
+        token = _tmdb_fresh.set(True)
+        try:
+            return await _fetch_item_metadata(item_id, force, override_tmdb_id,
+                                              override_kind)
+        finally:
+            _tmdb_fresh.reset(token)
 
     lock = _tmdb_fetch_locks.setdefault(item_id, asyncio.Lock())
     async with lock:
@@ -12284,6 +12361,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     dlsched_loop = asyncio.create_task(download_scheduler_loop())
     sysmon_loop = asyncio.create_task(system_monitor_loop())
     cachepurge_loop = asyncio.create_task(cache_autopurge_loop())
+    # Trim the TMDb response cache once per start (old/unused entries only).
+    _tmdb_bg(asyncio.to_thread(_tmdb_disk.prune))
     subupgrade_loop = asyncio.create_task(subtitle_upgrade_loop())
     od_reaper_loop  = asyncio.create_task(_od_reaper())
     maint_loop      = asyncio.create_task(background_maintenance_loop())
@@ -12339,6 +12418,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     await qbit.aclose()
     if vlc_client is not None:
         await vlc_client.aclose()
+    if _tmdb_client is not None:
+        await _tmdb_client.aclose()
 
 
 app = FastAPI(title="P2P StreamLink", version="2.0", lifespan=lifespan)
@@ -13817,17 +13898,39 @@ async def metadata_image(size: str, filename: str) -> Response:
     })
 
 
-# (title, year, kind) → cached metadata dict, for the search show-detail screen
+# (title, year, kind) → (stored_at, metadata), for the search show-detail screen
 # which looks up TMDb by name (not by library item). Coalesces concurrent
-# lookups and survives for the process lifetime (TMDb data is effectively static).
-_tmdb_title_cache: dict[tuple, dict] = {}
+# lookups. Entries expire after _TMDB_LOOKUP_TTL. They used to live for the
+# whole process, which hid a new season until a restart; re-assembling from the
+# on-disk response cache is cheap. An INCOMPLETE result (a season fetch failed)
+# is never memoised, so the next open retries just the missing seasons.
+_TMDB_LOOKUP_TTL = 15 * 60
+_tmdb_title_cache: dict[tuple, tuple[float, dict]] = {}
 _tmdb_title_locks: dict[tuple, asyncio.Lock] = {}
 
-# (kind, tmdb_id) → cached metadata dict, for the TMDb-first search flow which
-# opens a show-detail page from a specific candidate the user picked (so we fetch
-# by id rather than re-matching by title). Same lifetime/coalescing as above.
-_tmdb_id_cache: dict[tuple, dict] = {}
+# (kind, tmdb_id) → (stored_at, metadata), for the TMDb-first search flow and
+# the library page's season top-up, which fetch a specific entry by id rather
+# than re-matching by title. Same lifetime/coalescing as above.
+_tmdb_id_cache: dict[tuple, tuple[float, dict]] = {}
 _tmdb_id_locks: dict[tuple, asyncio.Lock] = {}
+
+
+def _tmdb_memo_get(cache: dict, ck: tuple) -> Optional[dict]:
+    hit = cache.get(ck)
+    if hit and time.monotonic() - hit[0] < _TMDB_LOOKUP_TTL:
+        return hit[1]
+    return None
+
+
+def _tmdb_memo_put(cache: dict, ck: tuple, data: dict) -> None:
+    """Memoise only a complete result: every season in the TV inventory has its
+    episode list. See _tmdb_fetch_seasons for why a gap means a failed fetch."""
+    if data.get("tmdb_kind") == "tv":
+        have = (data.get("seasons") or {}).keys()
+        if any(str(s["season"]) not in have
+               for s in data.get("all_seasons") or [] if s["season"] > 0):
+            return
+    cache[ck] = (time.monotonic(), data)
 
 
 async def _tmdb_lookup_by_id(tmdb_id: int, kind: str) -> Optional[dict]:
@@ -13837,26 +13940,20 @@ async def _tmdb_lookup_by_id(tmdb_id: int, kind: str) -> Optional[dict]:
     if not tmdb_id or kind not in ("tv", "movie") or not await _tmdb_effective_key():
         return None
     ck = (kind, int(tmdb_id))
-    if ck in _tmdb_id_cache:
-        return _tmdb_id_cache[ck]
+    if (hit := _tmdb_memo_get(_tmdb_id_cache, ck)) is not None:
+        return hit
     lock = _tmdb_id_locks.setdefault(ck, asyncio.Lock())
     async with lock:
-        if ck in _tmdb_id_cache:
-            return _tmdb_id_cache[ck]
+        if (hit := _tmdb_memo_get(_tmdb_id_cache, ck)) is not None:
+            return hit
         if kind == "tv":
-            details = await _tmdb_get(f"/tv/{tmdb_id}", {}) or {}
-            seasons = sorted({
-                int(s.get("season_number", 0))
-                for s in details.get("seasons", []) or []
-                if int(s.get("season_number", 0)) > 0
-            })
-            data = await _tmdb_fetch_tv(int(tmdb_id), seasons)
+            data = await _tmdb_fetch_tv(int(tmdb_id), None)
         else:
             data = await _tmdb_fetch_movie(int(tmdb_id))
         if not data or not data.get("title"):
             return None
         data["source"] = "tmdb"
-        _tmdb_id_cache[ck] = data
+        _tmdb_memo_put(_tmdb_id_cache, ck, data)
         _tmdb_bg(_prefetch_metadata_images(data))
         return data
 
@@ -13872,12 +13969,12 @@ async def _tmdb_lookup_by_title(title: str, year: Optional[int],
     if not query or not await _tmdb_effective_key():
         return None
     ck = (query.lower(), year or 0, kind or "")
-    if ck in _tmdb_title_cache:
-        return _tmdb_title_cache[ck]
+    if (hit := _tmdb_memo_get(_tmdb_title_cache, ck)) is not None:
+        return hit
     lock = _tmdb_title_locks.setdefault(ck, asyncio.Lock())
     async with lock:
-        if ck in _tmdb_title_cache:
-            return _tmdb_title_cache[ck]
+        if (hit := _tmdb_memo_get(_tmdb_title_cache, ck)) is not None:
+            return hit
 
         match = None
         if kind != "movie":
@@ -13898,19 +13995,12 @@ async def _tmdb_lookup_by_title(title: str, year: Optional[int],
             return None
 
         if match["kind"] == "tv":
-            # Fetch details first to learn how many seasons exist, then pull
-            # every real season's episodes (skip specials / season 0).
-            details = await _tmdb_get(f"/tv/{match['id']}", {}) or {}
-            seasons = sorted({
-                int(s.get("season_number", 0))
-                for s in details.get("seasons", []) or []
-                if int(s.get("season_number", 0)) > 0
-            })
-            data = await _tmdb_fetch_tv(match["id"], seasons)
+            # Every real season's episodes (specials / season 0 skipped).
+            data = await _tmdb_fetch_tv(match["id"], None)
         else:
             data = await _tmdb_fetch_movie(match["id"])
         data["source"] = "tmdb"
-        _tmdb_title_cache[ck] = data
+        _tmdb_memo_put(_tmdb_title_cache, ck, data)
         _tmdb_bg(_prefetch_metadata_images(data))
         return data
 

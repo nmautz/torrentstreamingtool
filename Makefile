@@ -10,6 +10,7 @@ run:
 test:
 	python3 tests/test_relquality.py
 	python3 tests/test_race_rules.py
+	python3 tests/test_tmdbcache.py
 
 clean:
 	rm -rf .venv __pycache__ .env

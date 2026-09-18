@@ -1,5 +1,33 @@
 # Changelog
 
+## [16.2.0] — 2026-09-17
+**Missing-season episode lists on a long show turned up late, often only after you left the page and came back. TMDb responses are now also cached on disk.**
+
+* **Why it was slow:** a show page lists the episodes of seasons you own nothing
+  from by looking up the whole show on TMDb (`/api/tmdb/lookup`). For South Park that is
+  ~30 requests, and they ran **one after another**, each over a brand-new HTTPS connection.
+  The page's request could take long enough that people gave up. Leaving and coming back
+  only worked because the first request had finished in the background by then.
+* **Faster:** season lists are now fetched in parallel (at most 8 at once) over one shared
+  keep-alive connection, and the lookup no longer fetches the show's details twice.
+* **Incomplete results aren't kept any more:** before, if a single season's fetch failed,
+  the lookup stored the result with that season missing for the rest of the process's
+  life. Now an incomplete result is never memoised, and the page retries once after 5 s.
+  The in-process lookup cache also expires after 15 min, so a new season no longer needs
+  a restart to show up.
+* **"Loading episode list…"** shows under a season you own nothing from while its list is
+  still on the way, so an empty season no longer looks final.
+* **New: TMDb response cache** (`tmdbcache.py`, `.tmdb_cache/`). Every TMDb API call now
+  goes through an on-disk cache, with TTLs set by how often each kind of data changes:
+  settled seasons keep 30 days, airing ones 12 h, show details 12 h (7 days once a show has
+  ended), searches 24 h, Explore lists 1 h. **When TMDb is unreachable the cached copy is
+  served at any age**, so Search, Explore, show pages and missing-season lists keep their
+  metadata through an internet outage. After a connection failure, TMDb calls go
+  straight to the cache for 30 s instead of each waiting out its own timeout.
+  The API key is never written to disk. An explicit metadata **Refresh** still goes to
+  TMDb. The cache is pruned at startup (entries unused for 180 days; 20k files max).
+* Tests: `tests/test_tmdbcache.py`.
+
 ## [16.1.3] — 2026-09-17
 * Tidy-up: removing a tag from a torrent leaves the tag NAME in qBittorrent's sidebar, and
   the cap tag encodes the previous limit — so a box would slowly collect a

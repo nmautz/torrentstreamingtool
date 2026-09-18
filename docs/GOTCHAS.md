@@ -2203,6 +2203,15 @@ All metadata endpoints hand out `img_base = "/api/metadata/img"`; the route serv
 
 `_tmdb_match_show` ([main.py](../main.py)) calls `/search/tv` (or `/search/movie` for single-file no-season items **whose name carries no season/episode marker** — see the movie-misbinding rule above) and takes the **first** result. TMDb's search ranks by popularity, so for ambiguous titles ("Monster", "The Office", "It") the match may be the wrong show. Recovery paths: an admin POSTs `/api/library/{id}/metadata/refresh` with `{tmdb_id: <correct>, kind: "tv"|"movie"}`, OR **any user** uses the episode-page "Fix Metadata" control (`/metadata/search` → `/metadata/set`) to pick the right entry or hand-enter custom fields. The result is cached on `item["metadata"]`.
 
+### A missing season's episode list "only appears after leaving and coming back" (16.2.0)
+
+The library page fills in the episode rows of a season you own nothing from with `/api/tmdb/lookup`, which fetches **every** season of the show. That used to be sequential with a fresh HTTPS client per request, so South Park (~28 seasons) took long enough that people gave up. Reopening the page "fixed" it only because the first request had finished in the meantime. Two traps here:
+
+- **Don't make per-season TMDb calls one at a time.** `_tmdb_fetch_seasons` gathers them (bounded by `_tmdb_net_sem`) over the shared `_tmdb_http()` client. Don't go back to `async with httpx.AsyncClient()` per call.
+- **Don't memoise a partial show.** `_tmdb_get` returns None for a failed season, which leaves that season out of the result, not empty. The old forever-cache stored that gap for the rest of the process's life. `_tmdb_memo_put` refuses any TV result missing an inventory season; the disk cache already holds the seasons that worked, so the retry only refetches the missing ones.
+
+The on-disk response cache (`tmdbcache.py`) serves stale data at any age when TMDb is unreachable, and backs off to cache-only for 30 s after a transport error. Without the backoff, an outage makes every season fetch wait out its own 5 s connect timeout. See [LIBRARY_DATA.md](LIBRARY_DATA.md) § TMDb response cache.
+
 ### A show can be matched as a MOVIE — and that silently kills the missing-seasons diff (12.6.1)
 
 `_tmdb_match_show` decides movie-vs-TV with `is_movieish = len(files) <= 1 and not item.get("season")`. That file list comes from qBit, and **an item is matched the moment it's added — usually before the torrent's file list has resolved at all.** A season pack with zero files therefore looks exactly like a one-shot movie, goes to `/search/movie`, and gets a movie binding cached forever.
