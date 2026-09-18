@@ -2980,22 +2980,47 @@ _auto_sub_tried: "dict[str, float]" = {}       # path -> when we last came up em
 _AUTO_SUB_RETRY = 12 * 3600
 
 
-def _start_auto_subtitle_fetch(video: Path, lang: str) -> None:
-    """Kick off a background subtitle fetch for the file now playing.
+def _start_auto_subtitle_fetch(video: Path, lang: str, item_id: str = "",
+                               file_path: str = "") -> None:
+    """Kick off a background subtitle fetch for a file that is starting to play.
 
     Only for a LIBRARY file: the search is only as good as the episode's
     identity, and a transient stream has none worth guessing from. Nothing is
     attached unless the audio verifies the subtitle IS this episode — a wrong
     subtitle is worse than none — and a file that comes up empty isn't retried
-    for half a day, so a re-watch doesn't spend the download budget again."""
-    item_id, fpath = state.library_item_id, state.library_current_file
-    if not (item_id and fpath and Path(fpath) == video):
+    for half a day, so a re-watch doesn't spend the download budget again.
+
+    Called from BOTH surfaces. VLC's track policy passes nothing and the current
+    playback is read off `state`; the on-device paths pass the item/file they are
+    about to serve, because the TV's own player never touches `state.library_*`
+    the way VLC does — hanging this off VLC alone meant it almost never ran.
+    """
+    item_id = item_id or state.library_item_id or ""
+    file_path = file_path or state.library_current_file or ""
+    if not (item_id and file_path and Path(file_path) == video):
         return
     last = _auto_sub_tried.get(str(video), 0)
     if time.time() - last < _AUTO_SUB_RETRY:
         return
     _auto_sub_tried[str(video)] = time.time()
-    _spawn_bg(_auto_subtitle_fetch(video, lang, item_id, fpath, time.time()))
+    _spawn_bg(_auto_subtitle_fetch(video, lang, item_id, file_path, time.time()))
+
+
+async def _maybe_auto_fetch_for_device(item: dict, fmeta: dict, embedded: list,
+                                       sidecars: list) -> None:
+    """On-device playback is starting: if nothing here is in the preferred
+    language, go and find one. The client doesn't have to ask — it hears about
+    the result through the `sub_added` relay and picks it up mid-playback."""
+    subs = _subs_cfg(await get_library())
+    pref = subs["default_language"]
+    if not (subs["auto_search"] and pref):
+        return
+    have = {_canon_lang(str(s.get("language") or "")) for s in (embedded or [])}
+    have |= {_canon_lang(str(s.get("lang") or "")) for s in (sidecars or [])
+             if not s.get("ai")}
+    if pref in have:
+        return
+    _start_auto_subtitle_fetch(Path(fmeta["path"]), pref, item.get("id", ""), fmeta["path"])
 
 
 async def _auto_subtitle_fetch(video: Path, lang: str, item_id: str,
@@ -3017,12 +3042,14 @@ async def _auto_subtitle_fetch(video: Path, lang: str, item_id: str,
         _auto_sub_tried.pop(str(video), None)          # found one — nothing to back off from
         await _mirror_sub_into_bundle(video, got["path"], got["lang"], "OpenSubtitles")
         await _announce_subtitle(item_id, file_path, got["path"])
-        # Only take the screen if the viewer hasn't chosen a track since, and
-        # this is still what's playing.
-        if state.sub_manual_at > started:
+        # VLC needs the file loaded into it; the on-device players (dashboard,
+        # phone, kiosk) already acted on the `sub_added` relay above. Only take
+        # the screen if the viewer hasn't chosen a track since, and this is
+        # still what VLC is playing.
+        if state.sub_manual_at > started or state.tv_local_active:
             return
         playing = await _current_playback_path()
-        if not playing or Path(playing) != video or state.tv_local_active:
+        if not playing or Path(playing) != video:
             return
         await _attach_subtitle_to_vlc(got["path"], got["lang"], save_pref=False)
         await broadcast("subtitle_upgraded", {"label": "Found subtitles online"})
@@ -22114,7 +22141,7 @@ async def library_subtitle_fetch(request: Request, item_id: str,
     await _mirror_sub_into_bundle(src, dest, got["lang"], "OpenSubtitles")
     subs = await asyncio.to_thread(_list_sidecar_subs, src, item_id)
     # If this file is the one on the TV, put it on screen there too.
-    playing, pitem, pfmeta = await _playing_context()
+    playing, _, _ = await _playing_context()
     if playing and Path(playing) == src and not state.tv_local_active:
         await _attach_subtitle_to_vlc(dest, got["lang"])
     await _announce_subtitle(item_id, req.file_path, dest)
@@ -30490,6 +30517,9 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
     if (out_dir / "master.m3u8").exists():
         _bundle_index_register(key, out_dir)
         meta = _read_meta(out_dir)
+        # Nothing in the preferred language? Look one up while the viewer starts
+        # watching (see _maybe_auto_fetch_for_device).
+        await _maybe_auto_fetch_for_device(item, target, meta.get("subtitles") or [], sidecar_subs)
         return JSONResponse({
             "ready":             True,
             "needs_processing":  False,
@@ -32178,6 +32208,7 @@ async def stream_ondemand(item_id: str, req: OnDemandReq) -> JSONResponse:
         hls_log.warning("ondemand %s: background full-prep enqueue skipped: %s", key, exc)
 
     sidecar_subs = await asyncio.to_thread(_list_sidecar_subs, src, item_id)
+    await _maybe_auto_fetch_for_device(item, target, _od_subs_meta(info), sidecar_subs)
     return JSONResponse({
         "ready":             True,
         "mode":              "ondemand",

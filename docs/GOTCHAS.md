@@ -3461,6 +3461,18 @@ tool for this) was measured on the same 290 candidates and rejected: 132 in sync
 vs 156, while breaking 25 good subtitles vs 1, and it moved some episodes' own
 embedded tracks by 15–45 s.
 
+## "Playing on the TV" usually does not mean VLC
+
+`/api/library/{id}/play` hands off to the **kiosk's own browser player** whenever
+it is up (`_tv_wants_device_surface`), and only falls back to VLC when it can't
+be reached — `{"surface": "device"}` in the response is the normal case, not the
+exception. Anything hung off VLC's track-selection policy therefore runs on
+almost nothing: 17.7.0 shipped the automatic subtitle fetch that way and it
+never fired in normal use (found in testing, fixed in 17.7.1 by hooking the
+device paths too). When you add behaviour "when playback starts", ask which of
+the three surfaces you actually wired: VLC, the kiosk/on-device player, and the
+iOS native player.
+
 ## A `[1:s]` in an ffmpeg filter graph is "the FIRST subtitle stream"
 
 `subpack.py`'s image branch overlaid `[0:v][1:s]`, so every bitmap pack rendered
