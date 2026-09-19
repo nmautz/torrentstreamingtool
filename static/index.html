@@ -6846,6 +6846,15 @@ function _covSeasonEps(row,season){
   return new Set([...h,...p]);
 }
 function _covHasEp(row,season,episode){ return _covSeasonEps(row,season).has(+episode); }
+// Episodes of `season` sitting at "skip" inside a torrent this box still holds —
+// a pack sliced down to the episodes that were actually asked for (17.8.0), or
+// files deselected by hand. Missing, but a priority write rather than an indexer
+// hunt away, so the pages offer to fetch them instead of searching. Coverage
+// already subtracts anything owned or on its way, so this never overlaps `have`.
+function _covPackEps(row,season){
+  return new Set(((row&&row.in_pack)||{})[String(+season||0)]||[]);
+}
+function _covInPack(row,season,episode){ return _covPackEps(row,season).has(+episode); }
 // True while an owned episode is still coming down — rendered as "Downloading",
 // not "Downloaded", so the badge never overstates what's playable.
 function _covEpPending(row,season,episode){
@@ -9529,9 +9538,29 @@ function _epReconsiderMovieMode(){
 // TMDb episodes of `season` with no file on disk. Unaired episodes are dropped
 // unless the admin opted into the "Upcoming" third state, so a currently-airing
 // show doesn't read as permanently incomplete.
+// A file set to "skip" is IN the torrent but will never be fetched — priority 0
+// takes it out of qBit's piece picker entirely. It is not on disk, so nothing that
+// asks "what do we hold?" may count it: before 17.8.0 a season pack sliced down to
+// one episode reported the whole season owned, and the eleven episodes nobody had
+// showed as present. It is not simply missing either — see `_epPackEpisodes`.
+const _epOnBox=f=>(f.mode||"")!=="skip";
+// Episodes of `season` sitting at "skip" in a torrent this page's item still holds:
+// missing, but one flag flip from downloading rather than an indexer hunt away.
+function _epPackEpisodes(season){
+  if(!epHasTorrent) return new Set();
+  return new Set((epFiles||[])
+    .filter(f=>!_epOnBox(f) && (+f.season||0)===+season && (+f.episode||0)>0
+            && !(f.bucket||""))
+    .map(f=>+f.episode));
+}
+function _epPackFileFor(season, episode){
+  return (epFiles||[]).find(f=>!_epOnBox(f) && (+f.season||0)===+season
+                            && (+f.episode||0)===+episode && !(f.bucket||"")) || null;
+}
+
 function _epMissingEpisodes(season){
   if(!_epMissingOn() || +season<=0) return [];
-  const have=new Set(epFiles.filter(f=>(+f.season||0)===+season).map(f=>+f.episode||0));
+  const have=new Set(epFiles.filter(f=>_epOnBox(f) && (+f.season||0)===+season).map(f=>+f.episode||0));
   return _missingTmdbEpisodes(epMetadata, season, have, missingUnaired);
 }
 
@@ -9540,7 +9569,7 @@ function _epMissingEpisodes(season){
 // fetched yet (a season we own nothing from, before the lazy top-up lands), so a
 // brand-new tab can still say "0 of 12" rather than nothing.
 function _epSeasonCounts(season){
-  const have=epFiles.filter(f=>(+f.season||0)===+season).length;
+  const have=epFiles.filter(f=>_epOnBox(f) && (+f.season||0)===+season).length;
   if(+season<=0 || !_epMissingOn()) return {have, total:have, missing:0};
   const eps=_tmdbSeasonEpisodes(epMetadata, season);
   let total, missing;
@@ -10696,10 +10725,21 @@ function _epMissingCardHtml(season, te){
   // in a different one. Say which, rather than leaving "Not downloaded" to read
   // as "your download is broken". See docs/LIBRARY_DATA.md § Anime season mapping.
   const pack=upcoming?null:_animeForeignPack(epMetadata, season, epNo);
+  // In a pack we already hold, set to "do not download" (17.8.0). Not the same
+  // kind of missing at all: the torrent is registered, the swarm is known, and
+  // the bytes are one priority write away — no search, no second torrent, and
+  // the same release group as the rest of the season. So it gets its own badge
+  // and its own button, and the badge says where it is rather than leaving
+  // "Not downloaded" to imply nobody has it.
+  const inPack=upcoming?false:_epPackEpisodes(season).has(epNo);
   const badge=upcoming
     ? `<span class="text-[10px] text-gray-500 font-bold uppercase tracking-widest flex items-center gap-1"
              title="TMDb lists this episode but it hasn't aired yet.">
          <span class="w-1.5 h-1.5 ${dot}"></span></span>${_releaseBadge(air)}`
+    : inPack
+    ? `<span class="text-[10px] text-sky-400 font-bold uppercase tracking-widest flex items-center gap-1"
+             title="This episode is inside a pack already in your library, set to not download. Fetching it needs no search and no new torrent.">
+         <span class="w-1.5 h-1.5 bg-sky-400"></span>In a pack you have</span>`
     : `<span class="text-[10px] text-orange-400 font-bold uppercase tracking-widest flex items-center gap-1"
              title="This episode exists but isn't on this box.">
          <span class="w-1.5 h-1.5 ${dot}"></span>Not downloaded</span>
@@ -10730,12 +10770,19 @@ function _epMissingCardHtml(season, te){
             title="Find the best copy and start playing it now. It streams while it downloads and stays in your library">
             ${ic("play")} Play now
           </button>
-          <button onclick="epGetEpisode(${season},${epNo},this)"
+          ${inPack
+            ? `<button onclick="epFetchFromPack(${season},${epNo},this)"
+            class="h-9 px-2.5 flex items-center gap-1 text-[11px] font-bold uppercase tracking-wide
+                   text-sky-300 hover:text-white hover:bg-sky-800/60 transition-colors"
+            title="This episode is already inside a pack in your library. Start downloading it - no search, no new torrent, same release as the rest of the season.">
+            ${ic("down")} Fetch from pack
+          </button>`
+            : `<button onclick="epGetEpisode(${season},${epNo},this)"
             class="h-9 px-2.5 flex items-center gap-1 text-[11px] font-bold uppercase tracking-wide
                    text-indigo-300 hover:text-white hover:bg-indigo-800/60 transition-colors"
             title="Find the best copy of this episode and start downloading it">
             ${ic("down")} Get
-          </button>
+          </button>`}
           ${SIMPLE?"":(pack
             ? `<button onclick="epGetPack(${pack.grid_season})"
             class="h-9 px-2.5 flex items-center gap-1 text-[11px] font-bold uppercase tracking-wide
@@ -10782,14 +10829,21 @@ function _epSearchCandidate(){
 // authoritative per-file truth — including the files still coming down, which
 // must count as owned so a second press can't queue them all over again.
 function _epOwnedRow(){
-  const have={}, pending={};
+  const have={}, pending={}, in_pack={};
   (epFiles||[]).forEach(f=>{
     const sn=+f.season||0, ep=+f.episode||0;
     if(sn<=0 || ep<=0 || (f.bucket||"")) return;
+    // A skipped file is a third thing: in a torrent we hold, but never fetched.
+    // Counting it as owned is what let "Get the missing episodes" decide a sliced
+    // season pack had nothing missing at all. See `_epOnBox`.
+    if(!_epOnBox(f)){
+      if(epHasTorrent) (in_pack[String(sn)]=in_pack[String(sn)]||[]).push(ep);
+      return;
+    }
     const m=(f.complete===false)?pending:have;
     (m[String(sn)]=m[String(sn)]||[]).push(ep);
   });
-  return {have, pending};
+  return {have, pending, in_pack, tmdb_id:+((epMetadata||{}).tmdb_id)||0};
 }
 
 // A detached-run context for the show the LIBRARY page has open — the same shape
@@ -10873,7 +10927,36 @@ function _epGetMissing(scope, label, btn, only){
   const foreign = (!only && sn>0 && !packFirst)
     ? _bgForeignPackScope(ctx, sn, _epMissingEpisodes(sn).map(te=>+te.episode))
     : null;
+  // What this run is actually being asked for, as a flat list. Needed up front
+  // because the two cheapest answers — it's already in a pack downstairs, or one
+  // pack covers the lot — are both decided against the gap set, not against the
+  // scope.
+  const wantEps = only ? [{season:sn, episode:+only.episode}]
+                       : (sn>0 ? _epMissingEpisodes(sn).map(te=>({season:sn, episode:+te.episode}))
+                               : []);
   const started=_bgRun(`${ctx.title} — ${label}`, async(ctl,report)=>{
+    // ── 0. Anything already sitting at "skip" in a pack on this box ──────────
+    // No query, no second torrent, and the same release group as the rest of the
+    // season. An episode one flag flip from downloading must never cost an
+    // indexer round trip, so this runs before anything else asks.
+    let gaps=wantEps.slice();
+    if(gaps.length){
+      report("Checking what's already here","Some of this may be in a pack you hold.",0.01);
+      const reused=await _bgFetchFromPacks(ctx, gaps);
+      if(ctl.cancel) return;
+      if(reused.length){
+        const took=new Set(reused.map(m=>`${m.season}-${m.episode}`));
+        gaps=gaps.filter(m=>!took.has(`${m.season}-${m.episode}`));
+        refreshCoverage();
+        if(!gaps.length){
+          showAlert(`Getting ${_ssEpList(reused.map(m=>_ssEpCode(m.season,m.episode)))} `
+                   +`out of a pack already in your library — no download needed, `
+                   +`nothing new was searched for.`,"success");
+          if(_epPageOpen()) refreshEpFiles();
+          return;
+        }
+      }
+    }
     if(packFirst || foreign){
       const want=foreign?foreign.gridSeason:sn;
       report(foreign?`Looking for the ${foreign.label.toLowerCase()} pack`
@@ -10887,6 +10970,59 @@ function _epGetMissing(scope, label, btn, only){
       // with nothing — the episode results from that same query are in hand.
       if(pack && await _bgStartPack(ctx, ctl, report, pack,
                                     foreign?foreign.season:sn, filt, foreign)) return;
+    }
+    // ── 1. Pack-first for a PARTIAL scope ────────────────────────────────────
+    // The branch above is the whole-season buy, and it only fires when the box
+    // holds none of the season — a pack would otherwise re-fetch what is already
+    // downstairs. Slicing removes that objection entirely: the pack is adopted
+    // and everything outside the gap set is set to "do not download", so the
+    // bandwidth is the episodes you asked for while the quality, the audio
+    // layout and the release group are the season's. That makes a pack the
+    // better buy for ONE episode too, which is what this branch is.
+    //
+    // The same season query the gap fill would run anyway, so the pack costs no
+    // extra round trip — and it returns that season's episodes alongside, which
+    // become the fallback if no pack passes.
+    if(gaps.length && app.pack_first && sn>0 && !ctx.absolute
+       && !packFirst && !foreign){
+      report("Looking for a season pack",
+             gaps.length===1 ? "One episode out of a pack beats a lone release."
+                             : "One download, one group, one encode.", 0.05);
+      await _bgSeasonSearch(ctx, sn);     // fills ctx.packs AND ctx.episodes
+      if(ctl.cancel) return;
+      const pack=_bgPackForEpisodes(ctx, sn, gaps.map(m=>m.episode), filt);
+      const covered=pack?_packCoversEpisodes(ctx, pack, sn, gaps.map(m=>m.episode)):[];
+      if(pack && covered.length){
+        // The release the per-episode hunt would have chosen, handed to the
+        // server as the recovery path: if the episode turns out not to be
+        // identifiable inside the pack, it swaps to this rather than stranding
+        // the user with a torrent that never resolves. See _pack_slice_fallback.
+        const one=_bgScopeEpisodes(ctx, sn).find(e=>+e.episode===covered[0]);
+        const fb=(one&&one.sources&&one.sources.length)
+          ? _bgAutoPick(ctx, one.sources, filt) : null;
+        if(await _bgStartPackSlice(ctx, ctl, report, pack, sn, covered, filt, fb)){
+          // "Take the pack, hunt the rest": whatever it did NOT cover still
+          // needs finding. _packCoversScope only ever accepts a pack spanning the
+          // whole season, so today this leaves nothing — but a partial adoption
+          // that silently dropped the remainder would be invisible, so the
+          // remainder is carried rather than assumed empty.
+          const got=new Set(covered);
+          gaps=gaps.filter(m=>!got.has(m.episode));
+          if(!gaps.length) return;
+          report("Finding the rest",
+                 `${_ssEpList(gaps.map(m=>_ssEpCode(m.season,m.episode)))} aren't in that pack.`, 0.5);
+        }
+      }
+    }
+    // ── 2. Per-episode hunt for whatever is left ─────────────────────────────
+    // `ctx.owned` is what _bgEnsureSources sweeps against, so narrowing it to the
+    // remaining gaps is what keeps this from re-hunting episodes step 0 or step 1
+    // just started. Same trick _epBgCtx uses for `only`, for the same reason.
+    if(gaps.length!==wantEps.length && sn>0){
+      const keep=new Set(gaps.map(m=>+m.episode));
+      const all=_tmdbSeasonEpisodes(epMetadata, sn).map(t=>+t.episode);
+      ctx.owned.have[String(sn)]=[...new Set((ctx.owned.have[String(sn)]||[])
+        .concat(all.filter(n=>n>0 && !keep.has(n))))];
     }
     const eps=await _bgEnsureSources(ctx,ctl,report);
     if(!eps) return;
@@ -10919,6 +11055,58 @@ function epGetEpisode(season, episode, btn){
                 {season:+season, episode:+episode});
 }
 
+// ── Fetch from a pack already in the library ────────────────────────────────
+// The counterpart to slicing: a pack adopted for one episode leaves the rest of
+// the season sitting in the torrent at priority 0, and getting any of it back is
+// a flag flip. No indexer query, no second torrent, and — the part that matters
+// for a library you actually watch — the same release group, the same encode and
+// the same audio layout as the episodes you already have.
+//
+// Deliberately NOT routed through `_epGetMissing`: that runs a detached search
+// with a progress pill, and there is nothing here to search for. This answers in
+// one round trip.
+async function epFetchFromPack(season, episode, btn){
+  season=+season; episode=+episode;
+  const f=_epPackFileFor(season, episode);
+  const iid=(f && epFileItem[f.path]) || epItemId;
+  if(!f || !iid){
+    // The page's snapshot has gone stale (someone fetched it from another
+    // device, or the pack was deleted). Fall back to the ordinary hunt rather
+    // than telling the user nothing happened.
+    epGetEpisode(season, episode, btn);
+    return;
+  }
+  if(btn) _markLoading(btn, true);
+  const n=await _packFetch({item_id:iid, season, episodes:[episode]});
+  if(btn) _markLoading(btn, false);
+  if(!n){ showAlert("That episode isn't in a pack here any more — searching instead.","warn");
+          epGetEpisode(season, episode, btn); return; }
+  showAlert(`Downloading ${_ssEpCode(season,episode)} out of the pack you already `
+           +`have — no search ran and no new torrent was added.`,"success");
+  refreshCoverage();
+  refreshEpFiles();
+}
+
+// Every episode of this season still sitting at "skip" in a pack here. The
+// whole-season twin of the button above, offered on the season header so
+// finishing a sliced season is one press rather than twelve.
+async function epFetchSeasonFromPack(season, btn){
+  season=+season;
+  const eps=[..._epPackEpisodes(season)];
+  if(!eps.length) return;
+  const f=_epPackFileFor(season, eps[0]);
+  const iid=(f && epFileItem[f.path]) || epItemId;
+  if(!iid) return;
+  if(btn) _markLoading(btn, true);
+  const n=await _packFetch({item_id:iid, season, episodes:eps});
+  if(btn) _markLoading(btn, false);
+  if(!n){ showAlert("Those episodes aren't in a pack here any more.","warn"); return; }
+  showAlert(`Downloading ${n} episode${n===1?"":"s"} out of the pack you already have `
+           +`— no search ran and no new torrent was added.`,"success");
+  refreshCoverage();
+  refreshEpFiles();
+}
+
 // Stream a missing episode right now: find sources for just this episode, pick
 // one the same way Get does (audio preference, Auto limits), and hand the pick
 // plus its race alternates to POST /api/library/stream-now. The server races
@@ -10938,17 +11126,44 @@ async function epPlayEpisode(season, episode, btn){
   const code=_ssEpCode(season, episode);
   const same=r=>r.kind==="episode" && r.season===season && r.episode===episode;
   const html=btn?btn.innerHTML:"";
+  // ── Already in a pack downstairs? ─────────────────────────────────────────
+  // Then there is nothing to find. Un-skip the file and play it the ordinary
+  // way: the torrent is already registered, and `_begin_library_file_stream`
+  // streams a library file ahead of its own download exactly as it does for
+  // anything else that hasn't finished. No race, no second torrent, no query.
+  const ident={tmdb_id:+((ctx.tmdb||{}).tmdb_id)||0, series_key:epSeriesKey||""};
+  const held=await _packLookup(season, episode, ident);
+  if(held && await _packFetch({item_id:held.item_id, season, episodes:[episode]})){
+    refreshCoverage();
+    const te0=_tmdbSeasonEpisodes(epMetadata, season).find(t=>+t.episode===episode);
+    showAlert(`${code} was already in a pack in your library — starting it now, `
+             +`nothing needed downloading first.`,"success");
+    if(_epPageOpen()) closeEpisodePage();
+    await playLibraryFiles(held.item_id, [held.path], null,
+                           `${ctx.title} ${code}${te0&&te0.name?` · ${te0.name}`:""}`);
+    return;
+  }
   if(btn){ btn.innerHTML=`${ic("search")} Finding…`; _markLoading(btn, true); }
   let eps=[], packs=[];
   try{
+    // Season query FIRST for ordinary TV, because it answers both questions in
+    // one round trip: that season's packs AND its episodes. The episode query
+    // used to lead, which cost nothing extra when it hit — but it can only ever
+    // return single-episode releases, so leading with it meant a pack was only
+    // ever considered when no episode release existed at all. Pack-first wants
+    // to compare them, so it asks the question that returns both.
     const abs=(season<=1 && episode>=100);
-    eps=(await _bgQuery(`${ctx.query} ${abs?episode:code}`, ctx)).filter(same);
-    if(!eps.length && !ctx.absolute){
+    if(!ctx.absolute){
       const res=await _bgQuery(`${ctx.query} S${pad2(season)}`, ctx);
       eps=res.filter(same);
       packs=res.filter(r=>(r.kind==="season" && r.season===season)
         || (r.kind==="multiseason" && r.season_from<=season && season<=r.season_to));
     }
+    // The targeted episode query mops up: indexers return an empty result far
+    // more often than a wrong one, and a season query that found no packs and no
+    // episodes is not evidence the episode isn't out there.
+    if(!eps.length && !packs.length)
+      eps=(await _bgQuery(`${ctx.query} ${abs?episode:code}`, ctx)).filter(same);
   }finally{
     if(btn){ _markLoading(btn, false); btn.innerHTML=html; }
   }
@@ -10957,17 +11172,35 @@ async function epPlayEpisode(season, episode, btn){
   const uniq=list=>{ const seen=new Set();
     return list.filter(r=>r.magnet && !seen.has(r.magnet) && seen.add(r.magnet))
                .sort((a,b)=>(b.seeders||0)-(a.seeders||0)); };
-  let cands=[];
-  if(eps.length){
+  const filt=_ssParseBulkFilters();
+  let cands=[], slice=false;
+  // Pack-first, same rule as Get: whenever one covers this episode and clears the
+  // filters, it wins. The server finds the episode's file inside each candidate
+  // and races on that, so a pack competes on how fast THIS episode arrives — and
+  // `slice_pack` then sets every other file in the winner to "do not download",
+  // so watching one episode never quietly pulls the season down behind it.
+  if(packs.length && app.pack_first){
+    ctx.packs=uniq(packs);
+    const pack=_bgPackForEpisodes(ctx, season, [episode], filt);
+    if(pack){
+      const rc=_ssAutoPickRace(ctx.packs, filt, {pick:pack, match:s=>_bgAudioMatch(ctx,s)});
+      cands=rc.candidates.length ? rc.candidates : [slim(pack)];
+      slice=true;
+    }
+  }
+  if(!cands.length && eps.length){
     eps=uniq(eps);
-    const filt=_ssParseBulkFilters();
     const pick=_bgAutoPick(ctx, eps, filt);
     const rc=_ssAutoPickRace(eps, filt, {pick, match:s=>_bgAudioMatch(ctx,s)});
     cands=rc.candidates.length ? rc.candidates : [slim(pick)];
-  }else if(packs.length){
-    // The server finds the episode's file inside each pack and races on it.
+  }
+  if(!cands.length && packs.length){
+    // No pack passed the filters and no episode release turned up — race the
+    // packs anyway rather than refusing. Unfiltered, so it is the last resort it
+    // reads as, and still sliced.
     const seeded=uniq(packs).filter(p=>(p.seeders||0)>0);
     cands=(seeded.length?seeded:uniq(packs)).slice(0,3).map(slim);
+    slice=true;
   }
   if(!cands.length){
     showAlert(`No sources found for ${code} right now. Try Choose to search wider.`,"warn");
@@ -10981,7 +11214,8 @@ async function epPlayEpisode(season, episode, btn){
     const r=await fetch("/api/library/stream-now",{
       method:"POST", headers:{"Content-Type":"application/json"},
       body:JSON.stringify({candidates:cands, title:label, series:ctx.title,
-                           season, episode, profile_id:profile.id||""}),
+                           season, episode, profile_id:profile.id||"",
+                           slice_pack:slice}),
     });
     if(!r.ok){
       _revertOptimistic();
@@ -11029,7 +11263,7 @@ function epFindSeason(season){
   // which torrents it has found, so left to itself it would sweep (and offer)
   // every episode of the season, including the ones already sitting here.
   const episodes=_epMissingEpisodes(season).map(te=>+te.episode);
-  const owned=epFiles.filter(f=>(+f.season||0)===+season).length;
+  const owned=epFiles.filter(f=>_epOnBox(f) && (+f.season||0)===+season).length;
   openSearchShowFromTmdb(c, {
     season:+season, findMissing:true, episodes,
     section: owned ? "episodes" : "packs",
@@ -11497,6 +11731,9 @@ function renderEpList(){
       const one=(packs.length && packs.every(p=>p && p.grid_season===packs[0].grid_season))
         ? packs[0] : null;
       const lo=one?+missingEps[0].episode:0, hi=one?+missingEps[missingEps.length-1].episode:0;
+      // How many of the gaps are already sitting in a pack here at "do not
+      // download" — those need no search at all, so they get their own button.
+      const inPackN=_epPackEpisodes(epCurrentSeason).size;
       html += `<div class="px-3 sm:px-5 py-2 bg-amber-950/40 border-b border-amber-900/50 flex items-center justify-between gap-2 flex-wrap">
           <span class="text-[11px] text-amber-300 uppercase tracking-wide flex items-center gap-2">
             <span class="w-2 h-2 bg-amber-400 flex-shrink-0"></span>
@@ -11505,6 +11742,11 @@ function renderEpList(){
               : ""}
           </span>
           <div class="flex items-center gap-1.5 flex-shrink-0">
+            ${inPackN?`<button onclick="epFetchSeasonFromPack(${epCurrentSeason},this)"
+              class="text-[11px] px-2.5 py-1 bg-sky-700 hover:bg-sky-600 text-white uppercase tracking-wide transition-colors flex items-center gap-1"
+              title="${inPackN} of these are already inside a pack in your library, set to not download. Start them - no search, no new torrent, same release as the rest of the season.">
+              ${ic("down")} Fetch ${inPackN} from pack
+            </button>`:""}
             <button onclick="epGetSeason(${epCurrentSeason},this)"
               class="text-[11px] px-2.5 py-1 bg-amber-700 hover:bg-amber-600 text-white uppercase tracking-wide transition-colors flex items-center gap-1"
               title="${one?`Download the ${escHtml(one.label.toLowerCase())} pack — it holds these episodes and the rest of the run.`:"Download the whole season in one copy when a complete one exists, otherwise find each missing episode."}">
@@ -13749,6 +13991,30 @@ function _ssOwnedEps(season){
   }
   return eps;
 }
+// Fetch an episode out of a pack already in the library, from the search show
+// page. Unlike the episode page's twin this has no item id — the show screen
+// never loaded one — so it addresses the pack by TMDb identity and lets the
+// server find whichever item holds it.
+async function ssFetchFromPack(season, episode, btn){
+  season=+season; episode=+episode;
+  const b=_ssTmdbBinding();
+  const ident={tmdb_id:+((b||{}).tmdb_id)||0,
+               series_key:(_ssOwned&&_ssOwned.series_key)||""};
+  if(!ident.tmdb_id && !ident.series_key){ ssSearchEpisode(season, episode); return; }
+  if(btn) _markLoading(btn, true);
+  const n=await _packFetch({...ident, season, episodes:[episode]});
+  if(btn) _markLoading(btn, false);
+  if(!n){
+    showAlert("That episode isn't in a pack here any more — searching instead.","warn");
+    ssSearchEpisode(season, episode);
+    return;
+  }
+  showAlert(`Downloading ${_ssEpCode(season,episode)} out of the pack you already `
+           +`have — no search ran and no new torrent was added.`,"success");
+  await refreshCoverage();
+  _ssRenderEpisodes();
+}
+
 function _ssOwns(season,episode){
   if(_ssReplace===`${+season}-${+episode}`) return false;
   return _covHasEp(_ssOwned, season, episode);
@@ -14861,6 +15127,22 @@ function _ssOwnedRowHtml(season, episode, name){
 function _ssMissingRowHtml(season, episode, name){
   const code=`S${String(season).padStart(2,"0")}E${String(episode).padStart(2,"0")}`;
   const busy=_ssSearching.has(`${season}-${episode}`);
+  // Already inside a pack downstairs, set to not download. There is nothing to
+  // search for — offer the flag flip instead, before a query is ever run, and
+  // say so where the row would otherwise read "No source found".
+  if(_covInPack(_ssOwned, season, episode)){
+    return `<div class="w-full text-left px-3 sm:px-5 py-3 flex items-center gap-3 bg-sky-950/20 border-l-2 border-l-sky-800">
+    <div class="text-[11px] font-mono font-bold text-sky-500/80 w-14 flex-shrink-0">${code}</div>
+    <div class="min-w-0 flex-1">
+      <p class="text-sm text-gray-300 truncate">${name?escHtml(name):`Episode ${episode}`}</p>
+      <p class="text-[11px] text-sky-400 uppercase tracking-wide flex items-center gap-1.5">
+        <span class="w-1.5 h-1.5 bg-sky-400"></span>In a pack you have</p>
+    </div>
+    <button onclick="ssFetchFromPack(${season},${episode},this)"
+      title="This episode is inside a pack already in your library. Start downloading it - no search, no new torrent, same release as the rest of the season."
+      class="text-[11px] px-2.5 py-1.5 flex-shrink-0 bg-sky-800 hover:bg-sky-700 text-sky-100 uppercase tracking-wide transition-colors">Fetch</button>
+  </div>`;
+  }
   return `<div class="w-full text-left px-3 sm:px-5 py-3 flex items-center gap-3 opacity-70">
     <div class="text-[11px] font-mono font-bold text-gray-600 w-14 flex-shrink-0">${code}</div>
     <div class="min-w-0 flex-1">
@@ -15453,6 +15735,16 @@ async function _ssDownloadOne(src, season, episode, opts={}){
     body.candidates=opts.candidates;
     if(opts.runtime_min) body.runtime_min=opts.runtime_min;
     if(opts.episode_count) body.episode_count=opts.episode_count;
+  }
+  // Pack slicing: keep these episodes, set every other file in the torrent to
+  // "do not download". Sent as season/episode rather than file indices because
+  // the numbering isn't final until the server's metadata binds - see
+  // `_pack_slice_apply` in main.py.
+  if(opts.want_episodes && opts.want_episodes.length){
+    body.want_episodes=opts.want_episodes;
+    if(opts.pack_fallback && opts.pack_fallback.magnet)
+      body.pack_fallback={magnet:opts.pack_fallback.magnet,
+                          title:opts.pack_fallback.title||""};
   }
   const r=await postLibraryDownload(body, {silent:!!opts.silent,
                                           alternatives:opts.silent?[]:_ssAlternativeSources(season, episode)});
@@ -16496,6 +16788,223 @@ async function _bgStartDownloads(ctx, ctl, report, jobs, note="", opts={}){
   // Only take the user somewhere if they're still standing on the page this came
   // from; a background run must never yank the screen out from under them.
   if(_bgLive(ctx)){ closeSearchShow(); switchTab("library"); }
+}
+
+// ── Pack-first for a partial scope ──────────────────────────────────────────
+// A whole-season pack is the better buy even when only one episode is wanted:
+// one group's encode, one audio layout across the season, and — because every
+// other episode in it is then a priority flip away (see _bgFetchFromPacks) —
+// the next one costs no indexer query at all. The pack is adopted and every
+// file the request did NOT ask for is set to "do not download"; the backend
+// resolves which those are once the attribution settles (_pack_slice_apply in
+// main.py), so the bandwidth cost is the episode, not the season.
+//
+// Two numbers gate it, and they measure different things:
+//
+//   * The Auto-pick size window is judged on the PER-EPISODE share, because
+//     that is what actually downloads. Judging a 144.7 GB Hunter x Hunter pack
+//     whole against a 40 GB cap would refuse the very case this exists for,
+//     while its real cost — one ~1 GB episode — sits comfortably inside it.
+//   * `app.pack_first_max_bytes` is the whole-torrent ceiling, and it is the
+//     only thing that stops a complete-franchise torrent being adopted for one
+//     episode. qBit has to hold its metadata and a queue slot forever.
+//
+// How many episodes a pack holds, from TMDb's inventory rather than the release
+// name — the name says "Complete" and means nothing arithmetical. A
+// multi-season pack sums the seasons it spans. Returns 0 when we can't tell,
+// which the callers read as "don't divide" (the pack is then judged whole,
+// which is the conservative direction).
+function _packEpisodeCount(ctx, p){
+  const all=((ctx&&ctx.meta)||{}).all_seasons||[];
+  const cnt=s=>+((all.find(x=>+x.season===+s)||{}).episode_count||0);
+  if(p.kind==="season") return cnt(p.season);
+  if(p.kind==="multiseason"){
+    const from=p.season_from||0, to=p.season_to||from;
+    // "Complete series" carries no span — every numbered season it is.
+    if(!from) return all.reduce((a,x)=>a+(+x.season>0?(+x.episode_count||0):0),0);
+    let n=0; for(let s=from;s<=to;s++) n+=cnt(s);
+    return n;
+  }
+  return 0;
+}
+
+// The best pack to slice for `wanted` episodes of `season`, or null.
+//
+// Deliberately NOT _bgBestPackForScope with a different filter: that one is the
+// whole-season buy, where the size window means what it says. Here the window
+// is applied to the share, and a hard ceiling is applied to the torrent.
+function _bgPackForEpisodes(ctx, season, wanted, filt){
+  if(!app.pack_first) return null;
+  if(!wanted || !wanted.length) return null;
+  const cap=+app.pack_first_max_bytes||0;
+  const pool=(ctx.packs||[]).filter(p=>
+    _packCoversScope(p, +season, ctx.seasons||[])
+    && (!cap || (p.size||0)<=cap));
+  if(!pool.length) return null;
+  // Audio preference first, exactly as _bestPackFrom does — a dub household must
+  // not be handed a subbed pack just because it seeds better.
+  const pref=pool.filter(p=>_bgAudioMatch(ctx,p));
+  const cand=pref.length?pref:pool;
+  const cmp=_bgPackCmp(ctx);
+  if(filt){
+    const fits=cand.filter(p=>{
+      const n=_packEpisodeCount(ctx,p), z=p.size||0, share=n?z/n:z;
+      return (p.seeders||0)>=filt.minSeed
+          && share>=filt.minBytes && share<=filt.maxBytes;
+    });
+    if(fits.length) return fits.sort(cmp)[0];
+  }
+  // Same cascade as _ssAutoPickFrom / _bestPackFrom: a limit steers the choice
+  // but can never leave you with no pack when one exists.
+  return [...cand].sort(cmp)[0];
+}
+
+// Which of `wanted` a pack actually covers. _packCoversScope only ever accepts a
+// pack spanning the whole season (an ep_from batch is refused — its numbering is
+// the release group's, not TMDb's, so coverage is unverifiable), so today this
+// answers "all of them". It is written as a real test anyway because the caller
+// has to handle a remainder correctly the day that stops being true, and a
+// partial adoption that silently dropped three episodes would be invisible.
+function _packCoversEpisodes(ctx, p, season, wanted){
+  return _packCoversScope(p, +season, ctx.seasons||[]) ? wanted.slice() : [];
+}
+
+// ── Fetch from a pack already on the box ────────────────────────────────────
+// The other half of slicing, and the half that makes it pay. An episode sitting
+// at "skip" inside a torrent we hold is not missing in any way a search could
+// improve on: the torrent is registered, the swarm is known, and the release
+// group is the one the rest of the season came from. Getting it is a priority
+// write. So every auto flow asks this BEFORE it asks an indexer.
+//
+// `coverage.in_pack` is the same answer precomputed per show, and is what the
+// buttons render off; this is the per-episode lookup for the flows that run
+// without a coverage row in hand.
+async function _packLookup(season, episode, ident){
+  // Identity is not optional: every show has an S01E05, and un-skipping a
+  // different show's is a wrong answer that costs real bandwidth. The server
+  // answers `found:false` rather than matching loosely when neither is given.
+  if(!ident || (!ident.tmdb_id && !ident.series_key)) return null;
+  try{
+    const qs=new URLSearchParams({season:String(+season), episode:String(+episode)});
+    if(ident.tmdb_id)    qs.set("tmdb_id", String(+ident.tmdb_id));
+    if(ident.series_key) qs.set("series_key", ident.series_key);
+    const r=await fetch(`/api/library/pack-lookup?${qs}`);
+    if(!r.ok) return null;
+    const j=await r.json();
+    return j && j.found ? j : null;
+  }catch(_){ return null; }
+}
+
+// The bulk form: which of `eps` are sitting at "skip" in a pack here, as
+// {episode: {item_id, path, …}}. One round trip for a whole season's gap set.
+async function _packLookupMany(season, eps, ident){
+  if(!ident || (!ident.tmdb_id && !ident.series_key) || !eps || !eps.length) return null;
+  try{
+    const qs=new URLSearchParams({season:String(+season), episodes:eps.join(",")});
+    if(ident.tmdb_id)    qs.set("tmdb_id", String(+ident.tmdb_id));
+    if(ident.series_key) qs.set("series_key", ident.series_key);
+    const r=await fetch(`/api/library/pack-lookup?${qs}`);
+    if(!r.ok) return null;
+    const j=await r.json();
+    return (j && j.found) ? (j.episodes||{}) : null;
+  }catch(_){ return null; }
+}
+
+// Un-skip episodes inside a pack we already hold. `body` is either
+// {item_id, season, episodes} or {series_key|tmdb_id, season, episodes}; omit
+// `episodes` for the whole season. Returns the number of files enabled, or 0.
+async function _packFetch(body){
+  try{
+    const r=await fetch("/api/library/pack-fetch",{
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(body),
+    });
+    if(!r.ok) return 0;
+    const j=await r.json();
+    return +((j&&j.count)||0);
+  }catch(_){ return 0; }
+}
+
+// The episodes of `missing` that were already sitting in a pack on this box, now
+// downloading. Returns the list it handled so the caller can narrow its hunt to
+// what genuinely needs one.
+async function _bgFetchFromPacks(ctx, missing){
+  if(!missing || !missing.length) return [];
+  const ident={tmdb_id:+((ctx.tmdb||{}).tmdb_id)||0,
+               series_key:(ctx.owned&&ctx.owned.series_key)||""};
+  if(!ident.tmdb_id && !ident.series_key) return [];
+  // ONE lookup per season, not one per episode. `get_library()` re-reads and
+  // re-parses library.json under the library lock on every call, so asking per
+  // episode made a twenty-gap season twenty serialised disk reads before a single
+  // indexer query had run.
+  const bySeason=new Map();
+  missing.forEach(m=>{ const k=+m.season;
+    if(!bySeason.has(k)) bySeason.set(k, []);
+    bySeason.get(k).push(+m.episode); });
+  const took=[];
+  for(const [season, eps] of bySeason){
+    const hits=await _packLookupMany(season, eps, ident);
+    if(!hits) continue;
+    // Group by the item that holds them, so a season split across two packs is
+    // still one write per pack rather than one per episode.
+    const byItem=new Map();
+    eps.forEach(ep=>{ const h=hits[String(ep)]; if(!h) return;
+      if(!byItem.has(h.item_id)) byItem.set(h.item_id, []);
+      byItem.get(h.item_id).push(ep); });
+    for(const [item_id, list] of byItem){
+      if(await _packFetch({item_id, season, episodes:list}))
+        list.forEach(ep=>took.push({season, episode:ep}));
+    }
+  }
+  return took;
+}
+
+// One pack, sliced to the episodes that were asked for — the twin of
+// _bgStartPack for a scope smaller than a whole season.
+//
+// It races for the same reason that one does: nobody picked this release, we
+// did. And racing is cheaper here than anywhere else in the app, because each
+// challenger is sliced too — three packs racing costs three EPISODES of
+// bandwidth, not three packs.
+//
+// `fallback` is the single-episode release the picker would otherwise have
+// chosen. It rides along so the server can recover on its own if the episode
+// turns out not to be identifiable inside the pack (odd naming, an attribution
+// that lands nowhere) — see `_pack_slice_fallback`. Without it the user would be
+// left with a pack that never resolves and no sign of why.
+async function _bgStartPackSlice(ctx, ctl, report, pack, season, wanted, filt, fallback){
+  if(ctl.cancel) return false;
+  const codes=wanted.map(e=>_ssEpCode(season,e));
+  report(`Starting download — ${_ssPackLabel(pack)}`, pack.title, 0.95);
+  const pool=(ctx.packs||[]).filter(p=>p===pack
+    || _packCoversScope(p, +season, ctx.seasons||[]));
+  const rc=_ssAutoPickRace(pool, filt, {pick:pack, match:s=>_bgAudioMatch(ctx,s)});
+  // `season` with episode 0 — the item is the PACK, and shaping it as one
+  // episode would read wrong the moment a second is fetched out of it. Same
+  // reasoning as _bgStartPack; don't "fix" it to the episode being requested.
+  const done=await _ssDownloadOne(pack, season, 0, {
+    silent:true, race:true,
+    candidates:(rc.pick&&rc.pick.magnet===pack.magnet)?rc.candidates:[],
+    series:ctx.title, locked:ctx.locked, tmdb:ctx.tmdb,
+    want_episodes:wanted.map(e=>[+season,+e]),
+    pack_fallback:fallback||null,
+    // The divisor is the episodes actually being KEPT, not the pack's whole
+    // run: the server's bytes-per-minute check would otherwise judge a 40 GB
+    // torrent against one episode's runtime and demote a perfectly good release.
+    ..._bgRuntimeHint(ctx, season, 0)});
+  if(!done || done.unreleased) return false;
+  const stats=`${_availLabel(pack.seeders).txt.toLowerCase()} availability, ${pack.size_human}`;
+  // Say plainly that the rest of the pack is off. Someone who asked for one
+  // episode and sees a season-pack row appear in the library will otherwise
+  // assume the whole thing is coming down.
+  showAlert(done.duplicate
+    ? "That copy is already downloading — nothing new was started."
+    : `Getting ${_ssEpList(codes)} out of ${_ssPackLabel(pack).toLowerCase()} — `
+     +`${stats}. The rest of the pack is set to not download; you can pull any `
+     +`of it later from the episode list without another search.`,
+    done.duplicate?"warn":"success");
+  refreshCoverage();
+  return true;
 }
 
 // One pack instead of N episodes — the twin of _bgStartDownloads for the case
@@ -25913,6 +26422,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.8.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.9.0</div>
 </body>
 </html>

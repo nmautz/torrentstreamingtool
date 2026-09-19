@@ -1330,6 +1330,42 @@
       </div>
     </div>
 
+    <!-- Pack-first: may one episode be answered with a whole-season torrent -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Prefer Season Packs<span class="help-tip" tabindex="0" data-tip="Only applies where nobody picked a release - the one-press Get and Play now buttons. Choosing a specific copy yourself is never overridden.">?</span></h2>
+        <p class="text-xs text-gray-500 mt-0.5">When someone asks for a single episode and a whole-season copy exists, take the season copy and download only the episode out of it. You get the quality, the audio layout and the release group of a proper season pack instead of whatever single-episode rip was seeded that day — and every other episode of that season is then one tap away with no search at all. <strong>Only the episode downloads</strong>; the rest of the pack is set to not download until you ask for it.</p>
+      </div>
+
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h3 class="text-xs font-black uppercase tracking-wide text-gray-200">Use A Season Pack For One Episode</h3>
+          <p class="text-xs text-gray-500 mt-0.5">Turning this off only affects the <em>next</em> request — packs already in your library keep their episodes and their Fetch buttons.</p>
+        </div>
+        <button id="pfEnabledBtn" onclick="togglePackFirst()"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                 bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">
+          &hellip;
+        </button>
+      </div>
+
+      <div class="px-5 py-4 flex items-end justify-between gap-3 flex-wrap">
+        <div class="min-w-0 flex-1">
+          <h3 class="text-xs font-black uppercase tracking-wide text-gray-200">Biggest Pack To Use</h3>
+          <p class="text-xs text-gray-500 mt-0.5">A hard ceiling on the whole torrent. The download-size limits on the Auto picker judge the <em>per-episode</em> share, because that is all that actually downloads — so without this, nothing would stop a complete-series torrent being adopted to get one episode. qBittorrent has to hold its file list and a queue slot for as long as it stays in your library.</p>
+        </div>
+        <div class="flex items-end gap-2 flex-shrink-0">
+          <div class="space-y-1.5 w-32">
+            <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Limit (GB)</label>
+            <input id="pfMaxGb" type="number" min="1" max="10000" step="10" value="200"
+              class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none"/>
+          </div>
+          <button id="pfSaveBtn" onclick="savePackFirstMax()"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:text-white transition-colors disabled:opacity-50">Save</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Stream focus: what "play this now" does to everything else -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
@@ -2070,7 +2106,7 @@ function switchTab(tab){
   else                   stopCompressionPolling();
   if(tab==="cleanup")    loadCleanup();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")   { loadNetwork(); loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadMissingContent(); loadDownloadRace(); loadStreamFocus(); loadAutoMaint(); loadPrepValidate(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
+  if(tab==="system")   { loadNetwork(); loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadMissingContent(); loadDownloadRace(); loadPackFirst(); loadStreamFocus(); loadAutoMaint(); loadPrepValidate(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
   else                 { stopSysHealthPolling(); stopForcePrepPolling(); stopFileValidationPolling(); stopFileRepairPolling(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); if(!_auChangelogLoaded) loadChangelog(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
@@ -2859,6 +2895,77 @@ function _sfRender(){
     badge.textContent = _sfCfg.throttled
       ? `Active — ${_sfCfg.throttled} held back` : "Active";
   }
+}
+
+// ── Prefer season packs ─────────────────────────────────────────────────────
+// Whether a request for ONE episode may be answered with a whole-season torrent
+// sliced down to it, and how big a torrent may be adopted that way. See
+// `_pack_first_cfg` in main.py.
+let _pfCfg = {enabled: true, max_bytes: 200 * 1024 ** 3};
+const _PF_BTNS = ["pfEnabledBtn", "pfSaveBtn"];
+
+function _pfRender(){
+  const b = document.getElementById("pfEnabledBtn");
+  if(b){
+    b.textContent = _pfCfg.enabled ? "On" : "Off";
+    b.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors "
+      + (_pfCfg.enabled
+          ? "bg-emerald-900 border-emerald-700 text-emerald-100 hover:bg-emerald-800"
+          : "bg-gray-800 border-gray-700 text-gray-400 hover:text-white");
+  }
+  const gb = document.getElementById("pfMaxGb");
+  // Don't stomp what the admin is mid-way through typing.
+  if(gb && document.activeElement !== gb)
+    gb.value = Math.round((_pfCfg.max_bytes || 0) / (1024 ** 3));
+}
+
+async function loadPackFirst(){
+  try{
+    const r = await fetch("/api/admin/pack-first", {headers: authHeader()});
+    if(!r.ok) return;
+    const d = await r.json();
+    _pfCfg = {enabled: !!d.enabled, max_bytes: +d.max_bytes || 0};
+    _pfRender();
+  }catch(_){}
+}
+
+async function _pfSave(next, okMsg){
+  const btns = _PF_BTNS.map(id => document.getElementById(id));
+  btns.forEach(b => { if(b) b.disabled = true; });
+  try{
+    const r = await fetch("/api/admin/pack-first",{
+      method: "POST",
+      headers: {...authHeader(), "Content-Type": "application/json"},
+      body: JSON.stringify(next),
+    });
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      showToast(`Save failed: ${d.detail || r.status}`, true);
+      return;
+    }
+    const d = await r.json();
+    _pfCfg = {enabled: !!d.enabled, max_bytes: +d.max_bytes || 0};
+    showToast(okMsg);
+  }catch(_){
+    showToast("Save failed.", true);
+  }finally{
+    btns.forEach(b => { if(b) b.disabled = false; });
+    _pfRender();
+  }
+}
+
+function togglePackFirst(){
+  const on = !_pfCfg.enabled;
+  _pfSave({enabled: on, max_bytes: _pfCfg.max_bytes},
+          on ? "One-episode requests will use a season pack when one fits."
+             : "One-episode requests will use single-episode releases.");
+}
+
+function savePackFirstMax(){
+  const gb = parseFloat((document.getElementById("pfMaxGb") || {}).value);
+  if(!(gb > 0)){ showToast("Enter a size in GB.", true); return; }
+  _pfSave({enabled: _pfCfg.enabled, max_bytes: Math.round(gb * (1024 ** 3))},
+          `Packs above ${gb} GB won't be used for a single episode.`);
 }
 
 async function loadStreamFocus(){

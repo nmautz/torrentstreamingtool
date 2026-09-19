@@ -800,6 +800,93 @@ Fix: `qbit_first_last_piece_prio` (`toggleFirstLastPiecePrio`, a toggle — read
 
 The earlier policy here said the opposite ("fetching the last piece breaks piece-order streaming") — that reasoning was wrong for tail-index containers and was the actual cause of the bug. Don't re-disable it.
 
+### A pack sliced to one episode must not claim the season (17.9.0)
+
+`/api/library/coverage`, `_epOwnedRow` and `_epMissingEpisodes` all used to walk
+`item["files"]` raw. A file set to **`"skip"`** is in that list — it is in the torrent —
+but priority 0 means qBittorrent will never fetch it, so the bytes are not on disk and
+no amount of waiting brings them. Adopting a twelve-episode pack to get S01E05 therefore
+reported all twelve owned, the eleven nobody had rendered as present, and "Get the
+missing episodes" concluded there were none.
+
+All three now exclude skip-moded files (`_effective_file_mode(cfg, path) != "skip"`,
+`_epOnBox` on the page). **This also changes items nobody sliced**: files deselected by
+hand in the download modal had exactly the same bug, and flip from owned to missing.
+
+They are not *simply* missing either, and the third state is the point of the feature.
+The torrent is registered, the swarm is known, and the release group is the one the rest
+of the season came from — so the episode is a priority write away, not an indexer hunt.
+That is `coverage.in_pack` (de-duplicated against `have`/`pending`, so an episode you
+already own is never offered), rendered as **"in a pack you have"** with a Fetch button,
+and asked for by `_pack_available` / `GET /api/library/pack-lookup` **before** any auto
+flow queries an indexer.
+
+`pack-lookup` requires `series_key` or `tmdb_id` and answers `found:false` without one.
+Every show has an S01E05; matching on the numbers alone would un-skip a different show's.
+
+### Slice a pack by season/episode, never by file index (17.9.0)
+
+`DownloadReq.selected_file_indices` is resolved once, from qBit's file order, at add
+time. That is right for the download modal, where a person ticked rows off a resolved
+file list. It is **wrong** for an auto-adopted pack, because a pack's episode numbering
+is not final at add time: passes 2 and 3 of the attribution chain (`resolve_absolute`,
+`animemap.remap_slots`) only run once TMDb metadata binds, seconds to minutes later, and
+for every long-running anime they move files across seasons. Slicing on the add-time
+numbering keeps the wrong episode on exactly the shows packs matter most for.
+
+So `want_episodes` is stored as `[[season, episode], …]` in `item["pack_slice"]` and
+re-resolved by `_pack_slice_apply` on **every monitor tick**, right after
+`_resettle_files`, until it settles. Two consequences worth not undoing:
+
+1. **While it is unresolved, every file is skipped — not none.** A 144 GB pack that
+   fetched ten gigabytes during the grace window would cost more than the feature saves.
+   Priority 0 across the board costs nothing and is undone the tick the episode is found.
+2. **Re-derivation only ever revises paths the slice itself wrote** (`pack_slice.skipped`
+   is the ledger), and stops entirely once `settled` is set — which `/api/library/
+   pack-fetch` does the moment a person edits the schedule. Without both, un-skipping an
+   episode by hand would be quietly reverted within five seconds.
+
+Past `_PACK_SLICE_GRACE_SECS` (300 s) still unresolved, `_pack_slice_fallback` drops the
+torrent (safe: nothing downloaded, by construction) and swaps in `pack_slice.fallback`,
+the single-episode release the picker held in reserve — the item keeps its id, its
+progress history and its place in the library, exactly as `_retry_dead_download` does.
+
+### The pack's size filter is per-episode; the ceiling is not (17.9.0)
+
+Two numbers, measuring different things, and swapping them breaks the feature in
+opposite directions.
+
+The Auto picker's download-size window is applied to the **per-episode share**
+(`pack_size ÷ _packEpisodeCount`), because with everything else skipped that is all that
+downloads. Judging the whole torrent instead would refuse Hunter x Hunter's 144.7 GB
+Blu-ray pack against a 40 GB cap — the exact case the feature exists for, whose real
+cost is one ~1 GB episode.
+
+Which leaves nothing judging the torrent, so `settings.pack_first.max_bytes` (200 GB,
+admin-settable) is a **hard refusal** on the whole thing. qBittorrent holds a pack's file
+list and a queue slot for as long as it stays in the library, and a complete-franchise
+torrent adopted to fetch one episode is real bookkeeping for no gain.
+
+`_packEpisodeCount` counts from TMDb's `all_seasons` inventory, never from the release
+name — "Complete" means nothing arithmetical. It returns 0 when it cannot tell, which
+the callers read as "don't divide", judging the pack whole: the conservative direction.
+
+### Stream-now's pack deselection is permanent; stream focus's is not (17.9.0)
+
+Two mechanisms deselect siblings in the same torrent and they are **not** the same thing.
+
+`stream_focus` is transient: it deselects unfinished siblings *while* a file plays so
+sequential download starts at the right piece, and unwinds when the file completes — at
+which point the rest of the season downloads. `pack_slice` is persistent: the episodes
+nobody asked for stay off until someone asks.
+
+`PlayNowReq.slice_pack` is what chooses the persistent one, and it is set **only** by the
+library's Play now on a *missing* episode. The search page's Play now, where the user
+picked both the torrent and the file, does not set it — silently deselecting the rest of
+something they chose would be a decision made for them. The two compose safely because
+`_reconcile_item_downloads` never *promotes* a file the schedule said not to fetch:
+focus reorders what is wanted, it does not overrule the user.
+
 ### Sequential download ignores file priority — only priority **0** reorders a pack
 
 The two streaming overrides pull in opposite directions on a multi-file torrent. `_begin_library_file_stream` marks the file being played `high` (qBit **7**) *and* flips the torrent sequential — but sequential's piece picker walks pieces in **index order over everything still selected**, and the only value that takes a piece out of that walk is priority **0**. A 7-vs-6 difference reorders nothing. So "play episode four of this season pack" used to mean "fetch the pack from episode one, sequentially, while the viewer waits on a file in the middle" — first/last-piece priority grabbed E04's head and tail so it didn't hang outright, and everything after that came from the front of the torrent.

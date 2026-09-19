@@ -84,6 +84,7 @@ make test                 # pure unit tests for the leaf modules (no deps, no ve
                           #   python tests/test_http_clients.py
                           #   python tests/test_reltracks.py
                           #   python tests/test_watchrule.py
+                          #   python tests/test_packslice.py
                           # tests/search_eval/ is the LIVE search-accuracy kit
                           # (69 hand-labelled shows) - run verify.py against a
                           # box before trusting a change to episode matching.

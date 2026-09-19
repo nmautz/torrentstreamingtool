@@ -229,7 +229,7 @@ For each profile:
 
 ### 7. System
 
-Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Automatic Stream Prep**, **Auto-Prep on Play**, **Show Missing Content**, **Force Stream Prep**, **Validate & Repair on Prep**, **File Validator**, **Storage & Compression**, **Network Adapter**, **VPN Kill Switch**, **Race Download Sources**, **Priority While Watching**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
+Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Automatic Stream Prep**, **Auto-Prep on Play**, **Show Missing Content**, **Force Stream Prep**, **Validate & Repair on Prep**, **File Validator**, **Storage & Compression**, **Network Adapter**, **VPN Kill Switch**, **Race Download Sources**, **Prefer Season Packs**, **Priority While Watching**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
 
 #### System Health
 
@@ -296,6 +296,24 @@ Enums are validated server-side, not coerced: an unrecognised size / cap / ceili
 - `POST /api/admin/download-race` → same shape.
 
 See [BACKEND.md § Parallel download racing](BACKEND.md), [LIBRARY_DATA.md](LIBRARY_DATA.md) § `race`, and [GOTCHAS.md](GOTCHAS.md).
+
+#### Prefer Season Packs
+
+**Ships on (17.9.0).** Whether a request for **one** episode may be answered with a whole-season torrent, sliced down to it. Applies only where nobody picked a release — the library's one-press **Get** and **Play now**, the per-season gap fill, and the search page's per-episode **Auto**. Choosing a specific copy yourself is never overridden.
+
+Why a pack wins even for one episode: you get that group's encode, its audio layout and the quality the rest of your library is, instead of whatever single-episode rip happened to be seeded that day — and because the torrent then stays registered, **every other episode of that season is a priority write away** rather than another indexer hunt (the *Fetch from pack* buttons, `POST /api/library/pack-fetch`). Only the requested episode downloads; the rest of the pack is set to "do not download" until asked for.
+
+- **Use A Season Pack For One Episode** (default on). Turning it off affects only the **next** request — a pack already in the library keeps its slice and its Fetch buttons. Releasing existing slices instead would hand the user twelve episodes they never asked for, which is the opposite of what turning this off means.
+- **Biggest Pack To Use** (default **200 GB**) — a hard refusal on the whole torrent. The Auto picker's download-size limits are applied to the **per-episode share** (`pack_size ÷ episode_count`), because that is all that actually downloads: judging a 144.7 GB Hunter x Hunter pack whole against a 40 GB cap would refuse the very case this exists for. That leaves nothing else stopping a complete-franchise torrent being adopted for one episode, which is what this ceiling is for — qBittorrent holds its file list and a queue slot for as long as it stays in the library.
+
+Two things it is worth knowing it does **not** do. A sliced pack's other episodes show in the library as **missing** (badged *in a pack you have*), not owned — they are not on disk and priority 0 means they never will be unaided. And a pack that turns out not to name its episodes in any resolvable way is abandoned by the server on its own after five minutes: the torrent is dropped (nothing of it downloaded — an unresolved slice holds every file at priority 0) and the single-episode release the picker had in reserve takes its place, with the library row keeping its identity throughout.
+
+Both settings live in `library.json → settings.pack_first` and are mirrored onto `state` so the dashboard's own picker knows the policy without a round trip.
+
+- `GET /api/admin/pack-first` → `{enabled, max_bytes}`
+- `POST /api/admin/pack-first` → same shape. A non-positive `max_bytes` is a **400**.
+
+See [LIBRARY_DATA.md](LIBRARY_DATA.md) § `pack_slice`, [API.md](API.md) § `/api/library/pack-fetch`, and [GOTCHAS.md](GOTCHAS.md).
 
 #### Priority While Watching
 

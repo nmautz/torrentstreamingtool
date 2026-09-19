@@ -142,6 +142,25 @@ The dashboard ports admin.html's `help-tip` component: a small square "?" chip (
 
 A downloading library card shows a download-mode badge ("↓ Downloading", or "↓ Idle download" / "⏸ Idle — waiting" when `item.download_mode==="idle"`, gated on `app.download_idle_open`) plus a Pause↔Resume button: **⏸ Idle** (`setDownloadSchedule(id,"idle")` — download only during the idle/night window) ↔ **▶ Resume** (`setDownloadSchedule(id,"now")`). The download modal's **Download at idle/night only** toggle (`#dlIdleOnly`) sends `download_mode:"idle"` on submit and warns (`#dlIdleWarn`) when `app.download_idle_configured===false` (no admin prep window enabled).
 
+### Pack-first for one episode (17.9.0)
+
+A request for a single episode reaches for a **whole-season pack** whenever one covers it
+and clears the filters, and keeps only that episode out of it. Lives beside the existing
+whole-season pack machinery in the detached-run block.
+
+| Function | Role |
+|----------|------|
+| `_packEpisodeCount(ctx, p)` | How many episodes a pack holds, counted from TMDb's `all_seasons`, never from the release name ("Complete" means nothing arithmetical). 0 = can't tell ⇒ judge the pack whole. |
+| `_bgPackForEpisodes(ctx, season, wanted, filt)` | The best pack to slice. Audio preference first (as `_bestPackFrom`), then the Auto size window applied to the **per-episode share**, then `app.pack_first_max_bytes` as a hard whole-torrent ceiling. Returns null when `app.pack_first` is off. |
+| `_packCoversEpisodes(ctx, p, season, wanted)` | Which of `wanted` the pack covers. `_packCoversScope` only accepts a pack spanning the whole season, so today this is "all of them" — written as a real test because the caller must carry a remainder correctly the day that changes. |
+| `_bgStartPackSlice(…, wanted, filt, fallback)` | The twin of `_bgStartPack` for a scope smaller than a season. Sends `want_episodes` + `pack_fallback`, and **races** — cheaper here than anywhere, since each challenger is sliced too (three packs cost three *episodes* of bandwidth). |
+| `_packLookup(season, episode, ident)` / `_packFetch(body)` | `GET /api/library/pack-lookup` and `POST /api/library/pack-fetch`. `ident` (`tmdb_id` or `series_key`) is mandatory — every show has an S01E05. |
+| `_bgFetchFromPacks(ctx, missing)` | The episodes of `missing` already sitting at "skip" in a pack here, now downloading. Returns what it handled so the caller narrows its hunt. **Step 0 of every auto flow**, before any query. |
+| `epFetchFromPack` / `epFetchSeasonFromPack` / `ssFetchFromPack` | The one-tap buttons — episode row, season header, and the search show page (which has no item id, so it addresses the pack by TMDb identity). |
+| `_epOnBox(f)` / `_epPackEpisodes(s)` / `_covPackEps(row,s)` | The skip-aware predicates. A `"skip"` file is **not** owned: it is in the torrent but priority 0 means it will never be fetched. `coverage.in_pack` is the third bucket — missing, but a priority write away. |
+
+`_epGetMissing` runs them in order: **0.** anything already in a pack here → fetch, no query; **1.** the existing whole-season branch; **2.** pack-first for the remaining gaps (the same season query the gap fill would run anyway, so it costs no extra round trip); **3.** the per-episode hunt for whatever is left, with `ctx.owned` narrowed so it can't re-hunt what steps 0–2 just started. `epPlayEpisode` does the same, and leads with the **season** query — it returns packs *and* episodes in one trip, where the episode query can only ever return single-episode releases.
+
 ### Content lock at download time (11.21.0)
 
 `#dlLockBtn` (Add-to-Library / Save-Stream modal header), `#ssLockBtn` (show view source sheet) and `#ssBulkLockBtn` (bulk sheet) are small lock/unlock icon toggles that send **`admin_only:true`** on `POST /api/library/download` / `/api/stream/save-to-library`, creating the item already content-locked instead of leaving it in the open library until someone flips it in the admin Content Lock tab.

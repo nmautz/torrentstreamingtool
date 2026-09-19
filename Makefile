@@ -15,6 +15,7 @@ test:
 	python3 tests/test_http_clients.py
 	python3 tests/test_watchrule.py
 	python3 tests/test_subsearch.py
+	python3 tests/test_packslice.py
 
 clean:
 	rm -rf .venv __pycache__ .env

@@ -1,5 +1,33 @@
 # Changelog
 
+## [17.9.0] — 2026-09-18
+**One episode out of a whole-season pack — and the rest of the season a flag flip away.**
+
+* **Asking for one episode now reaches for a season pack.** Whenever a pack covers the
+  episode and clears the filters, it wins: one group's encode, one audio layout, and the
+  quality the rest of your library is, instead of whatever single-episode rip happened to
+  be seeded that day. Everything in the torrent you did not ask for is set to **do not
+  download**, so the bandwidth is the episode, not the season. Applies to the library's
+  **Get** and **Play now**, the per-season gap fill, and the search page's per-episode Auto.
+* **The size limit judges the per-episode share, not the torrent.** A 40 GB cap should not
+  veto taking one 1 GB episode out of a 144 GB Blu-ray pack, which is the case this exists
+  for. A separate whole-torrent ceiling (Admin › Downloads, 200 GB by default) is what stops
+  a complete-franchise torrent being adopted for one episode.
+* **"Fetch from pack" — the second episode is free.** The rest of a sliced pack shows as
+  missing, but marked *in a pack you have*, with a one-tap fetch on the episode row, the
+  season header, the item's file list and the search page. No indexer query, no second
+  torrent, and the same release as the episodes you already have. The auto flows check for
+  it before they search, too.
+* **Fixed: skipped files were counted as owned.** Any file set to "skip" — a sliced pack, or
+  files you deselected by hand in the download modal — reported as present in the library,
+  the coverage join and the episode grid, so a pack sliced to one episode claimed the whole
+  season. They now read as missing everywhere, which will change the counts on shows where
+  you deselected files.
+* A pack that turns out not to name its episodes in any resolvable way is abandoned on its
+  own: the torrent is dropped (nothing of it downloaded — an unresolved slice holds every
+  file at priority 0) and the single-episode release the picker had in reserve takes its
+  place, with the library row keeping its identity throughout.
+
 ## [17.8.0] — 2026-09-18
 **See what's playing on your other devices — and pull it over.**
 

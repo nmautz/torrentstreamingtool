@@ -57,6 +57,12 @@ The only persistent server-side state. Lives at the project root. Accessed via `
       "quality_ceiling": 1080,          // highest tier the HQ track may aim at; 720 | 1080 | 2160
       "hq_upgrade":      true           // keep a better copy beside the fast one and swap it in when it lands
     },
+    "pack_first": {                     // may a request for ONE episode be answered with a whole-season torrent (admin System tab, 17.9.0)
+      "enabled":   true,                // on by default. Off affects only the NEXT request — packs already sliced keep their episodes
+      "max_bytes": 214748364800         // hard ceiling on the whole torrent (200 GB). The Auto-pick size window judges the PER-EPISODE
+                                        //   share, which is what actually downloads — so this is the only thing stopping a
+                                        //   complete-franchise torrent being adopted to get one episode. See `_pack_first_cfg`
+    },
     "stream_focus": {                   // what "play this now" does to everything else downloading (admin System tab)
       "pack_focus":   true,             // deselect the other unfinished files in the SAME torrent while one is streamed. Absent ⇒ true
       "sibling_kbps": 512               // TOTAL KB/s every OTHER downloading torrent shares meanwhile; 0 | 256 | 512 | 1024 | 2048 (0 = no throttle)
@@ -447,6 +453,52 @@ restart — `_recover_races` re-anchors every sampler on startup.
 
 `upgraded_from` survives the swap so the card can show an "Upgraded" chip for 24 h;
 it is the only part of `race` that outlives a settled race in a meaningful way.
+
+### `pack_slice` (one episode out of a pack, 17.9.0)
+
+Present only on an item whose torrent is a **whole-season pack adopted to answer a
+request for specific episodes** — the library's Get or Play now on a missing episode,
+or a gap fill. Everything the request did not ask for is written into
+[`download.files`](#download-download-schedule) as `"skip"`, so the bandwidth cost is
+the episodes, not the season.
+
+```jsonc
+"pack_slice": {
+  "want":       [[1, 5]],             // [[season, episode], …] — what was asked for
+  "settled":    false,                // slots are final; stop re-deriving
+  "since":      "2026-09-18T20:11:04Z",
+  "skipped":    ["D:\\media\\Show S01\\Show.S01E01.mkv", …],  // the paths WE wrote
+  "fallback":   {"magnet": "magnet:?…", "title": "Show.S01E05.1080p…"}
+}
+```
+
+**Why season/episode and not file indices.** `selected_file_indices` resolves once,
+from qBit's file order, at add time — and a pack's episode numbering is not final at
+add time. Passes 2 and 3 of the [attribution chain](#seasonepisode-attribution) only
+run once TMDb metadata binds, which is seconds to minutes later, and for every
+long-running anime they *move files across seasons*. Slicing on the add-time numbering
+would therefore keep the wrong episode on exactly the shows packs matter most for. So
+the want list is re-resolved against `item["files"]` on every monitor tick
+(`_pack_slice_apply`) until it settles.
+
+**While it is unresolved, every file is skipped — not none.** A 144 GB pack that
+fetched ten gigabytes during the grace window would have cost more than the feature
+saves. Priority 0 across the board costs nothing and is undone the tick the episode is
+identified.
+
+| Field | Meaning |
+|-------|---------|
+| `want` | The `[season, episode]` pairs to keep. Empty ⇒ the slice is inert. |
+| `settled` | Set by `_pack_slice_settle` once the episodes are identified **and** the metadata driving their attribution has bound — or the moment a person edits the schedule (`/api/library/pack-fetch`). From then on `_pack_slice_apply` is a permanent no-op and the schedule belongs to the user. |
+| `since` | When the slice was requested. After `_PACK_SLICE_GRACE_SECS` (300 s) still unresolved, `_pack_slice_fallback` abandons the pack. |
+| `skipped` | The ledger of paths this slice wrote. Re-derivation only ever revises **these**, so a file the user un-skipped by hand is never quietly re-skipped. |
+| `fallback` | The single-episode release the picker had in reserve. Used by `_pack_slice_fallback` when the episode turns out not to be identifiable inside the pack: the torrent is dropped (nothing of it downloaded, by construction) and this takes its place, with the item keeping its id, its progress history and its place in the library. |
+
+**Once sliced, the rest of the season is one flag flip away** — `POST
+/api/library/pack-fetch` moves a skipped file to a live tier and
+`_apply_item_schedule` flips the item `ready` → `downloading` and resumes the torrent.
+No indexer query, no second torrent, and the season stays on one release group. The
+auto flows ask `_pack_available` before they ask an indexer.
 
 ### `download` (download schedule)
 
@@ -1009,6 +1061,14 @@ Not part of `_migrate_item` — it needs a network round trip, so it's **lazy an
 A merged series never touches `GET /api/library/{id}/metadata`, so `GET /api/library/series/{key}` fires the same self-heal in the background (`_spawn_metadata_fetch` on the member it served metadata from) without delaying its own response. Until either lands, the frontend tops up from `/api/tmdb/lookup`, so the UI is correct on the very first open.
 
 ### Derived view: library coverage (11.22.0)
+
+> **A file at `"skip"` is not owned (17.9.0).** Priority 0 means qBittorrent will never
+> fetch it, so the bytes are not on disk and no amount of waiting brings them.
+> `/api/library/coverage` therefore excludes skip-moded files from `have`/`pending`
+> and reports them in a third bucket, **`in_pack`** — missing, but sitting in a torrent
+> this box still holds, so one priority write away rather than an indexer hunt. Before
+> this, a pack sliced to one episode reported its whole season owned. The rule applies
+> to files deselected by hand in the download modal too, which had the same bug.
 
 `GET /api/library/coverage` ([API.md](API.md)) answers "do we already have this, and which episodes" for Search and for the library grid's new-season chip. Nothing is persisted for it — it is computed on every call from fields documented above: `files[].season` / `.episode` / `.bucket` (a bucketed file sits outside the numbered run and never counts as owning an episode), `item["status"]` (`downloading` → `pending`, anything else → `have`), `_series_key` for grouping, `metadata.tmdb_kind` (a `movie` binding switches the diff off entirely — see [GOTCHAS.md](GOTCHAS.md) § A show can be matched as a MOVIE, and the `_movie_binding_is_stale` repair that re-opens one), and `metadata.all_seasons` for the `missing_seasons` diff — which is why the `all_seasons` self-heal above matters to Search as well as to the episode page.
 

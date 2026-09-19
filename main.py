@@ -1330,6 +1330,8 @@ class AppState:
     stream_focus_hash: Optional[str] = None               # …and its torrent, the one hash the throttle must never touch
     stream_throttled_count: int = 0                       # how many other torrents currently carry a stream-focus download limit
     stream_focus_pack_enabled: bool = True                # settings.stream_focus.pack_focus — mirrored
+    pack_first_enabled: bool = True                       # settings.pack_first.enabled — mirrored so the UI knows it may reach for a pack
+    pack_first_max_bytes: int = 200 * 1024 ** 3           # settings.pack_first.max_bytes — the size above which it may not
     stream_focus_sibling_bps: int = 512 * 1024            # settings.stream_focus.sibling_kbps × 1024 — total budget the OTHER torrents share while streaming (0 = no throttle)
     shotscan_current: str = ""                            # basename of the file the shot-boundary credit scan is decoding ("" = idle); surfaced in the admin Activity tab so the most expensive pass in the app is never invisible
     sub_auto_ai_path: str = ""                            # abs path of the AI sidecar currently auto-applied in VLC ("" = none); the upgrade loop watches this and swaps in a real sub when one arrives
@@ -1720,6 +1722,10 @@ def state_snapshot() -> dict:
         # shortlist for an auto-pick, and what tier the HQ track aims at.
         "download_race": state.download_race_enabled,
         "download_race_ceiling": state.download_race_ceiling,
+        # Pack-first — mirrored so the auto picker in the page knows whether it may
+        # answer a one-episode request with a season pack, and how big a one.
+        "pack_first": state.pack_first_enabled,
+        "pack_first_max_bytes": state.pack_first_max_bytes,
         # Stream focus — surfaced so the UI can say "other downloads are held
         # back while you watch" rather than leaving it as invisible magic.
         "stream_focus": bool(state.stream_focus_hash),
@@ -5858,6 +5864,211 @@ def _all_nonskip_complete(item: dict, qfiles: list, save_path: str) -> bool:
     return saw
 
 
+# ── Pack slicing: one episode out of a whole-season torrent ────────────────────
+# The auto picker prefers a season pack over a single-episode release whenever one
+# covers what was asked for (see `_pack_first_cfg` and `_bgPackForEpisodes` in
+# static/index.html). A pack that answers "get me S01E05" must not then download the
+# other eleven episodes, so every file the request did NOT ask for is written into
+# the item's download schedule as "skip" — priority 0, the only value that takes a
+# piece out of qBit's picker at all (see docs/GOTCHAS.md § sequential download
+# ignores file priority).
+#
+#   item["pack_slice"] = {
+#       "want":     [[season, episode], ...],   # what the caller asked for
+#       "settled":  bool,                       # slots are final; stop re-deriving
+#       "since":    "<iso>",                    # when the slice was requested
+#       "skipped":  ["<abs path>", ...],        # the paths WE wrote (ours to revise)
+#       "fallback": {"magnet", "title"},        # the release to use if slicing fails
+#   }
+#
+# It is deliberately NOT expressed as `selected_file_indices`. Those are resolved
+# once, from qBit's file order, at add time — and a pack's episode numbering is not
+# final at add time. Passes 2 and 3 of the attribution chain (absolute-number
+# resolution and the anime season remap) only run once TMDb metadata binds, which is
+# seconds to minutes later, and for every long-running anime they MOVE files across
+# seasons. Slicing on the add-time numbering would keep the wrong episode on exactly
+# the shows packs matter most for. So the want list is stored as season/episode and
+# re-resolved against `item["files"]` on every monitor tick until it settles.
+#
+# While it is unresolved, EVERY file is skipped rather than none. A 144 GB pack that
+# fetched ten gigabytes during the grace period would have cost more than the feature
+# saves; priority 0 across the board costs nothing and is undone the tick the episode
+# is identified.
+
+# Non-video files ride along free (a Subs/ folder, an .nfo) as long as they are
+# small — they are what `_discover_local_subs` goes looking for, and losing them
+# means an episode that arrives without its own subtitles. Anything bigger is an
+# extra nobody asked for.
+_PACK_EXTRA_MAX_BYTES = 8 * 1024 * 1024
+# How long an unresolved slice may hold the whole torrent at priority 0 before we
+# give up on it and fall back to a single-episode release. Generous: it has to cover
+# a TMDb round trip, the anime-mapping fetch, and a slow metadata resolve.
+_PACK_SLICE_GRACE_SECS = 300
+# The ceiling ships as an admin setting; this is its default. It clears the
+# long-running-anime Blu-ray packs the feature exists for (Hunter x Hunter's complete
+# run is 144.7 GB) and stops only genuinely absurd complete-franchise torrents, which
+# cost real qBit bookkeeping for one episode.
+_PACK_FIRST_MAX_BYTES = 200 * 1024 ** 3
+
+
+def _pack_first_cfg(lib: dict) -> dict:
+    """Read settings.pack_first — whether the auto picker may answer a request for
+    ONE episode with a whole-season torrent, and how big a torrent it may adopt.
+
+    On by default. A pack is the better buy even for a single episode: one group's
+    encode, one audio layout, and every later episode of that season is then a flag
+    flip away rather than another indexer hunt (see `/api/library/pack-fetch`).
+
+    `max_bytes` is a hard refusal. The size filter the frontend applies judges the
+    PER-EPISODE share — which is the right test for what actually downloads, and is
+    also why nothing else stops a complete-franchise torrent being adopted for one
+    episode. This is what stops it."""
+    cfg = (lib.get("settings", {}) or {}).get("pack_first") or {}
+    try:
+        cap = int(cfg.get("max_bytes", _PACK_FIRST_MAX_BYTES))
+    except (TypeError, ValueError):
+        cap = _PACK_FIRST_MAX_BYTES
+    return {
+        "enabled":   bool(cfg.get("enabled", True)),
+        "max_bytes": cap if cap > 0 else _PACK_FIRST_MAX_BYTES,
+    }
+
+
+def _pack_slice_want(item: dict) -> set:
+    """The (season, episode) pairs an item's pack slice was asked for."""
+    out = set()
+    for pair in (item.get("pack_slice") or {}).get("want") or []:
+        try:
+            s, e = int(pair[0]), int(pair[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if s > 0 and e > 0:
+            out.add((s, e))
+    return out
+
+
+def _pack_slice_apply(item: dict, qfiles: list, save_path: str) -> str:
+    """Re-derive an item's pack slice against its CURRENT file attribution.
+
+    Returns "ok" (the wanted episodes were found; everything else is now skipped),
+    "pending" (not identifiable yet — the whole torrent is held at priority 0
+    meanwhile), or "" (this item has no slice, or it has already settled).
+
+    Idempotent, and it only ever rewrites the paths it wrote itself: `skipped` is the
+    ledger, so a file the user has since un-skipped by hand (the Fetch from pack
+    button) is never quietly re-skipped. Once `settled` is set this is a no-op for
+    good — from then on the schedule belongs to the user.
+
+    Mutates `item`; the caller persists.
+    """
+    ps = item.get("pack_slice") or {}
+    want = _pack_slice_want(item)
+    if not want or ps.get("settled"):
+        return ""
+    dl = item.setdefault("download", {"mode": "now", "files": {}})
+    modes = dl.setdefault("files", {})
+    # Drop our own previous verdict before re-deriving. Anything else in `files` was
+    # put there by a person and stays.
+    for p in ps.get("skipped") or []:
+        if modes.get(p) == "skip":
+            modes.pop(p, None)
+
+    matched = {f.get("path", "") for f in item.get("files") or []
+               if (int(f.get("season", 0) or 0), int(f.get("episode", 0) or 0)) in want
+               and not (f.get("bucket") or "")}
+    matched.discard("")
+    # Every video the release holds, so "not wanted" is decided over the same set
+    # `item["files"]` was built from rather than over qBit's raw list — which also
+    # carries the sidecars and the .nfo we mean to keep.
+    videos = {f.get("path", "") for f in item.get("files") or []}
+
+    skipped = []
+    for qf in qfiles:
+        full = str(Path(save_path) / qf.get("name", ""))
+        if full in matched:
+            continue
+        if not matched:
+            # Nothing identified yet — hold the whole torrent rather than let a
+            # 144 GB pack run while attribution settles.
+            skipped.append(full)
+        elif full in videos:
+            skipped.append(full)          # a video nobody asked for (a sample is one)
+        elif int(qf.get("size", 0) or 0) > _PACK_EXTRA_MAX_BYTES:
+            skipped.append(full)          # a big extra that is not a sidecar
+    for p in skipped:
+        modes.setdefault(p, "skip")
+    ps["skipped"] = skipped
+    item["pack_slice"] = ps
+    return "ok" if matched else "pending"
+
+
+def _pack_slice_settle(item: dict) -> None:
+    """Freeze an item's slice: the episode was found and its metadata has bound, so
+    passes 2 and 3 have had their say and the numbers will not move again. From here
+    the download schedule is the user's."""
+    ps = item.get("pack_slice") or {}
+    if ps and not ps.get("settled"):
+        ps["settled"] = True
+        ps["settled_at"] = _now_iso()
+        item["pack_slice"] = ps
+
+
+def _pack_slice_expired(item: dict) -> bool:
+    """True once an unresolved slice has held its torrent at zero long enough that
+    the pack is plainly not going to yield the episode."""
+    since = (item.get("pack_slice") or {}).get("since") or ""
+    if not since:
+        return False
+    try:
+        started = datetime.fromisoformat(since.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return (datetime.now(timezone.utc) - started).total_seconds() > _PACK_SLICE_GRACE_SECS
+
+
+def _pack_available(lib: dict, season: int, episode: int,
+                    series_key: str = "", tmdb_id: int = 0) -> Optional[dict]:
+    """An episode sitting at "skip" inside a pack this box already holds, or None.
+
+    This is what makes the second episode of a sliced pack free: the torrent is
+    already registered, the swarm is already known, and fetching E06 out of it is a
+    priority write rather than an indexer hunt. Returns
+    `{"item_id", "path", "title", "hash"}`.
+
+    Restricted to items that still have a torrent hash — un-skipping a file in a
+    torrent that is gone leaves a row stuck at 0 % with no search having run, which
+    is strictly worse than searching.
+    """
+    s, e = int(season or 0), int(episode or 0)
+    if s <= 0 or e <= 0:
+        return None
+    for it in lib.get("items") or []:
+        if it.get("status") == "error" or not it.get("torrent_hash"):
+            continue
+        # Identity, not just the numbers: every show has an S01E05, and un-skipping
+        # a different one would be a silent, expensive wrong answer. A caller that
+        # can name neither is refused rather than matched loosely.
+        if tmdb_id:
+            if int(((it.get("metadata") or {}).get("tmdb_id")) or 0) != int(tmdb_id):
+                continue
+        elif series_key:
+            if _series_key(it) != series_key:
+                continue
+        else:
+            return None
+        cfg = _download_cfg(it)
+        for f in it.get("files") or []:
+            if (int(f.get("season", 0) or 0) != s
+                    or int(f.get("episode", 0) or 0) != e
+                    or (f.get("bucket") or "")):
+                continue
+            if _effective_file_mode(cfg, f.get("path", "")) != "skip":
+                continue
+            return {"item_id": it["id"], "path": f.get("path", ""),
+                    "title": it.get("title", ""), "hash": it.get("torrent_hash", "")}
+    return None
+
+
 def _file_progress(item: dict, profile_id: str, file_path: str) -> Optional[dict]:
     """Return per-file progress dict for a given profile and path, or None."""
     prof = item.get("progress", {}).get(profile_id, {})
@@ -9403,6 +9614,82 @@ def _retry_candidates(item: dict, shaped: list, tried: set,
     return out
 
 
+async def _pack_slice_fallback(item: dict) -> bool:
+    """Abandon a pack that will not yield the episode it was adopted for, and put the
+    single-episode release the picker had in reserve in its place.
+
+    Modelled on `_retry_dead_download`, and for the same reason: the user pressed one
+    button and asked for one episode, so coming back to a stalled card and choosing
+    again is work the server can do. The item keeps its identity — same id, same
+    place in the library, same progress history — and only the torrent changes.
+
+    Safe to take the pack's files with it: an unresolved slice holds every file at
+    priority 0, so by construction nothing of it has downloaded.
+
+    Returns True if the item now points at a replacement (caller persists), False if
+    there was nothing to fall back to — in which case the slice is dropped and the
+    pack downloads in full, which is at least the episode the user asked for plus
+    company, rather than a row that never moves.
+    """
+    ps = item.get("pack_slice") or {}
+    fb = ps.get("fallback") or {}
+    magnet = (fb.get("magnet") or "").strip()
+    cur_hash = (item.get("torrent_hash") or "").lower()
+    save_path = ((item.get("download_source") or {}).get("save_path")
+                 or settings.qbit_download_path)
+    log.warning("[pack] %r never resolved %s — %s",
+                item.get("title", ""),
+                ", ".join(f"S{s:02d}E{e:02d}" for s, e in sorted(_pack_slice_want(item))),
+                "falling back to a single-episode release" if magnet else
+                "no fallback in hand, letting the pack download in full")
+    if not magnet:
+        # Nothing to swap to. Drop the slice so `_reconcile_item_downloads` stops
+        # holding the torrent at zero — a pack the user did not quite ask for beats
+        # a download that never starts.
+        item.pop("pack_slice", None)
+        modes = (item.get("download") or {}).get("files")
+        if isinstance(modes, dict):
+            for p in ps.get("skipped") or []:
+                if modes.get(p) == "skip":
+                    modes.pop(p, None)
+        return True
+    if not state.vpn_secure:
+        return False        # qBit is stopped anyway — hold and retry next tick
+    await _race_abandon(item, "pack-unsliceable")
+    if cur_hash:
+        await qbit_delete(cur_hash, delete_files=True)
+    new_hash = await qbit_add_magnet(magnet, save_path=save_path) or ""
+    if not new_hash:
+        # The replacement was rejected too. Leave the pack alone (it is already
+        # deleted) and let the item error out through the normal missing-torrent
+        # path rather than inventing a third outcome here.
+        log.warning("[pack] qBittorrent rejected the fallback release %r",
+                    fb.get("title", ""))
+        item.pop("pack_slice", None)
+        return True
+    attempts = item.get("download_attempts") or []
+    attempts.append({"key": cur_hash or _release_key(item.get("title", "")),
+                     "title": item.get("title", ""), "at": _now_iso(),
+                     "outcome": "pack-unsliceable"})
+    item["download_attempts"] = attempts
+    item.pop("pack_slice", None)
+    item["torrent_hash"] = new_hash
+    item["title"] = fb.get("title", "") or item.get("title", "")
+    item["download_source"] = {"magnet": magnet, "save_path": save_path}
+    # The pack's file list and size describe a torrent that is gone.
+    item["files"] = []
+    item["size_bytes"] = 0
+    item["download"] = {"mode": _download_cfg(item)["mode"], "files": {}}
+    item.pop("error", None)
+    item["status"] = "downloading"
+    item.pop("stalled_since", None)
+    _missing_torrent_ticks.pop(item["id"], None)
+    await broadcast("library_update", {
+        "item_id": item["id"], "status": "downloading",
+        "message": f"That pack didn't name its episodes — switched to {item['title']}"})
+    return True
+
+
 async def _retry_dead_download(item: dict, lib: dict) -> str:
     """Swap a dead release for the next-best one, in place, with no user input.
 
@@ -11021,6 +11308,30 @@ async def library_download_monitor() -> None:
                     _resettle_files(item)
                     item["size_bytes"] = sum(f["size_bytes"] for f in new_files)
 
+                # A pack adopted to answer a request for specific episodes. The slice
+                # is re-derived on every rebuild rather than resolved once, because
+                # `_resettle_files` above can still move files between seasons right
+                # up until the metadata binds — and on a long-running anime it always
+                # does. Frozen the moment the wanted episodes are identified AND the
+                # metadata that drives that attribution is in hand; after that the
+                # download schedule belongs to the user.
+                if item.get("pack_slice") and not item["pack_slice"].get("settled"):
+                    verdict = _pack_slice_apply(item, qfiles, save_path)
+                    if verdict:
+                        changed = True
+                    if verdict == "ok":
+                        if item.get("metadata"):
+                            _pack_slice_settle(item)
+                        await _reconcile_item_downloads(item, state.download_idle_open)
+                    elif verdict == "pending":
+                        # Everything is at priority 0 meanwhile, so this costs nothing
+                        # but time — and past the grace window it is time spent on a
+                        # pack that is not going to answer the question.
+                        await _reconcile_item_downloads(item, state.download_idle_open)
+                        if _pack_slice_expired(item) and await _pack_slice_fallback(item):
+                            changed = True
+                            continue
+
                 qstate = info.get("state", "")
                 # Ready is gated on every NON-SKIP file being fully downloaded — not on
                 # qBit's torrent state. With skip/idle files at priority 0, qBit reports
@@ -12438,6 +12749,7 @@ async def _recover_interrupted_downloads() -> None:
             torrent_hash=it.get("torrent_hash") or pend.get("torrent_hash", ""),
             selected_file_indices=pend.get("selected_file_indices") or None,
             download_mode=_download_cfg(it)["mode"],
+            want_episodes=pend.get("want_episodes") or None,
         ))
         recovered += 1
     if recovered:
@@ -12648,6 +12960,7 @@ async def library_download_pipeline(
     race_candidates: Optional[list] = None,
     runtime_min: float = 0.0,
     episode_count: int = 0,
+    want_episodes: Optional[list] = None,
 ) -> None:
     """Add magnet to qBit for a full download; no streaming mode, never auto-deleted.
 
@@ -12759,6 +13072,22 @@ async def library_download_pipeline(
                             "mode": download_mode if download_mode in ("now", "idle") else "now",
                             "files": file_modes,
                         }
+                        # A pack adopted for specific episodes: slice it HERE, in the
+                        # same write that first records the file list, so the torrent
+                        # never spends a tick fetching twelve episodes to answer a
+                        # request for one. `_pack_slice_apply` holds everything at
+                        # priority 0 while the numbering is still unresolved, and the
+                        # monitor re-runs it every tick until it settles.
+                        if want_episodes and not it.get("pack_slice"):
+                            it["pack_slice"] = {
+                                "want": [[int(p[0]), int(p[1])] for p in want_episodes
+                                         if len(p) >= 2],
+                                "settled": False, "since": _now_iso(),
+                                "skipped": [], "fallback": {},
+                            }
+                        if it.get("pack_slice"):
+                            _resettle_files(it)
+                            _pack_slice_apply(it, qfiles, save_path)
                         target = it
                         break
             # `_download_idle_open` only reads settings off the dict it's handed, so
@@ -12936,6 +13265,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         _dr0 = _download_race_cfg(_lib0)
         state.download_race_enabled = _dr0["enabled"]
         state.download_race_ceiling = _dr0["quality_ceiling"]
+        _pf0 = _pack_first_cfg(_lib0)
+        state.pack_first_enabled = _pf0["enabled"]
+        state.pack_first_max_bytes = _pf0["max_bytes"]
         _sf0 = _stream_focus_cfg(_lib0)
         state.stream_focus_pack_enabled = _sf0["pack_focus"]
         state.stream_focus_sibling_bps = _sf0["sibling_kbps"] * 1024
@@ -13314,6 +13646,19 @@ class DownloadReq(BaseModel):
     # `_race_runtime_hint` when the client doesn't know either.
     runtime_min: float = 0
     episode_count: int = 0
+    # ── Pack slicing (17.8.0). The caller asked for these episodes and this
+    # torrent is a whole-season pack, so keep only their files and set every
+    # other one to "skip". Stored on the item as `pack_slice` and re-resolved
+    # each monitor tick until the attribution settles — see _pack_slice_apply.
+    #
+    # Season/episode rather than file indices ON PURPOSE: a pack's numbering is
+    # not final until TMDb metadata binds and passes 2 and 3 have run, which is
+    # after the add. `selected_file_indices` remains the right shape for the
+    # download modal, where a person picked rows off a resolved file list.
+    want_episodes: list[list[int]] = []
+    # The single-episode release to fall back to if the episode turns out not to
+    # be identifiable inside the pack. Same slim shape as `candidates`.
+    pack_fallback: dict = {}
 
 
 class VisibilityReq(BaseModel):
@@ -13538,6 +13883,11 @@ class DownloadRaceReq(BaseModel):
     max_items: int = 2                         # concurrent races, box-wide
     quality_ceiling: int = 1080                # the HQ track's target tier (720/1080/2160)
     hq_upgrade: bool = True                    # keep a better copy and swap it in when it lands
+
+
+class PackFirstReq(BaseModel):
+    enabled: bool = True                       # auto picker may answer a one-episode request with a season pack
+    max_bytes: int = _PACK_FIRST_MAX_BYTES     # hard refusal above this torrent size, whatever the per-episode share
 
 
 class StreamFocusReq(BaseModel):
@@ -14017,20 +14367,46 @@ async def library_coverage(request: Request, profile_id: str = "",
 
         have: dict[str, list[int]] = {}
         pending: dict[str, list[int]] = {}
+        # Episodes that are IN a torrent this box holds but set to "skip" — a pack
+        # sliced down to the one episode that was asked for (17.8.0), or files
+        # deselected by hand in the download modal. They are not owned: priority 0
+        # means qBit will never fetch them, so the bytes are not here and no amount
+        # of waiting brings them. Reporting them as `have` is what made the library
+        # claim a whole season it had one episode of. They are not simply missing
+        # either — the torrent is registered and the swarm known, so getting one is a
+        # priority write rather than an indexer hunt. Hence the third bucket, which
+        # the UI turns into "Fetch from pack". See /api/library/pack-fetch.
+        in_pack: dict[str, list[int]] = {}
         file_count = 0
         for it in members:
             bucket = pending if it.get("status") == "downloading" else have
+            cfg = _download_cfg(it)
+            live = bool(it.get("torrent_hash"))
             for f in it.get("files") or []:
-                file_count += 1
                 s, e = int(f.get("season") or 0), int(f.get("episode") or 0)
+                skipped = _effective_file_mode(cfg, f.get("path", "")) == "skip"
+                if not skipped:
+                    file_count += 1
                 # A file with a `bucket` sits outside the numbered run (Specials,
                 # a spin-off folder) — counting it as S02E03 would mark a real
                 # episode owned. Season 0 never participates, same as the diff.
-                if s > 0 and e > 0 and not (f.get("bucket") or ""):
+                if not (s > 0 and e > 0) or (f.get("bucket") or ""):
+                    continue
+                if not skipped:
                     bucket.setdefault(str(s), []).append(e)
-        for d in (have, pending):
+                elif live:
+                    in_pack.setdefault(str(s), []).append(e)
+        for d in (have, pending, in_pack):
             for s in d:
                 d[s] = sorted(set(d[s]))
+        # Owning a copy outranks holding a skipped one: a season part-fetched from a
+        # pack and part-hunted must not offer "fetch from pack" for an episode that
+        # is already downloaded, or already on its way.
+        for s in list(in_pack):
+            got = set(have.get(s, [])) | set(pending.get(s, []))
+            in_pack[s] = [e for e in in_pack[s] if e not in got]
+            if not in_pack[s]:
+                del in_pack[s]
 
         seasons_total: dict[str, int] = {}
         missing_seasons: list[int] = []
@@ -14063,6 +14439,9 @@ async def library_coverage(request: Request, profile_id: str = "",
             "file_count":      file_count,
             "have":            have,
             "pending":         pending,
+            # {season: [episodes]} sitting at "skip" inside a torrent we still hold.
+            # Missing, but one flag flip from present — see the bucket's comment above.
+            "in_pack":         in_pack,
             "seasons_total":   seasons_total,
             "missing_seasons": missing_seasons,
             # A movie has no season/episode numbers to match on — ownership is the
@@ -15972,6 +16351,16 @@ async def library_download(request: Request, req: DownloadReq) -> JSONResponse:
             "admin_only": bool(req.admin_only),
             "download": {"mode": req.download_mode if req.download_mode in ("now", "idle") else "now",
                          "files": {}},
+            # A pack adopted to answer a request for specific episodes: keep those,
+            # skip the rest. Resolved after the fact (see _pack_slice_apply) because
+            # the numbering is not final until metadata binds.
+            **({"pack_slice": {"want": [[int(p[0]), int(p[1])] for p in req.want_episodes
+                                        if len(p) >= 2],
+                               "settled": False,
+                               "since": _now_iso(),
+                               "skipped": [],
+                               "fallback": req.pack_fallback or {}}}
+               if req.want_episodes else {}),
             # Pinned TMDb binding from the search page the user came from. Read
             # by _fetch_item_metadata INSTEAD of running the fuzzy match. See
             # DownloadReq.tmdb_id.
@@ -15987,6 +16376,8 @@ async def library_download(request: Request, req: DownloadReq) -> JSONResponse:
                 "save_path": save_path,
                 "torrent_hash": req.torrent_hash,
                 "selected_file_indices": req.selected_file_indices or [],
+                "want_episodes": [[int(p[0]), int(p[1])] for p in req.want_episodes
+                                  if len(p) >= 2],
             },
         }
         lib["items"].append(item)
@@ -16020,6 +16411,7 @@ async def library_download(request: Request, req: DownloadReq) -> JSONResponse:
         race_candidates=_race_cands,
         runtime_min=float(req.runtime_min or 0),
         episode_count=int(req.episode_count or 0),
+        want_episodes=[[int(x[0]), int(x[1])] for x in req.want_episodes if len(x) >= 2] or None,
     ))
     # Tell every open dashboard the moment the row exists, rather than leaving
     # them to find out on `library_download_monitor`'s next tick. Starting a
@@ -16238,6 +16630,125 @@ async def set_download_schedule(item_id: str, req: DownloadScheduleReq) -> JSONR
         idle_open = await _apply_item_schedule(item, lib)   # may flip ready→downloading
     await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "downloading")})
     return JSONResponse({"ok": True, "mode": mode, "idle_open": idle_open})
+
+
+class PackFetchReq(BaseModel):
+    """Un-skip episodes already sitting inside a torrent this box holds.
+
+    Either address them by identity — `series_key` (or `tmdb_id`) plus `season`, and
+    `episodes` to name specific ones or omit it for the whole season — or point at
+    one item directly with `item_id`. The first form is what the episode page and
+    the search show page use, because neither knows which item holds the pack."""
+    series_key: str = ""
+    tmdb_id: int = 0
+    item_id: str = ""
+    season: int = 0
+    episodes: list[int] = []
+    priority: str = "mid"          # the tier to un-skip INTO (low / mid / high)
+
+
+@app.post("/api/library/pack-fetch")
+async def library_pack_fetch(req: PackFetchReq) -> JSONResponse:
+    """Fetch episodes out of a pack already on the box: flip their files from "skip"
+    to a live download tier, and let `_apply_item_schedule` wake the torrent.
+
+    This is the other half of pack slicing. Adopting a season pack for one episode
+    only pays if the rest of the season stays cheap afterwards, and it does: the
+    torrent is registered, its swarm is known, and every other episode in it is a
+    priority write away. No indexer query runs, no second torrent is added, and
+    nothing can pick a different release group for episode six than episode five.
+
+    Returns the paths it enabled, grouped by item. A request naming episodes that
+    are not skipped anywhere answers 404 rather than silently doing nothing — the
+    UI only offers the button off `coverage.in_pack`, so an empty match means that
+    snapshot is stale and the caller should re-read it.
+    """
+    mode = req.priority if req.priority in _DL_PRIORITIES else "mid"
+    want = {int(e) for e in req.episodes if int(e) > 0}
+    season = int(req.season or 0)
+    touched: list[dict] = []
+    async with mutate_library() as lib:
+        if req.item_id:
+            members = [it for it in lib["items"] if it["id"] == req.item_id]
+            if not members:
+                raise HTTPException(404, "Item not found.")
+        else:
+            members = [it for it in lib["items"]
+                       if (req.series_key and _series_key(it) == req.series_key)
+                       or (req.tmdb_id and int(((it.get("metadata") or {}).get("tmdb_id")) or 0)
+                           == req.tmdb_id)]
+            if not members:
+                raise HTTPException(404, "Nothing in your library matches that show.")
+        for it in members:
+            if it.get("status") == "error" or not it.get("torrent_hash"):
+                continue
+            cfg = _download_cfg(it)
+            paths = []
+            for f in it.get("files") or []:
+                s, e = int(f.get("season") or 0), int(f.get("episode") or 0)
+                if s <= 0 or e <= 0 or (f.get("bucket") or ""):
+                    continue
+                if season and s != season:
+                    continue
+                if want and e not in want:
+                    continue
+                if _effective_file_mode(cfg, f.get("path", "")) != "skip":
+                    continue
+                paths.append(f.get("path", ""))
+            if not paths:
+                continue
+            dl = it.setdefault("download", {"mode": "now", "files": {}})
+            files = dl.setdefault("files", {})
+            for p in paths:
+                files[p] = mode
+            # The slice is settled by definition once a person has edited it — from
+            # here `_pack_slice_apply` must never revise these paths again.
+            _pack_slice_settle(it)
+            # May flip the item ready -> downloading and resume the torrent, which is
+            # the whole point: a sliced pack goes "ready" when its one episode lands.
+            await _apply_item_schedule(it, lib)
+            touched.append({"item_id": it["id"], "title": it.get("title", ""),
+                            "count": len(paths)})
+        if not touched:
+            raise HTTPException(404, "Those episodes aren't sitting in a pack on this box.")
+    for t in touched:
+        await broadcast("library_update", {"item_id": t["item_id"], "status": "downloading"})
+    return JSONResponse({"ok": True, "items": touched,
+                         "count": sum(t["count"] for t in touched)})
+
+
+@app.get("/api/library/pack-lookup")
+async def library_pack_lookup(season: int, episode: int = 0, episodes: str = "",
+                              series_key: str = "", tmdb_id: int = 0) -> JSONResponse:
+    """Which of these episodes are sitting at "skip" inside a torrent we already hold?
+
+    The auto flows ask this BEFORE any indexer query: an episode one flag flip from
+    present should never cost a search, and reusing the pack keeps the season on one
+    release group. A miss answers `{"found": false}` rather than 404 — it is the common
+    case, and an ordinary reply is what the caller wants to branch on.
+
+    **`episodes` (comma-separated) answers a whole season's gap set in ONE call**, and
+    the gap fill must use it. `get_library()` re-reads and re-parses `library.json` under
+    `_lib_lock` on every call (it is O(library size) — see its own comment), so asking
+    per episode turned a twenty-gap season into twenty serialised disk reads before a
+    single indexer query had run. `episode` is the single-episode form, kept for Play now.
+    """
+    wanted = [int(x) for x in (episodes or "").split(",") if x.strip().lstrip("-").isdigit()]
+    if episode:
+        wanted.append(int(episode))
+    wanted = sorted({e for e in wanted if e > 0})
+    if not wanted:
+        return JSONResponse({"found": False, "episodes": {}})
+    lib = await get_library()
+    hits = {}
+    for ep in wanted:
+        hit = _pack_available(lib, season, ep, series_key, tmdb_id)
+        if hit:
+            hits[str(ep)] = hit
+    # The single-episode form keeps its flat shape so `_packLookup` and Play now read
+    # the answer straight off the response.
+    flat = hits.get(str(episode)) if episode else None
+    return JSONResponse({"found": bool(hits), "episodes": hits, **(flat or {})})
 
 
 @app.post("/api/library/{item_id}/file-schedule")
@@ -17471,6 +17982,12 @@ class PlayNowReq(BaseModel):
     season: int = 0
     episode: int = 0
     profile_id: str = ""
+    # Keep ONLY this episode's file and skip the rest of the torrent (17.8.0).
+    # Set by the library's Play-now-on-a-missing-episode, where nobody chose a
+    # release and a season pack may well have won the race; NOT set by the search
+    # page's Play now, where the user picked both the torrent and the file and a
+    # silent deselection of everything else would be a decision we made for them.
+    slice_pack: bool = False
 
 
 @app.post("/api/library/play-now")
@@ -17554,6 +18071,18 @@ async def library_play_now(req: PlayNowReq) -> JSONResponse:
                 "hidden_by_profiles": [],
                 "download": {"mode": "now", "files": {}},
             }
+            # A pack that won the race for one episode. Slice it here, inside the
+            # same transaction that mints the item, so the other eleven episodes
+            # never reach the piece picker at all — the stream focus applied a few
+            # lines below deselects siblings only WHILE the file plays, and would
+            # hand the whole season back the moment the episode finished.
+            if (req.slice_pack and req.season > 0 and req.episode > 0
+                    and state.pack_first_enabled
+                    and len(item["files"]) > 1):
+                item["pack_slice"] = {"want": [[int(req.season), int(req.episode)]],
+                                      "settled": False, "since": _now_iso(),
+                                      "skipped": [], "fallback": {}}
+                _pack_slice_apply(item, qfiles, save_path)
             lib["items"].append(item)
             created = True
         elif not item.get("files"):
@@ -19033,6 +19562,9 @@ class StreamNowReq(BaseModel):
     season: int = 0
     episode: int = 0
     profile_id: str = ""
+    # Whichever candidate wins, keep only this episode's file (17.8.0). Set by the
+    # library's Play now on a missing episode — see PlayNowReq.slice_pack.
+    slice_pack: bool = False
 
 
 def _cancel_stream_now() -> None:
@@ -19107,7 +19639,8 @@ async def _stream_now_job(req: StreamNowReq, cands: list, prev: tuple) -> None:
         await library_play_now(PlayNowReq(
             magnet=w["magnet"], title=w["title"], torrent_hash=w["hash"],
             file_index=idx, series=req.series, season=req.season,
-            episode=req.episode, profile_id=req.profile_id))
+            episode=req.episode, profile_id=req.profile_id,
+            slice_pack=bool(req.slice_pack)))
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -25075,6 +25608,37 @@ async def admin_set_stream_focus(request: Request,
     return JSONResponse({"ok": True, **cfg,
                          "active": bool(state.stream_focus_hash),
                          "throttled": state.stream_throttled_count})
+
+
+@app.get("/api/admin/pack-first")
+async def admin_get_pack_first(request: Request) -> JSONResponse:
+    """Return the pack-first policy: may a request for one episode be answered with
+    a whole-season torrent, and how big a torrent may be adopted that way."""
+    _require_admin(request)
+    return JSONResponse(_pack_first_cfg(await get_library()))
+
+
+@app.post("/api/admin/pack-first")
+async def admin_set_pack_first(request: Request, body: PackFirstReq) -> JSONResponse:
+    """Save the pack-first policy.
+
+    Turning it off changes nothing already downloading — a pack adopted earlier keeps
+    its slice and its Fetch-from-pack buttons. It only stops the NEXT one-episode
+    request reaching for a pack. Releasing existing slices instead would hand the
+    user twelve episodes they never asked for, which is the opposite of what someone
+    turning this off wants."""
+    _require_admin(request)
+    cap = int(body.max_bytes or 0)
+    if cap <= 0:
+        raise HTTPException(400, "max_bytes must be a positive number of bytes.")
+    async with mutate_library() as lib:
+        pf = lib.setdefault("settings", {}).setdefault("pack_first", {})
+        pf["enabled"]   = bool(body.enabled)
+        pf["max_bytes"] = cap
+    cfg = _pack_first_cfg(lib)
+    state.pack_first_enabled = cfg["enabled"]
+    state.pack_first_max_bytes = cfg["max_bytes"]
+    return JSONResponse({"ok": True, **cfg})
 
 
 @app.get("/api/admin/prep-validate")
