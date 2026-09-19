@@ -12090,10 +12090,16 @@ function epDownloadPaths(paths, label){
 }
 
 function epDownloadSeason(season){
-  if(!epItemId) return;
   const s=+season;
-  const paths=epFiles.filter(f=>(+f.season||0)===s).map(f=>f.path);
   const title=document.getElementById("epTitle")?.textContent||"download";
+  // A merged show (epSeriesKey, no epItemId) spans many items. The host ZIP is
+  // per-item so it can't serve one, but a device save is per-file — in the app
+  // the season saves across every item it spans.
+  if(isApp && epSeriesKey){
+    return _appSaveFiles(epFiles.filter(f=>(+f.season||0)===s), `${title} Season ${s}`);
+  }
+  if(!epItemId) return;
+  const paths=epFiles.filter(f=>(+f.season||0)===s).map(f=>f.path);
   epDownloadPaths(paths, `${title} Season ${s}`);
 }
 
@@ -19007,12 +19013,23 @@ async function appDownloadAllBundles(itemId, title, paths){
     files = (files || []).filter(f => want.has(f.path));
   }
   if (!files || !files.length){ showAlert("No files to download.","warn"); return; }
+  return _appSaveFiles(files.map(f => ({ ...f, item_id: itemId })), title);
+}
+
+// Save a batch of files to the device: one quality prompt, then the pooled
+// downloader. Each file carries its own `item_id`, so a batch may span several
+// items — a merged show's season is often one item per episode, which is why
+// this can't be keyed on a single itemId the way the host ZIP is.
+async function _appSaveFiles(files, label){
+  if (!isApp) return;
+  if (!hlsAvailable){ showAlert("Offline download needs HLS prep on the host.","warn"); return; }
   const toStart = [];
   for (const f of files){
     if (f.complete === false) continue;   // not on the host's disk yet
-    const st = offlineBundles.get(offKey(itemId, f.path));
+    const k = offKey(f.item_id, f.path), st = offlineBundles.get(k);
     if (st && (st.complete || st.downloading || st.queued)) continue;
-    offlineBundles.set(offKey(itemId, f.path), { queued:true, fraction:0, name:f.name });
+    offlineBundles.set(k, { queued:true, fraction:0, name:f.name });
+    _appRefreshDlBtn(f.item_id, f.path);   // paint the spinner now, not after the quality probe
     toStart.push(f);
   }
   if (!toStart.length){ showAlert("All episodes are already saved or downloading.","info"); return; }
@@ -19022,13 +19039,13 @@ async function appDownloadAllBundles(itemId, title, paths){
   _appHoldBg();
   try {
     // Ask which quality once for the whole batch, then apply it to every episode.
-    const q = await _appBatchQuality(itemId, toStart[0].path, title);
+    const q = await _appBatchQuality(toStart[0].item_id, toStart[0].path, label);
     if (q === null){   // cancelled — clear the queued markers we painted above
-      for (const f of toStart){ offlineBundles.delete(offKey(itemId, f.path)); _appRefreshDlBtn(itemId, f.path); }
+      for (const f of toStart){ offlineBundles.delete(offKey(f.item_id, f.path)); _appRefreshDlBtn(f.item_id, f.path); }
       return;
     }
     showAlert(`Saving ${toStart.length} episode${toStart.length>1?"s":""} offline…`, "ok");
-    await _appRunPooled(toStart, 3, (f) => appDownloadBundle(itemId, f.path, f.name, null, q));
+    await _appRunPooled(toStart, 3, (f) => appDownloadBundle(f.item_id, f.path, f.name, null, q));
   } finally { _appReleaseBg(); }
 }
 
@@ -19113,7 +19130,10 @@ function _cssAttr(v){ return (window.CSS && CSS.escape) ? CSS.escape(v) : String
 // just the `%` text so the spinner animation isn't restarted either; structural
 // changes (queued→prepping→downloading→saved/error) rebuild the small slot only.
 function _appRefreshDlBtn(itemId, filePath){
-  if (epItemId !== itemId) return;
+  // Is this file on the open page? A merged show has no epItemId — its rows
+  // belong to many items, so ask the page's path→item map instead.
+  const onPage = epSeriesKey ? epFileItem[filePath] === itemId : epItemId === itemId;
+  if (!onPage) return;
   const sel = `[data-path="${_cssAttr(filePath)}"]`;
   const slot = document.querySelector(`.ep-appdl-slot${sel}`);
   // The movie panel carries the same action as a full-width labelled button.
@@ -26499,6 +26519,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.10.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.10.1</div>
 </body>
 </html>

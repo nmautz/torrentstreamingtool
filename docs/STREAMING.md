@@ -2429,7 +2429,9 @@ panel's full-width twin is `_appDlWideHTML`, refreshed by the same
 > `videos[].length > 1` it lists each rung with its size and re-fetches the manifest
 > for the pick. A **bulk** download (card *Download all* → `appDownloadAllBundles`,
 > a season header *Save Season* → `epDownloadSeason` → `_triggerZipDownload`'s app
-> branch → `appDownloadAllBundles(itemId, label, paths)`, or multi-select
+> branch → `appDownloadAllBundles(itemId, label, paths)` — or, on a **merged** show
+> (no single `epItemId`), straight to `_appSaveFiles(files)` with each file keyed to its
+> own `item_id`, since a merged season is often one item per episode — or multi-select
 > *Download (N)* → `epDownloadSelected`) asks **once** via
 > `_appBatchQuality` (which probes the first file's ladder) and passes the chosen
 > `quality` to every per-file `appDownloadBundle` so the prompt isn't repeated; a

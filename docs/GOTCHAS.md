@@ -3109,7 +3109,12 @@ caller inherit it. Two traps if you add another: the **single-path shortcut** in
 `hlsAvailable` is false** — with the ZIP gone there's nothing to show in its place,
 and a control that vanishes on some hosts looks like a bug. Render it and explain
 on tap (`appDownloadBundle` warns after the already-saved *removal* branch, so
-deleting an existing bundle still works on an HLS-less host).
+deleting an existing bundle still works on an HLS-less host). Third trap: **a merged show has
+no `epItemId`.** Its rows belong to many items, so anything gated on `epItemId` silently
+no-ops there — which is how *Save Season* shipped dead on most of the library in 17.10.0,
+and how `_appRefreshDlBtn` had never animated a merged row at all. Key app downloads by
+each file's own `item_id` (`_appSaveFiles`), and test "is this file on the open page?"
+with `epFileItem[path] === itemId` when `epSeriesKey` is set.
 
 ### In-app "tabs" must be overlays on the host page — never full-page navigations — or in-flight downloads die
 The dashboard (`static/index.html`, served by the host) is the page that

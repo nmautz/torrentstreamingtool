@@ -1,5 +1,22 @@
 # Changelog
 
+## [17.10.1] — 2026-09-18
+* **Fixed: *Save Season* did nothing on a merged show.** A show whose episodes arrived as
+  separate items (most of Hacks, South Park, Futurama) opens as one merged page with no
+  single `epItemId`, and `epDownloadSeason` began `if(!epItemId) return;` — so in the app the
+  button 17.10.0 had just relabelled from *Save ZIP* was dead on most of the library. A device
+  save is per-file, not per-item, so it has no reason to stop there: the season now saves
+  every episode it spans, each keyed to its own item, with one quality prompt for the batch
+  (new `_appSaveFiles`, which `appDownloadAllBundles` now delegates to). Measured on Hacks
+  S04 — ten episodes, ten separate items, all ten queued.
+* **Fixed: a merged show's rows never showed save progress.** `_appRefreshDlBtn` bailed
+  unless the file belonged to `epItemId`, which a merged page doesn't have, so a row's
+  spinner and percentage never appeared. It now asks the page's path→item map
+  (`epFileItem`) instead. This predates 17.10.0 — it affected every per-row save on a
+  merged page.
+* The browser's *Save ZIP* on a merged page is still inert — the host ZIP is per-item and
+  can't span a merged season. Unchanged here; noted in [FRONTEND.md](docs/FRONTEND.md).
+
 ## [17.10.0] — 2026-09-18
 **In the app, "download" always means *onto this device*.**
 
