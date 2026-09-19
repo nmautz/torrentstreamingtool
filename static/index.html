@@ -9661,16 +9661,21 @@ function pickDefaultSeason(){
     const f=epFiles.find(x=>x.path===app.library_current_file);
     if(f && f.season) return +f.season;
   }
-  // 2) season of the most-recently-watched episode (latest progress.updated_at).
-  //    We land where the viewer actually left off — NOT the first unwatched
-  //    episode: an early episode left unwatched on purpose (skipped, or being
-  //    saved for later) shouldn't drag the picker back to an earlier season.
-  let latestFile=null, latestT=-Infinity;
-  for(const f of epFiles){
-    const t=Date.parse(f.progress?.updated_at||"");
-    if(!isNaN(t) && t>latestT){ latestT=t; latestFile=f; }
+  // 2) season of the episode the viewer is up to — the same answer the page
+  //    then scrolls to, and the same rule the server resumes by: anchored on the
+  //    most-recently-watched episode (latest progress.updated_at), NOT on the
+  //    first unwatched one, so an early episode skipped or saved for later can't
+  //    drag the picker back to an earlier season; and moving PAST the anchor
+  //    when it is finished, so the season you just completed hands over to the
+  //    next one instead of re-opening on itself. Numbered seasons only —
+  //    season 0 sorts last, and "you've seen every episode, here are the
+  //    creditless openings" is not where a show should open.
+  const numbered=epFiles.filter(f=>(+f.season||0)>0);
+  const upNext=_epNextUpPath(numbered);
+  if(upNext){
+    const f=numbered.find(x=>x.path===upNext);
+    if(f && f.season) return +f.season;
   }
-  if(latestFile && latestFile.season) return +latestFile.season;
   // 3) first season with an unwatched episode
   for(const s of epSeasonList){
     const any=epFiles.some(f=>(+f.season||0)===s && !f.progress?.completed);

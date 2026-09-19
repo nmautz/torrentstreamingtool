@@ -12,6 +12,13 @@
   you've never touched, or one you've finished, still opens at the top.
   Scrolling the list yourself ends it for that visit: from then on repaints leave you
   where you are, and picking a season tab by hand still opens that season at its start.
+* **Fixed: a finished season re-opening on itself.** Which season a show opens on is
+  now decided by the same rule — the episode you're up to — so finishing season 1 hands
+  over to season 2 instead of re-opening the season you just completed. The rule needed
+  a field the server had never sent: per-file progress on `GET /api/library/{id}/files`
+  (and `/series/{key}`) now carries `updated_at`, so the page can tell *which* episode
+  you touched last rather than guessing "the first one you haven't finished" — the guess
+  that walked backwards into an episode skipped on purpose.
 * On the TV, the first **OK** press now lands on a control that's actually on screen
   rather than the first one in the page, which used to jump back to episode 1.
 

@@ -14683,6 +14683,12 @@ async def _build_item_files(item: dict, profile_id: str) -> list[dict]:
                 "duration_sec": dur,
                 "completed": fp.get("completed", False),
                 "pct": round(pos / dur * 100, 1) if dur else 0,
+                # 17.13.0: which episode was touched LAST is what tells the page
+                # where the viewer is up to — the season to open and the row to
+                # scroll to (pickDefaultSeason / _epNextUpPath). Without it the
+                # client could only fall back to "the first unwatched one", which
+                # walks backwards into an episode skipped on purpose.
+                "updated_at": fp.get("updated_at", ""),
             }
         else:
             progress = None
