@@ -4230,6 +4230,32 @@ consequences worth knowing before debugging a "why is my phone listed twice":
   the host origin. Without this the same phone changes identity (and loses its
   chosen name) halfway through an episode.
 
+## `updated_at` is now the library's sort key, not just a sync watermark (17.12.0)
+
+The library is ordered most-recently-watched first, and "recently watched" is
+read off `progress[<profile>].file_progress[<path>].updated_at` — the newest one
+in the item, rolled up per `series_key` (`_item_last_watched_at` →
+`last_watched_at` on `GET /api/library`). That field already carried two jobs
+(the resume hint's tiebreak, and the iOS sync's conflict watermark); it now also
+decides what the user sees first when they open the app.
+
+So **a write that bumps `updated_at` moves a show to the top of the library**,
+whatever the write was for. Two consequences worth holding onto:
+
+- **Don't stamp `updated_at` on something that isn't a watch.** `_save_track_pref`
+  deliberately doesn't (picking a subtitle track is not watching), and the
+  17.6.0 legacy tail backfill deliberately doesn't either (it's a
+  *reinterpretation* of an old record, and bumping would both reorder the
+  library and raise spurious iOS sync conflicts). Keep it that way. Mark-watched
+  / mark-unwatched *do* bump it, which is intended — reaching for an episode is
+  what "recent" means here.
+- **Compare it as a time, not as a string.** `_item_last_watched_at` normalises
+  through `_parse_iso_dt` before comparing, because an offline-sync write can
+  land a non-UTC offset (`…+02:00`) that sorts wrong lexically against the
+  host's `…+00:00`. It hands back a normalised UTC string, which is what lets
+  the frontend's `_libLastWatched` get away with a plain `>`.
+
+
 ---
 
 - [BACKEND.md](BACKEND.md) — invariants enforced by `main.py`

@@ -1,5 +1,17 @@
 # Changelog
 
+## [17.12.0] — 2026-09-19
+* **New: the library leads with what you were watching.** Items are ordered
+  most-recently-watched first, so a show you started last night is the first tile you
+  see when you come back instead of being somewhere under the letter it begins with.
+  Recency is per profile (everyone's library leads with their own last watch) and
+  measured per *series*, so a show held as one torrent per episode moves as a single
+  block and keeps its episode order inside it. A franchise shelf takes its place in
+  that order too, by the last time you watched anything inside it, rather than always
+  sitting on top of the grid. Anything you've never played keeps the A-Z order it
+  always had, below the shows you have. Works in both library views and on the TV.
+  New `last_watched_at` on `GET /api/library`.
+
 ## [17.11.0] — 2026-09-18
 * **New: *Where to watch* on the search show page.** Under the title, a strip of the
   services that stream, rent or sell the title in your country (the browser's region,

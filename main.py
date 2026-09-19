@@ -6157,6 +6157,35 @@ def _file_progress(item: dict, profile_id: str, file_path: str) -> Optional[dict
     return prof.get("file_progress", {}).get(file_path)
 
 
+def _recency_rank(iso: str) -> float:
+    """Sort key for "most recently watched first": the negated epoch of an
+    ``_item_last_watched_at`` stamp, or +inf for a series with no watch behind
+    it (so it sorts after every watched one, keeping its A-Z place)."""
+    dt = _parse_iso_dt(iso)
+    return -dt.timestamp() if dt else float("inf")
+
+
+def _item_last_watched_at(item: dict, profile_id: str) -> str:
+    """When this profile last played anything in this item, as an ISO-8601 UTC
+    string ("" when never, or when no profile is selected).
+
+    The newest ``updated_at`` across the profile's ``file_progress`` records —
+    every position writer stamps one (see LIBRARY_DATA.md § Progress), so this
+    moves on a real play and on nothing else. Normalised through
+    ``_parse_iso_dt`` because an offline-sync write can carry a non-UTC offset,
+    which would compare wrong as a raw string.
+    """
+    if not profile_id:
+        return ""
+    prof = (item.get("progress") or {}).get(profile_id) or {}
+    best = None
+    for rec in (prof.get("file_progress") or {}).values():
+        dt = _parse_iso_dt((rec or {}).get("updated_at", ""))
+        if dt and (best is None or dt > best):
+            best = dt
+    return best.astimezone(timezone.utc).isoformat(timespec="seconds") if best else ""
+
+
 def _canonical_item_path(vlc_path: str, item: dict) -> str:
     """Return the item["files"] path that resolves to the same file as vlc_path.
 
@@ -14356,6 +14385,10 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
             "race": _race_summary(it),
             "torrent_hash": it.get("torrent_hash", ""),
             "series_key": _series_key(it),   # groups same-series items into one show tile
+            # When this profile last played something in here — "" if never. Drives
+            # the recently-watched order below, and the frontend's placement of a
+            # franchise tile among the shows. See _item_last_watched_at.
+            "last_watched_at": _item_last_watched_at(it, profile_id),
             "resume": resume,
             # Empty for an ordinary one-run show; non-empty means this tile opens
             # the group page instead of the episode picker. See _section_summary.
@@ -14370,7 +14403,22 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
             # no compatible base layer). 0 until the file has been probed.
             "green_files": sum(1 for f in files if (f.get("video") or {}).get("green")),
         })
+    # Come back to StreamLink and the show you were watching is the first thing
+    # you see. Recency is measured per SERIES, not per item — a show downloaded
+    # as one torrent per episode is many items rendering as one tile, so they
+    # have to move as a block and keep their season/episode order inside it.
+    # Never-watched items keep the A-Z order they've always had, below the ones
+    # with a watch behind them. Without a profile there's no "recent" to speak
+    # of and the whole list stays alphabetical.
+    recent: dict[str, str] = {}
+    for x in items:
+        at = x["last_watched_at"]
+        if at and at > recent.get(x["series_key"], ""):
+            recent[x["series_key"]] = at
     items.sort(key=lambda x: (
+        # Negated epoch: newest-watched first, and a never-watched series sorts
+        # after every watched one (+inf).
+        _recency_rank(recent.get(x["series_key"], "")),
         x["series"] or "\xff" + x["title"],
         x["season"],
         x["episode"],

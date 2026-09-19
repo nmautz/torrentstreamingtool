@@ -8364,6 +8364,15 @@ async function renameGroup(){
   loadLibrary();
 }
 
+// The newest watch across a set of library items ("" when nobody has played any
+// of them). `last_watched_at` is a UTC ISO stamp from the server, so a plain
+// string compare is a time compare. Used to order the library tiles.
+function _libLastWatched(list){
+  let best="";
+  (list||[]).forEach(i=>{ const t=(i&&i.last_watched_at)||""; if(t>best) best=t; });
+  return best;
+}
+
 // A franchise tile. Stands in for every member tile it claims, so the grid
 // shows one "Star Wars" rather than nine films and six shows scattered through
 // it alphabetically.
@@ -8512,33 +8521,50 @@ function renderLibrary(items){
   // no action exists in only one view.
   const isCard = libViewMode==="card";
   if(isCard) html+=`<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 items-start">`;
-  activeGroups.forEach(g=>{ html+=_libGroupTileHtml(g, isCard); });
+
+  // Each tile is built first and placed after: the show you last watched leads
+  // the library. `items` already arrives most-recently-watched first (the server
+  // sorts it, per profile — see /api/library), and this repeats that ordering at
+  // TILE level so a franchise shelf takes its place among the shows by the last
+  // time you watched anything inside it, instead of always sitting on top.
+  const units=[];
+  activeGroups.forEach(g=>{
+    const mk=new Set(g.members.map(m=>m.key));
+    units.push({at:_libLastWatched(renderItems.filter(i=>mk.has(i.series_key))),
+                html:_libGroupTileHtml(g, isCard)});
+  });
 
   groups.forEach(({label,items:gItems})=>{
+    const at=_libLastWatched(gItems);
     // A real series with multiple items (e.g. episodes downloaded individually)
     // renders as ONE cohesive show tile/card that opens the merged episode page —
     // never as N separate tiles.
     if(gItems.length>1 && (gItems[0].series||"").trim()){
-      html+= isCard ? _libShowCardHtml(label, gItems) : _libShowTileHtml(label, gItems);
+      units.push({at, html: isCard ? _libShowCardHtml(label, gItems) : _libShowTileHtml(label, gItems)});
       return;
     }
     // Card view: each item is a poster card appended straight into the flat grid.
     if(isCard){
-      gItems.forEach(item=>{ html+=_libItemCardHtml(item); });
+      units.push({at, html:gItems.map(item=>_libItemCardHtml(item)).join("")});
       return;
     }
     // List view: 2 columns only for a genuine multi-item series; a single-item
     // series spans full width instead of stranding an empty column.
     const gridCls=gItems.length>1?"grid grid-cols-1 lg:grid-cols-2 gap-2 items-start":"space-y-2";
+    let u;
     if(label){
-      html+=`<div class="mb-6">
+      u=`<div class="mb-6">
         <h3 class="text-xs font-black text-gray-600 uppercase tracking-widest mb-2 border-l-2 border-indigo-800 pl-2">${escHtml(label)}</h3><div class="${gridCls}">`;
     } else {
-      html+=`<div class="mb-2"><div class="${gridCls}">`;
+      u=`<div class="mb-2"><div class="${gridCls}">`;
     }
-    gItems.forEach(item=>{ html+=_libItemListHtml(item); });
-    html+=`</div></div>`;
+    gItems.forEach(item=>{ u+=_libItemListHtml(item); });
+    u+=`</div></div>`;
+    units.push({at, html:u});
   });
+  // Stable sort: never-watched tiles keep the A-Z order the server gave them.
+  units.sort((a,b)=> a.at===b.at ? 0 : (!a.at ? 1 : (!b.at ? -1 : (a.at<b.at ? 1 : -1))));
+  units.forEach(u=>{ html+=u.html; });
   if(isCard) html+=`</div>`;
   el.innerHTML=html;
   if(isCard) _libWirePosters(el);
@@ -26608,6 +26634,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.11.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.12.0</div>
 </body>
 </html>
