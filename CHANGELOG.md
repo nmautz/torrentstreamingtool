@@ -1,5 +1,29 @@
 # Changelog
 
+## [17.8.0] — 2026-09-18
+**See what's playing on your other devices — and pull it over.**
+
+* **The household's playback is visible across devices.** VLC and the TV kiosk were always
+  server state, so every dashboard could see them; a phone playing in its own `<video>` was
+  not — the only trace it left on the host was a progress write every 15 s. On-device
+  players now beat a small session report to the host while they play, and a banner at the
+  top of the dashboard lists the live sessions signed in as **your** profile, plus the TV
+  (whoever started it, named with their chip — it is one shared screen).
+* **Hold *Play Here* to take a session over.** The source device is asked for its exact
+  playhead, flushes it, and stops; this device resumes on the same frame with the rest of
+  the run — remaining episodes, shuffle order and scope — intact. Hold-to-activate, like
+  every other control that moves playback off a screen someone may be watching. A source
+  that is asleep still hands over: the position falls back to its last beat and the stop
+  command stays armed until it obeys.
+* **A locked phone still counts.** The iOS app's native background player beats for itself
+  and honours a takeover from its own heartbeat response — a backgrounded WebView has
+  frozen timers and a dead event stream, so an episode playing with the phone in a pocket
+  would otherwise have vanished from everyone's banner at exactly the moment they wanted it
+  on the TV.
+* **Settings › This Device › Device Name.** What your other devices call this one. Defaults
+  to something recognisable from the browser ("iPhone · Safari"); rename it for the
+  two-iPhones household. Device-local, like the rest of that block.
+
 ## [17.7.2] — 2026-09-18
 * **Fixed: bulk prep no longer triggers a subtitle search per episode.** `/offline-prepare`
   serves both an interactive play and "prep for later"; only the former looks for subtitles

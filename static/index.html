@@ -354,7 +354,18 @@
        control tiles below, since users rely on muscle memory for those) and has
        pointer-events:none so it can never block a control. */
     body.fc-open #serverAttentionBanner,
+    body.fc-open #elsewhereBanner,
     body.fc-open #globalToast { display:none !important; }
+    /* The "playing elsewhere" banner sits below the server-attention banner's
+       z-70 but above the page, and — unlike that one — it is NOT dismissable, so
+       it must never swallow a tap meant for something underneath. It only ever
+       renders above the page flow (sticky, at the top), so capturing pointer
+       events on the strip itself is safe and is what the hold-to-pull buttons
+       need. */
+    #elsewhereBanner { pointer-events: auto; }
+    /* The clock column is hidden on the narrowest phones (Tailwind has no `xs`
+       breakpoint by default, so define the one class we use). */
+    @media (min-width: 400px) { .xs\:block { display: block !important; } }
     /* The server-attention banner floats at z-70 — above the on-device player
        (z-50) and its Stop / To TV control bar. It's dismissable, so a shown banner
        should BLOCK clicks so an accidental tap can't fall through to a UI button
@@ -1320,6 +1331,13 @@
         <span class="text-[10px] font-black uppercase tracking-widest text-emerald-500">This Device</span>
         <span class="text-[10px] text-gray-600 uppercase tracking-widest">Saved in this browser only</span>
         <span class="flex-1 h-px bg-gray-800"></span>
+      </div>
+
+      <div class="bg-gray-800/60 px-4 py-3">
+        <div class="text-sm font-bold text-gray-200 uppercase tracking-wide">Device Name</div>
+        <div class="text-[11px] text-gray-500 mt-0.5">What your other devices call this one when it's playing something — "Playing on Nathan's iPhone". Leave it empty to use the automatic name.</div>
+        <input id="psDeviceName" type="text" maxlength="40" onchange="saveDeviceName(this)" onblur="saveDeviceName(this)"
+          class="mt-2 w-full bg-gray-900 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-emerald-600"/>
       </div>
 
       <label class="flex items-center justify-between gap-3 bg-gray-800/60 px-4 py-3 cursor-pointer hover:bg-gray-800 transition-colors">
@@ -2395,6 +2413,16 @@
     aria-label="Dismiss" title="Dismiss"
     class="flex-shrink-0 -my-1.5 -mr-1 p-1.5 leading-none text-base opacity-70 hover:opacity-100 transition-opacity">×</button>
 </div>
+
+<!-- ── "Playing elsewhere" banner (cross-device sessions) ─────────────────── -->
+<!-- One row per live session on another device signed in as this profile, plus
+     the TV whoever started it. Each row holds to pull that playback onto THIS
+     device. Rendered entirely by renderElsewhere(); hidden when the list is
+     empty and on the ?tv=1 kiosk (no pointer, and it is itself one of the
+     sessions being listed). Sits above the navbar like the server-attention
+     banner and below the fullscreen overlay's own notice strip. -->
+<div id="elsewhereBanner"
+  class="hidden sticky top-0 z-[65] bg-indigo-950/70 border-b border-indigo-900 divide-y divide-indigo-900/60"></div>
 
 <!-- Host-performance banner removed: CPU/GPU/RAM/network busy/overloaded states
      are transient background-work noise and are no longer surfaced to the user. -->
@@ -6089,6 +6117,10 @@ function _doSelectProfile(p){
   renderNavProfile();
   applyMaxVolumeToSliders();
   loadSearchIndexers();
+  // The "playing elsewhere" list is per profile, so it is wrong the instant the
+  // profile changes — re-fetch rather than wait for the next rev bump, which may
+  // not come for minutes.
+  pbSessions = []; _pbRev = -1; renderElsewhere(); _pbFetchSessions();
   if(activeTab==="library") loadLibrary();
   // M3: tell the native store whose history to record, then flush anything the
   // offline player accumulated for this profile.
@@ -6242,6 +6274,13 @@ function openProfileSettings(){
   // Device-local, synchronous (localStorage) — no loader needed.
   document.getElementById("psDevMode").checked = devMode;
   document.getElementById("psSeekLock").checked = _seekLockEnabled;
+  // The field shows only a name the user actually chose; the automatic one is
+  // the placeholder, so clearing the box visibly returns it to the default.
+  const dn = document.getElementById("psDeviceName");
+  let savedName = "";
+  try { savedName = localStorage.getItem("streamlink_device_name") || ""; } catch (_) {}
+  dn.value = savedName;
+  dn.placeholder = _pbDefaultDeviceName();
   _renderLibViewToggle();
   _psLoadProfilePrefs();
   _psLoadMaxVolume();
@@ -17463,6 +17502,13 @@ function _appProxiedSeedStorage() {
     if (_appProxyHost && !localStorage.getItem("streamlink_server_url")) {
       localStorage.setItem("streamlink_server_url", _appProxyHost);
     }
+    // Keep being the same device across the origin hop — see the producer in
+    // _appTryLocalHandoff. Seeded unconditionally (not `if absent`): a loopback
+    // origin that already holds an id from an earlier proxied session must still
+    // agree with the host origin, or the phone shows up twice.
+    const did = p.get("did") || "", dnm = p.get("dnm") || "";
+    if (did) localStorage.setItem("streamlink_device_id", did);
+    if (dnm) localStorage.setItem("streamlink_device_name", dnm);
     const am = p.get("am");
     if (am) {
       const o = JSON.parse(am);
@@ -17659,6 +17705,16 @@ function _npPayload() {
     profileId: (profile && profile.id) || "",
     serverUrl: _npServerUrl(),
     token: _appPairingToken() || "",
+    // Cross-device sessions. While backgrounded the WebView's timers are frozen,
+    // so _pbBeat stops firing and this device would vanish from every other
+    // device's banner mid-episode — exactly when someone is most likely to want
+    // to pull it onto the TV. The native player therefore beats the session
+    // itself, from the same time observer that already writes progress, and acts
+    // on a yield that comes back on the response. See NativePlayback.swift.
+    deviceId: _pbDeviceId(),
+    deviceName: _pbDeviceName(),
+    sessionProfileId: _pbProfileId(),
+    sessionSource: (lp.source === "device") ? "offline" : "server",
     canPrev: (lp.pi || 0) > 0,
     canNext: (lp.playlist || []).length > (lp.pi || 0) + 1,
     nextUrl: nx ? _npAbs(nx.url) : "",
@@ -17755,6 +17811,22 @@ function _npBindEvents() {
       const was = _npExternal;
       _npExternal = !!(e && e.connected);
       if (_npExternal !== was) _npOnDisplayChange(_npExternal);
+    });
+    // Another device pulled this playback over while we were backgrounded. The
+    // native side has already flushed the exact position and stopped its player;
+    // all that is left is to tear the web player down so returning to the app
+    // doesn't hand back to a session that no longer exists. `handled: true` says
+    // the flush is done — _pbYieldNow's own POST would be a duplicate, and the
+    // session is already gone server-side, so we skip straight to the teardown.
+    _cap.np.addListener("nativeYielded", (e) => {
+      const to = (e && e.to) || "another device";
+      // Claim the yield so the SSE copy of the same command — which may land the
+      // moment the app comes back to the foreground — can't flush and stop a
+      // second time against a session that is already gone.
+      _pbYielding = true;
+      _npDisarm();
+      Promise.resolve(lpStop()).catch(() => {}).then(() => { _pbYielding = false; });
+      showAlert(`Playback moved to ${to}.`, "info");
     });
   } catch (_) {}
 }
@@ -17937,6 +18009,11 @@ async function _appTryLocalHandoff(itemId, filePath, seekTo) {
       proxied: "1", host: location.origin,
       item: itemId, file: filePath, seek: String(Math.max(0, Math.floor(seekTo || 0))),
       profile: profile.id || "", am,
+      // Cross-device identity. The loopback origin has its own localStorage, so
+      // without these the same phone would mint a second device id (and lose its
+      // chosen name) the moment a proxied session starts — appearing to the
+      // household as a different device halfway through an episode.
+      did: _pbDeviceId(), dnm: _pbDeviceName(),
     });
     window.location.replace(base + "/index.html?" + q.toString());
     return true;
@@ -20049,6 +20126,403 @@ async function handoffToDevice(btn, allowOnDemand = false) {
   });
 }
 
+// ── Cross-device playback sessions ("playing elsewhere" + pull-over) ────────
+// The TV has always been visible to every dashboard, because VLC and the kiosk
+// are server state. A phone playing in its own <video> was not: it is pure
+// client state, and the only trace it left on the host was a progress POST
+// every 15 s. So this browser beats a small session report to the host while it
+// plays, and reads back the sessions belonging to ITS profile — which is what
+// lets a second device say "you're watching this on your phone" and take it.
+//
+// Three moving parts:
+//   _pbBeat*       — this device reporting that it is playing (and hearing a
+//                    yield command come back on the response).
+//   _pbFetchSessions / renderElsewhere — the banner: other devices on this
+//                    profile, plus the TV.
+//   pullPlayback   — the takeover.
+// See docs/STREAMING.md § 8.
+
+// The beat interval. Matches the kiosk's own /api/tv-local/state cadence; the
+// backgrounded native iOS player beats at 5 s instead (battery), which is still
+// three beats inside PLAYBACK_SESSION_STALE_SECS.
+const PB_BEAT_MS = 2000;
+let _pbBeatTimer = null;
+// Signature of the continuity payload (playlist / shuffle / picks) last sent, so
+// a hundred-path playlist rides one beat and not every beat. The server keeps
+// the last value it was given, so a pull always has the full set.
+let _pbSentSig = "";
+let _pbYielding = false;      // a yield is being honoured — don't fire twice
+let pbSessions = [];          // what the banner draws, newest fetch wins
+let _pbRev = -1;              // last playback_sessions_rev we fetched for
+let _pbFetching = false;
+let _pbTickTimer = null;      // 1 Hz repaint that ages a playing session's clock
+let _pbPulling = false;
+let _pbBeatInflight = false;  // one beat at a time; see _pbBeat
+
+// This browser's identity. A plain localStorage UUID: the host keeps sessions in
+// memory only, so there is nothing to register and nothing to revoke. NOTE that
+// http:// and https:// are separate origins, so one machine reached both ways
+// mints two ids and can appear twice — harmless (each is genuinely a separate
+// player) but worth knowing when a device looks duplicated.
+function _pbDeviceId(){
+  let id = "";
+  try { id = localStorage.getItem("streamlink_device_id") || ""; } catch(_){}
+  if(!id){
+    try {
+      id = (crypto && crypto.randomUUID) ? crypto.randomUUID()
+         : "d" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+      localStorage.setItem("streamlink_device_id", id);
+    } catch(_){ id = id || ("d" + Date.now().toString(36)); }
+  }
+  return id;
+}
+
+// What this device is called before anyone renames it. Coarse on purpose — it
+// only has to be recognisable across the room ("iPhone · Safari"), and Settings
+// → This Device is there for the two-iPhones household.
+function _pbDefaultDeviceName(){
+  if(TV_MODE) return "The TV";
+  const ua = navigator.userAgent || "";
+  const os = /iPhone/.test(ua) ? "iPhone"
+           : /iPad/.test(ua) ? "iPad"
+           : /Android/.test(ua) ? "Android"
+           : /Macintosh|Mac OS X/.test(ua) ? "Mac"
+           : /Windows/.test(ua) ? "Windows PC"
+           : /Linux/.test(ua) ? "Linux"
+           : "Device";
+  if(isApp) return os + " app";
+  const br = /Edg[A-Z]?\//.test(ua) ? "Edge"
+           : /CriOS|Chrome\//.test(ua) ? "Chrome"
+           : /FxiOS|Firefox\//.test(ua) ? "Firefox"
+           : /Safari\//.test(ua) ? "Safari" : "";
+  return br ? `${os} · ${br}` : os;
+}
+function _pbDeviceName(){
+  let n = "";
+  try { n = (localStorage.getItem("streamlink_device_name") || "").trim(); } catch(_){}
+  return n || _pbDefaultDeviceName();
+}
+// Settings → This Device → Device Name. Device-local like every other setting in
+// that block; the name travels on the heartbeat, never stored on the host.
+function saveDeviceName(input){
+  const v = (input && input.value || "").trim().slice(0, 40);
+  try {
+    if(v) localStorage.setItem("streamlink_device_name", v);
+    else  localStorage.removeItem("streamlink_device_name");
+  } catch(_){}
+  if(input) input.placeholder = _pbDefaultDeviceName();
+  // Push the new name immediately if we're mid-playback, so the other devices'
+  // banners don't keep showing the old one for the rest of the episode.
+  if(lp.itemId) _pbBeat();
+}
+
+// Whose session this is. The kiosk aside, that is the signed-in profile; on the
+// kiosk a pushed play belongs to whoever pressed it (see lp.profileId).
+function _pbProfileId(){
+  try { return _lpProfileId() || profile.id || ""; } catch(_){ return profile.id || ""; }
+}
+
+// ── This device reporting in ───────────────────────────────────────────────
+
+function _pbBeatStart(){
+  // _pbIsHere() changes the moment this device starts playing, and the server
+  // rev won't move just because WE opened a player — repaint now so the banner
+  // doesn't keep offering an episode that is already up on this screen. Outside
+  // the timer guard: a pull-over replaces the run in place, with the beat timer
+  // already running.
+  try { renderElsewhere(); } catch(_){}
+  if(_pbBeatTimer) return;
+  _pbSentSig = "";            // a new session re-sends its continuity payload
+  _pbYielding = false;
+  _pbBeat();
+  _pbBeatTimer = setInterval(_pbBeat, PB_BEAT_MS);
+}
+
+// Close the session. `active:false` is the clean exit; the host's 15 s staleness
+// reaper is the backstop for a tab that was closed mid-episode.
+function _pbBeatStop(useBeacon){
+  if(_pbBeatTimer){ clearInterval(_pbBeatTimer); _pbBeatTimer = null; }
+  _pbSentSig = "";
+  if(_appOffline) return;
+  const body = JSON.stringify({ device_id: _pbDeviceId(), active: false });
+  if(useBeacon && navigator.sendBeacon){
+    try {
+      if(navigator.sendBeacon("/api/playback/session",
+                              new Blob([body], {type:"application/json"}))) return;
+    } catch(_){}
+  }
+  fetch("/api/playback/session", { method:"POST",
+    headers:{"Content-Type":"application/json"}, body }).catch(()=>{});
+  // Mirror of _pbBeatStart: nothing is playing here any more, so a session on
+  // the same file is worth showing again.
+  try { renderElsewhere(); } catch(_){}
+}
+
+async function _pbBeat(){
+  if(!lp.itemId || !lp.filePath) return;
+  // Offline cached-player mode: this origin's /api is the loopback server, so
+  // the POST would 404 against a host that isn't there. A phone genuinely off
+  // the network has no session to advertise — see _appOffline.
+  if(_appOffline) return;
+  // A hung beat must not stack behind the 2 s timer — two in flight can also
+  // land out of order and rewind the reported position.
+  if(_pbBeatInflight) return;
+  _pbBeatInflight = true;
+  try { await _pbBeatOnce(); } finally { _pbBeatInflight = false; }
+}
+
+async function _pbBeatOnce(){
+  const v = document.getElementById("lpVideo");
+  const t = (v && v.currentTime > 2) ? v.currentTime : (lp.lastKnownT || 0);
+  const d = (v && v.duration > 0) ? v.duration : (lp.duration || 0);
+  const body = {
+    device_id:    _pbDeviceId(),
+    device_name:  _pbDeviceName(),
+    profile_id:   _pbProfileId(),
+    active:       true,
+    item_id:      lp.itemId,
+    file_path:    lp.filePath,
+    title:        lp.name || "",
+    position_sec: t,
+    duration_sec: d,
+    playback:     (v && v.readyState < 2) ? "buffering" : ((v && v.paused) ? "paused" : "playing"),
+    // "offline" = the iOS app is playing its OWN downloaded bundle while still on
+    // the LAN. Still pullable (the host has the same file), but the banner says
+    // so, because stopping it frees nothing on the host.
+    source:       (lp.source === "device") ? "offline" : "server",
+  };
+  // Continuity, only when it changed. Track picks are NOT in here: both players
+  // already write every deliberate pick to library.json (per file and per series)
+  // and both read it back on the next load — that is what carries a pick across a
+  // device↔TV switch today, and it is fresher than anything we could snapshot.
+  const sig = JSON.stringify([lp.playlist || [], lp.playlistItems || [],
+                              !!lp.shuffle, lp.shuffleScope || ""]);
+  if(sig !== _pbSentSig){
+    body.playlist       = lp.playlist || [];
+    body.playlist_items = lp.playlistItems || [];
+    body.shuffle        = !!lp.shuffle;
+    body.shuffle_scope  = lp.shuffleScope || "";
+  }
+  let r = null;
+  try {
+    r = await fetch("/api/playback/session", { method:"POST",
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+  } catch(_){ return; }              // offline blip — the next beat retries
+  if(!r.ok) return;
+  if(sig !== _pbSentSig) _pbSentSig = sig;   // only on an accepted beat
+  const res = await r.json().catch(()=>null);
+  // The yield command's reliable channel. A foregrounded page normally hears it
+  // over SSE a beat earlier; a backgrounded one (frozen timers, dead EventSource)
+  // only ever hears it here.
+  if(res && res.yield) _pbYieldNow(res.yield_to || "another device");
+}
+
+// Hand this session over: flush the EXACT playhead, then stop. The puller is
+// blocked on that flush (up to 2.5 s server-side), which is what makes the
+// episode resume on the same frame over there.
+async function _pbYieldNow(toName){
+  if(_pbYielding) return;
+  if(!lp.itemId) return;
+  _pbYielding = true;
+  if(_pbBeatTimer){ clearInterval(_pbBeatTimer); _pbBeatTimer = null; }
+  const v = document.getElementById("lpVideo");
+  const t = (v && v.currentTime > 2) ? v.currentTime : (lp.lastKnownT || 0);
+  const d = (v && v.duration > 0) ? v.duration : (lp.duration || 0);
+  try { if(v) v.pause(); } catch(_){}
+  try {
+    await fetch(`/api/playback/session/${encodeURIComponent(_pbDeviceId())}/yield`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({
+        device_id: _pbDeviceId(), position_sec: t, duration_sec: d,
+        playlist: lp.playlist || [], playlist_items: lp.playlistItems || [],
+        shuffle: !!lp.shuffle, shuffle_scope: lp.shuffleScope || "",
+      }),
+    });
+  } catch(_){}
+  // lpStop writes the final progress itself, so the position is safe on the host
+  // whichever device resumes it. It also calls _pbBeatStop — harmless, the
+  // session is already gone server-side.
+  try { await lpStop(); } catch(_){}
+  _pbYielding = false;
+  showAlert(`Playback moved to ${toName}.`, "info");
+}
+// The native iOS player honours a yield from its own heartbeat while the app is
+// backgrounded, then tells JS so the web player tears down to match.
+window._pbYieldNow = _pbYieldNow;
+
+// ── The banner: what's playing elsewhere ───────────────────────────────────
+
+async function _pbFetchSessions(){
+  // The kiosk deliberately has no banner: it is the couch surface, driven by a
+  // remote with no pointer, and it is itself one of the sessions being listed.
+  if(TV_MODE || _appOffline) return;
+  if(!profile.id || _pbFetching) return;
+  _pbFetching = true;
+  try {
+    const r = await fetch(`/api/playback/sessions?profile_id=${encodeURIComponent(profile.id)}`
+                          + `&device_id=${encodeURIComponent(_pbDeviceId())}`);
+    if(!r.ok) return;
+    const d = await r.json();
+    pbSessions = Array.isArray(d.sessions) ? d.sessions : [];
+    _pbRev = typeof d.rev === "number" ? d.rev : _pbRev;
+    renderElsewhere();
+  } catch(_){
+  } finally { _pbFetching = false; }
+}
+
+// Called from the `state` SSE handler. The snapshot carries only a counter, not
+// the sessions — `state` goes to every profile and this list is same-profile-only.
+function _pbOnRev(rev){
+  if(typeof rev !== "number") return;
+  if(rev === _pbRev) return;
+  _pbRev = rev;
+  _pbFetchSessions();
+}
+
+// A session we should not offer to pull: our own TV playback pushed from here is
+// still "elsewhere" (it is on the TV), so the only exclusion is a session whose
+// file we are already playing on this very device.
+function _pbIsHere(s){
+  return !!(lp.itemId && s.file_path && lp.filePath === s.file_path);
+}
+
+function _pbAgedPos(s){
+  let t = Number(s.position_sec) || 0;
+  if((s.playback || "") === "playing" && s.seen_at){
+    // The record is a snapshot; age it so the clock in the banner keeps moving
+    // between fetches instead of freezing. Cosmetic — a pull re-reads the
+    // position from the source device itself.
+    t += Math.max(0, Math.min(60, (Date.now()/1000) - s.seen_at));
+  }
+  if(s.duration_sec > 0) t = Math.min(t, s.duration_sec);
+  return t;
+}
+
+function renderElsewhere(){
+  const el = document.getElementById("elsewhereBanner");
+  if(!el) return;
+  const list = (pbSessions || []).filter(s => s && s.item_id && !_pbIsHere(s));
+  if(!list.length || TV_MODE){
+    el.classList.add("hidden");
+    if(_pbTickTimer){ clearInterval(_pbTickTimer); _pbTickTimer = null; }
+    return;
+  }
+  el.classList.remove("hidden");
+  el.innerHTML = list.map(s => {
+    const mine = !s.profile_id || s.profile_id === profile.id;
+    const icon = s.surface === "tv" ? "monitor" : "phone";
+    const pos  = _pbAgedPos(s);
+    const clock = s.duration_sec > 0
+      ? `${fmtTimeSecs(pos)} / ${fmtTimeSecs(s.duration_sec)}`
+      : fmtTimeSecs(pos);
+    const stateWord = s.playback === "paused" ? "Paused"
+                    : s.playback === "buffering" ? "Starting"
+                    : s.source === "offline" ? "Playing offline" : "Playing";
+    // The TV can be someone else's play — it is one shared screen and the
+    // dashboard has always shown its now-playing to everyone. Name them, so
+    // taking it over is a deliberate, informed act.
+    const who = (!mine && s.profile_name)
+      ? `<span class="inline-flex items-center gap-1 ml-1.5 px-1.5 py-px text-[9px] font-black uppercase tracking-wider"
+              style="background:${avatarBg(s.profile_color)}">${escHtml(s.profile_name)}</span>` : "";
+    return `
+    <div class="flex items-center gap-3 px-3 py-2">
+      <span class="flex-shrink-0 text-indigo-400">${ic(icon)}</span>
+      <div class="min-w-0 flex-1 leading-tight">
+        <div class="text-[10px] font-black uppercase tracking-widest text-indigo-400 truncate">
+          ${stateWord} on ${escHtml(s.device_name)}${who}
+        </div>
+        <div class="text-xs text-gray-300 truncate">${escHtml(s.title || "Library item")}</div>
+      </div>
+      <div class="flex-shrink-0 text-[11px] font-mono text-gray-500 tabular-nums hidden xs:block"
+           data-pb-clock="${escHtml(s.id)}">${clock}</div>
+      <button type="button" data-pb-pull="${escHtml(s.id)}"
+        onpointerdown="_holdStart(this, _pbPullFromBtn, event)"
+        onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
+        title="Hold to play here — this device takes over and ${escHtml(s.device_name)} stops"
+        class="hold-btn flex-shrink-0 px-3 py-1.5 text-[10px] font-black uppercase tracking-wide
+               border border-indigo-700 text-indigo-300 hover:bg-indigo-900/50 active:bg-indigo-900
+               transition-colors">Play Here</button>
+    </div>`;
+  }).join("");
+  // 1 Hz clock ageing, alive only while the banner is. Repaints the two time
+  // cells, never the whole banner — a re-render mid-hold would drop the hold.
+  if(!_pbTickTimer) _pbTickTimer = setInterval(_pbTickClocks, 1000);
+}
+
+function _pbTickClocks(){
+  const el = document.getElementById("elsewhereBanner");
+  if(!el || el.classList.contains("hidden")) return;
+  (pbSessions || []).forEach(s => {
+    const cell = el.querySelector(`[data-pb-clock="${CSS.escape(String(s.id))}"]`);
+    if(!cell) return;
+    const pos = _pbAgedPos(s);
+    cell.textContent = s.duration_sec > 0
+      ? `${fmtTimeSecs(pos)} / ${fmtTimeSecs(s.duration_sec)}` : fmtTimeSecs(pos);
+  });
+}
+
+// ── The takeover ───────────────────────────────────────────────────────────
+
+// The session id travels on the button as a data attribute rather than being
+// interpolated into the inline handler's JS: a device id is client-supplied, and
+// nothing client-supplied belongs inside a string literal in generated markup.
+function _pbPullFromBtn(btn){
+  pullPlayback(btn, (btn && btn.dataset && btn.dataset.pbPull) || "");
+}
+
+// Hold-to-activate, like every other control that moves playback off a screen
+// someone may be watching (Stop, the TV→device Handoff). An accidental tap must
+// not pull an episode out from under whoever is holding the other device.
+async function pullPlayback(btn, sessionId){
+  if(!sessionId) return;
+  if(_pbPulling) return;
+  if(!navigator.onLine && !_appOffline){
+    showAlert("Disconnected — taking playback over needs the host to be reachable.", "error");
+    return;
+  }
+  if(!hlsAvailable){
+    showAlert("Stream-to-device isn't available on this host.", "warn");
+    return;
+  }
+  _pbPulling = true;
+  await withInflight("pb_pull", btn, async () => {
+    let d = null;
+    try {
+      const r = await fetch("/api/playback/pull", { method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ session_id: sessionId, device_id: _pbDeviceId(),
+                               device_name: _pbDeviceName(), profile_id: profile.id || "" }) });
+      if(!r.ok){
+        const e = await r.json().catch(()=>({}));
+        showAlert(e.detail || "Couldn't take that playback over.", "warn");
+        return;
+      }
+      d = await r.json();
+    } catch(_){
+      showAlert("Couldn't reach the host to take playback over.", "error");
+      return;
+    }
+    if(!d || !d.item_id || !Array.isArray(d.playlist) || !d.playlist.length){
+      showAlert("That device stopped before we could take it over.", "warn");
+      return;
+    }
+    // Drop it from the banner straight away — the source is stopping and the
+    // next fetch would only remove it a beat later.
+    pbSessions = (pbSessions || []).filter(s => s.id !== sessionId);
+    renderElsewhere();
+    const items = (Array.isArray(d.playlist_items) && d.playlist_items.length === d.playlist.length)
+                  ? d.playlist_items : null;
+    // No profileId argument on purpose: playback continues under whoever is
+    // signed in HERE. That matches the TV→device Handoff, and it is the honest
+    // attribution — if you pull the TV's play onto your phone, the rest of the
+    // episode is yours. The track picks come across through the per-file /
+    // per-series memory in library.json, which both players already read.
+    await lpPlay(d.item_id, d.playlist, Number(d.position_sec) || 0,
+                 d.title || "", !!d.shuffle, d.shuffle_scope || "", items);
+  });
+  _pbPulling = false;
+}
+
 // ── Clip: save & share the last N seconds ──────────────────────────────────
 // Two entry points share _doClip: the fullscreen VLC controls (fcClip — clips
 // what's on the TV) and the on-device player (lpClip — clips the <video>). The
@@ -20533,6 +21007,11 @@ async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope, items
   const c = document.getElementById("localPlayer");
   c.classList.remove("lp-tiny");
   c.classList.add("lp-active");
+  // Announce the session NOW, not when the picture appears. A cold JIT start can
+  // take seconds, and a session the household's other devices can't see yet is a
+  // session they can't pull — the same reason the kiosk claims its surface from
+  // the start of a play rather than from the first frame.
+  _pbBeatStart();
   _lpDevHudStart();   // no-op unless Dev Mode is on (Settings → This Device)
   // Hydrate prep-readiness for the whole item from the server's .offline_cache,
   // so the Prev/Next dots are accurate even for an already-prepped earlier
@@ -23844,6 +24323,10 @@ async function lpStop() {
   // on claiming "buffering" for the rest of it instead of releasing the surface —
   // holding the TV on a stopped player and keeping the idle video away.
   _tvOpenPendingUntil = 0; _tvOpenKey = "";
+  // Close the cross-device session before anything else can fail: every other
+  // device's banner should stop offering to pull a player that is going away.
+  // Idempotent, so the yield path calling lpStop() after its own stop is fine.
+  _pbBeatStop(false);
   const v = document.getElementById("lpVideo");
   // Playback is over: no handoff, and drop TV Mode so the phone's screen comes
   // back (setTvMode(false) is idempotent and restores brightness).
@@ -24362,6 +24845,10 @@ function _lpAttachVideoEvents() {
   // any in-flight fetch is liable to be cancelled mid-request.
   window.addEventListener("pagehide", () => {
     _lpFlushProgress(true);
+    // Same reason the progress flush uses a beacon here: a fetch() in flight when
+    // the tab closes is routinely cancelled, and a session left open keeps
+    // offering itself in every other device's banner until the 15 s reaper.
+    _pbBeatStop(true);
     if (lp.mode === "ondemand" && lp.odKey) {
       try { navigator.sendBeacon(`/api/library/ondemand/${lp.odKey}/close`); } catch (_) {}
     }
@@ -24903,6 +25390,10 @@ function connectSSE(){
       }
     }
     if(typeof d.vpn_block_ui === "boolean") app.vpn_block_ui=d.vpn_block_ui;
+    // Cross-device sessions: the snapshot carries a change counter, not the
+    // sessions themselves (it goes to every profile; the list is same-profile-
+    // only). A bump means re-fetch our own filtered list.
+    _pbOnRev(d.playback_sessions_rev);
     renderVpn(d.vpn_secure,d.vpn_status,app.vpn_block_ui,app.vpn_mode); renderPlayer(app);
     updateDlBadge(d.downloading_count||0);
     renderServerAttention(d);
@@ -25079,6 +25570,16 @@ function connectSSE(){
         return;
       }
     }catch(_){}
+  });
+  // Another device is taking our playback over. The fast path only — the same
+  // command rides back on our own heartbeat response, which is what reaches a
+  // backgrounded app whose EventSource is dead. Both are idempotent.
+  es.addEventListener("playback_command",e=>{
+    _noteSSEMsg();
+    const d=JSON.parse(e.data);
+    if(d.action!=="yield") return;
+    if(d.session_id!==_pbDeviceId()) return;   // not ours; every client gets this
+    _pbYieldNow(d.to||"another device");
   });
   es.addEventListener("subtitle_upgraded",e=>{
     _noteSSEMsg();
@@ -25412,6 +25913,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.7.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.8.0</div>
 </body>
 </html>

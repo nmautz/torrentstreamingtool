@@ -3985,6 +3985,93 @@ So a `reboot:true` deploy shortly after anyone has freed disk space can leave a 
 looking broken on the dashboard. Check the admin Cleanup tab for `missingFiles` after a
 reboot, and prefer `reboot:false` for frontend-only changes.
 
+## A broadcast can't reach a sleeping phone — its own request can (17.8.0)
+
+The cross-device pull-over has to tell one specific device to stop. The obvious
+channel is SSE, and there *is* a `playback_command` event — but it is the fast
+path, not the reliable one.
+
+The case that matters most is a phone in a pocket: the iOS app backgrounded, the
+native `AVPlayer` running with the screen off. In that state WKWebView freezes
+the page's JS timers and the `EventSource` is dead. A broadcast aimed at that
+device goes nowhere, and — for the same reason — the web player's own 2 s
+session beat has stopped, so the device has already vanished from every other
+device's banner. Which is exactly the moment someone wants it on the TV.
+
+The fix is to stop thinking of the command as something pushed at the device.
+That device is still **posting** (`NativePlayback.maybePostSession`, off the same
+time observer that writes progress), so the *answer to its own request* carries
+the command: `POST /api/playback/session` responds `{yield:true, yield_to}`.
+That channel cannot be asleep, because the device only hears it while it is
+awake enough to ask.
+
+Both channels are live and both are idempotent — SSE saves a beat when the page
+happens to be awake, and `_pbYielding` / `yielded` stop the second one firing.
+Don't "simplify" this by deleting the heartbeat path.
+
+---
+
+## A pull that can't reach the source must still take the playback (17.8.0)
+
+`POST /api/playback/pull` waits `PLAYBACK_YIELD_WAIT_SECS` (2.5 s) for the source
+to flush its exact playhead. It is tempting to treat a timeout as a failure — it
+isn't, and failing there would make the feature useless in precisely the cases it
+exists for (asleep phone, 5 s native beat, flaky wifi).
+
+On timeout the pull **returns anyway**, from the source's last beat, and:
+
+- the position is **aged forward** by up to 6 s when the session was `playing` —
+  a beat is a snapshot, and the source kept playing through it, so handing the
+  raw value over would rewind the viewer several seconds. Capped at the beat
+  interval we expect, never at `PLAYBACK_SESSION_STALE_SECS`, so a genuinely
+  stalled session can't fast-forward anyone.
+- `yield_to` **stays armed** and the session record is **not** deleted. The
+  source stops on its own next beat. Deleting it there would be the bug: the
+  source is still playing, and its next beat would simply re-create the session
+  and carry on.
+
+`exact:false` in the response is how the client knows which of the two happened.
+
+---
+
+## The `state` broadcast is not a place to put per-profile data (17.8.0)
+
+`state_snapshot()` goes to **every** connected dashboard, whatever profile it is
+signed in as — there is one SSE fan-out, not one per viewer. So the cross-device
+session list, which is deliberately same-profile-only, cannot ride in it: doing so
+would hand every device in the house every profile's viewing titles, with the
+filtering done client-side as decoration.
+
+What rides in `state` is `playback_sessions_rev`, an integer that means "the set
+changed, re-fetch". `GET /api/playback/sessions` does the filtering server-side.
+
+The same reasoning already applies elsewhere in the snapshot — see
+`downloading_count_visible`, which exists because the raw count would have leaked
+the existence of `admin_only` downloads to non-elevated viewers.
+
+A corollary: **only bump the rev on a material change.** A position-only beat
+must not, or every dashboard in the house re-fetches twice a second.
+
+---
+
+## Two origins, one phone: `localStorage` identity has to be carried (17.8.0)
+
+The cross-device device id lives in `localStorage`, which is per **origin**. Two
+consequences worth knowing before debugging a "why is my phone listed twice":
+
+- `http://<host>` and `https://<host>` are separate origins, so a machine reached
+  both ways mints two device ids. Harmless (each really is a separate player),
+  but it looks like duplication. This is the same split that made the profile
+  token a cookie rather than `localStorage` — see ADMIN.md.
+- The iOS **proxied playback session** navigates to a loopback origin with its own
+  empty storage. `_appTryLocalHandoff` therefore passes `did=` / `dnm=` on the
+  URL and `_appProxiedSeedStorage` writes them — unconditionally, not "if absent",
+  because an id left over from an earlier proxied session must still agree with
+  the host origin. Without this the same phone changes identity (and loses its
+  chosen name) halfway through an episode.
+
+---
+
 - [BACKEND.md](BACKEND.md) — invariants enforced by `main.py`
 - [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md) — VPN guard at the process level
 - [ANALYZER.md](ANALYZER.md) — Smart Skip algorithm details and fallback chain

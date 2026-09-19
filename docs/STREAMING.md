@@ -40,6 +40,10 @@ Read this when changing anything related to:
 - **On-demand (JIT) streaming** — `stream-ondemand`, the `_od_*` session manager,
   the `/api/library/ondemand/<key>/…` virtual-playlist + segment endpoints, and the
   client `lp.mode === "ondemand"` path. See [§ On-Demand](#on-demand-just-in-time-streaming)
+- **Cross-device sessions** — the "playing elsewhere" banner and pull-over:
+  `/api/playback/session`, `…/yield`, `/api/playback/sessions`, `/api/playback/pull`,
+  `state.playback_sessions`, the client's `_pb*` block + `#elsewhereBanner`, and
+  `NativePlayback.maybePostSession` / `honourYield`. See [§ 8](#8-cross-device-sessions--playing-elsewhere-and-pull-over-1780)
 - The play chooser (`#playChooserModal`, `playLibraryWithChooser`, `pcChoose`)
 - The **Handoff** (both directions): TV→device (`handoffToDevice`, `#handoffBtn`,
   `#fcHandoffBtn`) and device→TV (`lpHandoffToVlc`, the local player's **To TV** button)
@@ -1660,6 +1664,147 @@ onto the TV:
 The **To TV** button lives in the local player's fullscreen header (next to
 Stop); it's part of `.lp-chrome`, so it's hidden in tiny mode (maximize first).
 Guarded by `withInflight("handoff_vlc")`.
+
+---
+
+### 8. Cross-device sessions — "playing elsewhere" and pull-over (17.8.0)
+
+Sections 6 and 7 move playback between **the TV and this device**. This section
+is the general case: *any* device seeing *any* other device's playback, and
+taking it.
+
+#### Why it needed anything new
+
+The TV was always visible to everyone, because VLC and the kiosk are server
+state — `vlc_status` polling and `/api/tv-local/state` both land in `AppState`,
+which `state_snapshot()` broadcasts to every dashboard. A phone playing in its
+own `<video>` is the opposite: entirely client state. The only trace it left on
+the host was `POST /api/library/{id}/progress` every 15 s — enough to remember
+where you got to, nowhere near enough to say "this is playing **right now**, on
+**that** device, and here is how to take it".
+
+So on-device players now beat a session report to the host.
+
+#### The registry (`main.py`, the "Cross-device playback sessions" block)
+
+- **`state.playback_sessions`** — `device_id → record`, **in memory only**. Never
+  written to `library.json`: a session is a fact about right now, and a host
+  restart genuinely does end every session it knew about.
+- **The beat** is `POST /api/playback/session`, ~every 2 s from the web player
+  (`_pbBeat`) and every 5 s from the backgrounded native iOS player
+  (`maybePostSession`). `PLAYBACK_SESSION_STALE_SECS = 15` reaps a session that
+  stops beating — swept from `stat_broadcaster`'s existing 2 s tick
+  (`_playback_reap_sessions`), not a task of its own.
+- **The continuity payload** (`playlist`, `playlist_items`, `shuffle`,
+  `shuffle_scope`) rides only on the beats where it **changed** — a run can be a
+  hundred-plus paths and this beats at 2 s. The record keeps the last value it
+  was given, so a pull triggered by a bare position beat still gets the whole run.
+- **VLC and the kiosk are not in the registry.** They already report themselves
+  two other ways, and a third would be a third source of truth for one screen.
+  `_playback_tv_session()` reads the shared fields they both populate
+  (`active_title`, `vlc_time`, `vlc_duration`, `library_*`) back out in the
+  session shape, on read.
+
+#### Who sees what
+
+`GET /api/playback/sessions` filters **server-side**, per caller:
+
+| | Visible to |
+|---|---|
+| A device session | the **same profile** only, and never itself — and, when the item is `admin_only`, only if the request also *proves* elevation (`_is_elevated`), because a `profile_id` query param is a claim, not proof |
+| The TV | **every** profile, tagged with the `profile_name`/`profile_color` that started it |
+
+The TV is special on purpose. It is one physical screen in a shared room and the
+dashboard has always shown its now-playing to everyone (the footer player, the
+fullscreen controls) — hiding it here would be a regression dressed as privacy.
+Naming who started it is what keeps taking it over a deliberate act.
+
+Filtering cannot happen in the `state` broadcast: that is one message to every
+connected dashboard whatever profile it is signed in as, so putting the records
+in it would ship every profile's titles to every device in the house. `state`
+carries only **`playback_sessions_rev`**, a change counter — "the set moved,
+re-fetch". A position-only beat never bumps it; the client ages a playing
+session's clock from `seen_at` instead (`_pbAgedPos`).
+
+#### The takeover: command → flush → take
+
+`POST /api/playback/pull` blocks, on purpose:
+
+1. **Command.** Arm `yield_to` on the session, broadcast `playback_command`.
+2. **Flush.** Wait up to `PLAYBACK_YIELD_WAIT_SECS` (2.5 s) for the source to
+   `POST …/yield` with its **exact** playhead and stop. This is the difference
+   between the episode resuming on the same frame and resuming up to a beat
+   behind.
+3. **Take.** Return position + the tail sliced from the current file forward +
+   shuffle flag and scope, for the caller to `lpPlay`.
+
+*A source that is asleep still hands over.* On timeout the pull returns anyway —
+`exact:false`, position from the last beat **aged forward** by up to 6 s when it
+was `playing` — and **leaves `yield_to` armed**, so the source stops when it next
+beats. A slow source costs accuracy, never the takeover. `PLAYBACK_YIELD_ARM_SECS`
+(30 s) disarms a yield a surviving-but-slow session never honoured.
+
+**Two channels carry the yield, and the second one is the load-bearing one.**
+SSE (`playback_command`) reaches a page that is awake within a tick. But the case
+that matters most — a phone in a pocket, native `AVPlayer` running with the
+screen off — has a frozen WebView: no JS timers, no live `EventSource`. That
+device is still *posting*, so the answer to its own heartbeat (`yield: true`) is
+the one channel guaranteed to arrive. `NativePlayback.honourYield` acts on it,
+flushes, stops, and emits `nativeYielded` so the web player tears down to match
+when the app comes back.
+
+*Pulling is **not** prep-gated, unlike the footer Handoff button.* `handoffToDevice`
+greys out when the current file has no HLS bundle, because it would stop the TV
+and then sit in a full encode. A pull takes the on-demand (JIT) path instead —
+the same thing the fullscreen To-Device tile does when you hold it mid-prep
+(`allowOnDemand`) — so playback starts in seconds rather than being refused. The
+only hard gate is `hlsAvailable` (false on a macOS host).
+
+**`session_id: "tv"`** takes the server-side path (`_playback_pull_tv`) — the
+host reads VLC's live position itself (fresher than the ≤2 s `state.vlc_time`,
+same reason `handoffToDevice` re-reads `/api/vlc/tracks`), builds the tail from
+`library_playlist` + `library_series_map`, then `await stop()`. Not on the
+kiosk's own player, where VLC is idle by design and would answer with zeros.
+
+#### What travels, and what already did
+
+| | How |
+|---|---|
+| Position | the yield flush (exact), or the aged last beat |
+| Remaining episodes, incl. a merged-series item map | the session's continuity payload, sliced to the tail |
+| Shuffle flag + scope | same |
+| Audio / subtitle picks, audio delay | **not** the payload — `library.json`'s per-file and per-series pick memory, which both players already write on every deliberate choice and read on every load. That is what carries a pick across a device↔TV switch today, and it is fresher than a session snapshot could be. `audio_sel` / `subtitle_sel` ride on the wire for diagnostics only. |
+| Progress | `lpStop()` on the source writes it as it always did, before the destination starts |
+
+#### Client side (`static/index.html`)
+
+- **Identity** — `_pbDeviceId()` is a plain `localStorage` UUID; the host keeps
+  sessions in memory, so there is nothing to register and nothing to revoke.
+  `_pbDeviceName()` is the coarse UA-derived default ("iPhone · Safari"),
+  overridable in **Settings → This Device → Device Name** (`saveDeviceName`,
+  device-local like the rest of that block). Both are seeded across the proxied
+  loopback origin by `_appTryLocalHandoff` ↔ `_appProxiedSeedStorage` (`did=` /
+  `dnm=`) — that origin has its own `localStorage`, so without it the same phone
+  would mint a second identity halfway through an episode.
+- **Beating** — `_pbBeatStart()` from `lpPlay` (at the *start* of a play, not the
+  first frame: a cold JIT start takes seconds and a session nobody can see yet is
+  a session nobody can pull), `_pbBeatStop()` from `lpStop` and from `pagehide`
+  with a beacon.
+- **The banner** — `#elsewhereBanner`, rendered by `renderElsewhere()`, one row
+  per session, hold-to-pull (`_pbPullFromBtn` → `pullPlayback`). Refreshed by
+  `_pbOnRev()` off the `state` event and on a profile switch. A 1 Hz timer
+  repaints only the clock cells — a full re-render mid-hold would drop the hold.
+- **Not on the `?tv=1` kiosk.** It is the couch surface, driven by a remote with
+  no pointer, and it is itself one of the sessions being listed.
+
+#### iOS (`NativePlayback.swift`)
+
+`maybePostSession` and `honourYield` hang off the same 1 s time observer that
+already writes progress, so background playback costs one extra request every
+5 s. `ArmedPlayback` gains `deviceId` / `deviceName` / `sessionProfileId` /
+`sessionSource`, pushed from `_npPayload()`. `yielded` is reset on each fresh
+`arm` — without it one takeover would leave the flag set for the life of the
+process and every later session on that device would refuse to hand over.
 
 ---
 

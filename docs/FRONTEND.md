@@ -1032,6 +1032,67 @@ Password-protected at `/admin`. Token stored in `sessionStorage.admin_token` and
 - [API.md](API.md) — endpoint signatures
 - [ADMIN.md](ADMIN.md) — admin auth, indexer flow, content lock semantics
 
+## Cross-device playback sessions (17.8.0)
+
+The `#elsewhereBanner` strip and everything behind it. Backend contract and the
+design reasoning live in [STREAMING.md § 8](STREAMING.md); this is the client map.
+
+**Markup.** `#elsewhereBanner` sits directly after `#serverAttentionBanner`, sticky
+at `z-[65]` (under that banner's `z-70`, over the page). Hidden by `body.fc-open`
+alongside the other top banners, and `pointer-events:auto` so the hold buttons work.
+It is **empty in the document** — every row is written by `renderElsewhere()`.
+
+**Identity (device-local, `localStorage`).**
+
+| Function | Key | Notes |
+|---|---|---|
+| `_pbDeviceId()` | `streamlink_device_id` | Minted with `crypto.randomUUID()` on first use. The host keeps sessions in memory, so there is nothing to register and nothing to revoke |
+| `_pbDefaultDeviceName()` | — | Coarse UA read: `"iPhone · Safari"`, `"Windows PC · Chrome"`, `"iPhone app"` in the Capacitor shell, `"The TV"` under `TV_MODE` |
+| `_pbDeviceName()` / `saveDeviceName()` | `streamlink_device_name` | **Settings › This Device › Device Name** (`#psDeviceName`). The field shows only a name the user chose — the automatic one is the *placeholder*, so clearing the box visibly returns it to the default. Saving mid-playback beats immediately so other devices' banners don't keep the old name for the rest of the episode |
+
+Both are carried across the iOS **proxied** loopback origin (`did=` / `dnm=` in
+`_appTryLocalHandoff` ↔ `_appProxiedSeedStorage`) — that origin has its own
+`localStorage`, so without it the phone changes identity mid-episode.
+
+**Reporting this device.**
+
+- `_pbBeatStart()` — called from `lpPlay` at the **start** of a play, not the first
+  frame. A cold JIT start takes seconds, and a session nobody can see yet is a
+  session nobody can pull. Also repaints the banner, because `_pbIsHere()` has
+  just changed and the server rev won't move because *we* opened a player.
+- `_pbBeat()` — every `PB_BEAT_MS` (2 s). Sends position/state always; the
+  continuity block (`playlist`, `playlist_items`, `shuffle`, `shuffle_scope`) only
+  when `_pbSentSig` changes, and only once the beat carrying it was **accepted**.
+  Acts on `{yield:true}` in the response.
+- `_pbBeatStop(useBeacon)` — from `lpStop` (plain fetch) and from `pagehide`
+  (beacon, for the same reason `_lpFlushProgress` uses one there).
+- `_pbYieldNow(toName)` — flush the exact playhead to `…/yield`, then `lpStop()`.
+  Guarded by `_pbYielding`; exposed as `window._pbYieldNow` for the native bridge.
+
+**The banner.**
+
+- `_pbOnRev(rev)` from the `state` SSE handler → `_pbFetchSessions()` when the
+  counter moved. Also re-fetched on a profile switch (`_doSelectProfile`), where
+  the list is wrong the instant the profile changes.
+- `renderElsewhere()` — one row per session: device icon (`i-monitor` for the TV,
+  `i-phone` otherwise), state word (`Playing` / `Paused` / `Starting` /
+  `Playing offline`), the owner's profile chip when it isn't yours (the TV can be
+  someone else's play), title, clock, and a **hold-to-activate** `Play Here`.
+  Filters out `_pbIsHere(s)` — a session whose file is already up on this screen.
+- `_pbTickClocks()` at 1 Hz repaints **only** the `[data-pb-clock]` cells, ageing
+  a playing session's position from `seen_at` (`_pbAgedPos`). A full re-render
+  would drop an in-progress hold.
+- **Nothing renders under `TV_MODE`.** The kiosk is the couch surface, driven by a
+  remote with no pointer, and it is itself one of the sessions being listed.
+
+**The takeover.** `_pbPullFromBtn` reads the session id from `data-pb-pull` rather
+than having it interpolated into the inline handler's JS — a device id is
+client-supplied, and nothing client-supplied belongs inside a string literal in
+generated markup. `pullPlayback` POSTs `/api/playback/pull`, drops the row
+optimistically, then `lpPlay(item, tail, position, title, shuffle, scope, items)`.
+It passes **no** `profileId`: playback continues under whoever is signed in here,
+matching the TV→device Handoff. Guarded by `withInflight("pb_pull")`.
+
 ## Download racing (16.0.0)
 
 Racing is **server-side**; the frontend's only job is to offer an ordered shortlist

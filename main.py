@@ -1429,6 +1429,22 @@ class AppState:
     # Persisted in library.json → settings.tv_playback_mode, seeded at lifespan.
     # VLC stays the automatic fallback whichever way this is set.
     tv_playback_mode: str = "device"
+    # ── Cross-device playback sessions ("playing elsewhere" + pull-over) ──
+    # Every on-device player (phone / tablet / another browser / the iOS app,
+    # foreground or backgrounded-native) beats into /api/playback/session while
+    # it plays. This is the ONLY place the host learns that a device is watching
+    # something: a browser <video> is entirely client-side, and before 17.8.0 the
+    # only trace it left was a progress POST every 15 s. Keyed by the client's own
+    # localStorage UUID. DELIBERATELY EPHEMERAL — in-memory only, never written to
+    # library.json: a session is a live fact about right now, and a host restart
+    # genuinely does end every session it knew about. See docs/STREAMING.md § 8.
+    playback_sessions: dict = field(default_factory=dict)
+    # Bumped whenever the *material* shape of the session set changes (a session
+    # opens/closes/changes file or play-state) — NOT on a position-only beat.
+    # Rides in state_snapshot so a dashboard knows to re-fetch its own filtered
+    # list; the broadcast itself carries no session detail, because `state` goes
+    # to every profile and the list is same-profile-only. See GET /api/playback/sessions.
+    playback_sessions_rev: int = 0
     # ── Auto-updater (transient view of the current update operation) ──
     # All persisted updater state lives in library.json → settings.autoupdate.
     # These fields just expose the live state of an in-flight check/apply so
@@ -1812,6 +1828,13 @@ def state_snapshot() -> dict:
         # "device" | "vlc" — which surface a TV play opens on. Mirrored here (the
         # night-mode precedent) so the More-panel toggle stays in sync everywhere.
         "tv_playback_mode": state.tv_playback_mode,
+        # Cross-device playback: a change counter, NOT the sessions themselves.
+        # `state` is one broadcast to every connected dashboard regardless of
+        # profile, and the "playing elsewhere" list is same-profile-only — putting
+        # the records here would ship every profile's titles to every device. So
+        # this just says "the set moved, re-fetch", and GET /api/playback/sessions
+        # does the filtering. A position-only beat does NOT bump it.
+        "playback_sessions_rev": state.playback_sessions_rev,
         # Env keys whose absence disables features. The non-admin UI shows a
         # passive banner ("server needs admin attention") when this is non-empty
         # AND any entry has `required=True`; the admin Updates tab renders the
@@ -8733,6 +8756,12 @@ async def stat_broadcaster() -> None:
                     state.vlc_volume = cap
                 else:
                     state.vlc_volume = reported
+        # Cross-device sessions: a device that stopped beating has stopped
+        # playing. Swept here rather than in a task of its own — it is a dict
+        # walk over at most a handful of entries, on a loop that is already
+        # about to broadcast the rev it may have just bumped.
+        if _playback_reap_sessions():
+            _playback_bump_rev()
         await broadcast("state", state_snapshot())
         await asyncio.sleep(2)
 
@@ -13380,6 +13409,70 @@ class TvLocalOpenReq(BaseModel):
     file_path: str
     profile_id: str = ""
     seek: float = 0.0
+
+
+class PlaybackSessionReq(BaseModel):
+    """Heartbeat from an on-device player, ~every 2 s (5 s from the backgrounded
+    native iOS player, to spare the battery).
+
+    This is what makes a phone's playback visible to the household's other
+    devices. All optional but `device_id` and `profile_id` — an early beat, sent
+    the moment a play is requested and before metadata is in, is valid and
+    wanted: a cold JIT start can take seconds, and a session nobody can see yet
+    is a session nobody can pull.
+    """
+    device_id: str                            # this browser's localStorage UUID
+    device_name: str = ""                     # "Nathan's iPhone" / auto from the UA
+    profile_id: str = ""                      # whose session this is (lp.profileId or the signed-in one)
+    active: bool = True                       # false ⇒ the player stopped; drop the session
+    item_id: Optional[str] = None
+    file_path: Optional[str] = None
+    title: Optional[str] = None               # human label for the banner ("Frieren S01E12")
+    position_sec: Optional[float] = None
+    duration_sec: Optional[float] = None
+    playback: Optional[str] = None            # playing | paused | buffering
+    # "server" = streaming HLS from this host; "offline" = the iOS app playing its
+    # OWN downloaded bundle while still on the LAN. Both are pullable (the host has
+    # the same file), but the banner says which, because stopping an offline play
+    # frees nothing on the host.
+    source: Optional[str] = None
+    # ── Continuity payload — everything a pull must carry across ──────────────
+    # Sent only when it CHANGES (a new run / a new pick), not on every beat: the
+    # playlist alone can be a hundred-plus paths and this beats at 2 s. The
+    # session record keeps the last value, so the pull always has the full set
+    # even though the beat that triggered it was a bare position update.
+    playlist: Optional[list[str]] = None
+    playlist_items: Optional[list[str]] = None   # merged-series: owning item id per path
+    shuffle: Optional[bool] = None
+    shuffle_scope: Optional[str] = None
+    audio_sel: Optional[dict] = None             # the resolvable descriptors, not raw indices —
+    subtitle_sel: Optional[dict] = None          # indices drift between releases (LIBRARY_DATA.md)
+    audio_offset_ms: Optional[int] = None
+
+
+class PlaybackYieldReq(BaseModel):
+    """The source device's answer to a yield command: its EXACT final playhead
+    plus whatever continuity it holds, posted the instant before it tears its
+    player down. The puller is blocked on this (up to PLAYBACK_YIELD_WAIT_SECS),
+    which is what makes a pulled-over episode land on the same frame instead of
+    up to a beat behind."""
+    device_id: str = ""              # must match the session's owner, else ignored
+    position_sec: Optional[float] = None
+    duration_sec: Optional[float] = None
+    playlist: Optional[list[str]] = None
+    playlist_items: Optional[list[str]] = None
+    shuffle: Optional[bool] = None
+    shuffle_scope: Optional[str] = None
+    audio_sel: Optional[dict] = None
+    subtitle_sel: Optional[dict] = None
+    audio_offset_ms: Optional[int] = None
+
+
+class PlaybackPullReq(BaseModel):
+    session_id: str                  # the session to take over
+    device_id: str = ""              # the puller, so it never yields itself
+    device_name: str = ""            # shown on the source device's "moved to …" notice
+    profile_id: str = ""             # the puller's profile — checked against the session's
 
 
 class LibraryPlayReq(BaseModel):
@@ -20540,6 +20633,520 @@ async def tv_local_open(req: TvLocalOpenReq) -> JSONResponse:
     }))
     await broadcast("state", state_snapshot())
     return JSONResponse({"ok": True})
+
+
+# ── Cross-device playback sessions ("playing elsewhere" + pull-over) ──────────
+# The problem this solves: VLC and the TV kiosk are GLOBAL state, so every
+# dashboard on the LAN can already see and control them. A phone playing in its
+# own <video> is not — it is pure client state, and before 17.8.0 the only trace
+# it left on the host was a progress POST every 15 s. So the same profile signed
+# in on a second device had no way to know an episode was already running, let
+# alone take it over.
+#
+# The fix is a heartbeat registry. Each on-device player beats into
+# POST /api/playback/session while it plays; the host keeps those beats in memory
+# and hands each dashboard back the ones that belong to ITS profile (plus the TV,
+# which is a shared screen and visible to everyone). Pulling a session over is a
+# three-step handshake — command, flush, take — described on `playback_pull`.
+#
+# Deliberately in-memory and never persisted: a session is a fact about right
+# now, and a host restart genuinely does end every session it knew about.
+# See docs/STREAMING.md § 8 and docs/GOTCHAS.md.
+
+# A session whose last beat is older than this is gone — the tab was closed, the
+# browser was killed, the phone left the network. Matches TV_LOCAL_STALE_SECS,
+# and for the same reason: generous next to the 2 s beat because a JIT rebuffer
+# can stall a page's timers briefly. The backgrounded native iOS player beats at
+# 5 s to spare the battery, so this is three of its beats.
+PLAYBACK_SESSION_STALE_SECS = 15.0
+
+# How long a pull blocks waiting for the source device to flush its EXACT
+# playhead. Long enough for a foregrounded page (which gets the command over SSE
+# within a tick) and for one native beat; short enough that the pull still feels
+# immediate when the source is asleep. On timeout the pull proceeds from the last
+# heartbeat position and the yield command stays armed, so the source still stops
+# on its next beat — a slow source delays accuracy, never the takeover.
+PLAYBACK_YIELD_WAIT_SECS = 2.5
+
+# An armed yield the source never honoured is disarmed after this, so a session
+# that survives (a tab that was merely slow, not gone) is not stuck refusing to
+# play forever. The staleness reaper is what removes a genuinely dead one.
+PLAYBACK_YIELD_ARM_SECS = 30.0
+
+# session_id → asyncio.Event, signalled by POST …/yield. Kept OUT of the session
+# record so the record stays plain JSON for the list endpoint.
+_playback_yield_events: dict = {}
+
+# A device id is whatever the client made up, and it comes back out in generated
+# markup and in a URL path — so it is shaped, not trusted. UUIDs and the short
+# fallback id both fit; anything else is a client we did not write.
+_PB_DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _playback_bump_rev() -> None:
+    state.playback_sessions_rev += 1
+
+
+def _playback_reap_sessions() -> bool:
+    """Drop sessions that stopped beating, and disarm stale yields.
+
+    Returns True when anything changed (the caller bumps the rev and the next
+    `state` broadcast tells every dashboard to re-fetch). Called from
+    stat_broadcaster's 2 s tick — no task of its own, same as every other cheap
+    housekeeping sweep in this file.
+    """
+    now = time.time()
+    changed = False
+    for sid, sess in list(state.playback_sessions.items()):
+        if now - sess.get("seen_at", 0) > PLAYBACK_SESSION_STALE_SECS:
+            log.info("playback-session: reaping %s (%s) — no beat for %.0fs",
+                     sid[:8], sess.get("device_name") or "?",
+                     now - sess.get("seen_at", 0))
+            state.playback_sessions.pop(sid, None)
+            _playback_yield_events.pop(sid, None)
+            changed = True
+            continue
+        if sess.get("yield_to") and now - sess.get("yield_at", 0) > PLAYBACK_YIELD_ARM_SECS:
+            sess["yield_to"] = None
+            sess["yield_at"] = 0.0
+            changed = True
+    return changed
+
+
+def _playback_tv_session() -> Optional[dict]:
+    """The TV as a session record, synthesised on read rather than stored.
+
+    VLC and the kiosk player already report themselves through entirely
+    different channels (vlc_status / /api/tv-local/state), so making them beat
+    into this registry as well would be two sources of truth for one screen.
+    Instead the shared fields they BOTH already populate — active_title,
+    vlc_time, vlc_duration, library_* — are read back out in the session shape.
+
+    Unlike a device session this is visible to EVERY profile, tagged with who
+    started it: the TV is one physical screen in a shared room, and the dashboard
+    has always shown its now-playing to everyone (the footer player, the
+    fullscreen controls). Hiding it here would be a regression dressed as privacy.
+    """
+    if state.youtube_active:
+        return None                       # a different surface with its own controls
+    if not state.library_item_id or state.stream_status not in ("playing", "buffering"):
+        return None
+    # Only the kiosk surface reports a paused/playing distinction of its own;
+    # tv_local_playback is gated on tv_local_active so a value left over from a
+    # released kiosk session can't label a VLC play "paused".
+    playback = "buffering" if state.stream_status == "buffering" else (
+        (state.tv_local_playback if state.tv_local_active else "") or "playing")
+    if playback not in ("playing", "paused", "buffering"):
+        playback = "playing"
+    return {
+        "id": "tv",
+        "device_name": "The TV",
+        "surface": "tv",
+        # Which player is actually making the picture. Only used for the banner's
+        # sub-label; both are pulled the same way.
+        "source": "tv-device" if state.tv_local_active else "vlc",
+        "profile_id": state.library_profile_id or "",
+        "profile_name": state.library_profile_name or "",
+        "profile_color": state.library_profile_color or "",
+        "item_id": state.library_item_id,
+        "file_path": state.library_current_file or "",
+        "title": state.active_title or "",
+        "position_sec": float(state.vlc_time or 0),
+        "duration_sec": float(state.vlc_duration or 0),
+        "playback": playback,
+        "seen_at": time.time(),
+        "yield_to": None,
+    }
+
+
+def _playback_public(sess: dict) -> dict:
+    """Strip a session record down to what a banner needs.
+
+    The continuity payload (the playlist tail, the track descriptors) is
+    deliberately NOT included: it is large, it changes nothing about what the
+    banner draws, and it is handed over exactly once — at the moment of the pull.
+    """
+    return {
+        "id": sess.get("id"),
+        "device_name": sess.get("device_name") or "Another device",
+        "surface": sess.get("surface") or "device",
+        "source": sess.get("source") or "server",
+        "profile_id": sess.get("profile_id") or "",
+        "profile_name": sess.get("profile_name") or "",
+        "profile_color": sess.get("profile_color") or "",
+        "item_id": sess.get("item_id") or "",
+        "file_path": sess.get("file_path") or "",
+        "title": sess.get("title") or "",
+        "position_sec": float(sess.get("position_sec") or 0),
+        "duration_sec": float(sess.get("duration_sec") or 0),
+        "playback": sess.get("playback") or "playing",
+        # Lets the client age the position it was given instead of re-fetching
+        # every second: a `playing` session's playhead is (now - seen_at) further
+        # on than the beat said. Cosmetic only — a pull always re-reads the
+        # position from the source.
+        "seen_at": float(sess.get("seen_at") or 0),
+        "yielding": bool(sess.get("yield_to")),
+    }
+
+
+@app.post("/api/playback/session")
+async def playback_session(req: PlaybackSessionReq) -> JSONResponse:
+    """Heartbeat from an on-device player.
+
+    Also the channel the yield command comes back on: the response carries
+    `yield: true` when another device has asked to take this session over. That
+    matters because SSE cannot reach the source in the case that needs it most —
+    a backgrounded iOS app has its WebView timers frozen and its EventSource
+    dead, so the native player would never hear a broadcast. It is already
+    posting, so the answer to its own POST is the one channel guaranteed to
+    arrive. The SSE `playback_command` is the fast path for a page that IS awake;
+    this is the one that always works.
+    """
+    if not _PB_DEVICE_ID_RE.match(req.device_id or ""):
+        raise HTTPException(400, "device_id is missing or malformed")
+    now = time.time()
+    sess = state.playback_sessions.get(req.device_id)
+
+    if not req.active:
+        if sess:
+            log.info("playback-session: %s (%s) reported inactive",
+                     req.device_id[:8], sess.get("device_name") or "?")
+            state.playback_sessions.pop(req.device_id, None)
+            _playback_yield_events.pop(req.device_id, None)
+            _playback_bump_rev()
+            await broadcast("state", state_snapshot())
+        return JSONResponse({"ok": True, "active": False, "yield": False})
+
+    if sess is None:
+        sess = {"id": req.device_id, "surface": "device", "started_at": now,
+                "yield_to": None, "yield_at": 0.0}
+        state.playback_sessions[req.device_id] = sess
+        log.info("playback-session: %s (%s) opened", req.device_id[:8],
+                 req.device_name or "?")
+        material = True
+    else:
+        # A rev bump makes every dashboard re-fetch, so it must mean something
+        # CHANGED about the set — not that a playhead moved. Position rides on
+        # the next fetch (or is aged client-side from `seen_at`) instead.
+        material = (
+            (req.item_id or "") != (sess.get("item_id") or "")
+            or (req.file_path or "") != (sess.get("file_path") or "")
+            or (req.playback or "") != (sess.get("playback") or "")
+            or (req.device_name or "") != (sess.get("device_name") or "")
+        )
+
+    sess["seen_at"] = now
+    if req.device_name:
+        sess["device_name"] = req.device_name
+    if req.item_id is not None:
+        sess["item_id"] = req.item_id
+    if req.file_path is not None:
+        sess["file_path"] = req.file_path
+    if req.title is not None:
+        sess["title"] = req.title
+    if req.position_sec is not None:
+        sess["position_sec"] = float(req.position_sec)
+    if req.duration_sec is not None:
+        sess["duration_sec"] = float(req.duration_sec)
+    if req.playback:
+        sess["playback"] = req.playback
+    if req.source:
+        sess["source"] = req.source
+    # Continuity — only present on the beats where it changed (see the model).
+    # `is not None` throughout, so a genuinely empty playlist cannot silently keep
+    # a stale one alive.
+    if req.playlist is not None:
+        sess["playlist"] = list(req.playlist)
+    if req.playlist_items is not None:
+        sess["playlist_items"] = list(req.playlist_items)
+    if req.shuffle is not None:
+        sess["shuffle"] = bool(req.shuffle)
+    if req.shuffle_scope is not None:
+        sess["shuffle_scope"] = req.shuffle_scope
+    if req.audio_sel is not None:
+        sess["audio_sel"] = req.audio_sel
+    if req.subtitle_sel is not None:
+        sess["subtitle_sel"] = req.subtitle_sel
+    if req.audio_offset_ms is not None:
+        sess["audio_offset_ms"] = int(req.audio_offset_ms)
+
+    # Snapshot the owning profile's name/colour so the banner can render a chip
+    # without every client re-resolving profile ids. Only on a change — this is
+    # the one part of a beat that would otherwise touch the library.
+    if req.profile_id and req.profile_id != sess.get("profile_id"):
+        sess["profile_id"] = req.profile_id
+        lib = await get_library()
+        prof = next((p for p in lib.get("profiles", [])
+                     if p.get("id") == req.profile_id), None)
+        sess["profile_name"] = (prof or {}).get("name", "") or ""
+        sess["profile_color"] = (prof or {}).get("color", "") or ""
+        material = True
+
+    if material:
+        _playback_bump_rev()
+        await broadcast("state", state_snapshot())
+
+    return JSONResponse({
+        "ok": True,
+        "active": True,
+        "yield": bool(sess.get("yield_to")),
+        "yield_to": sess.get("yield_to") or "",
+    })
+
+
+@app.post("/api/playback/session/{session_id}/yield")
+async def playback_session_yield(session_id: str, req: PlaybackYieldReq) -> JSONResponse:
+    """The source device handing its session over: exact playhead, then silence.
+
+    Posted immediately BEFORE the source tears its player down, so the position
+    here is the last frame that was actually on screen. Releasing the waiter is
+    the whole point — `playback_pull` is blocked on it.
+    """
+    sess = state.playback_sessions.get(session_id)
+    if sess is None:
+        # Already reaped, or never ours. Not an error: the puller has a fallback
+        # position and the source is stopping regardless.
+        return JSONResponse({"ok": True, "known": False})
+    if req.device_id and req.device_id != session_id:
+        raise HTTPException(403, "device_id does not own this session")
+
+    if req.position_sec is not None:
+        sess["position_sec"] = float(req.position_sec)
+    if req.duration_sec is not None:
+        sess["duration_sec"] = float(req.duration_sec)
+    if req.playlist is not None:
+        sess["playlist"] = list(req.playlist)
+    if req.playlist_items is not None:
+        sess["playlist_items"] = list(req.playlist_items)
+    if req.shuffle is not None:
+        sess["shuffle"] = bool(req.shuffle)
+    if req.shuffle_scope is not None:
+        sess["shuffle_scope"] = req.shuffle_scope
+    if req.audio_sel is not None:
+        sess["audio_sel"] = req.audio_sel
+    if req.subtitle_sel is not None:
+        sess["subtitle_sel"] = req.subtitle_sel
+    if req.audio_offset_ms is not None:
+        sess["audio_offset_ms"] = int(req.audio_offset_ms)
+    sess["yielded"] = True
+
+    ev = _playback_yield_events.get(session_id)
+    if ev is not None:
+        ev.set()
+    log.info("playback-session: %s yielded at %.1fs", session_id[:8],
+             sess.get("position_sec") or 0)
+    return JSONResponse({"ok": True, "known": True})
+
+
+@app.get("/api/playback/sessions")
+async def playback_sessions_list(request: Request, profile_id: str = "",
+                                 device_id: str = "") -> JSONResponse:
+    """The "playing elsewhere" list for ONE caller.
+
+    Filtering happens here, not in the `state` broadcast, because `state` is a
+    single message sent to every connected dashboard whatever profile it is
+    signed in as — putting the records in it would ship every profile's titles
+    to every device in the house.
+
+    Device sessions are same-profile-only. The TV is not: it is a shared screen
+    whose now-playing the dashboard has always shown to everyone, and it comes
+    back tagged with the profile that started it.
+    """
+    out = []
+    tv = _playback_tv_session()
+    if tv:
+        out.append(_playback_public(tv))
+    mine = [s for sid, s in state.playback_sessions.items()
+            if s.get("item_id") and profile_id and s.get("profile_id") == profile_id
+            and not (device_id and sid == device_id)]
+    if mine:
+        # `profile_id` is a claim, not proof (see GOTCHAS), so an admin-locked
+        # item's title must not leak just because someone quoted an elevated
+        # profile's uuid. Content lock promises no "this is downloaded" evidence
+        # reaches a non-elevated viewer, and "it is playing right now" is
+        # stronger evidence than the library listing it already hides.
+        # Only read the library when there is something to check.
+        lib = await get_library()
+        if not _is_elevated(request, lib, profile_id):
+            locked = {it.get("id") for it in lib.get("items", []) if it.get("admin_only")}
+            mine = [s for s in mine if s.get("item_id") not in locked]
+    out.extend(_playback_public(s) for s in mine)
+    return JSONResponse({"sessions": out, "rev": state.playback_sessions_rev})
+
+
+def _playback_tail(playlist, items, current: str):
+    """Slice a session's playlist to the run that is still ahead of it.
+
+    The destination is continuing a run, not restarting one: it wants the current
+    file first and everything after it, with the parallel owning-item ids kept in
+    step (a merged series spans several library items, and dropping the map lands
+    later episodes' progress under the wrong one).
+    """
+    paths = [p for p in (playlist or []) if p]
+    if not paths:
+        return ([current] if current else []), None
+    try:
+        idx = paths.index(current) if current else 0
+    except ValueError:
+        idx = 0
+    tail = paths[idx:]
+    tail_items = None
+    if items and len(items) == len(paths):
+        tail_items = list(items)[idx:]
+    return tail, tail_items
+
+
+async def _playback_pull_tv(req: PlaybackPullReq) -> dict:
+    """Take the TV's playback over. The server-side twin of `handoffToDevice`.
+
+    A live `vlc_status()` read beats state.vlc_time, which is up to 2 s stale —
+    the same reason the browser handoff re-reads /api/vlc/tracks before it acts.
+    Not on the kiosk's own player though: there VLC is idle by design and its
+    status would answer with zeros (or the idle background video's playhead), so
+    the mirrored heartbeat value IS the live one.
+    """
+    tv = _playback_tv_session()
+    if tv is None:
+        raise HTTPException(409, "Nothing is playing on the TV.")
+    pos = float(state.vlc_time or 0)
+    if not state.tv_local_active:
+        try:
+            vs = await vlc_status()
+            if vs and float(vs.get("time", 0) or 0) > 0:
+                pos = float(vs["time"])
+        except Exception:
+            pass
+    plist = list(state.library_playlist)
+    pitems = ([state.library_series_map.get(p) or state.library_item_id for p in plist]
+              if state.library_series_map else None)
+    tail, tail_items = _playback_tail(plist, pitems, state.library_current_file or "")
+    payload = {
+        "ok": True,
+        "exact": True,                       # we read the playhead ourselves
+        "session_id": "tv",
+        "device_name": tv["device_name"],
+        "profile_id": tv["profile_id"],
+        "item_id": tv["item_id"],
+        "file_path": tv["file_path"],
+        "title": tv["title"],
+        "position_sec": pos,
+        "duration_sec": float(state.vlc_duration or 0),
+        "playlist": tail,
+        "playlist_items": tail_items,
+        "shuffle": bool(state.library_shuffle_order)
+                   or bool(state.tv_local_active and state.tv_local_shuffle),
+        "shuffle_scope": state.library_shuffle_scope if state.library_shuffle_order else "",
+        "audio_sel": None,          # the TV's picks already live in library.json,
+        "subtitle_sel": None,       # where the destination's own resolver reads them
+        "audio_offset_ms": 0,
+    }
+    # Stop the TV only AFTER the position is safely captured. Awaited (unlike the
+    # browser handoff's fire-and-forget POST) because this returns the payload the
+    # caller plays from — there is no teardown left to overlap with.
+    await stop()
+    return payload
+
+
+@app.post("/api/playback/pull")
+async def playback_pull(req: PlaybackPullReq) -> JSONResponse:
+    """Take a session over onto the calling device.
+
+    Three steps, and the middle one is why this is a POST that blocks rather than
+    a broadcast:
+
+    1. **Command.** Arm `yield_to` on the session and broadcast
+       `playback_command`. The armed flag is what makes this survive a source
+       that is asleep — it also rides back on the source's next heartbeat
+       response, so a backgrounded iOS player (frozen JS, dead EventSource)
+       still hears it.
+    2. **Flush.** Wait up to PLAYBACK_YIELD_WAIT_SECS for the source to POST its
+       exact playhead to …/yield and stop. This is what makes the pulled-over
+       episode land on the same frame instead of up to a beat behind.
+    3. **Take.** Return the full continuity payload — position, the remaining
+       run, shuffle, the track picks — for the caller to play locally.
+
+    On timeout it still returns (from the last heartbeat) and LEAVES the yield
+    armed, so the source stops on its own next beat. A slow source costs accuracy,
+    never the takeover.
+    """
+    if req.session_id == "tv":
+        return JSONResponse(await _playback_pull_tv(req))
+
+    sess = state.playback_sessions.get(req.session_id)
+    if sess is None:
+        raise HTTPException(404, "That device isn't playing anything any more.")
+    if req.device_id and req.device_id == req.session_id:
+        raise HTTPException(400, "That session is already on this device.")
+    # Same-profile-only, enforced here and not just in the list: the list is a
+    # convenience, this is the action.
+    if req.profile_id and sess.get("profile_id") and req.profile_id != sess.get("profile_id"):
+        raise HTTPException(403, "That playback belongs to another profile.")
+
+    sess["yield_to"] = req.device_name or "another device"
+    sess["yield_at"] = time.time()
+    sess["yielded"] = False
+    ev = asyncio.Event()
+    _playback_yield_events[req.session_id] = ev
+    _playback_bump_rev()
+    await broadcast("playback_command", {
+        "action": "yield",
+        "session_id": req.session_id,
+        "to": sess["yield_to"],
+        "by_device": req.device_id or "",
+    })
+    exact = False
+    try:
+        await asyncio.wait_for(ev.wait(), PLAYBACK_YIELD_WAIT_SECS)
+        exact = True
+    except asyncio.TimeoutError:
+        log.info("playback-session: %s didn't flush in %.1fs — pulling from its "
+                 "last beat (%.1fs old)", req.session_id[:8],
+                 PLAYBACK_YIELD_WAIT_SECS, time.time() - sess.get("seen_at", 0))
+    finally:
+        _playback_yield_events.pop(req.session_id, None)
+
+    pos = float(sess.get("position_sec") or 0)
+    if not exact and (sess.get("playback") or "") == "playing":
+        # The beat is up to PLAYBACK_SESSION_STALE_SECS old and the source kept
+        # playing through it, so age the position forward — otherwise a locked
+        # phone hands over a playhead several seconds behind what its owner last
+        # heard. Capped at the beat interval we actually expect, never the reaper
+        # limit, so a genuinely stalled session cannot fast-forward the viewer.
+        pos += min(6.0, max(0.0, time.time() - float(sess.get("seen_at") or 0)))
+        if sess.get("duration_sec"):
+            pos = min(pos, float(sess["duration_sec"]))
+
+    tail, tail_items = _playback_tail(sess.get("playlist") or [],
+                                      sess.get("playlist_items") or [],
+                                      sess.get("file_path") or "")
+    payload = {
+        "ok": True,
+        "exact": exact,
+        "session_id": req.session_id,
+        "device_name": sess.get("device_name") or "another device",
+        "profile_id": sess.get("profile_id") or "",
+        "item_id": sess.get("item_id") or "",
+        "file_path": sess.get("file_path") or "",
+        "title": sess.get("title") or "",
+        "position_sec": pos,
+        "duration_sec": float(sess.get("duration_sec") or 0),
+        "playlist": tail,
+        "playlist_items": tail_items,
+        "shuffle": bool(sess.get("shuffle")),
+        "shuffle_scope": sess.get("shuffle_scope") or "",
+        "audio_sel": sess.get("audio_sel"),
+        "subtitle_sel": sess.get("subtitle_sel"),
+        "audio_offset_ms": int(sess.get("audio_offset_ms") or 0),
+    }
+    if exact:
+        # It confirmed it stopped, so the session is over. A source that never
+        # confirmed keeps its record (with the yield still armed) until it obeys
+        # on its next beat or the reaper takes it.
+        state.playback_sessions.pop(req.session_id, None)
+    _playback_bump_rev()
+    await broadcast("state", state_snapshot())
+    return JSONResponse(payload)
+
 
 
 @app.get("/api/settings/tv-playback-mode")

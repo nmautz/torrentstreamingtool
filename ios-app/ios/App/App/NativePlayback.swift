@@ -40,7 +40,9 @@
 //                            tvMode }
 //    setTvMode({on})   -> { on }
 //    displays()        -> { connected, name, externalPlayback, ownWindow }
-//  Events: nativeStarted, nativeEnded, nativeAdvanced, displayChanged
+//  Events: nativeStarted, nativeEnded, nativeAdvanced, displayChanged,
+//          nativeYielded (another device pulled this playback over — see
+//          maybePostSession / honourYield)
 //
 //  See docs/STREAMING.md and docs/GOTCHAS.md ("iOS background playback").
 //
@@ -73,6 +75,16 @@ struct ArmedPlayback {
     var profileId = ""
     var serverUrl = ""
     var token = ""
+    /// Cross-device playback sessions. While the app is backgrounded the
+    /// webview's JS timers are frozen, so the web player's own 2 s session beat
+    /// stops — this device would drop out of every other device's "playing
+    /// elsewhere" banner mid-episode, which is precisely when someone wants to
+    /// pull it onto the TV. So we beat for it, off the same time observer that
+    /// already writes progress. See maybePostSession.
+    var deviceId = ""
+    var deviceName = ""
+    var sessionProfileId = ""     // lp.profileId ?? the signed-in one (see _pbProfileId)
+    var sessionSource = "server"  // "server" | "offline" (playing our own download)
     var canPrev = false
     var canNext = false
     var nextUrl: URL?
@@ -181,6 +193,13 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private var mainLayer: AVPlayerLayer?
     private var bgTask: UIBackgroundTaskIdentifier = .invalid
     private var lastProgressPost = Date.distantPast
+    /// Cross-device session heartbeat. 5 s rather than the web player's 2 s — the
+    /// host reaps at 15 s, so three beats is still a comfortable margin, and this
+    /// one runs with the screen off.
+    private var lastSessionPost = Date.distantPast
+    /// Set once a yield has been honoured, so a command that arrives again on a
+    /// beat that crossed with our flush cannot stop a second session.
+    private var yielded = false
     private var sessionActivated = false
     private var endedFlag = false
     private var handBackDeadline: DispatchWorkItem?
@@ -239,6 +258,10 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         a.profileId      = call.getString("profileId") ?? ""
         a.serverUrl      = call.getString("serverUrl") ?? ""
         a.token          = call.getString("token") ?? ""
+        a.deviceId       = call.getString("deviceId") ?? ""
+        a.deviceName     = call.getString("deviceName") ?? ""
+        a.sessionProfileId = call.getString("sessionProfileId") ?? (call.getString("profileId") ?? "")
+        a.sessionSource  = call.getString("sessionSource") ?? "server"
         a.canPrev        = call.getBool("canPrev") ?? false
         a.canNext        = call.getBool("canNext") ?? false
         a.nextUrl        = URL(string: call.getString("nextUrl") ?? "")
@@ -251,6 +274,10 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
 
         let wasActive = armed.active
         armed = a
+        // A fresh session can be yielded again. Without this, one takeover would
+        // leave the flag set for the life of the process and every later session
+        // on this device would refuse to hand over.
+        if a.active && !wasActive { yielded = false; lastSessionPost = .distantPast }
 
         // The Live Activity must be REQUESTED while foreground — a request from
         // a background handler is unreliable. So it starts here, on the first
@@ -426,6 +453,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             self.updateNowPlaying()
             PlaybackLiveActivity.shared.update(state: self.liveActivityState(), force: false)
             self.maybePostProgress(t)
+            self.maybePostSession(t)
         }
     }
 
@@ -469,6 +497,93 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             "duration_sec": armed.duration,
         ])
         URLSession.shared.dataTask(with: req).resume()   // best-effort
+    }
+
+    // MARK: Cross-device playback session
+
+    /// Keep this device visible in the household's "playing elsewhere" banner,
+    /// and listen for a request to hand playback over.
+    ///
+    /// Both halves have to live here rather than in JS. A backgrounded WKWebView
+    /// has its timers frozen and its EventSource dead, so the web player can
+    /// neither beat nor hear an SSE `playback_command` — a phone in a pocket
+    /// would silently disappear from every other device's banner, and a yield
+    /// broadcast at it would go nowhere. We are already posting, so the answer to
+    /// our own POST is the one channel that always arrives.
+    private func maybePostSession(_ t: Double, force: Bool = false) {
+        guard !armed.deviceId.isEmpty, !armed.serverUrl.isEmpty,
+              !armed.itemId.isEmpty, !armed.filePath.isEmpty, !yielded else { return }
+        guard force || Date().timeIntervalSince(lastSessionPost) >= 5 else { return }
+        lastSessionPost = Date()
+
+        guard let base = URL(string: armed.serverUrl),
+              let url = URL(string: "/api/playback/session", relativeTo: base)
+        else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !armed.token.isEmpty { req.setValue(armed.token, forHTTPHeaderField: "X-Device-Token") }
+        req.timeoutInterval = 8
+        let paused = (player?.timeControlStatus != .playing)
+        // No continuity payload: the web player sent its playlist / shuffle on the
+        // beat that opened this session and the host keeps the last value it was
+        // given, so a pull still gets the whole run. Nothing about it can change
+        // while the phone is locked — an auto-advance moves the file, which the
+        // fields below carry, not the run itself.
+        req.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "device_id":    armed.deviceId,
+            "device_name":  armed.deviceName,
+            "profile_id":   armed.sessionProfileId.isEmpty ? armed.profileId : armed.sessionProfileId,
+            "active":       true,
+            "item_id":      armed.itemId,
+            "file_path":    armed.filePath,
+            "title":        armed.title,
+            "position_sec": t,
+            "duration_sec": armed.duration,
+            "playback":     paused ? "paused" : "playing",
+            "source":       armed.sessionSource,
+        ])
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            guard let self = self, let data = data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  (obj["yield"] as? Bool) == true else { return }
+            let to = (obj["yield_to"] as? String) ?? "another device"
+            self.onMain { self.honourYield(to: to) }
+        }.resume()
+    }
+
+    /// Hand the session over: flush the exact playhead, stop, tell JS.
+    ///
+    /// The flush is what the puller is blocked on (up to 2.5 s server-side) — it
+    /// is the difference between the other device resuming on this frame and
+    /// resuming up to a beat behind. Progress is written first and forced, so the
+    /// host's own resume position is correct even if the other device never
+    /// actually starts.
+    private func honourYield(to: String) {
+        guard !yielded, !armed.deviceId.isEmpty, !armed.serverUrl.isEmpty else { return }
+        yielded = true
+        let t = extrapolatedPosition()
+        maybePostProgress(t, force: true)
+
+        if let base = URL(string: armed.serverUrl),
+           let url = URL(string: "/api/playback/session/\(armed.deviceId)/yield", relativeTo: base) {
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            if !armed.token.isEmpty { req.setValue(armed.token, forHTTPHeaderField: "X-Device-Token") }
+            req.timeoutInterval = 8
+            req.httpBody = try? JSONSerialization.data(withJSONObject: [
+                "device_id":    armed.deviceId,
+                "position_sec": t,
+                "duration_sec": armed.duration,
+            ])
+            URLSession.shared.dataTask(with: req).resume()
+        }
+        // Stop WITHOUT clearing `armed` — the JS side is about to run lpStop(),
+        // and disarming here first would race it into a hand-back against a
+        // player that no longer exists.
+        stopNative(endActivity: true)
+        emit("nativeYielded", ["to": to, "filePath": armed.filePath])
     }
 
     // MARK: End of file / auto-advance
