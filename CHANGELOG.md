@@ -1,5 +1,12 @@
 # Changelog
 
+## [17.10.2] — 2026-09-18
+* **Fixed: a dead *Save ZIP* button on merged shows in the browser.** The host ZIP is
+  per-item and a merged season spans many items, so `epDownloadSeason` could only return
+  without doing anything. The button is now hidden there, the same way the bottom
+  *Download (N)* already was. The app's *Save Season* is unaffected: it saves per file and
+  works across items (17.10.1).
+
 ## [17.10.1] — 2026-09-18
 * **Fixed: *Save Season* did nothing on a merged show.** A show whose episodes arrived as
   separate items (most of Hacks, South Park, Futurama) opens as one merged page with no
@@ -15,7 +22,7 @@
   (`epFileItem`) instead. This predates 17.10.0 — it affected every per-row save on a
   merged page.
 * The browser's *Save ZIP* on a merged page is still inert — the host ZIP is per-item and
-  can't span a merged season. Unchanged here; noted in [FRONTEND.md](docs/FRONTEND.md).
+  can't span a merged season. Hidden in 17.10.2.
 
 ## [17.10.0] — 2026-09-18
 **In the app, "download" always means *onto this device*.**

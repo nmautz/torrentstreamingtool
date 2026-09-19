@@ -3114,7 +3114,7 @@ no `epItemId`.** Its rows belong to many items, so anything gated on `epItemId` 
 no-ops there — which is how *Save Season* shipped dead on most of the library in 17.10.0,
 and how `_appRefreshDlBtn` had never animated a merged row at all. Key app downloads by
 each file's own `item_id` (`_appSaveFiles`), and test "is this file on the open page?"
-with `epFileItem[path] === itemId` when `epSeriesKey` is set.
+with `epFileItem[path] === itemId` when `epSeriesKey` is set. (The browser's host ZIP genuinely can't span items, so there the season button is hidden on a merged page rather than left dead.)
 
 ### In-app "tabs" must be overlays on the host page — never full-page navigations — or in-flight downloads die
 The dashboard (`static/index.html`, served by the host) is the page that
