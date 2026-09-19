@@ -3089,6 +3089,28 @@ so a plain browser is byte-for-byte unaffected. `_appDlBtnHTML()` returns `""`
 and `_appLocalBundle()` returns null off-app. Don't call a native plugin without
 the `isApp` guard — `Capacitor` may be undefined (browser) or the plugin missing.
 
+### The app must never be handed a host ZIP — gate it at `_triggerZipDownload`, not per button
+`static/index.html` serves both the browser dashboard and the in-app UI, so every
+"download" control has two meanings: in a browser it's a host ZIP / raw file, in
+the app it's an **offline bundle on the device**. A ZIP dropped into iOS's download
+tray is inert — the app can't play it, sync its progress, or delete it — so the app
+must get the device save *every* time. Gating each button individually is how this
+drifted: the library card and multi-select checked `isApp && hlsAvailable` and
+**fell back to the ZIP** on a host with no HLS, the season header's *Save ZIP* was
+never gated at all, and the movie panel's *Download to device* was a raw
+`/api/library/{id}/download` link even in the app (the compact episode row right
+next to it had been gated correctly all along). The rule now lives at the one
+choke point every bulk path funnels through — `_triggerZipDownload` returns
+`appDownloadAllBundles(itemId, label, filePaths)` when `isApp` before touching the
+network — so `epDownloadAll`, `epDownloadPaths`, `epDownloadSeason` and any future
+caller inherit it. Two traps if you add another: the **single-path shortcut** in
+`epDownloadPaths`/`epDownloadSelected` bypasses the choke point with a direct
+`<a download>`, so it needs its own `!isApp`; and **don't hide the button when
+`hlsAvailable` is false** — with the ZIP gone there's nothing to show in its place,
+and a control that vanishes on some hosts looks like a bug. Render it and explain
+on tap (`appDownloadBundle` warns after the already-saved *removal* branch, so
+deleting an existing bundle still works on an HLS-less host).
+
 ### In-app "tabs" must be overlays on the host page — never full-page navigations — or in-flight downloads die
 The dashboard (`static/index.html`, served by the host) is the page that
 *orchestrates* every download: `_appPrepBundle` polls the host's `/offline-job`

@@ -1,5 +1,26 @@
 # Changelog
 
+## [17.10.0] — 2026-09-18
+**In the app, "download" always means *onto this device*.**
+
+* **The host ZIP is gone from the app.** A ZIP landing in iOS Safari's download
+  tray is a file the app can't play, can't sync progress for, and can't delete —
+  yet several buttons still offered one: the library card's *Download all* and the
+  season header's *Save ZIP* whenever the host couldn't prep HLS, and the movie
+  panel's *Download to device* always. All of them now save an offline bundle
+  instead. `_triggerZipDownload` is the single choke point every bulk path funnels
+  through, so the gate lives there and covers future callers too.
+* **A movie can be saved to the device from its detail panel.** The panel's
+  download action is now the same offline save as an episode row's, and it shows
+  the same states — *Save on this device* → *Saving 42%* → *Saved on device*
+  (tap to remove) — live, without repainting the panel.
+* **The season header saves the whole season offline.** In the app that button is
+  *Save Season*; it queues every episode of the open season as a device download
+  with one quality prompt for the batch, exactly as *Download (N)* does.
+* **The save button no longer vanishes on a host that can't prep HLS.** It stays
+  put and says why on tap ("Offline download needs HLS prep on the host") — with
+  no ZIP left to fall back to, a button that silently disappears reads as a bug.
+
 ## [17.9.1] — 2026-09-18
 * **Fixed: an abandoned pack deleted and re-added its replacement every five seconds.**
   `_pack_slice_fallback` cleared the slice with `item.pop("pack_slice")`, but the download

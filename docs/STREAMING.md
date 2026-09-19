@@ -2380,8 +2380,27 @@ the phone and played from a loopback server with **no host connection** (Airplan
 Mode). The browser dashboard is untouched — all the glue below is gated behind a
 Capacitor native-platform check (`isApp`), so it's inert in a plain browser.
 
+> **In the app, every download path is a device save.** The browser's host
+> downloads — the streamed ZIP (`POST /api/library/{id}/download-zip`) and the raw
+> `GET /api/library/{id}/download` — are **never** offered when `isApp`. A ZIP in
+> iOS's download tray is a file the app can't play, can't sync progress for and
+> can't delete, so each entry point routes to an offline bundle instead: the
+> library card's *Download all* → `appDownloadAllBundles`, the season header (*Save
+> Season*, not *Save ZIP*) and multi-select *Download (N)* → the same, the movie
+> panel's action → `_appDlWideHTML`/`appDownloadBundle`, and the per-episode row →
+> `_appDlBtnHTML`. `_triggerZipDownload` is the choke point every bulk path funnels
+> through and returns `appDownloadAllBundles(itemId, label, filePaths)` off the top
+> when `isApp`, so a new bulk caller inherits the rule for free.
+> **On a host that can't prep HLS** (`hlsAvailable === false`, e.g. macOS) the
+> buttons still render — there is no ZIP left to put in their place, and a control
+> that silently disappears reads as a bug. `appDownloadBundle` /
+> `appDownloadAllBundles` warn on tap instead. Removing an *already saved* bundle
+> keeps working regardless (that branch runs before the HLS guard).
+
 **Download.** A per-row **Download** button (`appDownloadBundle` in
-[static/index.html](../static/index.html), app-only via `_appDlBtnHTML`):
+[static/index.html](../static/index.html), app-only via `_appDlBtnHTML`; the movie
+panel's full-width twin is `_appDlWideHTML`, refreshed by the same
+`_appRefreshDlBtn` via an `.ep-appdl-wide[data-path]` slot):
 1. `GET /api/library/{id}/bundle-manifest?file_path=…` (plan A1). On **409
    not_ready** the app POSTs the normal `/offline-prepare`, polls
    `/offline-job/{id}` until the host bundle is built, then retries the manifest.
@@ -2409,7 +2428,9 @@ Capacitor native-platform check (`isApp`), so it's inert in a plain browser.
 > this for a **Download Quality** chooser (`_appChooseQuality`): on a download, if
 > `videos[].length > 1` it lists each rung with its size and re-fetches the manifest
 > for the pick. A **bulk** download (card *Download all* → `appDownloadAllBundles`,
-> or multi-select *Download (N)* → `epDownloadSelected`) asks **once** via
+> a season header *Save Season* → `epDownloadSeason` → `_triggerZipDownload`'s app
+> branch → `appDownloadAllBundles(itemId, label, paths)`, or multi-select
+> *Download (N)* → `epDownloadSelected`) asks **once** via
 > `_appBatchQuality` (which probes the first file's ladder) and passes the chosen
 > `quality` to every per-file `appDownloadBundle` so the prompt isn't repeated; a
 > ≤1-rung bundle skips the prompt entirely. The manifest's **`master_m3u8`** carries a
