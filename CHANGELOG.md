@@ -1,5 +1,20 @@
 # Changelog
 
+## [17.13.0] — 2026-09-19
+* **New: a show opens on the episode you're up to.** Watched one to ten and the rest
+  still to go? The episode page now opens scrolled to episode eleven instead of at the
+  top of a season you have to scroll past every time. The row is marked **Next up**
+  (**Resume** when you stopped part-way through it), and a sliver of the previous
+  episode stays on screen so it's clear the earlier ones are still there. The rule is
+  the one the Resume button already uses: the episode playing now, else the one you
+  left part-way through, else the first unwatched episode *after* the one you last
+  watched — so an episode skipped on purpose doesn't drag the page back to it. A season
+  you've never touched, or one you've finished, still opens at the top.
+  Scrolling the list yourself ends it for that visit: from then on repaints leave you
+  where you are, and picking a season tab by hand still opens that season at its start.
+* On the TV, the first **OK** press now lands on a control that's actually on screen
+  rather than the first one in the page, which used to jump back to episode 1.
+
 ## [17.12.0] — 2026-09-19
 * **New: the library leads with what you were watching.** Items are ordered
   most-recently-watched first, so a show you started last night is the first tile you

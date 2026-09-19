@@ -4256,6 +4256,31 @@ whatever the write was for. Two consequences worth holding onto:
   the frontend's `_libLastWatched` get away with a plain `>`.
 
 
+## An auto-scroll that can't tell the user's scroll from its own (17.13.0)
+
+The episode page opens scrolled to the episode you're up to, and stays armed
+across repaints — `renderEpList` rebuilds `#epList.innerHTML`, so every
+prep-status/metadata/SSE repaint would otherwise drop the list back to the top
+(the same fact `_epLiveRefresh`'s scroll save/restore exists for). "Armed until
+the viewer scrolls" is the whole contract, and it has two traps:
+
+- **Our own `scrollTop =` fires `scroll` too.** A naive `scroll` listener
+  disarms itself the instant it lands, and the next repaint goes to the top.
+  `_epApplyAutoScroll` records what it set in `_epAutoScrollTop` and the
+  listener only disarms when the position differs by more than a few pixels.
+  Same reason the listener is installed **once** (`_epScrollHooked`) on the
+  element, which survives every `innerHTML` rebuild — re-adding it per render
+  stacks a new listener on every repaint.
+- **`offsetTop` is not the scroll offset here.** The rows sit in a grid inside
+  several wrappers, and on a wide screen that grid is `xl:grid-cols-2`, so the
+  nearest positioned ancestor is not the scroller. Measure the row against
+  `#epList` with `getBoundingClientRect()` and add to the *current* `scrollTop`.
+
+Also: `_epNextUpPath` deliberately returns `null` when the answer is the first
+row (an untouched season, a finished one). Returning row 0 would be harmless for
+the scroll and wrong for the **Next up** badge, which would then sit on episode 1
+of every show nobody has played.
+
 ---
 
 - [BACKEND.md](BACKEND.md) — invariants enforced by `main.py`

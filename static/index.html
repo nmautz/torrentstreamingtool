@@ -4162,7 +4162,15 @@ function _tvNavKey(e){
   }
   if (e.key === "Enter"){
     if (!cur){                              // nothing focused yet → land somewhere useful
-      const first = _tvCandidates(_tvNavScope())[0];
+      // On screen beats first in the DOM: an episode page opens scrolled to the
+      // episode you're up to (see _epApplyAutoScroll), and DOM order would send
+      // the first OK press back to episode 1 — off screen, above the fold.
+      const cands = _tvCandidates(_tvNavScope());
+      const onScreen = cands.find(el => {
+        const r = el.getBoundingClientRect();
+        return r.bottom > 0 && r.top < innerHeight && r.width > 0 && r.height > 0;
+      });
+      const first = onScreen || cands[0];
       if (first){ e.preventDefault(); first.focus({preventScroll:true});
                   first.scrollIntoView({block:"center", behavior:"smooth"}); }
       return;
@@ -4277,6 +4285,14 @@ let epOndemandOnly = false;   // item flagged on-demand stream only (no permanen
 let epOndemandLocked = false; // admin-locked → this UI can't change epOndemandOnly
 let epHlsAvailable = true;    // HLS prep/JIT available (false on macOS → hide the toggle)
 let epIsMovie = false;     // single-file item → movie-info panel instead of an episode list
+// Open-on-next-up: while armed, every repaint of the episode list puts the
+// episode you'd actually press play on at the top of the scroller, instead of
+// opening season 4 at episode 1 when you finished episode 10 last night. Armed
+// when the page opens, dropped the moment the viewer scrolls it themselves (or
+// switches season / closes the page) — see _epApplyAutoScroll.
+let _epAutoScrollArmed = false;
+let _epAutoScrollTop   = -1;   // the scrollTop WE set, so our own scroll event isn't mistaken for the user's
+let _epScrollHooked    = false;
 // Stream file picker state
 let streamPrepData = null;   // {hash, files, magnet, title} from /stream/prepare
 let streamPrepAbort = null;  // AbortController for the in-flight prepare request
@@ -9217,6 +9233,7 @@ async function openEpisodePicker(itemId, title, section, filePath){
   epItemId=itemId;
   epSeriesKey=null; epFileItem={};   // single-item open — clear any series mode
   epFiles=[]; epChecked=new Set();
+  _epAutoScrollArmed=true; _epAutoScrollTop=-1;   // open on next-up until the viewer scrolls
   epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[]; epIsMovie=false;
   epSection=section||"";
 
@@ -9301,6 +9318,7 @@ async function openEpisodePicker(itemId, title, section, filePath){
 async function openSeriesPage(seriesKey, title, section, filePath){
   epItemId=null; epSeriesKey=seriesKey; epFileItem={};
   epFiles=[]; epChecked=new Set();
+  _epAutoScrollArmed=true; _epAutoScrollTop=-1;   // open on next-up until the viewer scrolls
   epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[]; epIsMovie=false;
   epSection=section||"";
 
@@ -10097,15 +10115,18 @@ function epSwitchSeason(s){
   epCurrentSeason=+s;
   renderEpSeasonTabs();
   renderEpList();
-  // Scroll the new season into view from the top
-  const list=document.getElementById("epList"); if(list) list.scrollTop=0;
+  // Scroll the new season into view from the top. Picking a season by hand is a
+  // "show me this" gesture, so it starts where the season starts — and it ends
+  // the open-on-next-up scroll, which is about where you LEFT off.
+  _epAutoScrollArmed=false;
+  const list=document.getElementById("epList"); if(list){ list.scrollTop=0; _epAutoScrollTop=0; }
 }
 
 function closeEpisodePage(){
   document.getElementById("episodePage").classList.add("hidden");
   document.body.style.overflow="";
   epItemId=null; epSeriesKey=null; epFileItem={}; _epSeriesResume=null;
-  epFiles=[]; epChecked=new Set();
+  epFiles=[]; epChecked=new Set(); _epAutoScrollArmed=false; _epNextUpNow=null;
   epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[];
   epHeroTitle=""; clearTimeout(_epMetaRetryTimer); _epMetaRetryTimer=null;
   epIsMovie=false; _epApplyMovieChrome(false);
@@ -10582,6 +10603,12 @@ function _epCardHtml(f){
   const playingBadge = isNowPlaying
     ? `<span class="text-[10px] text-indigo-300 font-bold uppercase tracking-widest"><svg class="ic" aria-hidden="true"><use href="#i-play"/></svg> Playing</span>`
     : "";
+  // The episode this show is up to — the row the page opened scrolled to. Marked
+  // so landing mid-list reads as "here's where you are", not as a list that has
+  // lost its first ten episodes. Never on the playing row (it has its own badge).
+  const nextUpBadge = (!isNowPlaying && f.path===_epNextUpNow)
+    ? `<span class="text-[10px] text-indigo-300 font-bold uppercase tracking-widest" title="Where you're up to in this season"><svg class="ic" aria-hidden="true"><use href="#i-resume"/></svg> ${inProgress?"Resume":"Next up"}</span>`
+    : "";
   const watchedBadge = isComplete
     ? `<span class="text-[10px] text-green-500 font-bold uppercase tracking-widest"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg> Watched</span>`
     : inProgress ? `<span class="text-[10px] text-yellow-500 font-bold">${pct}%</span>` : "";
@@ -10680,6 +10707,7 @@ function _epCardHtml(f){
             <div class="flex items-center gap-2 flex-wrap">
               ${headline}
               ${playingBadge}
+              ${nextUpBadge}
               ${watchedBadge}
               ${notDlBadge}
               ${compressedBadge}
@@ -11645,8 +11673,79 @@ function _epMoviePanel(f){
   </div>`;
 }
 
+// ── Open on the episode you'd actually press play on ───────────────────────
+// Which of the visible season's rows the page should open scrolled to. Mirrors
+// the server's resume rule (`_resume_from_files` in main.py) so we land on the
+// row the hero's Resume/Play button would start:
+//   1. the episode playing right now,
+//   2. the newest-touched episode, if it was left part-way through,
+//   3. else the first unwatched episode at or after it — the "you finished ten,
+//      here's eleven" case, which is the whole point,
+//   4. else the first unwatched episode anywhere in the season.
+// Null when the answer is the first row anyway (an untouched season, a finished
+// one being rewatched): the top of the list is already the right place, and a
+// "next up" marker on episode 1 of a show you've never played is noise.
+function _epNextUpPath(visibleFiles){
+  if(!visibleFiles || visibleFiles.length<2) return null;
+  const done=f=>!!f.progress?.completed;
+  if(app.library_current_file && visibleFiles.some(f=>f.path===app.library_current_file))
+    return app.library_current_file;
+  // Anchor: the episode touched most recently. NOT the first unwatched one — an
+  // episode skipped on purpose must not drag the page back to it (same rule as
+  // pickDefaultSeason).
+  let anchor=-1, anchorT=-Infinity;
+  visibleFiles.forEach((f,i)=>{
+    const t=Date.parse(f.progress?.updated_at||"");
+    if(!isNaN(t) && t>anchorT){ anchorT=t; anchor=i; }
+  });
+  if(anchor>=0){
+    const p=visibleFiles[anchor].progress||{};
+    // Mid-episode → that episode itself; finished → the next one still to watch.
+    if(!p.completed && (p.position_sec||0)>5) return visibleFiles[anchor].path;
+    for(let i=anchor+(p.completed?1:0); i<visibleFiles.length; i++)
+      if(!done(visibleFiles[i])) return visibleFiles[i].path;
+  }
+  const first=visibleFiles.findIndex(f=>!done(f));
+  return first>0 ? visibleFiles[first].path : null;
+}
+// Path the open list is marking as next up (read by _epCardHtml for its badge).
+let _epNextUpNow=null;
+
+// Scroll the list so the next-up row sits at the top, with a sliver of the
+// episode before it still showing — without that peek the list reads as if it
+// simply starts at episode 11 and the earlier ones are gone.
+const EP_SCROLL_PEEK=44;
+function _epApplyAutoScroll(){
+  const list=document.getElementById("epList");
+  if(!list) return;
+  _epHookListScroll(list);
+  if(!_epAutoScrollArmed) return;
+  if(!_epNextUpNow){ _epAutoScrollTop=list.scrollTop; return; }
+  const row=list.querySelector(`.ep-card[data-path="${_cssAttr(_epNextUpNow)}"]`);
+  if(!row) return;
+  // Measured against the scroller, not offsetTop: the rows sit inside a grid
+  // inside several wrappers, and on a wide screen that grid is two columns.
+  const delta=row.getBoundingClientRect().top-list.getBoundingClientRect().top;
+  const max=Math.max(0, list.scrollHeight-list.clientHeight);
+  list.scrollTop=Math.max(0, Math.min(list.scrollTop+delta-EP_SCROLL_PEEK, max));
+  _epAutoScrollTop=list.scrollTop;
+}
+// The viewer scrolling the list themselves ends the auto-scroll for this visit —
+// a repaint that yanks the page back to "next up" while someone is reading three
+// episodes further down is exactly the behaviour _epLiveRefresh exists to avoid.
+// Our own scroll fires this event too, hence the comparison against what we set.
+function _epHookListScroll(list){
+  if(_epScrollHooked) return;
+  _epScrollHooked=true;
+  list.addEventListener("scroll",()=>{
+    if(!_epAutoScrollArmed) return;
+    if(Math.abs(list.scrollTop-_epAutoScrollTop)>4) _epAutoScrollArmed=false;
+  }, {passive:true});
+}
+
 function renderEpList(){
   const el=document.getElementById("epList");
+  _epNextUpNow=null;   // recomputed below for an episode list; nothing else has one
   if(!epFiles.length){
     el.innerHTML=`<p class="text-gray-600 text-sm text-center py-12">No video files found.</p>`;
     return;
@@ -11721,6 +11820,10 @@ function renderEpList(){
       : `<p class="text-gray-600 text-sm text-center py-12">No episodes in this season.</p>`;
     updateEpCount(); return;
   }
+
+  // What the page opens on, and what the "Next up" badge marks. Computed off the
+  // rows as they will be ordered, so the badge and the scroll always agree.
+  _epNextUpNow=_epNextUpPath(visibleFiles);
 
   let html = "";
   // Optional: season-level header with TMDb season overview when present.
@@ -11929,6 +12032,7 @@ function renderEpList(){
   html += `</div>`;
 
   el.innerHTML=html;
+  _epApplyAutoScroll();   // land on next-up (while armed — see _epAutoScrollArmed)
   updateEpCount();
   applyVpnGate();   // title the recheck button if it rendered while VPN is down
 }
@@ -12324,7 +12428,9 @@ function _epLiveRefresh(){
     const list=document.getElementById("epList");
     const top=list?list.scrollTop:0;
     await refreshEpFiles();
-    if(list) list.scrollTop=top;
+    // While the open-on-next-up scroll is still armed the repaint has already
+    // re-landed on that row; restoring the old number would fight it.
+    if(list && !_epAutoScrollArmed) list.scrollTop=top;
   }, EP_LIVE_MS);
 }
 
@@ -26634,6 +26740,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.12.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.13.0</div>
 </body>
 </html>

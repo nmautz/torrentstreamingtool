@@ -317,7 +317,12 @@ Mechanics (`main.py`):
   (distance + off-axis-penalty scoring inside a forgiving cone; the target is
   scrolled to center and marked by the `.tv-mode :focus` indigo ring), OK /
   Enter activates it (native click for buttons/links, synthesized `click()`
-  for `[onclick]` tiles). Navigation is scoped inside the topmost open
+  for `[onclick]` tiles). With **nothing focused yet**, OK lands on the first
+  candidate that is actually **on screen**, falling back to the first in the
+  DOM (17.13.0): an episode page opens scrolled to the episode you're up to
+  (`_epApplyAutoScroll`), and DOM order used to send that first press back to
+  episode 1, above the fold. Arrow keys were always safe here — with no focus
+  they score from the viewport centre, so they already followed the scroll. Navigation is scoped inside the topmost open
   overlay (`_tvOpenOverlays`: `*Modal`s plus the episode/search pages and
   bottom-sheets, ranked by z-index then DOM order) so focus can't wander
   behind a dialog or the episode page; arrows that edit a control
