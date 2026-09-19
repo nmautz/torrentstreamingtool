@@ -3690,24 +3690,36 @@ def _tmdb_pick_trailer(videos: Optional[dict]) -> str:
 # 2 Theatrical (limited), 3 Theatrical, 4 Digital, 5 Physical, 6 TV.
 _TMDB_REL_THEATRICAL = {2, 3}
 _TMDB_REL_HOME = {4, 5, 6}
+# How long after its first theatrical date a film can still be "only in
+# theaters". Studio windows run 17-120 days; a year covers the slowest of them.
+# Past that, a missing home-release date is TMDb not knowing, not the film not
+# having one — small and old films (a 2001 documentary) are routinely entered
+# with a theatrical date and nothing else, and flagging them sent people
+# looking for a cinema showing that ended decades ago.
+_THEATRICAL_WINDOW_DAYS = 365
 
 
 def _movie_release_flags(details: dict) -> dict:
     """From a movie's `release_dates` (append_to_response), derive whether it's
-    still theatrical-only — i.e. it has had a theatrical release but no
-    digital/physical/TV release yet, so a real home-quality torrent won't exist.
-    Prefers the US region, falling back to every region's dates combined.
-    Returns `{theatrical_only, digital_date}` — `digital_date` is the earliest
-    announced home-release date (past or future), "" if none."""
+    still theatrical-only — i.e. it opened in theaters within the last
+    `_THEATRICAL_WINDOW_DAYS` and has no digital/physical/TV release yet, so a
+    real home-quality torrent won't exist. Prefers the US region, falling back
+    to every region's dates combined. Returns `{theatrical_only,
+    theatrical_date, digital_date}` — `theatrical_date` is the earliest past
+    theatrical date, `digital_date` the earliest announced home-release date
+    (past or future); each "" if none."""
     results = (details.get("release_dates") or {}).get("results") or []
     if not results:
-        return {"theatrical_only": False, "digital_date": ""}
+        return {"theatrical_only": False, "theatrical_date": "", "digital_date": ""}
     us = [r for r in results if (r.get("iso_3166_1") or "").upper() == "US"]
     entries: list[dict] = []
     for r in (us or results):
         entries.extend(r.get("release_dates") or [])
-    today = datetime.now(timezone.utc).date().isoformat()
-    theatrical_past = home_past = False
+    now = datetime.now(timezone.utc).date()
+    today = now.isoformat()
+    window_start = (now - timedelta(days=_THEATRICAL_WINDOW_DAYS)).isoformat()
+    home_past = False
+    theatrical_dates: list[str] = []
     home_dates: list[str] = []
     for e in entries:
         try:
@@ -3718,15 +3730,67 @@ def _movie_release_flags(details: dict) -> dict:
         if not date:
             continue
         if typ in _TMDB_REL_THEATRICAL and date <= today:
-            theatrical_past = True
+            theatrical_dates.append(date)
         if typ in _TMDB_REL_HOME:
             home_dates.append(date)
             if date <= today:
                 home_past = True
+    # The FIRST theatrical date decides the window: a 1990 film's 2025
+    # anniversary re-release is not a new film waiting for its digital date.
+    opened = min(theatrical_dates) if theatrical_dates else ""
     return {
-        "theatrical_only": theatrical_past and not home_past,
+        "theatrical_only": bool(opened) and opened >= window_start and not home_past,
+        "theatrical_date": opened,
         "digital_date":    min(home_dates) if home_dates else "",
     }
+
+
+# TMDb watch-provider offer types, in the order the show page lists them: what
+# you can watch with a subscription you may already have, then free, then pay.
+_WATCH_OFFER_KINDS = (("flatrate", "stream"), ("free", "free"), ("ads", "ads"),
+                      ("rent", "rent"), ("buy", "buy"))
+_REGION_RE = re.compile(r"^[A-Z]{2}$")
+
+
+def _watch_offers(payload: Optional[dict], region: str) -> dict:
+    """Reduce TMDb's `/{kind}/{id}/watch/providers` payload (every country, data
+    from JustWatch) to one region: each provider once, carrying every way it
+    offers the title (`kinds`, e.g. ["rent", "buy"]), in offer-then-TMDb order.
+
+    TMDb gives no per-provider deep links — only `link`, its own watch page for
+    the region, which in turn links out to each provider. `other_regions` lists
+    the countries that DO have offers, so "not in your country" and "nowhere at
+    all" read differently (the second is the honest answer for a lot of the
+    small titles no torrent exists for either)."""
+    results = (payload or {}).get("results") or {}
+    if not isinstance(results, dict):
+        results = {}
+    reg = results.get(region) or {}
+    providers: dict[int, dict] = {}
+    for key, kind in _WATCH_OFFER_KINDS:
+        for p in reg.get(key) or []:
+            pid = p.get("provider_id")
+            name = (p.get("provider_name") or "").strip()
+            if pid is None or not name:
+                continue
+            ent = providers.get(pid)
+            if ent is None:
+                ent = providers[pid] = {
+                    "id":        pid,
+                    "name":      name,
+                    "logo_path": p.get("logo_path") or "",
+                    "kinds":     [],
+                }
+            if kind not in ent["kinds"]:
+                ent["kinds"].append(kind)
+    # dicts keep insertion order: offer type first, then TMDb's own ranking
+    # (each list arrives sorted by display_priority).
+    out = list(providers.values())
+    others = sorted(c for c, r in results.items()
+                    if c != region and isinstance(r, dict)
+                    and any(r.get(k) for k, _ in _WATCH_OFFER_KINDS))
+    return {"region": region, "link": reg.get("link") or "",
+            "providers": out, "other_regions": others}
 
 
 async def _tmdb_fetch_seasons(show_id: int, seasons: list[int]) -> dict[str, dict]:
@@ -15159,6 +15223,27 @@ async def tmdb_lookup(title: str = "", year: int = 0, kind: str = "",
         # needs it to query an anime episode by its absolute number.
         "anime":    _anime_facts(data),
     })
+
+
+@app.get("/api/tmdb/watch")
+async def tmdb_watch(tmdb_id: int = 0, kind: str = "", region: str = "") -> JSONResponse:
+    """Where a title can be legitimately watched in `region` (ISO 3166-1, the
+    browser's country; US when absent or malformed) — TMDb's watch providers,
+    which are JustWatch data and must be credited as such in the UI. Shape:
+    `{enabled, img_base, region, link, providers:[{id, name, logo_path, kinds}],
+    other_regions}`; see `_watch_offers`. A separate call from `/lookup` so the
+    per-country list never enters the metadata caches. Not admin-gated."""
+    region = (region or "").strip().upper()
+    if not _REGION_RE.match(region):
+        region = "US"
+    empty = {"region": region, "link": "", "providers": [], "other_regions": []}
+    if not await _tmdb_effective_key():
+        return JSONResponse({"enabled": False, "img_base": LOCAL_IMG_BASE, **empty})
+    if tmdb_id <= 0 or kind not in ("tv", "movie"):
+        return JSONResponse({"enabled": True, "img_base": LOCAL_IMG_BASE, **empty})
+    payload = await _tmdb_get(f"/{kind}/{tmdb_id}/watch/providers")
+    return JSONResponse({"enabled": True, "img_base": LOCAL_IMG_BASE,
+                         **_watch_offers(payload, region)})
 
 
 @app.get("/api/tmdb/search")

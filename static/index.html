@@ -1952,6 +1952,15 @@
           <button data-open onclick="ssOpenInLibrary()"
             class="text-[10px] px-2 py-1 bg-emerald-800 hover:bg-emerald-700 text-white uppercase tracking-wide transition-colors flex-shrink-0">Open in library</button>
         </div>
+        <!-- Where to watch it legitimately (TMDb watch providers = JustWatch
+             data; the credit is a TMDb terms requirement). Filled by
+             _ssLoadWatch once the TMDb identity is known. -->
+        <div id="ssWatch" class="hidden mt-2 flex items-center gap-1.5 flex-wrap">
+          <span class="text-[10px] text-gray-400 uppercase tracking-widest font-bold mr-1">Where to watch</span>
+          <div data-list class="contents"></div>
+          <a data-credit target="_blank" rel="noopener" onclick="return ssOpenWatchLink(event,this)"
+            class="text-[9px] text-gray-500 hover:text-gray-300 uppercase tracking-widest ml-1">Data: JustWatch</a>
+        </div>
       </div>
     </div>
   </div>
@@ -14312,6 +14321,7 @@ async function openSearchShow(group){
   poster.classList.add("hidden"); poster.removeAttribute("src");
   document.getElementById("ssPosterFallback").classList.remove("hidden");
   document.getElementById("ssTheaterBanner").classList.add("hidden");
+  _ssWatch=null; _ssRenderWatch();
   document.getElementById("ssLibraryBanner").classList.add("hidden");
 
   document.getElementById("searchShowPage").classList.remove("hidden");
@@ -14372,6 +14382,7 @@ async function openSearchShowFromTmdb(cand, opts){
   poster.classList.add("hidden"); poster.removeAttribute("src");
   document.getElementById("ssPosterFallback").classList.remove("hidden");
   document.getElementById("ssTheaterBanner").classList.add("hidden");
+  _ssWatch=null; _ssRenderWatch();
   _ssRenderLibraryBanner();
 
   document.getElementById("searchShowPage").classList.remove("hidden");
@@ -14677,19 +14688,93 @@ function _ssRenderHero(){
   else { poster.classList.add("hidden"); poster.removeAttribute("src"); posterFb.classList.remove("hidden"); }
   _ssRenderTheaterBanner();
   _ssRenderLibraryBanner();
+  _ssLoadWatch();
   _ssUpdateTrailerBtn();
 }
-// "Theaters only" warning: an accurately-flagged movie (no home release yet)
-// won't have a real home-quality torrent — only cams. Hidden for TV / released
-// movies. `digital_date` (if TMDb has one) tells the user when to check back.
+// "Theaters only" warning: a movie that opened in cinemas within the last year
+// and has no digital / disc / TV release yet won't have a real home-quality
+// torrent — only camera recordings. The server only sets `theatrical_only`
+// inside that window (an old film TMDb simply has no home date for is not "in
+// theaters"). `digital_date` (if TMDb has one) tells the user when to check back.
+function _ssFmtDate(iso){
+  const d=new Date((iso||"")+"T00:00:00");
+  return isNaN(d)?iso:d.toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"});
+}
 function _ssRenderTheaterBanner(){
   const banner=document.getElementById("ssTheaterBanner");
   const m=_ssMeta;
   if(!m||!m.theatrical_only){ banner.classList.add("hidden"); return; }
-  let msg="In theaters only — no home release yet; downloads may be cam-quality.";
-  if(m.digital_date) msg+=` Digital: ${m.digital_date}.`;
+  const since=m.theatrical_date?` since ${_ssFmtDate(m.theatrical_date)}`:"";
+  let msg=`In cinemas${since}, not out on digital or disc yet — any download now is likely a camera recording.`;
+  if(m.digital_date) msg+=` Digital release: ${_ssFmtDate(m.digital_date)}.`;
   banner.querySelector("[data-txt]").textContent=msg;
   banner.classList.remove("hidden");
+}
+
+// ── Where to watch (TMDb watch providers, JustWatch data) ───────────────────
+// Region = the browser's country ("en-GB" → GB); the server falls back to US.
+// Every provider links to TMDb's watch page for that region, which links out to
+// each service — TMDb's API hands out no per-provider deep links.
+let _ssWatch=null;   // {key, data} for the open title, data null while loading
+function _ssWatchRegion(){
+  for(const tag of (navigator.languages||[navigator.language||""])){
+    const sub=String(tag||"").split("-").slice(1).find(p=>/^[A-Za-z]{2}$/.test(p));
+    if(sub) return sub.toUpperCase();
+  }
+  return "";
+}
+async function _ssLoadWatch(){
+  const m=_ssMeta;
+  if(!m||!m.tmdb_id||!m.tmdb_kind){ _ssWatch=null; _ssRenderWatch(); return; }
+  const key=`${m.tmdb_kind}:${m.tmdb_id}`;
+  if(_ssWatch&&_ssWatch.key===key){ _ssRenderWatch(); return; }
+  _ssWatch={key, data:null}; _ssRenderWatch();
+  try{
+    const r=await fetch(`/api/tmdb/watch?kind=${encodeURIComponent(m.tmdb_kind)}`
+      +`&tmdb_id=${encodeURIComponent(m.tmdb_id)}&region=${encodeURIComponent(_ssWatchRegion())}`);
+    const d=r.ok?await r.json():null;
+    if(_ssWatch&&_ssWatch.key===key){ _ssWatch.data=(d&&d.enabled)?d:null; _ssRenderWatch(); }
+  }catch(_){}
+}
+function _ssRenderWatch(){
+  const box=document.getElementById("ssWatch"); if(!box) return;
+  const d=_ssWatch&&_ssWatch.data, m=_ssMeta;
+  if(!d||!m){ box.classList.add("hidden"); return; }
+  const link=d.link||`https://www.themoviedb.org/${m.tmdb_kind}/${m.tmdb_id}/watch?locale=${d.region}`;
+  const kindLbl={stream:"Stream", free:"Free", ads:"Free", rent:"Rent", buy:"Buy"};
+  const list=box.querySelector("[data-list]");
+  if(d.providers.length){
+    list.innerHTML=d.providers.map(p=>{
+      const kinds=[...new Set(p.kinds.map(k=>kindLbl[k]||k))].join(" · ");
+      const logo=p.logo_path
+        ?`<img src="${escHtml(_ssImgBase)}/w92${escHtml(p.logo_path)}" alt="" loading="lazy" class="w-6 h-6 flex-shrink-0 object-cover">`
+        :"";
+      return `<a href="${escHtml(link)}" target="_blank" rel="noopener" onclick="return ssOpenWatchLink(event,this)"
+        title="${escHtml(p.name)} — ${escHtml(kinds)}"
+        class="flex items-center gap-1.5 bg-white/5 hover:bg-white/15 border border-white/10 pr-2 min-h-[26px] transition-colors">
+        ${logo}<span class="${logo?"":"pl-2 "}text-[10px] text-gray-200 font-bold uppercase tracking-wide truncate max-w-[9rem]">${escHtml(p.name)}</span>
+        <span class="text-[9px] text-gray-400 uppercase tracking-widest">${escHtml(kinds)}</span></a>`;
+    }).join("");
+  } else {
+    const n=d.other_regions.length;
+    const msg=n
+      ?`Not on any service in ${d.region} — available in ${n} other countr${n===1?"y":"ies"}`
+      :"Not listed on any streaming, rental or purchase service";
+    list.innerHTML=`<a href="${escHtml(link)}" target="_blank" rel="noopener" onclick="return ssOpenWatchLink(event,this)"
+      class="text-[10px] text-gray-400 hover:text-gray-200 uppercase tracking-wide">${escHtml(msg)}</a>`;
+  }
+  const credit=box.querySelector("[data-credit]"); credit.href=link;
+  box.classList.remove("hidden");
+}
+// In the iOS app a target=_blank link is a no-op inside the WKWebView, so hand
+// it to Safari through the plugin; everywhere else the plain link does the job.
+function ssOpenWatchLink(ev, a){
+  if(isApp && _cap && _cap.dl && _cap.dl.openExternal){
+    ev.preventDefault();
+    _cap.dl.openExternal({url:a.href}).catch(()=>{});
+    return false;
+  }
+  return true;
 }
 
 // ── Trailers (TMDb videos → YouTube embed) ──────────────────────────────────
@@ -26523,6 +26608,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.10.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.11.0</div>
 </body>
 </html>

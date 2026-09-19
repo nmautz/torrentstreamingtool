@@ -2532,6 +2532,14 @@ Caches written before 11.18.0 have no `all_seasons`, so `_fetch_item_metadata` t
 
 `_tmdbEpisode(file)` matches the file's `(season, episode)` against `metadata.seasons[N].episodes[*]`. If the filenames are mis-labelled — e.g. an anime cour where the on-disk numbering restarts each cour but TMDb uses one continuous season — the still and overview will be wrong even though the show match is right. The TMDb episode overview is still better than nothing; the user can always rename files or override the match. Don't add complex episode-offset heuristics without a clear failure case.
 
+### A missing home-release date is not "still in theaters" (17.11.0)
+
+`_movie_release_flags` used to set `theatrical_only` for any movie with a past theatrical date and no digital/physical/TV date. TMDb's `release_dates` for small and old films is routinely just the one theatrical entry — Shomõtsi (2001, TMDb 279561) has `2001-01-01` theatrical and nothing else — so a 25-year-old documentary showed an amber "In theaters only" banner, which read as the reason no torrent turned up. The flag now also needs the **first** theatrical date inside `_THEATRICAL_WINDOW_DAYS` (365). First, not latest: an anniversary re-release of a 1990 film is not a new film waiting for its digital date. When a small title has no torrents, the honest context is the **Where to watch** strip (`/api/tmdb/watch`), which for these titles usually says it isn't on any service either.
+
+### TMDb watch providers have no per-provider links
+
+`/{kind}/{id}/watch/providers` is JustWatch data and carries one `link` per country — TMDb's own watch page — and nothing per provider. Every provider tile on the show page links to that page, which links out to each service. Building provider URLs ourselves (Netflix search, etc.) would break silently as those sites change; don't. The JustWatch credit next to the strip is a TMDb terms requirement, not decoration. In the iOS app a `target=_blank` link does nothing inside the WKWebView, so the links go through `ssOpenWatchLink` → `BundleDownloader.openExternal`.
+
 ## Python compatibility
 
 `setup.py` and `run.py` are run by **system Python** (any version 3.9+). They use `from __future__ import annotations` so they parse on 3.9. `main.py`, `analyzer.py`, `watchdog.py`, `daemon.py` run inside the venv (also 3.9+ baseline but the project doesn't pin newer syntax).

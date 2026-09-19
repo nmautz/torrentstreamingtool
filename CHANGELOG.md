@@ -1,5 +1,22 @@
 # Changelog
 
+## [17.11.0] — 2026-09-18
+* **New: *Where to watch* on the search show page.** Under the title, a strip of the
+  services that stream, rent or sell the title in your country (the browser's region,
+  US if it has none) — logo, name and *Stream · Rent · Buy* — from TMDb's watch
+  providers (JustWatch data, credited as required). Each links to TMDb's watch page for
+  your country, which links out to the service; TMDb offers no per-service links. When
+  nothing is listed it says so — "not on any service in GB — available in 4 other
+  countries", or "not listed on any streaming, rental or purchase service", which for a
+  small title is usually why no torrent turned up either. New route `/api/tmdb/watch`.
+  In the app the links open in Safari.
+* **Fixed: "In theaters only" on films that left cinemas decades ago.** The banner fired
+  for any movie with a theatrical date on TMDb and no home-release date, and small or
+  old films are routinely entered with nothing but the theatrical date — Shomõtsi (2001)
+  showed it. It now needs the film's first theatrical date to be within the last year.
+  The banner itself now says what it means: "In cinemas since Aug 20, 2026, not out on
+  digital or disc yet — any download now is likely a camera recording".
+
 ## [17.10.2] — 2026-09-18
 * **Fixed: a dead *Save ZIP* button on merged shows in the browser.** The host ZIP is
   per-item and a merged season spans many items, so `epDownloadSeason` could only return
