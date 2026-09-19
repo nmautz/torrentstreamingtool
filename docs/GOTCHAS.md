@@ -4063,6 +4063,16 @@ consequences worth knowing before debugging a "why is my phone listed twice":
   both ways mints two device ids. Harmless (each really is a separate player),
   but it looks like duplication. This is the same split that made the profile
   token a cookie rather than `localStorage` — see ADMIN.md.
+- **Most device ids on this LAN are NOT UUIDs, and that is expected.**
+  `crypto.randomUUID()` requires a *secure context*, which a plain-`http://` LAN
+  origin is not — and neither is an `https://` origin whose self-signed cert the
+  browser was told to ignore. So `_pbDeviceId()` takes its
+  `"d" + Date.now().toString(36) + …` fallback on most real clients, and the log
+  lines (which print `sid[:8]`) read like `dmu7mzs6` rather than `0c19419c`. The
+  id is still minted once and persisted, so it is stable; don't "fix" this by
+  assuming a malformed client. Verified live 2026-09-18 — both a phone on
+  `http://` and the desktop dashboard produced fallback ids while a headless
+  browser on `https://` produced a real UUID.
 - The iOS **proxied playback session** navigates to a loopback origin with its own
   empty storage. `_appTryLocalHandoff` therefore passes `did=` / `dnm=` on the
   URL and `_appProxiedSeedStorage` writes them — unconditionally, not "if absent",
