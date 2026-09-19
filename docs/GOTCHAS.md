@@ -824,6 +824,34 @@ flow queries an indexer.
 `pack-lookup` requires `series_key` or `tmdb_id` and answers `found:false` without one.
 Every show has an S01E05; matching on the numbers alone would un-skip a different show's.
 
+### You cannot DELETE a field from an item inside a monitor tick (17.9.0)
+
+`library_download_monitor` does its qBit IO against a snapshot with no library lock held,
+then persists at the end with:
+
+```python
+async with mutate_library() as fresh:
+    cur = by_id.get(iid)
+    if cur is not None:
+        cur.update(mutated)
+```
+
+`dict.update` **adds and overwrites; it never deletes.** So `item.pop("some_field")` inside
+a tick looks like it worked — the in-memory item loses the key — and is then silently
+restored from the copy on disk at merge time.
+
+This shipped as a destructive loop. `_pack_slice_fallback` ended with
+`item.pop("pack_slice", None)`, so an abandoned pack came back still carrying an expired,
+unsettled slice; the next tick abandoned it again, and each round **deletes the torrent
+with its files** and re-adds the fallback. Measured on the box: ten rounds in forty
+seconds against a 3.8 GB release, and it would not have stopped on its own.
+
+The fix is to retire a field rather than remove it — overwrite it with a value every reader
+treats as inert (`_pack_slice_retire` writes `{"want": [], "settled": True, …}`, which closes
+both the `_pack_slice_apply` early-return and the monitor's `not settled` guard). Anything
+else that needs to clear state on a monitored item must do the same, or clear it in its own
+`mutate_library()` block outside the tick.
+
 ### Slice a pack by season/episode, never by file index (17.9.0)
 
 `DownloadReq.selected_file_indices` is resolved once, from qBit's file order, at add

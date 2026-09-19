@@ -6002,6 +6002,24 @@ def _pack_slice_apply(item: dict, qfiles: list, save_path: str) -> str:
     return "ok" if matched else "pending"
 
 
+def _pack_slice_retire(item: dict, why: str) -> None:
+    """Neutralise a slice permanently, in a way the download monitor's merge-back keeps.
+
+    **Do not `pop("pack_slice")` here.** `library_download_monitor` persists a tick with
+    `cur.update(mutated)`, and `dict.update` adds and overwrites but never *deletes* — so a
+    popped key is silently restored from the copy on disk. The item then comes back still
+    carrying an expired, unsettled slice, `_pack_slice_fallback` fires again, and the
+    torrent is deleted **with its files** and re-added once every five seconds, forever.
+    Measured live on the box: ten rounds in forty seconds against a 3.8 GB release.
+
+    An empty `want` plus `settled` closes both gates (`_pack_slice_apply` returns early,
+    and the monitor only looks at unsettled slices), and being an overwrite it survives
+    the merge. Any future field removal on a monitored item needs the same treatment.
+    """
+    item["pack_slice"] = {"want": [], "settled": True, "skipped": [],
+                          "retired": why, "retired_at": _now_iso()}
+
+
 def _pack_slice_settle(item: dict) -> None:
     """Freeze an item's slice: the episode was found and its metadata has bound, so
     passes 2 and 3 have had their say and the numbers will not move again. From here
@@ -9646,7 +9664,7 @@ async def _pack_slice_fallback(item: dict) -> bool:
         # Nothing to swap to. Drop the slice so `_reconcile_item_downloads` stops
         # holding the torrent at zero — a pack the user did not quite ask for beats
         # a download that never starts.
-        item.pop("pack_slice", None)
+        _pack_slice_retire(item, "no-fallback")
         modes = (item.get("download") or {}).get("files")
         if isinstance(modes, dict):
             for p in ps.get("skipped") or []:
@@ -9665,14 +9683,14 @@ async def _pack_slice_fallback(item: dict) -> bool:
         # path rather than inventing a third outcome here.
         log.warning("[pack] qBittorrent rejected the fallback release %r",
                     fb.get("title", ""))
-        item.pop("pack_slice", None)
+        _pack_slice_retire(item, "fallback-rejected")
         return True
     attempts = item.get("download_attempts") or []
     attempts.append({"key": cur_hash or _release_key(item.get("title", "")),
                      "title": item.get("title", ""), "at": _now_iso(),
                      "outcome": "pack-unsliceable"})
     item["download_attempts"] = attempts
-    item.pop("pack_slice", None)
+    _pack_slice_retire(item, "unsliceable")
     item["torrent_hash"] = new_hash
     item["title"] = fb.get("title", "") or item.get("title", "")
     item["download_source"] = {"magnet": magnet, "save_path": save_path}

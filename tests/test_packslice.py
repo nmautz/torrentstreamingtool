@@ -22,6 +22,7 @@ tree = ast.parse(src)
 
 WANT = {"_pack_slice_want", "_pack_slice_apply", "_pack_slice_settle",
         "_pack_slice_expired", "_pack_available", "_pack_first_cfg",
+        "_pack_slice_retire",
         "_download_cfg", "_effective_file_mode", "_file_mode_to_priority"}
 CONSTS = {"_PACK_EXTRA_MAX_BYTES", "_PACK_SLICE_GRACE_SECS",
           "_PACK_FIRST_MAX_BYTES", "_FILE_MODES", "_DL_PRIORITIES"}
@@ -136,6 +137,37 @@ check("honours an override",
       == {"enabled": False, "max_bytes": 1})
 check("a junk cap falls back",
       pf({"settings": {"pack_first": {"max_bytes": "lots"}}})["max_bytes"] == 200 * 1024 ** 3)
+
+# ── 7. Retiring a slice must survive the monitor's merge-back.
+# `library_download_monitor` persists a tick with `cur.update(mutated)`, and dict.update
+# never DELETES a key — so a retired slice expressed as `item.pop("pack_slice")` came
+# back from disk still expired and unsettled, `_pack_slice_fallback` fired again, and the
+# torrent was deleted with its files and re-added every five seconds. Caught live on the
+# box (ten rounds in forty seconds against a 3.8 GB release); this is its regression.
+print("7. retiring a slice survives a dict.update() merge-back")
+retire = ns["_pack_slice_retire"]
+live_item = {"id": "i9", "files": [], "download": {"mode": "now", "files": {}},
+             "pack_slice": {"want": [[1, 99]], "settled": False,
+                            "since": "2020-01-01T00:00:00+00:00", "skipped": []}}
+check("an old slice reads as expired", ns["_pack_slice_expired"](live_item) is True)
+retire(live_item, "unsliceable")
+on_disk = {"id": "i9", "pack_slice": {"want": [[1, 99]], "settled": False,
+                                      "since": "2020-01-01T00:00:00+00:00", "skipped": []}}
+on_disk.update(live_item)          # exactly what the monitor does to persist a tick
+check("the retired slice survived the merge",
+      on_disk["pack_slice"].get("settled") is True and not on_disk["pack_slice"].get("want"))
+check("so the monitor's guard is closed",
+      not (on_disk.get("pack_slice") and not on_disk["pack_slice"].get("settled")))
+check("and re-applying is a permanent no-op",
+      _apply(on_disk, [qf("x.mkv", 1)], SP) == "")
+# The shape the bug had: a pop is undone by the same merge.
+popped = dict(live_item)
+popped.pop("pack_slice")
+merged = {"pack_slice": {"want": [[1, 99]], "settled": False,
+                         "since": "2020-01-01T00:00:00+00:00", "skipped": []}}
+merged.update(popped)
+check("(a pop, by contrast, would have been undone — the bug)",
+      merged["pack_slice"].get("settled") is False)
 
 print()
 print("FAILED: " + "; ".join(fails) if fails else "all checks passed")

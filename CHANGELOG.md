@@ -1,5 +1,16 @@
 # Changelog
 
+## [17.9.1] — 2026-09-18
+* **Fixed: an abandoned pack deleted and re-added its replacement every five seconds.**
+  `_pack_slice_fallback` cleared the slice with `item.pop("pack_slice")`, but the download
+  monitor persists a tick with `cur.update(mutated)` — and `dict.update` never *deletes* a
+  key, so the slice came straight back off disk still expired. The item abandoned itself
+  again on the next tick, and each round deletes the torrent **with its files**. Found by
+  testing the path on the live box: ten rounds in forty seconds against a 3.8 GB release,
+  and it would not have stopped on its own. A slice is now *retired* (overwritten with an
+  inert value) rather than removed. See [GOTCHAS.md](docs/GOTCHAS.md) § you cannot DELETE a
+  field from an item inside a monitor tick.
+
 ## [17.9.0] — 2026-09-18
 **One episode out of a whole-season pack — and the rest of the season a flag flip away.**
 
@@ -26,7 +37,8 @@
 * A pack that turns out not to name its episodes in any resolvable way is abandoned on its
   own: the torrent is dropped (nothing of it downloaded — an unresolved slice holds every
   file at priority 0) and the single-episode release the picker had in reserve takes its
-  place, with the library row keeping its identity throughout.
+  place, with the library row keeping its identity throughout. Verified live, which is how
+  the next line got found.
 
 ## [17.8.0] — 2026-09-18
 **See what's playing on your other devices — and pull it over.**
