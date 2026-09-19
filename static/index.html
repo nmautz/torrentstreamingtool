@@ -4291,7 +4291,7 @@ let epIsMovie = false;     // single-file item → movie-info panel instead of a
 // when the page opens, dropped the moment the viewer scrolls it themselves (or
 // switches season / closes the page) — see _epApplyAutoScroll.
 let _epAutoScrollArmed = false;
-let _epAutoScrollTop   = -1;   // the scrollTop WE set, so our own scroll event isn't mistaken for the user's
+let _epScrollSettleUntil = 0;   // our own scroll (and the browser's clamp of it) is not the viewer scrolling
 let _epScrollHooked    = false;
 // Stream file picker state
 let streamPrepData = null;   // {hash, files, magnet, title} from /stream/prepare
@@ -9233,7 +9233,7 @@ async function openEpisodePicker(itemId, title, section, filePath){
   epItemId=itemId;
   epSeriesKey=null; epFileItem={};   // single-item open — clear any series mode
   epFiles=[]; epChecked=new Set();
-  _epAutoScrollArmed=true; _epAutoScrollTop=-1;   // open on next-up until the viewer scrolls
+  _epAutoScrollArmed=true; _epScrollSettleUntil=0;   // open on next-up until the viewer scrolls
   epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[]; epIsMovie=false;
   epSection=section||"";
 
@@ -9318,7 +9318,7 @@ async function openEpisodePicker(itemId, title, section, filePath){
 async function openSeriesPage(seriesKey, title, section, filePath){
   epItemId=null; epSeriesKey=seriesKey; epFileItem={};
   epFiles=[]; epChecked=new Set();
-  _epAutoScrollArmed=true; _epAutoScrollTop=-1;   // open on next-up until the viewer scrolls
+  _epAutoScrollArmed=true; _epScrollSettleUntil=0;   // open on next-up until the viewer scrolls
   epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[]; epIsMovie=false;
   epSection=section||"";
 
@@ -10124,7 +10124,7 @@ function epSwitchSeason(s){
   // "show me this" gesture, so it starts where the season starts — and it ends
   // the open-on-next-up scroll, which is about where you LEFT off.
   _epAutoScrollArmed=false;
-  const list=document.getElementById("epList"); if(list){ list.scrollTop=0; _epAutoScrollTop=0; }
+  const list=document.getElementById("epList"); if(list) list.scrollTop=0;
 }
 
 function closeEpisodePage(){
@@ -11720,31 +11720,48 @@ let _epNextUpNow=null;
 // episode before it still showing — without that peek the list reads as if it
 // simply starts at episode 11 and the earlier ones are gone.
 const EP_SCROLL_PEEK=44;
-function _epApplyAutoScroll(){
-  const list=document.getElementById("epList");
-  if(!list) return;
-  _epHookListScroll(list);
-  if(!_epAutoScrollArmed) return;
-  if(!_epNextUpNow){ _epAutoScrollTop=list.scrollTop; return; }
-  const row=list.querySelector(`.ep-card[data-path="${_cssAttr(_epNextUpNow)}"]`);
+const EP_SCROLL_SETTLE_MS=700;
+function _epScrollToNextUp(list){
+  const row=list.querySelector(`.ep-card[data-path="${_cssAttr(_epNextUpNow||"")}"]`);
   if(!row) return;
   // Measured against the scroller, not offsetTop: the rows sit inside a grid
   // inside several wrappers, and on a wide screen that grid is two columns.
   const delta=row.getBoundingClientRect().top-list.getBoundingClientRect().top;
   const max=Math.max(0, list.scrollHeight-list.clientHeight);
   list.scrollTop=Math.max(0, Math.min(list.scrollTop+delta-EP_SCROLL_PEEK, max));
-  _epAutoScrollTop=list.scrollTop;
+  _epScrollSettleUntil=performance.now()+EP_SCROLL_SETTLE_MS;
 }
-// The viewer scrolling the list themselves ends the auto-scroll for this visit —
-// a repaint that yanks the page back to "next up" while someone is reading three
-// episodes further down is exactly the behaviour _epLiveRefresh exists to avoid.
-// Our own scroll fires this event too, hence the comparison against what we set.
-function _epHookListScroll(list){
+function _epApplyAutoScroll(){
+  const list=document.getElementById("epList");
+  if(!list) return;
+  _epHookListGestures(list);
+  if(!_epAutoScrollArmed || !_epNextUpNow) return;
+  _epScrollToNextUp(list);
+  // A position measured in the same tick as the paint is provisional: the list is
+  // still settling (a 5700px list measured 8800px mid-render on Hunter x Hunter),
+  // and the browser clamps whatever we set to the height it has at that instant.
+  // Re-measure once the frame has actually laid out.
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{
+    if(_epAutoScrollArmed && _epNextUpNow) _epScrollToNextUp(list);
+  }));
+}
+// The viewer moving the list themselves ends the auto-scroll for this visit — a
+// repaint that yanks the page back to "next up" while someone is reading three
+// episodes further down is exactly what _epLiveRefresh exists to avoid.
+//
+// Gestures decide it, NOT the `scroll` event: the clamp described above fires
+// `scroll` with a delta of over a thousand pixels and is indistinguishable from a
+// flick, so a scroll-position comparison disarmed itself on every open. `scroll`
+// is still watched — it is the only signal a scrollbar drag gives — but only
+// outside the settle window after our own scroll.
+function _epHookListGestures(list){
   if(_epScrollHooked) return;
   _epScrollHooked=true;
+  const off=()=>{ _epAutoScrollArmed=false; };
+  ["wheel","touchstart","keydown"].forEach(t=>
+    list.addEventListener(t, off, {passive:true}));
   list.addEventListener("scroll",()=>{
-    if(!_epAutoScrollArmed) return;
-    if(Math.abs(list.scrollTop-_epAutoScrollTop)>4) _epAutoScrollArmed=false;
+    if(_epAutoScrollArmed && performance.now()>_epScrollSettleUntil) off();
   }, {passive:true});
 }
 

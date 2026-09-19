@@ -4264,13 +4264,20 @@ prep-status/metadata/SSE repaint would otherwise drop the list back to the top
 (the same fact `_epLiveRefresh`'s scroll save/restore exists for). "Armed until
 the viewer scrolls" is the whole contract, and it has two traps:
 
-- **Our own `scrollTop =` fires `scroll` too.** A naive `scroll` listener
-  disarms itself the instant it lands, and the next repaint goes to the top.
-  `_epApplyAutoScroll` records what it set in `_epAutoScrollTop` and the
-  listener only disarms when the position differs by more than a few pixels.
-  Same reason the listener is installed **once** (`_epScrollHooked`) on the
-  element, which survives every `innerHTML` rebuild — re-adding it per render
-  stacks a new listener on every repaint.
+- **Our own `scrollTop =` fires `scroll` too — and so does the browser
+  overruling it.** Comparing the new position against what we set is not enough:
+  the list is still settling when the first render scrolls it (Hunter x Hunter's
+  5.7k-pixel list measures 8.8k mid-render), so the browser clamps our 2901 to
+  1594 and the resulting `scroll` event looks exactly like a 1300px flick. That
+  disarmed the feature on every open, and the page came to rest ~300px short.
+  Two fixes, both needed: **scroll twice** (immediately, then after a double
+  `requestAnimationFrame`, once the frame has really laid out), and let
+  **gestures** decide the disarm — `wheel` / `touchstart` / `keydown`, with
+  `scroll` honoured only outside `_epScrollSettleUntil`, which covers the one
+  gesture that produces no other event (a scrollbar drag). Same reason the
+  listeners are installed **once** (`_epScrollHooked`) on the element, which
+  survives every `innerHTML` rebuild — re-adding them per render stacks a new
+  set on every repaint.
 - **`offsetTop` is not the scroll offset here.** The rows sit in a grid inside
   several wrappers, and on a wide screen that grid is `xl:grid-cols-2`, so the
   nearest positioned ancestor is not the scroller. Measure the row against

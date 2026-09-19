@@ -12,6 +12,8 @@
   you've never touched, or one you've finished, still opens at the top.
   Scrolling the list yourself ends it for that visit: from then on repaints leave you
   where you are, and picking a season tab by hand still opens that season at its start.
+  Measured on the box: Hunter x Hunter, 19 of 58 episodes watched, opens with episode 20
+  at the top of the list and 19 peeking above it.
 * **Fixed: a finished season re-opening on itself.** Which season a show opens on is
   now decided by the same rule — the episode you're up to — so finishing season 1 hands
   over to season 2 instead of re-opening the season you just completed. The rule needed
