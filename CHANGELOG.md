@@ -1,5 +1,19 @@
 # Changelog
 
+## [18.6.1] — 2026-09-20
+* **Fixed: nothing was saving progress at all while playing to the external screen.**
+  Every progress POST is gated on `armed.duration > 0`, and duration came **only from the
+  page**. Early mode hands off the instant playback starts, when the `<video>` usually has
+  no duration yet — so `armed.duration` stayed 0 and `maybePostProgress` returned at its
+  first guard every single time. `itemDidEnd` then posted `armed.duration` (0), which also
+  failed the `t >= 5` guard, so **completion was lost too**. `_npTick` would have repaired
+  it, but it rides `_lpClockTick`, which does not run while the element is parked — so the
+  one path that could have healed it was closed by the same design that created it.
+* Duration is now taken from the **`AVPlayerItem`**, on `readyToPlay`, on every time
+  observer tick, and in `replaceItem` — which never updated it at all, so every episode
+  after an auto-advance inherited the previous one's. An incoming arm can no longer
+  overwrite a good duration with 0.
+
 ## [18.6.0] — 2026-09-20
 * **Confirmed working: two consecutive locks, video on the glasses through both.**
 * **Fixed auto-advance, which was broken at both ends.** `nativeEnded` only set a flag —

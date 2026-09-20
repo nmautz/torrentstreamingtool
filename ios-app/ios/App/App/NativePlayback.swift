@@ -331,7 +331,12 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // While WE are the player, the page's `paused` is a stale echo of a web
         // element WebKit paused on our behalf — never a command. Taking it would
         // let a routine arm stop playback the user never touched.
-        if isNativeActive { a.paused = armed.paused }
+        if isNativeActive {
+            a.paused = armed.paused
+            // The item knows its own duration better than a page whose element is
+            // parked; never let an arm overwrite a good value with 0.
+            if a.duration <= 0 { a.duration = armed.duration }
+        }
         armed = a
         // A fresh session can be yielded again. Without this, one takeover would
         // leave the flag set for the life of the process and every later session
@@ -498,6 +503,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
 
         statusObs = it.observe(\.status, options: [.new]) { [weak self] obs, _ in
             guard let self = self, obs.status == .readyToPlay else { return }
+            self.adoptDuration(from: obs)
             self.applyTrackSelection(on: obs)
             self.seekAndPlay(to: startAt, play: shouldPlay)
         }
@@ -531,6 +537,24 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         t -= 0.3
         if armed.duration > 1 { t = min(t, armed.duration - 1) }
         return max(t, 0)
+    }
+
+    /// Take the duration from the item itself.
+    ///
+    /// It used to come only from the page (`_npPayload`), and every progress POST
+    /// is gated on `armed.duration > 0`. In early mode the handoff happens the
+    /// instant playback starts, when the `<video>` often has no duration yet — so
+    /// `armed.duration` stayed 0, `maybePostProgress` returned at its first guard
+    /// every time, and **nothing was ever saved**. `itemDidEnd` then posted
+    /// `armed.duration` (0) and failed the `t >= 5` guard too, so completion was
+    /// lost as well. `_npTick` would have repaired it, but it rides
+    /// `_lpClockTick`, which does not run while the element is parked.
+    ///
+    /// Also fixes the advance case: `replaceItem` never updated duration at all,
+    /// so every episode after the first inherited the wrong one.
+    private func adoptDuration(from it: AVPlayerItem) {
+        let d = CMTimeGetSeconds(it.duration)
+        if d.isFinite, d > 0 { armed.duration = d }
     }
 
     private func seekAndPlay(to t: Double, play shouldPlay: Bool) {
@@ -589,6 +613,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             guard t.isFinite else { return }
             self.armed.position = t
             self.armed.armedAt = Date()
+            if let it = p.currentItem { self.adoptDuration(from: it) }
             self.armed.paused = (p.timeControlStatus != .playing)
             self.updateNowPlaying()
             PlaybackLiveActivity.shared.update(state: self.liveActivityState(), force: false)
@@ -769,6 +794,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         item = it
         statusObs = it.observe(\.status, options: [.new]) { [weak self] obs, _ in
             guard let self = self, obs.status == .readyToPlay else { return }
+            self.adoptDuration(from: obs)
             self.applyTrackSelection(on: obs)
         }
         NotificationCenter.default.addObserver(
@@ -1491,7 +1517,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             // Bump with any change to this file. Two runs have already been
             // ambiguous about whether the app had been rebuilt, and the trail
             // should never leave that in doubt.
-            "build": "18.6.0",
+            "build": "18.6.1",
             "audioSession": sessionActivated ? "active now"
                              : (audioEverActivated ? "released (was active)" : "NEVER ACTIVATED"),
             "audioError": audioSessionError,
