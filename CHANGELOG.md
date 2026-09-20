@@ -1,5 +1,24 @@
 # Changelog
 
+## [18.4.5] — 2026-09-20
+* **The seek completion re-read the pause flag after a late arm had flipped it.** The
+  trail caught it in the act: `armPaused=-` at `background/attached`, `armPaused=Y` by
+  `locked+3s`. `p.seek` is asynchronous and arms keep arriving while it runs, so
+  `if !self.armed.paused { p.play() }` was reading a value written *after* the handoff
+  decision. The player then sat paused at a perfectly correct position — `pos=447.1`,
+  unchanged across `locked+3s` and `locked+10s`. `startNative` now captures
+  `shouldPlay` at the instant of handoff and `seekAndPlay` takes it as a parameter.
+* **A late arm can no longer pause the native player at all.** While the native player
+  owns playback, the page's `paused` is a stale echo of an element WebKit paused on our
+  behalf, not a command — `arm()` now keeps its own value.
+* **18.4.3's intent tracking was too weak.** It read the element while the page was
+  "visible" and called that intent, but WebKit's background pause fires *before*
+  `visibilitychange`, so the system pause was still recorded as the user's wish. Intent
+  is now written only by real transport actions (`lpTogglePlay` → `_npSetPausedIntent`);
+  the element is consulted only to notice a play that started some other way.
+* Confirmed working from this run: `sess=Y` before backgrounding (18.4.2) and
+  `armPaused=-` at the handoff itself (18.4.3).
+
 ## [18.4.4] — 2026-09-20
 * **The pause bug reproduces with no display attached at all** — `tcs=pause` with
   `pos=441.7` at `locked+3s`, no scene, no window, nothing plugged in. Same signature as

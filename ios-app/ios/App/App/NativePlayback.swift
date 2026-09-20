@@ -309,6 +309,10 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         a.armedAt        = Date()
 
         let wasActive = armed.active
+        // While WE are the player, the page's `paused` is a stale echo of a web
+        // element WebKit paused on our behalf — never a command. Taking it would
+        // let a routine arm stop playback the user never touched.
+        if isNativeActive { a.paused = armed.paused }
         armed = a
         // A fresh session can be yielded again. Without this, one takeover would
         // leave the flag set for the life of the process and every later session
@@ -410,6 +414,13 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         activateAudioSession()
 
         endedFlag = false
+        // THE DECISION IS MADE HERE, NOT IN THE SEEK COMPLETION.
+        // `p.seek` is asynchronous, and arms keep arriving while it runs. Measured:
+        // armPaused=- at background/attached, then armPaused=Y by locked+3s — a
+        // late arm flipped it mid-seek, the completion's `if !armed.paused` read
+        // the new value, play() was skipped, and the player sat paused at a
+        // perfectly correct position. Capture intent at the instant of handoff.
+        let shouldPlay = !armed.paused
         let startAt = extrapolatedPosition()
         let it = AVPlayerItem(url: url)
         let p = AVPlayer(playerItem: it)
@@ -433,7 +444,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         statusObs = it.observe(\.status, options: [.new]) { [weak self] obs, _ in
             guard let self = self, obs.status == .readyToPlay else { return }
             self.applyTrackSelection(on: obs)
-            self.seekAndPlay(to: startAt)
+            self.seekAndPlay(to: startAt, play: shouldPlay)
         }
         externalObs = p.observe(\.isExternalPlaybackActive, options: [.new]) { [weak self] _, _ in
             guard let self = self else { return }
@@ -467,12 +478,12 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         return max(t, 0)
     }
 
-    private func seekAndPlay(to t: Double) {
+    private func seekAndPlay(to t: Double, play shouldPlay: Bool) {
         guard let p = player else { return }
         let target = CMTime(seconds: t, preferredTimescale: 600)
         p.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
             guard let self = self else { return }
-            if !self.armed.paused { p.play() }
+            if shouldPlay { p.play() }
             self.updateNowPlaying()
             self.endBgTask()
         }
@@ -1369,7 +1380,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             // Bump with any change to this file. Two runs have already been
             // ambiguous about whether the app had been rebuilt, and the trail
             // should never leave that in doubt.
-            "build": "18.4.3",
+            "build": "18.4.4",
             "audioSession": sessionActivated ? "active" : "INACTIVE",
             "audioError": audioSessionError,
             "iosVersion": UIDevice.current.systemVersion,

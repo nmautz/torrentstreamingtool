@@ -18504,10 +18504,19 @@ function _npSeriesName() {
 // Element state while visible, last-visible state once hidden. See
 // _npVisiblePaused.
 function _npPausedIntent(v) {
-  const live = !!(v && v.paused);
-  if (document.visibilityState === "visible") { _npVisiblePaused = live; return live; }
+  // 18.4.3 read the element while the page was "visible" and treated that as
+  // intent. Not good enough: WebKit's background pause fires BEFORE
+  // visibilitychange, so the system pause was still recorded as the user's
+  // wish. Intent is now written only by lpTogglePlay and the explicit transport
+  // paths (_npSetPausedIntent); the element is consulted solely to catch a play
+  // that started some other way.
+  if (!v) return _npVisiblePaused;
+  if (document.visibilityState === "visible" && !v.paused) _npVisiblePaused = false;
   return _npVisiblePaused;
 }
+
+// The only writer of pause INTENT. Call from real user transport actions.
+function _npSetPausedIntent(paused) { _npVisiblePaused = !!paused; }
 
 function _npPayload() {
   const v = _lpV();
@@ -24561,8 +24570,11 @@ function lpStageTap(e) {
 
 function lpTogglePlay() {
   const v = _lpV();
-  if (v.paused) v.play().catch(() => {});
-  else v.pause();
+  // Record the INTENT here, where it is unambiguous — this is the user asking.
+  // Everything else that pauses the element (WebKit backgrounding it, a stall,
+  // a teardown) is not a wish and must not reach the native handoff.
+  if (v.paused) { _npSetPausedIntent(false); v.play().catch(() => {}); }
+  else { _npSetPausedIntent(true); v.pause(); }
   _lpCtlShow();
 }
 
@@ -27052,6 +27064,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.4.4</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.4.5</div>
 </body>
 </html>
