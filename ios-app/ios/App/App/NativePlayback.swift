@@ -449,6 +449,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     // MARK: Handoff in
 
     @objc private func appDidEnterBackground() {
+        if isNativeActive { diagSnap("background"); scheduleBackgroundSnaps() }
         guard armed.active, armed.handoffEnabled, armed.url != nil else { return }
         guard !isNativeActive else { return }
         startNative(reason: "background")
@@ -591,6 +592,14 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             self.armed.paused = (p.timeControlStatus != .playing)
             self.updateNowPlaying()
             PlaybackLiveActivity.shared.update(state: self.liveActivityState(), force: false)
+            // Push the transport to the page. While native holds the display the
+            // page's own element is parked, so this is the ONLY source for its
+            // clock and seek bar. An event, not a poll: nativeStarted already
+            // proves this channel works, and a 1 Hz state() round-trip is both
+            // slower and one more thing to be wrong.
+            self.emit("nativeProgress", ["position": t,
+                                         "duration": self.armed.duration,
+                                         "paused": p.timeControlStatus != .playing])
             self.maybePostProgress(t)
             self.maybePostSession(t)
         }
@@ -1433,7 +1442,21 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     /// is alive here (the `audio` background mode plus the handoff's bg task),
     /// so these fire; if they are MISSING from the trail, that is itself the
     /// finding — the process was suspended instead of playing.
+    /// Samples after a HANDOFF. Early mode starts the player while foreground, so
+    /// these are no longer "into a lock" — the label said locked+Ns and meant
+    /// nothing of the sort once 18.5.0 landed.
     private func scheduleLockedSnaps() {
+        for d in [3.0, 10.0, 20.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + d) { [weak self] in
+                guard let self = self, self.isNativeActive else { return }
+                self.diagSnap("handoff+\(Int(d))s")
+            }
+        }
+    }
+
+    /// Samples after the app actually BACKGROUNDS. With the handoff moved earlier
+    /// this is the only thing that measures a real lock.
+    private func scheduleBackgroundSnaps() {
         for d in [3.0, 10.0, 20.0] {
             DispatchQueue.main.asyncAfter(deadline: .now() + d) { [weak self] in
                 guard let self = self, self.isNativeActive else { return }
@@ -1468,7 +1491,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             // Bump with any change to this file. Two runs have already been
             // ambiguous about whether the app had been rebuilt, and the trail
             // should never leave that in doubt.
-            "build": "18.5.2",
+            "build": "18.5.3",
             "audioSession": sessionActivated ? "active now"
                              : (audioEverActivated ? "released (was active)" : "NEVER ACTIVATED"),
             "audioError": audioSessionError,

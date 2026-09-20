@@ -18485,20 +18485,31 @@ let _npNativePos = 0;
 let _npNativeDur = 0;
 let _npPollTimer = null;
 
+// Kept as a safety net only. The transport now arrives on the `nativeProgress`
+// event, pushed from the native time observer at 1 Hz — the same channel that
+// already delivers nativeStarted, so it is known to work, and it avoids a
+// per-second bridge round-trip that has to be right in both directions.
 function _npStartPoll() {
   if (_npPollTimer || !_cap.np) return;
   _npPollTimer = setInterval(async () => {
-    if (!_npHolding) return;
+    if (!_npHolding || Date.now() - _npLastProgressAt < 4000) return;
     let st = null;
     try { st = await _cap.np.state(); } catch (_) { return; }
     if (!st || !st.native) { _npStopPoll(); _npHolding = false; return; }
-    _npNativePos = st.position || 0;
-    _npNativePaused = !!st.paused;
-    if (typeof _lpCtlTick === "function") { _lpCtlTick(); _lpCtlSync(); }
-  }, 1000);
+    _npApplyNativeTransport(st.position, st.paused, _npNativeDur);
+  }, 2000);
 }
 function _npStopPoll() {
   if (_npPollTimer) { clearInterval(_npPollTimer); _npPollTimer = null; }
+}
+let _npLastProgressAt = 0;
+function _npApplyNativeTransport(pos, paused, dur) {
+  _npLastProgressAt = Date.now();
+  if (typeof pos === "number") _npNativePos = pos;
+  if (typeof dur === "number" && dur > 0) _npNativeDur = dur;
+  _npNativePaused = !!paused;
+  if (!_npHolding) return;
+  try { _lpCtlTick(); _lpCtlSync(); } catch (_) {}
 }
 // Position the UI should show: native's while it holds, the element's otherwise.
 function _npUiTime(v) { return _npHolding ? _npNativePos : ((v && v.currentTime) || 0); }
@@ -18688,6 +18699,12 @@ function _npBindEvents() {
       _npNativePaused = false;
       _npNativeDur = lp.duration || 0;
       _npStartPoll();
+    });
+    // The native player's own clock. This is the page's only source of truth for
+    // the seek bar and time labels while the element is parked.
+    _cap.np.addListener("nativeProgress", (e) => {
+      if (!e) return;
+      _npApplyNativeTransport(e.position, e.paused, e.duration);
     });
     _cap.np.addListener("nativeEnded", () => {
       _npHolding = false;
@@ -27153,6 +27170,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.5.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.5.3</div>
 </body>
 </html>

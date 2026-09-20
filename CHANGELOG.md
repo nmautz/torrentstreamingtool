@@ -1,5 +1,19 @@
 # Changelog
 
+## [18.5.3] — 2026-09-20
+* **The clock and seek bar now follow the native player.** 18.5.2 had the page poll
+  `state()` once a second; play/pause and ±10 s worked but the readouts never moved. The
+  transport is now **pushed** from the native time observer as a `nativeProgress` event —
+  the same channel that already delivers `nativeStarted`, so it is known to work, and it
+  drops a per-second bridge round-trip that had to be right in both directions. The poll
+  survives only as a safety net, at 2 s, and stands down whenever events are arriving.
+* **The `locked+Ns` samples were lying since 18.5.0.** Early mode starts the player while
+  the app is *foreground*, so samples timed from the handoff were never "into a lock" at
+  all — in the last trail every one of them carried `app=act` because the phone had not
+  been locked yet. They are now labelled **`handoff+Ns`**, and a new **`locked+Ns`** series
+  is scheduled from `didEnterBackground`, which is the only thing that measures a real
+  lock. A `background` row marks the transition.
+
 ## [18.5.2] — 2026-09-20
 * **The page is now a full remote while native holds the display**, not just for
   play/pause. `_lpCommitSeek` and `lpSeekBy` route to a new `seekTo` plugin method;
