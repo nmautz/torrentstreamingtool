@@ -692,6 +692,16 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         if tvModeOn { applyBlank(true) }   // re-dim after a transient interruption
         guard isNativeActive else { return }
 
+        // HOLDING THE DISPLAY MEANS "active" IS NOT A HAND-BACK CUE.
+        // With a live external-display scene iOS reports the app active while the
+        // phone is still locked — measured: a whole run of app=act rows with the
+        // phone's screen dark throughout. The deadline below then fired ~5 s into
+        // every locked session and tore the native player down, taking the picture
+        // on the display with it. That is the "showed a frame for a second or two,
+        // black otherwise" symptom. While our window is up, the native player IS
+        // the presentation; only disarm/stop ends it.
+        if extWindow != nil { return }
+
         // If the webview never calls resume() — it reloaded, crashed, or the
         // page was replaced — we'd be left playing invisible audio with no UI.
         // Tear down after a grace period so the app can't get into that state.
@@ -707,6 +717,14 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
 
     func reclaim() -> [String: Any] {
         handBackDeadline?.cancel(); handBackDeadline = nil
+        // Same reasoning as the deadline above: a foreground JS hand-back would
+        // stop the player that is currently feeding the external display. Tell the
+        // page we are holding it and let it leave the web element alone.
+        if extWindow != nil, isNativeActive {
+            return ["holding": true, "active": true, "position": armed.position,
+                    "paused": armed.paused, "ended": false,
+                    "itemId": armed.itemId, "filePath": armed.filePath]
+        }
         let wasActive = isNativeActive
         let pos = armed.position
         let paused = armed.paused
@@ -1294,6 +1312,10 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             "connectedScenes": roles,
             "openSessions": openRoles,
             "externalDisplayScene": roles.contains(where: { $0.contains("ExternalDisplay") }),
+            // Bump with any change to this file. Two runs have already been
+            // ambiguous about whether the app had been rebuilt, and the trail
+            // should never leave that in doubt.
+            "build": "18.4.0",
             "iosVersion": UIDevice.current.systemVersion,
             "extMode": armed.extMode,
             "trail": diagTrail,

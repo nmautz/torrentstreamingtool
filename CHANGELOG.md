@@ -1,5 +1,23 @@
 # Changelog
 
+## [18.4.0] — 2026-09-20
+* **The native player was destroying itself ~5 s into every locked session.**
+  `didBecomeActive` arms a 5-second deadline that calls `stopNative()`, there to catch a
+  webview that never calls `resume()`. But with a live external-display scene iOS reports
+  the app **active while the phone is still locked** — so that deadline fired on every
+  lock, tore down the player, and took the picture on the display with it. The trail shows
+  it exactly: `locked+3s` present with `nat=Y`, then **no `locked+10s` or `locked+20s`**
+  (both guard on `isNativeActive`), and `nat=-` by the next sample. It is also the
+  measured symptom — "a frame for a second or two, black otherwise" is the ~5 s window
+  between the layer attaching and the deadline firing.
+* While our window is up, the native player **is** the presentation, so: the deadline is
+  no longer armed, and `reclaim()` refuses to hand back, returning `holding: true`
+  instead. `_npHandBack` bails on that rather than stopping the player feeding the
+  display. Only disarm/stop ends the session.
+* **The trail now carries the app build.** Two runs were ambiguous about whether the app
+  had been rebuilt, which is not a thing a diagnostic should ever leave in doubt. The
+  header reads `app build 18.4.0`, or `pre-18.4.0` for anything older.
+
 ## [18.3.5] — 2026-09-20
 * **The lock was holding all along — `app=act` never meant the phone had unlocked.**
   Confirmed on device: through a whole run whose rows all read `app=act`, the phone's

@@ -18577,6 +18577,12 @@ async function _npHandBack() {
   let r = null;
   try { r = await _cap.np.resume(); } catch (_) { return; }
   if (!r || !r.active) return;
+  // The native player is driving an external display and did NOT stop. iOS
+  // reports the app active while the phone is still locked when a display is
+  // attached, so this path runs at a moment the user has not actually come back.
+  // Handing back here would stop the player feeding the display. Leave the web
+  // element paused where it is; disarm/stop is what ends the session.
+  if (r.holding) return;
   const v = _lpV(); if (!v) return;
 
   // Native auto-advanced into the next episode while we were away — resync the
@@ -20398,7 +20404,7 @@ function _appOpenAppSettings() {
     try {
       const d = await _cap.np.extDiag();
       const head = [
-        `iOS ${d.iosVersion}   mode=${d.extMode}`,
+        `iOS ${d.iosVersion}   app build ${d.build || "pre-18.4.0"}   mode=${d.extMode}`,
         `sceneManifest: ${d.sceneManifest}`,
         `externalDisplayScene: ${d.externalDisplayScene}`,
         `connectedScenes: ${(d.connectedScenes || []).join(", ") || "(none)"}`,
@@ -27000,6 +27006,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.3.5</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.4.0</div>
 </body>
 </html>
