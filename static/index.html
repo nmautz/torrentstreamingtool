@@ -20428,10 +20428,25 @@ function _appOpenAppSettings() {
         verdict.push("BUILD: OLD - this app has no scene= data, so it predates the fix.",
                      "       Rebuild (./build-ipa.sh --fast) before any of this means anything.");
       }
+      // The claim is worth reporting on its own: mirroring going off is the whole
+      // mechanism, and until run 5 it had never once happened.
+      const claim = trail.filter((r) => r.at === "earlyClaim").pop();
+      if (claim) {
+        verdict.push(claim.mirrored
+          ? `CLAIM: window built at ${claim.t}s but mirroring STAYED UP.`
+          : `CLAIM: display taken over at ${claim.t}s - mirroring off. This is the win.`);
+      }
+      const lastRow = trail[trail.length - 1];
+      const released = claim && !claim.mirrored && lastRow && !lastRow.extWindow;
       if (!locked.length) {
         verdict.push("RESULT: NO LOCK IN THIS TRAIL - nothing was tested.",
                      "        Play an episode with the monitor connected, press the power",
                      "        button, wait 20s, then unlock and press Read.");
+        if (released) {
+          verdict.push("        NOTE: the claim was RELEASED before you read this - the",
+                       "        window only lives while an episode is armed. Don't stop",
+                       "        playback before locking; leave it playing.");
+        }
       } else {
         const L = locked[0];
         // A lock that did not STAY locked measures nothing: run 4's locked+3s was
@@ -26932,6 +26947,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.3.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.3.1</div>
 </body>
 </html>

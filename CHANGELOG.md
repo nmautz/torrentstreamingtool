@@ -1,5 +1,17 @@
 # Changelog
 
+## [18.3.1] — 2026-09-20
+* **Early mode works: mirroring went off for the first time.** Run 5's trail carries
+  `earlyClaim ... scene=Y mir=- win=Y winScene=Y` — the window is attached to the
+  external-display scene and iOS has dropped mirroring for that display. Every previous
+  trail, across every mode, had `mir=Y` on every row. The ownership mechanism is
+  confirmed; what remains untested is whether that ownership survives the lock.
+* The readout now reports the claim on its own line rather than leaving it in the
+  columns, and calls out the trap run 5 fell into: the claim is **released when playback
+  is disarmed**, so stopping the episode before reading the trail tears the window down
+  (`win=-`) and resets `extMode` to its default, which is also why the header read
+  `mode=window` after an Early-mode run. Don't stop playback before locking.
+
 ## [18.3.0] — 2026-09-20
 * **New: "Early" monitor-feed mode — claim the display when the episode starts, not
   when the phone locks.** The trails had made a persuasive case that nothing could work:
