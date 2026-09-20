@@ -1136,6 +1136,15 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private var diagTrail: [[String: Any]] = []
     private var diagT0 = Date()
 
+    private static func stateName(_ s: UIApplication.State) -> String {
+        switch s {
+        case .active:   return "act"
+        case .inactive: return "inact"
+        case .background: return "bg"
+        @unknown default: return "?"
+        }
+    }
+
     private func diagSnap(_ label: String) {
         let ext = externalScreen
         // Both of these are OPTIONAL properties reached through OPTIONAL chaining,
@@ -1159,6 +1168,12 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             "extPlayback": player?.isExternalPlaybackActive ?? false,
             "native":      isNativeActive,
             "mode":        armed.extMode,
+            // "act" / "inact" / "bg". Run 4 could not distinguish "the phone was
+            // locked" from "the app came back and the reading is meaningless", and
+            // the user had no way to know either. There is no public API for WHY a
+            // device woke, but there is one for whether we were foreground when the
+            // sample was taken, and that is the part that invalidates a reading.
+            "appState":    Self.stateName(UIApplication.shared.applicationState),
         ]
         if let b = ext?.bounds { row["extBounds"] = "\(Int(b.width))x\(Int(b.height))" }
         diagTrail.append(row)

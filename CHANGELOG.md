@@ -1,5 +1,14 @@
 # Changelog
 
+## [18.2.4] — 2026-09-20
+* **The trail now records `UIApplication.applicationState` per sample.** Run 4's
+  `locked+3s` was taken while the app was foreground again and neither the readout nor
+  the user could tell — the wake had to be inferred from a nearby `becomeActive`, and
+  "why did it wake?" was unanswerable. There is no public API for a wake *reason*, but
+  there is one for whether we were backgrounded when the sample was taken, which is the
+  part that invalidates a reading. `app=bg` on a `locked+` row is now the precondition
+  for believing anything on it.
+
 ## [18.2.3] — 2026-09-20
 * **The external-display SCENE does not arrive with the screen, and is absent at the
   moment the window gets built.** The first trail containing a real lock showed
