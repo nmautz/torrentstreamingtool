@@ -758,7 +758,7 @@
       </div>
 
       <div class="px-5 py-3 border-b border-amber-900/60 text-[11px] text-amber-200/80 bg-amber-950/20">
-        <strong>Dry run only.</strong> Nothing is deleted yet — the sweep that acts on this policy is not switched on. The toggle and thresholds are saved so you can size the feature against your real library first.
+        <strong>Deleting a source cannot be undone from here.</strong> The only way back is re-downloading the identical release, which re-adopts the same bundle. The sweep runs on its own only while the policy is <strong>on</strong> and free space is <strong>below the floor</strong>; <strong>Dry Run</strong> always shows you the plan without touching anything.
       </div>
 
       <div class="px-5 py-4 grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -793,9 +793,14 @@
           class="text-xs font-bold uppercase tracking-wide px-4 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:text-white transition-colors disabled:opacity-50">
           Dry Run
         </button>
+        <button id="seRunBtn" onclick="runSourceEvictionSweep(this)"
+          class="text-xs font-black uppercase tracking-wide px-4 py-2 border border-red-800 bg-red-950 text-red-300 hover:bg-red-900 transition-colors disabled:opacity-50">
+          Reclaim Now
+        </button>
         <span id="seStatus" class="text-[11px] text-gray-500"></span>
       </div>
 
+      <div id="seLast" class="hidden px-5 pb-4 text-[11px] text-gray-500"></div>
       <div id="seResult" class="hidden border-t border-amber-900/60"></div>
     </div>
   </div>
@@ -4025,6 +4030,7 @@ async function loadStorageCompression(){
   loadStorageBreakdown();
   loadOndemandOnly();
   loadSourceEviction();
+  loadSourceEvictionStatus();
   const running = await _fetchCompression();
   if(running) startCompressionPolling();
 }
@@ -6440,6 +6446,62 @@ function _seRenderPlan(d){
         </div>
         <div class="text-[11px]">${rows(d.eligible)}</div>
       </div>` : ""}`;
+}
+
+async function loadSourceEvictionStatus(){
+  let r;
+  try{ r = await fetch("/api/admin/source-eviction/status", {headers: authHeader()}); }catch(_){ return; }
+  if(!r.ok) return;
+  const d = await r.json();
+  const el = document.getElementById("seLast");
+  const s = d.current && d.current.running ? d.current : d.last;
+  if(!s){ el.classList.add("hidden"); return; }
+  el.classList.remove("hidden");
+  if(d.current && d.current.running){
+    el.innerHTML = `<span class="text-amber-300">Sweeping… ${s.deleted} reclaimed, ${_fmtBytes(s.bytes_freed)} freed.</span>`;
+    setTimeout(loadSourceEvictionStatus, 2000);
+  } else if(s.error){
+    el.textContent = s.error;
+  } else {
+    el.textContent = `Last sweep ${new Date(s.finished_at).toLocaleString()}: reclaimed `
+      + `${s.deleted} source file${s.deleted!==1?"s":""}, freed ${_fmtBytes(s.bytes_freed)}`
+      + (s.stopped ? " (stopped early)." : ".");
+  }
+}
+
+async function runSourceEvictionSweep(btn){
+  // Two gates before anything is deleted: the plan is shown, and the count is
+  // named in the confirm. A sweep that silently reclaimed "some files" would be
+  // the wrong shape of control for an action with no undo.
+  const status = document.getElementById("seStatus");
+  status.textContent = "Computing the plan…";
+  let p;
+  try{
+    const r = await fetch("/api/admin/source-eviction/dry-run", {method:"POST", headers: authHeader()});
+    if(!r.ok){ status.textContent = `Failed (HTTP ${r.status}).`; return; }
+    p = await r.json();
+  }catch(_){ status.textContent = "Network error."; return; }
+  status.textContent = "";
+  document.getElementById("seResult").classList.remove("hidden");
+  document.getElementById("seResult").innerHTML = _seRenderPlan(p);
+  if(!p.enabled){ showToast("Switch the policy on first — the sweep refuses while it's off."); return; }
+  if(!p.triggered){ showToast(`Free space (${p.free_human}) is above the ${p.floor_gb} GB floor — nothing would be reclaimed.`); return; }
+  const n = (p.would_delete || []).length;
+  if(!n){ showToast("Nothing is eligible — see the blockers below."); return; }
+  if(!confirm(`Permanently delete ${n} source file${n!==1?"s":""} (${p.would_free_human})?
+
+`
+            + `Their on-device bundles are kept, so they keep playing on phones and in the browser. `
+            + `They will lose VLC on the TV (5.1 audio, HDR, image subtitles), repair, re-prep and `
+            + `just-in-time streaming.
+
+The only way back is re-downloading the identical release.`)) return;
+  if(btn){ btn.disabled = true; btn.classList.add("opacity-50"); _markLoading(btn, true); }
+  try{
+    await fetch("/api/admin/source-eviction/run", {method:"POST", headers: authHeader()});
+  }catch(_){}
+  if(btn){ btn.disabled = false; btn.classList.remove("opacity-50"); _markLoading(btn, false); }
+  loadSourceEvictionStatus();
 }
 
 // Contextual help for the Auto-Purge card: reflect the toggle + size cap.

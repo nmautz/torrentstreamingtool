@@ -2553,16 +2553,59 @@ The v8 key is `sha256(version | filename | size)` — path- and mtime-independen
 existing bundle**, with progress and skip data intact and no re-prep. A wrong
 eviction therefore costs bandwidth, not the episode.
 
-### What ships in 18.0.0: dry run only
+### The sweep (18.1.0)
 
-The policy, the gate, the source-optional addressing and the admin card are all
-in. **The sweep that acts on the plan is not wired up — nothing is deleted.**
-`POST /api/admin/source-eviction/dry-run` (Admin -> Storage -> **Reclaim Source
-Files** -> *Dry Run*) computes the whole plan and reports it: free space now, the
-eligible pool, what a sweep would take this instant, and a per-reason breakdown of
-what is holding everything else back. The toggle and thresholds are saved so the
-feature can be sized against a real library before it is allowed to delete
-anything.
+`source_eviction_loop` ticks every 5 minutes and costs **one `shutil.disk_usage`
+call** in the common case: the expensive walk only happens once free space is
+below `floor_gb`. When it is, and the box is idle, `_run_source_eviction` works
+down `plan.would_delete` until free space clears `target_gb`. `POST
+/api/admin/source-eviction/run` (Admin -> Storage -> **Reclaim Now**) skips the
+wait but not the conditions — it still refuses while the policy is off or the disk
+is above the floor.
+
+> **The record is written BEFORE the file is deleted, and the order is not
+> negotiable.** The two crash windows are not symmetric:
+>
+> * *record then crash* — a file marked evicted whose source still exists.
+>   Harmless: `_evicted_bundle_dir` resolves to the same directory the stat would
+>   have produced, so nothing breaks; at worst that file is never re-evicted.
+> * *delete then crash* — a source-less file with **no** record. Its bundle then
+>   matches no library file, lands in `orphans`, and `cache_autopurge_loop` deletes
+>   it the next time the cache passes its cap. Total loss, recoverable only by
+>   re-downloading.
+>
+> A failed `os.remove` rolls the record back, so a locked file never ends up badged
+> Bundle Only while it is still perfectly playable in VLC.
+
+`_evict_one_source` **re-checks every precondition immediately before deleting** —
+bundle still present, segment check still passing, not compressing, no prep job on
+the key, not the current VLC file, no live JIT session. The plan is computed
+against a library snapshot that can be seconds old, and a viewer can start an
+episode inside that window. The loop also aborts between files the moment
+`_machine_in_use` goes true: this is housekeeping and a viewer outranks it.
+
+### Measured on the live library (18.0.1, 613 files)
+
+The first real dry run is the reason to be honest about what this feature is worth:
+
+| | |
+|---|---|
+| Files weighed | 613 (8.4 s) |
+| Eligible | **0** |
+| Sole-blocker `unverified` | 34 files / **5.3 GB** — the pool the bundle audit would unlock |
+| Sole-blocker `no-bundle` | 121 files / 58.9 GB — never prepped, so nothing to fall back on |
+| `not-aged` | 410 files / 372.9 GB |
+| Free space | 350.7 GB, against a 100 GB floor — so `triggered` was false anyway |
+
+Every file with a source belongs to a series touched within **60 days**, and 410 of
+613 within 15. Combined with the per-series clock, that is a library where almost
+nothing ages out: the realistic ceiling at the shipped defaults is **~5 GB**.
+Dropping `never_played_days` from 7 to 1 takes it to 62.3 GB — that is the
+downloaded-but-never-opened backlog, and a 1-day clock is aggressive for exactly
+the content you have not got to yet.
+
+**Read that before tuning anything.** On a heavily-watched library the per-series
+clock, not the gate, is the binding constraint.
 
 ---
 

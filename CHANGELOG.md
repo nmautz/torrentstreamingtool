@@ -1,5 +1,32 @@
 # Changelog
 
+## [18.1.0] — 2026-09-19
+* **The source-eviction sweep is now wired — it can delete.** 18.0.0 measured; this
+  acts. `source_eviction_loop` checks free space every 5 minutes (one
+  `disk_usage` call — the expensive walk only happens below the floor), and when
+  the disk is under `floor_gb` and the box is idle it reclaims the oldest eligible
+  sources until free space is back above `target_gb`. Admin → Storage → **Reclaim
+  Now** runs it on demand; it skips the wait, never the conditions.
+  * **The record is written before the file is deleted, and that order is not
+    negotiable.** The two crash windows are not symmetric: record-then-crash leaves
+    a file marked evicted whose source still exists (harmless — the stored key
+    resolves to the same directory), while delete-then-crash leaves a source-less
+    file with no record, whose bundle then matches no library file, lands in
+    `orphans`, and gets deleted by `cache_autopurge_loop` the next time the cache
+    passes its cap. A failed delete rolls the record back.
+  * **Every precondition is re-checked immediately before each delete**, because
+    the plan is computed against a snapshot that can be seconds old and a viewer
+    can start an episode in that window. The sweep also aborts between files the
+    moment the box stops being idle.
+  * Confirm dialog names the file count, the bytes, exactly what those episodes
+    lose (VLC 5.1 / HDR / image subs, repair, re-prep, JIT) and that the only way
+    back is re-downloading the identical release.
+* **New: `dry_run` on the bundle audit** (`POST /api/admin/bundle-audit
+  {"dry_run": true}`). Reports damage and repairs nothing — no bundle purged, no
+  prep queued. A repair starts an encode, and on a box someone is watching that is
+  a decision worth seeing before it happens. Verdicts are still persisted, since
+  they measure what is on disk and re-deriving them costs another full scan.
+
 ## [18.0.1] — 2026-09-19
 * **Fixed: the dry run reported 37 files as "source already reclaimed" when nothing
   had ever been reclaimed.** A file with no source on disk and no `files[].bundle`

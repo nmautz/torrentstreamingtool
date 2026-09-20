@@ -1399,6 +1399,11 @@ class AppState:
     bundle_audit: dict = field(default_factory=dict)      # {running, scope, auto, total, scanned, current_name, damaged:[…], repaired, stopped, error, started_at, finished_at}
     bundle_audit_task: Optional[asyncio.Task] = None
     bundle_audit_stop: bool = False
+    # Source eviction (delete a prepped file's source, keep its bundle).
+    source_eviction: dict = field(default_factory=dict)   # {running, deleted, bytes_freed, error, manual, stopped, started_at, finished_at}
+    source_eviction_last: dict = field(default_factory=dict)  # the last completed sweep, for the admin card
+    source_eviction_task: Optional[asyncio.Task] = None
+    source_eviction_stop: bool = False
     # ── YouTube-on-TV (browser playback on the host display, remote-controlled) ──
     youtube_active: bool = False                          # True while a YouTube video is the active TV playback (browser, not VLC)
     youtube_video_id: Optional[str] = None               # 11-char YouTube id currently loaded on the TV page
@@ -13488,6 +13493,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     subupgrade_loop = asyncio.create_task(subtitle_upgrade_loop())
     od_reaper_loop  = asyncio.create_task(_od_reaper())
     maint_loop      = asyncio.create_task(background_maintenance_loop())
+    evict_loop      = asyncio.create_task(source_eviction_loop())
     shotscan_task   = asyncio.create_task(shot_scan_loop())
     tvui_task       = asyncio.create_task(tv_ui_loop())
     rvol_guard      = asyncio.create_task(remote_volume_guard())   # opt-in: no-op unless REMOTE_VOLUME_GUARD=1 (Windows)
@@ -13528,7 +13534,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     for t in (guard, broadcaster, dl_monitor, dvbackfill, animefill, vlc_tracker, bg_loop,
               jackett_mon, reboot_loop, autoprep_loop, update_loop, dlsched_loop,
               sysmon_loop, cachepurge_loop, subupgrade_loop, od_reaper_loop,
-              maint_loop, shotscan_task, tvui_task, rvol_guard,
+              maint_loop, evict_loop, shotscan_task, tvui_task, rvol_guard,
               diag_lag, diag_vitals, diag_probe):
         t.cancel()
     if remote_listener is not None:
@@ -14077,6 +14083,7 @@ class ValidateFilesReq(BaseModel):
 
 class BundleAuditReq(BaseModel):
     scope: Optional[str] = None                 # None/""/"all" ⇒ every prepped file; else a library item id
+    dry_run: bool = False                       # report damage WITHOUT purging the bundle or re-queuing prep
 
 
 class RepairFilesReq(BaseModel):
@@ -25975,6 +25982,9 @@ async def admin_start_bundle_audit(request: Request, body: BundleAuditReq) -> JS
     """Audit prepped HLS bundles for frozen-picture-over-silence damage and
     repair what fails (purge the bundle, re-queue ordinary prep).
 
+    `dry_run:true` reports what it found and repairs nothing — no bundle is
+    purged and no prep is queued. Use it before a real run on a box in use.
+
     `scope` None/""/"all" ⇒ every prepped file, else one item id. Unlike the
     idle sweep this re-scans bundles that already carry a verdict — it is the
     "check it again now" button. Structural only: stats, no decode, so it costs
@@ -25986,12 +25996,13 @@ async def admin_start_bundle_audit(request: Request, body: BundleAuditReq) -> JS
     scope = (body.scope or "all").strip() or "all"
     state.bundle_audit_stop = False
     state.bundle_audit = {
-        "running": True, "scope": scope, "auto": False,
+        "running": True, "scope": scope, "auto": False, "dry_run": bool(body.dry_run),
         "total": 0, "scanned": 0, "current_name": "",
         "damaged": [], "repaired": 0, "stopped": False, "error": "",
         "started_at": _now_iso(), "finished_at": None,
     }
-    state.bundle_audit_task = asyncio.create_task(_run_bundle_audit(scope))
+    state.bundle_audit_task = asyncio.create_task(
+        _run_bundle_audit(scope, dry_run=bool(body.dry_run)))
     return JSONResponse(_bundle_audit_status())
 
 
@@ -26461,6 +26472,37 @@ async def admin_source_eviction_dry_run(request: Request) -> JSONResponse:
     so it is on-demand rather than polled."""
     _require_admin(request)
     return JSONResponse(await _build_evict_plan())
+
+
+@app.post("/api/admin/source-eviction/run")
+async def admin_run_source_eviction(request: Request) -> JSONResponse:
+    """Run the sweep now (the loop otherwise waits for the disk to drop below the
+    floor). **This deletes source files.** It still refuses unless the policy is
+    enabled and free space is genuinely below `floor_gb` — the manual trigger
+    skips the wait, never the conditions. 409 if a sweep is already running."""
+    _require_admin(request)
+    if state.source_eviction.get("running"):
+        raise HTTPException(409, "A source-eviction sweep is already running.")
+    state.source_eviction_stop = False
+    state.source_eviction_task = asyncio.create_task(_run_source_eviction(manual=True))
+    return JSONResponse({"ok": True, "started": True})
+
+
+@app.post("/api/admin/source-eviction/stop")
+async def admin_stop_source_eviction(request: Request) -> JSONResponse:
+    """Halt an in-progress sweep. It stops between files, so whatever has already
+    been reclaimed stays reclaimed — there is no rollback for a deleted file."""
+    _require_admin(request)
+    state.source_eviction_stop = True
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/admin/source-eviction/status")
+async def admin_source_eviction_status(request: Request) -> JSONResponse:
+    """Live sweep progress, or the last completed one."""
+    _require_admin(request)
+    return JSONResponse({"current": state.source_eviction or None,
+                         "last": state.source_eviction_last or None})
 
 
 @app.get("/api/admin/auto-maintenance")
@@ -31145,7 +31187,8 @@ def _any_bundle_check_needed(lib: dict) -> bool:
                for it in lib.get("items", []) for f in it.get("files", []))
 
 
-async def _run_bundle_audit(scope: str = "all", *, auto: bool = False) -> None:
+async def _run_bundle_audit(scope: str = "all", *, auto: bool = False,
+                            dry_run: bool = False) -> None:
     """Structurally audit prepped bundles, and repair the damaged ones.
 
     This is the sweep half of the integrity work — the prep-time check
@@ -31159,6 +31202,13 @@ async def _run_bundle_audit(scope: str = "all", *, auto: bool = False) -> None:
     a sweep must never hold the encode slot.
 
     `auto` marks the idle-gated run, which stops the moment the box is in use.
+
+    `dry_run` reports damage and repairs NOTHING — no purge, no re-queued prep.
+    The verdicts are still persisted (they are a measurement of what is on disk,
+    and re-deriving them costs another full scan), but a damaged bundle is left
+    exactly where it is. This is the "show me what you would do" button: a repair
+    purges a bundle and starts an encode, and on a box someone is watching that is
+    a decision worth seeing before it happens.
     """
     ba = state.bundle_audit
     records: dict = {}
@@ -31210,6 +31260,13 @@ async def _run_bundle_audit(scope: str = "all", *, auto: bool = False) -> None:
             ba["damaged"].append({"item_id": iid, "item_title": title, "path": path,
                                   "name": name, "detail": verdict.detail,
                                   "dead_secs": round(verdict.dead_secs, 1)})
+            if dry_run:
+                # Report only: leave the bundle and the verdict alone. Nothing is
+                # purged and no prep is queued.
+                if len(records) >= 10:
+                    await _persist_bundle_checks(records)
+                    records = {}
+                continue
             # Purge + re-prep. The bundle is gone either way, so a viewer falls
             # back to on-demand JIT (which reads the source directly and is
             # unaffected) rather than sitting through the frozen copy.
@@ -31597,6 +31654,161 @@ def _free_disk_bytes_for_library(lib: dict) -> int:
         except OSError:
             continue
     return 0
+
+
+async def _evict_one_source(f_path: str, key: str, sig: str) -> int:
+    """Reclaim ONE source file. Returns the bytes freed (0 if nothing happened).
+
+    **The record is written BEFORE the file is deleted, and that order is not
+    negotiable.** The two crash windows are not symmetric:
+
+      * record-then-crash leaves a file marked evicted whose source still exists.
+        Harmless: `_evicted_bundle_dir` resolves to the same directory the stat
+        would have produced, so everything keeps working, and the worst case is
+        one file that won't be re-evicted.
+      * delete-then-crash leaves a source-less file with NO record. Its bundle
+        then matches no library file, lands in `orphans`, and `cache_autopurge_loop`
+        deletes it the next time the cache passes its cap — total loss, recoverable
+        only by re-downloading. See docs/GOTCHAS.md.
+
+    Every precondition is re-checked here, immediately before the delete, because
+    the plan was computed against a library snapshot that may be seconds old — a
+    viewer can start an episode in that window.
+    """
+    src = Path(f_path)
+    bundle = src.parent / OFFLINE_CACHE_DIRNAME / key
+    # Re-verify under current conditions, not the snapshot's.
+    if not (bundle / "master.m3u8").exists():
+        hls_log.warning("evict: %s skipped — bundle vanished since the plan", src.name)
+        return 0
+    if _is_compressing(f_path) or _offline_cache_path_active(key):
+        return 0
+    if state.library_current_file and _norm_path(state.library_current_file) == _norm_path(f_path):
+        return 0
+    if any(_norm_path(str(x.get("src") or "")) == _norm_path(f_path) for x in _od_sessions.values()):
+        return 0
+    if not await asyncio.to_thread(_bundle_playable_sync, bundle):
+        hls_log.warning("evict: %s skipped — bundle no longer passes the segment check", src.name)
+        return 0
+    try:
+        size = await asyncio.to_thread(lambda: src.stat().st_size)
+    except OSError:
+        return 0
+
+    # 1) Record first.
+    async with mutate_library() as lib:
+        hit = False
+        for it in lib.get("items", []):
+            for f in it.get("files", []):
+                if f.get("path") == f_path:
+                    f["bundle"] = {"key": key, "sig": sig, "source_evicted": True,
+                                   "evicted_at": _now_iso(), "source_bytes": size}
+                    hit = True
+        if not hit:
+            hls_log.warning("evict: %s skipped — no longer in the library", src.name)
+            return 0
+
+    # 2) Delete second.
+    try:
+        await asyncio.to_thread(os.remove, str(src))
+    except OSError as exc:
+        # Roll the record back: the source is still there, so claiming otherwise
+        # would strand a playable file behind a "Bundle Only" badge.
+        hls_log.warning("evict: could not delete %s (%s) — reverting the record", src.name, exc)
+        async with mutate_library() as lib:
+            for it in lib.get("items", []):
+                for f in it.get("files", []):
+                    if f.get("path") == f_path:
+                        f.pop("bundle", None)
+        return 0
+
+    _bundle_index_register(key, bundle)
+    hls_log.info("evict: reclaimed %s (%s) — bundle %s kept",
+                 src.name, human_size(size), key)
+    return size
+
+
+async def _run_source_eviction(*, manual: bool = False) -> dict:
+    """Execute the sweep: delete the sources the plan selected, keep their bundles.
+
+    Returns a summary dict (also stashed on `state.source_eviction_last`). Refuses
+    to do anything unless the policy is enabled AND free space is below the floor —
+    the dry-run endpoint is how you see the plan without this.
+    """
+    se = state.source_eviction
+    se.update({"running": True, "deleted": 0, "bytes_freed": 0, "error": "",
+               "manual": manual, "started_at": _now_iso(), "finished_at": None,
+               "stopped": False})
+    freed = deleted = 0
+    try:
+        plan = await _build_evict_plan()
+        if not plan["enabled"]:
+            se["error"] = "Source eviction is switched off."
+            return se
+        if not plan["triggered"]:
+            se["error"] = ("Free space is above the floor — nothing to do. "
+                           f"({plan['free_human']} free, floor {plan['floor_gb']} GB)")
+            return se
+        lib = await get_library()
+        sigs = {f.get("path", ""): _file_sig(f.get("path", ""))
+                for it in lib.get("items", []) for f in it.get("files", [])}
+        for row in plan["would_delete"]:
+            if state.source_eviction_stop:
+                se["stopped"] = True
+                break
+            # Never evict while someone is watching: this is a slow background
+            # chore and a viewer's needs outrank it every time.
+            if await _machine_in_use(60):
+                se["stopped"] = True
+                break
+            path = row["path"]
+            n = await _evict_one_source(path, _bundle_key_for_file(
+                next((f for it in lib.get("items", []) for f in it.get("files", [])
+                      if f.get("path") == path), {"path": path})), sigs.get(path, ""))
+            if n:
+                deleted += 1
+                freed += n
+                se["deleted"], se["bytes_freed"] = deleted, freed
+        if deleted:
+            _invalidate_bundle_index()
+            _invalidate_offline_cache_inventory()
+            hls_log.info("evict: reclaimed %d source file(s), freed %s",
+                         deleted, human_size(freed))
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        se["error"] = str(exc)
+        log.warning("source-eviction: %s", exc)
+    finally:
+        se["running"] = False
+        se["finished_at"] = _now_iso()
+        state.source_eviction_last = dict(se)
+    return se
+
+
+async def source_eviction_loop() -> None:
+    """Fire the sweep when the disk drops below the floor, and not otherwise.
+
+    The expensive part (a stat per library file plus a segment walk per eligible
+    bundle) is gated behind a single `shutil.disk_usage` call, so the common case —
+    a disk with room — costs one syscall every five minutes. Idle-gated on top of
+    that: eviction is housekeeping and must never compete with viewing.
+    """
+    await asyncio.sleep(90)   # let startup settle; qBit needs to be up to be asked
+    while True:
+        try:
+            lib = await get_library()
+            policy = _src_evict_cfg(lib)
+            if policy.enabled and not state.source_eviction.get("running"):
+                free = await asyncio.to_thread(_free_disk_bytes_for_library, lib)
+                if free < policy.floor_bytes and not await _machine_in_use(300):
+                    state.source_eviction_stop = False
+                    await _run_source_eviction()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("source_eviction_loop: %s", exc)
+        await asyncio.sleep(300)
 
 
 async def background_maintenance_loop() -> None:

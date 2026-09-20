@@ -4484,3 +4484,25 @@ It asks only for profiles that have **started** that series (a non-empty
 is just episode 1, and blocking it would spare one arbitrary file per show for no
 benefit while adding noise to the dry run.
 
+### Evicting a source: write the record BEFORE deleting the file, never after
+
+`_evict_one_source` marks `files[].bundle.source_evicted` and *then* calls
+`os.remove`. The instinct is the reverse — delete, confirm, record — and it is
+wrong, because the two crash windows are not symmetric:
+
+* **record then crash** leaves a file marked evicted whose source still exists.
+  `_evicted_bundle_dir` resolves to the same directory a stat would have produced,
+  so playback, downloads and the inventory all keep working. The only cost is that
+  the file won't be re-evicted.
+* **delete then crash** leaves a source-less file with **no** record. Its bundle
+  then matches no library file (see the orphan gotcha above), lands in `orphans`,
+  and `cache_autopurge_loop` deletes it the next time the cache passes its cap —
+  the episode is gone, recoverable only by re-downloading the identical release.
+
+So the safe order is the one that fails into a harmless state. A failed
+`os.remove` (file locked, permissions) rolls the record back, so a still-playable
+file never ends up badged Bundle Only.
+
+The same asymmetry argument applies to anything else that will make a bundle the
+sole copy: establish the claim first, destroy second.
+
