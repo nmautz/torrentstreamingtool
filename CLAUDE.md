@@ -122,15 +122,38 @@ Current version lives in the `<div>` at the very bottom of `static/index.html`. 
 
 ## iOS app changes — ALWAYS flag the rebuild (mandatory)
 
-The user builds the app **directly from Xcode**, which recompiles Swift but does **not** refresh web assets (`ios-app/www/` → `public/` only copies via `npx cap sync ios`). After any change under `ios-app/`:
+The app is built on a **Mac**, from `ios-app/build-ipa.sh`. That script is the whole
+path: `npm install` → re-vendor `www/capacitor.js` from `@capacitor/core` →
+`npx cap sync ios` → `xcodebuild` → an **unsigned** `.ipa` the user re-signs with a
+sideloader (Sideloadly / AltStore / ESign). Building straight from Xcode also works and
+installs directly to the device, but it does **not** run `cap sync`, so it alone can
+ship stale web assets.
 
-1. If `ios-app/www/*` changed → **run `npx cap sync ios` yourself** (in `ios-app/`; safe local copy), then verify with `grep <new-symbol> ios-app/ios/App/App/public/<file>`.
-2. **End your summary with an unmissable callout** stating exactly what the user must do, e.g.:
-   > **📱 App rebuild needed:** web assets changed — I already ran `cap sync`; rebuild from Xcode as usual. / Swift changed — rebuild from Xcode. / Host-only — no rebuild.
+**Do not run `npx cap sync ios` yourself to "fix" this.** `ios-app/ios/App/App/public/`
+is a build artifact and is **gitignored** (see `ios-app/.gitignore`) — nothing you
+generate on Windows reaches the Mac. The Mac regenerates it from `ios-app/www/` on its
+own `cap sync`. The source of truth is `ios-app/www/`; sync locally only if you need to
+verify the copy step, never as a delivery mechanism.
 
-Never let an `ios-app/` change ship without this callout — a stale `public/` looks like "my change didn't work" and has bitten three times (see docs/GOTCHAS.md § stale builds).
+So after any change under `ios-app/`, work out which invocation is safe and **end your
+summary with an unmissable callout saying so**:
 
----
+| What changed | Callout |
+|---|---|
+| Swift only | **📱 App rebuild needed:** Swift changed — `./build-ipa.sh --fast` is enough (`--fast` skips `npm install` + `cap sync`, neither of which has anything to do). |
+| `ios-app/www/*` | **📱 App rebuild needed:** web assets changed — run the **plain** `./build-ipa.sh`. Do **not** use `--fast` or `--no-sync`; they skip the `cap sync` that copies `www/` in, and the build silently ships the old assets. |
+| `package.json` / plugins | **📱 App rebuild needed:** dependencies changed — plain `./build-ipa.sh` (needs the `npm install`). |
+| Host-side only (`static/`, `main.py`, …) | **📱 No rebuild** — the dashboard is served by the box; deploy it there instead. |
+
+Never let an `ios-app/` change ship without this callout — a stale `public/` looks like
+"my change didn't work" and has bitten three times (see docs/GOTCHAS.md § stale builds).
+
+**The app's own version is not the dashboard's.** `CFBundleShortVersionString` is
+`$(MARKETING_VERSION)`, pinned at **1.0** in `App.xcodeproj` and never bumped — so
+`build-ipa.sh`'s closing `Version:` line always prints `1.0` and proves nothing about
+whether a change compiled in. Don't point the user at it. The dashboard badge in
+`static/index.html` is the version that moves; confirm an app change landed by its
+behaviour on-device instead.
 
 ## Style conventions
 
