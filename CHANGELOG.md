@@ -1,5 +1,29 @@
 # Changelog
 
+## [18.2.1] — 2026-09-20
+* **Fixed: Direct mode never attached its window to anything.** 18.2.0 predicted the
+  app would have no external-display scene at all and called for a full scene
+  migration. The trail from the device says otherwise, and the correction is the
+  useful part: on **iOS 27 with no `UIApplicationSceneManifest`**, `connectedScenes`
+  already carries `UIWindowSceneSessionRoleExternalDisplayNonInteractive` beside the
+  application scene. UIKit's compatibility path connects it even though this app never
+  opted into scenes — and even though Apple's article says that from iOS 27 the role
+  arrives only after registering a `UISceneAccessory`. The scene was there the whole
+  time, mirroring the phone, waiting for a window.
+* So the fix is ten lines, not a launch-path migration. `ensureExternalWindow()` built
+  its window with a frame and then set `w.screen`, which since iOS 13 means "move me to
+  the window scene on that screen" — a resolution step that found nothing, because
+  nothing ever named the scene. It now builds with **`UIWindow(windowScene:)`** against
+  that scene directly, which is what kicks the display out of mirroring, and
+  `detachExternalWindow` sets `windowScene = nil` to hand it back.
+* `wantsOwnExternalWindow` now gates on the **scene** rather than the screen, and
+  `attachVideoSurface` falls through to the route layer when Direct is chosen but no
+  scene exists — without that, such a handoff attached no surface at all, which is the
+  audio-only bug 14.1.1 fixed.
+* Diagnostics gain `scene=` and `nat=` columns, and the panel now says a run only counts
+  if the trail contains a `locked+3s` row — the first run had no lock in it, so every
+  reading about the takeover was vacuous.
+
 ## [18.2.0] — 2026-09-20
 * **Monitor diagnostics for the iOS external-display handoff, and the reason it
   was needed.** "Direct" has never once displaced mirroring on a real device —

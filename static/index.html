@@ -18434,7 +18434,7 @@ async function _tvRemoteSync() {
 const _APP_BGPLAY_KEY = "streamlink_app_bgplay";   // "0" = off (default ON)
 const _APP_TVMODE_KEY = "streamlink_app_tvmode";   // "0" = off (default ON)
 // How the native player reaches a WIRED monitor once the phone is locked:
-//   "window" (default) - our own UIWindow on the external UIScreen, which
+//   "window" (default) - our own UIWindow in the external display's UIWindowScene, which
 //                        REPLACES mirroring (mirroring shows the lock screen)
 //   "route"            - leave mirroring up and let AVFoundation's external-screen
 //                        route take the picture over
@@ -20306,10 +20306,11 @@ function _appOpenAppSettings() {
       </div>
       <div style="font-size:12px;color:#8a8a92;margin-top:8px;line-height:1.45;">
         Records what the monitor handoff actually did at each step. Plug the monitor in,
-        start an episode, lock the phone for ~20 seconds, unlock, then press Read.
-        <b style="color:#c9c9cf;">winScene:false</b> means our video window was never attached to a
-        display, and <b style="color:#c9c9cf;">mirrored:true</b> at <b style="color:#c9c9cf;">locked+3s</b> means the
-        monitor was still mirroring the lock screen.
+        start an episode, <b style="color:#c9c9cf;">lock the phone for ~20 seconds</b>, unlock, then press
+        Read. The run only counts if the trail contains a <b style="color:#c9c9cf;">locked+3s</b> row.
+        On that row <b style="color:#c9c9cf;">winScene=Y</b> and <b style="color:#c9c9cf;">mir=-</b> means the
+        takeover worked; <b style="color:#c9c9cf;">mir=Y</b> means the monitor was still mirroring the
+        lock screen.
       </div>
       <pre id="appSetDiagOut" style="display:none;font-size:10px;line-height:1.4;color:#c9c9cf;background:#0d0d10;
         border:1px solid #2a2a30;padding:10px;margin-top:10px;max-height:260px;overflow:auto;
@@ -20402,9 +20403,9 @@ function _appOpenAppSettings() {
       const b = (v) => (v ? "Y" : "-");
       const rows = (d.trail || []).map((r) =>
         `${String(r.at).padEnd(19)} ${String(r.t).padStart(6)}s  scr=${r.screens}` +
-        ` ext=${b(r.extScreen)} mir=${b(r.mirrored)} win=${b(r.extWindow)}` +
-        ` winScene=${b(r.winScene)} onExt=${b(r.winOnExt)} extLyr=${b(r.extLayer)}` +
-        ` mainLyr=${b(r.mainLayer)} extPlay=${b(r.extPlayback)}` +
+        ` ext=${b(r.extScreen)} scene=${b(r.extScene)} mir=${b(r.mirrored)}` +
+        ` win=${b(r.extWindow)} winScene=${b(r.winScene)} extLyr=${b(r.extLayer)}` +
+        ` mainLyr=${b(r.mainLayer)} extPlay=${b(r.extPlayback)} nat=${b(r.native)}` +
         (r.extBounds ? ` ${r.extBounds}` : ""));
       out.textContent = head.concat(rows.length ? rows : ["(no trail — nothing has locked yet)"]).join("\n");
     } catch (e) {
@@ -26872,6 +26873,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.2.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.2.1</div>
 </body>
 </html>

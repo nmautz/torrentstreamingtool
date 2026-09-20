@@ -1403,34 +1403,33 @@ locked**, `streamlink_app_extmode`, passed through `arm()` as `extMode`):
 
 | Mode | What it does | When to pick it |
 |---|---|---|
-| **Direct** (`window`, default) | a `UIWindow` of our own on the external `UIScreen` with an `AVPlayerLayer` in it. Creating it **replaces mirroring** for that screen, so the lock screen never reaches the monitor. Built at `willResignActive` — the last moment the app is guaranteed a composite pass — and destroyed at `didBecomeActive`, so foreground/TV Mode still get their mirror. | most wired adapters |
+| **Direct** (`window`, default) | a `UIWindow` of our own in the external display's **`UIWindowScene`** (`UIWindow(windowScene:)`), with an `AVPlayerLayer` in it. Putting content in that scene **replaces mirroring** for the display, so the lock screen never reaches the monitor. Built at `willResignActive` — the last moment the app is guaranteed a composite pass — and released at `didBecomeActive` with `windowScene = nil`, which hands the display back to mirroring so foreground/TV Mode still get it. | most wired adapters |
 | **Mirrored** (`route`) | leaves mirroring up and gives the player a full-screen `AVPlayerLayer` at the back of the app's own window (invisible behind the opaque webview), so AVFoundation's external-screen route has something to take over. | if Direct leaves the monitor blank |
 
-> **⚠️ Direct mode does not work, and cannot work as written (18.2.0).** Nobody has
-> ever got a picture onto the TV this way — it behaves exactly like Mirrored.
-> Replacing mirroring is a **scene** operation on current iOS: `UIScreen.mirrored`'s
-> documentation says the way to disable mirroring is to *register a scene accessory*,
-> and *Presenting content on a connected display* documents only attaching a `UIWindow`
-> to the `UIWindowScene` the system provides for the
-> `windowExternalDisplayNonInteractive` role. This app has **no
-> `UIApplicationSceneManifest`**, so it is never handed that scene, and
-> `window.screen = external` — which since iOS 13 means "move me to the window scene on
-> that screen" — has nothing to move onto. Detection is fine (`UIScreen.screens` still
-> reports the monitor; the TV Mode button appears); only the takeover fails. Fixing it
-> means adopting scenes, plus `UIViewController.registerSceneAccessory(_:)` for
-> **iOS 27+**, where the scene is no longer connected automatically. Until then TV Mode
-> is the only path that puts the episode on the TV. Full reasoning and the second-order
-> "layer added while backgrounded" bug are in [GOTCHAS.md](GOTCHAS.md).
+> **Direct mode was broken from the start, and the fix is not the one 18.2.0 predicted
+> (fixed 18.2.1).** It had never once displaced mirroring — it behaved exactly like
+> Mirrored — because `ensureExternalWindow()` built its window with a frame and then set
+> `w.screen`. Since iOS 13 that means "move me to the window scene on that screen", and
+> nothing ever named a scene, so the window was never presented.
+>
+> 18.2.0 reasoned from the missing `UIApplicationSceneManifest` that the app could never
+> be handed a `windowExternalDisplayNonInteractive` scene, and called for a full scene
+> migration. **Measured on iOS 27, that scene is already connected** — UIKit's
+> compatibility path provides it without the manifest, and without the `UISceneAccessory`
+> registration Apple's article says iOS 27 requires. So the fix is
+> `UIWindow(windowScene: externalScene)` plus `windowScene = nil` to hand the display
+> back, and the app's launch path is untouched. Full reasoning in
+> [GOTCHAS.md](GOTCHAS.md).
 >
 > **Measuring it:** ☰ App → Settings → Playback → **Monitor diagnostics** calls
 > `NativePlayback.extDiag()`, which prints the scene manifest / connected scene roles /
 > `openSessions` and a buffered trail sampled at `resignActive`,
 > `background/attached`, `locked+3s`, `locked+10s`, `screenChange` and `becomeActive`.
 > It is buffered rather than live because the readings only mean anything while the
-> phone is locked. `winScene:false` ⇒ the window belongs to no scene at all;
-> `mirrored:true` at `locked+3s` ⇒ the monitor was still showing the lock screen. A
-> *missing* `locked+3s` row is itself a finding — the process was suspended, not
-> playing.
+> phone is locked. **A run with no `locked+3s` row tested nothing** — the first one had
+> no lock in it and every takeover reading was vacuous. On that row, `winScene=Y` with
+> `mir=-` is the takeover working; `mir=Y` is the monitor still showing the lock screen;
+> a missing row means the process was suspended rather than playing.
 
 **With no display connected, neither layer is attached** — deliberately. A main-screen
 `AVPlayerLayer` is the classic way to get AVFoundation to *suspend* video on background

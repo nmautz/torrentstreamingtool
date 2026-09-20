@@ -11,7 +11,7 @@
 //
 //  It also solves the external monitor: screen MIRRORING dies at lock (the
 //  monitor gets the lock screen). The fix is to stop mirroring and give the
-//  player a surface of our own — a UIWindow on the external UIScreen carrying an
+//  player a surface of our own — a UIWindow in the external display's UIWindowScene carrying an
 //  AVPlayerLayer. Built on the way out, destroyed on the way back in, so the
 //  foreground/TV-Mode story (which NEEDS mirroring) is untouched. See
 //  "External display surface" below for why the routing flags alone are not
@@ -93,7 +93,7 @@ struct ArmedPlayback {
     var nextItemId = ""
     var handoffEnabled = true
     /// How to reach a wired monitor once locked: "window" (our own UIWindow on the
-    /// external UIScreen, replacing mirroring) or "route" (leave mirroring up and
+    /// display's UIWindowScene, replacing mirroring) or "route" (leave mirroring up and
     /// let AVFoundation take the picture over). See "External display surface".
     var extMode = "window"
     /// When `position` was sampled. Handoff extrapolates from this.
@@ -865,7 +865,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     // mirroring — so at lock it shows the lock screen. That was the bug: the
     // handoff kept the audio and lost the picture.
     //
-    // A UIWindow on the external UIScreen is a real surface AND it REPLACES
+    // A UIWindow in the external display's UIWindowScene is a real surface AND it REPLACES
     // mirroring for that screen. Replacing mirroring is exactly right once the
     // phone is locked, and exactly wrong while TV Mode is running (TV Mode needs
     // mirroring to carry the custom player + the libass overlay). So the window is
@@ -873,6 +873,27 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     // the ability to draw) and destroyed on the way BACK IN.
 
     private var externalScreen: UIScreen? { UIScreen.screens.first { $0 !== UIScreen.main } }
+
+    /// The external-display scene UIKit hands us — and it DOES hand us one.
+    ///
+    /// Measured on iOS 27 with **no `UIApplicationSceneManifest`** (18.2.0's trail):
+    /// `connectedScenes` carried `UIWindowSceneSessionRoleExternalDisplayNonInteractive`
+    /// alongside the application scene. The compatibility path connects it even though
+    /// this app never opted into scenes, and even though Apple's own article says that
+    /// from iOS 27 the role arrives only after registering a `UISceneAccessory`. So the
+    /// scene migration 18.2.0 called for is unnecessary: the scene is already there,
+    /// mirroring the phone, waiting for something to put a window in it.
+    ///
+    /// Matched on the role's raw value rather than the `.windowExternalDisplayNonInteractive`
+    /// constant so this still compiles at the project's iOS 15 deployment target (the
+    /// constant is iOS 16+), and so the deprecated pre-16 `…RoleExternalDisplay` is
+    /// picked up by the same prefix.
+    private var externalScene: UIWindowScene? {
+        UIApplication.shared.connectedScenes
+            .lazy
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.session.role.rawValue.hasPrefix("UIWindowSceneSessionRoleExternalDisplay") }
+    }
 
     /// UIKit from wherever we are called. Capacitor delivers plugin methods off
     /// the main thread (`takeover`, `resume`), the lifecycle notifications on it —
@@ -883,10 +904,12 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         if Thread.isMainThread { work() } else { DispatchQueue.main.async(execute: work) }
     }
 
-    /// True when we should claim the external screen with a window of our own,
+    /// True when we should claim the external display with a window of our own,
     /// rather than leaving mirroring up for AVFoundation's route to take over.
+    /// Gated on the SCENE, not the screen: the window has to go somewhere, and the
+    /// scene is the only thing that can hold it.
     private var wantsOwnExternalWindow: Bool {
-        externalScreen != nil && armed.extMode != "route"
+        externalScene != nil && armed.extMode != "route"
     }
 
     /// Give the player a video surface when — and ONLY when — there is a monitor to
@@ -903,8 +926,14 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             if self.wantsOwnExternalWindow {
                 self.ensureExternalWindow()
                 self.attachExternalLayer()
-            } else if self.externalScreen != nil {
-                self.attachFallbackLayer()     // "Mirrored" mode
+            }
+            // Falls through to the route layer in two cases: "Mirrored" was chosen,
+            // or "Direct" was chosen and there was no scene to put a window in. The
+            // second is the degradation that matters — without it, a Direct-mode
+            // handoff on a device that never offers the scene attaches NO surface at
+            // all, which is the audio-only bug 14.1.1 fixed.
+            if self.extLayer == nil, self.externalScreen != nil {
+                self.attachFallbackLayer()
             }
         }
     }
@@ -913,18 +942,18 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     /// `attachExternalLayer` — at resign-active time there is no player yet, but
     /// that is the last moment the app is guaranteed a composite pass.
     private func ensureExternalWindow() {
-        guard extWindow == nil, let screen = externalScreen else { return }
+        guard extWindow == nil, let scene = externalScene else { return }
         let vc = UIViewController()
         vc.view.backgroundColor = .black
-        let w = UIWindow(frame: screen.bounds)
-        // DEPRECATED IN iOS 13 AND SUSPECTED INERT HERE. The old comment claimed
-        // being non-scene-based kept this path alive; it is the opposite. Since
-        // iOS 13 this setter means "move me to the window scene on that screen",
-        // and an app with no UIApplicationSceneManifest is never handed a
-        // windowExternalDisplayNonInteractive scene to move onto — so the window
-        // is never presented and mirroring is never displaced. See the
-        // "External-display diagnostics" section; `extDiag()` measures it.
-        w.screen = screen
+        // `UIWindow(windowScene:)` is the whole fix. The old code built the window
+        // with a frame and then set `w.screen`, which since iOS 13 means "move me to
+        // the window scene on that screen" — a resolution step that found nothing,
+        // because nothing ever told UIKit which scene we meant. The window stayed
+        // unattached, was never presented, and mirroring was never displaced, so
+        // Direct behaved exactly like Mirrored. Naming the scene directly is what
+        // kicks the system out of mirroring for that display.
+        let w = UIWindow(windowScene: scene)
+        w.frame = scene.screen.bounds     // contextual bounds; never UIScreen.main's
         w.backgroundColor = .black
         w.rootViewController = vc
         w.isHidden = false
@@ -953,6 +982,10 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             self.extLayer = nil
             self.extWindow?.isHidden = true
             self.extWindow?.rootViewController = nil
+            // Detaching from the scene is what hands the display BACK to mirroring
+            // — the documented inverse of putting a window in it. Dropping the
+            // reference alone would leave the scene holding our window.
+            self.extWindow?.windowScene = nil
             self.extWindow = nil
             self.player?.usesExternalPlaybackWhileExternalScreenIsActive = true
         }
@@ -1016,38 +1049,42 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     // MARK: External-display diagnostics
 
     // WHY THIS EXISTS
-    // Direct mode has never once displaced mirroring on a real device — it
-    // behaves identically to Mirrored. Apple's current documentation says why,
-    // and it is not a tuning problem:
+    // Direct mode had never once displaced mirroring on a real device — it behaved
+    // identically to Mirrored. Apple's current documentation points at the cause:
     //
     //   * `UIScreen.mirrored`: "To disable mirroring and present unique content
     //     on the external display, REGISTER A SCENE ACCESSORY."
     //   * "Presenting content on a connected display": "To present content on a
     //     connected display, you attach windows to UIWindowScene objects that
     //     the system provides and respond to life-cycle events using scene
-    //     delegates." No UIScreen-based path is documented at all any more.
+    //     delegates." No UIScreen-based path is documented any more.
     //   * `UIWindow.screen` — deprecated, "Use windowScene instead".
     //     `UIScreen.screens` / `UIScreen.didConnectNotification` — deprecated
     //     at iOS 16.0, "use UIApplication.shared.openSessions" / a scene delegate.
     //
-    // This app ships no `UIApplicationSceneManifest`, so the system never
-    // connects a `windowExternalDisplayNonInteractive` scene to it. Since iOS 13
-    // the `window.screen` setter means "move me to the window scene on that
-    // screen"; with no such scene there is nothing to move onto, the window is
-    // never presented, and mirroring is never displaced. The comment in
-    // `ensureExternalWindow` has it backwards: being non-scene-based is not what
-    // keeps the legacy path alive, it is what makes it impossible.
+    // `ensureExternalWindow` set `w.screen`, which since iOS 13 means "move me to
+    // the window scene on that screen" — and nothing ever named a scene, so the
+    // window was never presented.
     //
-    // Migrating the app to scenes changes its launch path, so measure before
-    // shipping: this records what actually happens at each lifecycle edge. Two
-    // fields decide it —
-    //   `winScene` : false => our UIWindow belongs to no scene, i.e. it was
-    //                never presented anywhere. Proves the diagnosis.
-    //   `mirrored` : still true at "locked+3s" => the takeover did not happen
-    //                and the monitor is showing the lock screen.
-    // Both readings only mean anything WHILE THE PHONE IS LOCKED, which is
-    // exactly when nothing can display them — hence a buffered trail read back
-    // after unlocking rather than a live call.
+    // WHAT THIS INSTRUMENT FOUND, WHICH IS NOT WHAT IT WAS BUILT TO FIND
+    // The reasoning above ended in a wrong prediction: that an app with no
+    // UIApplicationSceneManifest is never handed a windowExternalDisplayNonInteractive
+    // scene, and that fixing this meant migrating the app's whole launch path to
+    // scenes. The first trail off a real iOS 27 device said `externalDisplayScene:
+    // true` — the compatibility path connects that scene regardless, and regardless
+    // of the UISceneAccessory registration Apple's article says iOS 27 requires. The
+    // scene was there all along, mirroring the phone, waiting for a window. See
+    // `externalScene`. THE LESSON IS THE INSTRUMENT: do not re-derive the scene's
+    // absence from the manifest's absence — read `connectedScenes`.
+    //
+    // Keep this armed, because the fix's own effect is only observable from a locked
+    // phone. The fields that decide it —
+    //   `winScene` : false => our UIWindow belongs to no scene, i.e. never presented.
+    //   `mirrored` : false at "locked+3s" => the takeover happened and the monitor is
+    //                showing our window rather than the lock screen.
+    // Both only mean anything WHILE THE PHONE IS LOCKED, which is exactly when nothing
+    // can display them — hence a buffered trail read back after unlocking. A trail with
+    // no "locked+3s" row in it tested nothing at all; the first one was exactly that.
 
     private var diagTrail: [[String: Any]] = []
     private var diagT0 = Date()
@@ -1065,6 +1102,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             "t":           String(format: "%.1f", Date().timeIntervalSince(diagT0)),
             "screens":     UIScreen.screens.count,
             "extScreen":   ext != nil,
+            "extScene":    externalScene != nil,
             "mirrored":    mirroredFrom != nil,
             "extWindow":   extWindow != nil,
             "winScene":    winScene != nil,

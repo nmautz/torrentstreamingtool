@@ -2476,38 +2476,39 @@ Eleven constraints, each of which independently breaks the feature. See
   is `playerLayer.player = nil`), so an unconditional attach would trade the plain
   locked-phone-listening case for a monitor that isn't there. Layerless is wrong with a
   display and right without one — `attachVideoSurface()` gates on exactly that.
-- **"Direct" mode cannot work in a non-scene app — replacing mirroring is a SCENE
-  operation now** (diagnosed 18.2.0, not yet fixed). `ensureExternalWindow()` claims
-  the monitor the pre-iOS-13 way: `UIWindow(frame:)` + `w.screen = externalScreen` +
-  `isHidden = false`. Every API on that path is deprecated, and the replacement is not
-  a different spelling of the same thing — it is a different mechanism:
-  `UIScreen.mirrored`'s own documentation says *"To disable mirroring and present
-  unique content on the external display, **register a scene accessory**"*, and
-  *Presenting content on a connected display* documents exactly one route — *"you
-  attach windows to `UIWindowScene` objects that the system provides and respond to
-  life-cycle events using scene delegates."* `UIWindow.screen` is deprecated in favour
-  of `windowScene`; `UIScreen.screens` and `UIScreen.didConnectNotification` were
-  deprecated at **iOS 16.0** pointing at `UIApplication.shared.openSessions` and scene
-  delegates. `ios-app/ios/App/App/Info.plist` has **no `UIApplicationSceneManifest`**
-  (`@UIApplicationMain` + `AppDelegate.window` + `UIMainStoryboardFile`), so the system
-  never connects a `windowExternalDisplayNonInteractive` scene to this app — and since
-  iOS 13 the `window.screen` setter means *"move me to the window scene on that
-  screen"*. With no such scene there is nothing to move onto: the window is never
-  presented, mirroring is never displaced, and **Direct behaves identically to
-  Mirrored**, which is what the user has always seen. The old comment on that line
-  claimed being non-scene-based was what *kept* the legacy path alive; it is what makes
-  it impossible. **`UIScreen.screens` itself still works** — the TV Mode button appears
-  on plug-in, so detection is fine and only the takeover fails. Measure before
-  migrating: `NativePlayback.extDiag()` (☰ App → Settings → Playback → **Monitor
-  diagnostics**) buffers the readings, which are only meaningful while the phone is
-  locked. `winScene:false` ⇒ the window belongs to no scene; `mirrored:true` at
-  `locked+3s` ⇒ the monitor was still on the lock screen. The fix is a scene
-  migration (manifest with both the application and
-  `UIWindowSceneSessionRoleExternalDisplayNonInteractive` roles, a `SceneDelegate`, an
-  external-display scene delegate handing its window to `NativePlayback`), and it has a
-  shelf life: **from iOS 27 the external-display scene is only connected after the app
-  registers a `UISceneAccessory`** via `UIViewController.registerSceneAccessory(_:)`.
-  Until then TV Mode is the only path that actually puts the episode on the TV.
+- **A window reaches an external display through its SCENE, not its screen — and the
+  scene is there even with no scene manifest** (diagnosed 18.2.0, fixed 18.2.1).
+  `ensureExternalWindow()` claimed the monitor the pre-iOS-13 way: `UIWindow(frame:)` +
+  `w.screen = externalScreen` + `isHidden = false`. Since iOS 13 that setter means *"move
+  me to the window scene on that screen"* — a resolution step that finds nothing unless
+  something names the scene, so the window was never presented, mirroring was never
+  displaced, and **Direct behaved identically to Mirrored**. Apple's docs point the same
+  way: `UIScreen.mirrored` says the way out of mirroring is to register a scene accessory,
+  *Presenting content on a connected display* documents only attaching a `UIWindow` to a
+  `UIWindowScene`, and `UIWindow.screen` / `UIScreen.screens` /
+  `UIScreen.didConnectNotification` are all deprecated toward scenes.
+  **The trap for the next person is the inference that follows, which was wrong.** This
+  app has no `UIApplicationSceneManifest`, so 18.2.0 concluded it could never be handed a
+  `windowExternalDisplayNonInteractive` scene and called for a full scene migration
+  (manifest, `SceneDelegate`, and `UIViewController.registerSceneAccessory(_:)` for iOS
+  27+, where the article says the role only arrives after registration). Measured on a
+  real iOS 27 device, `connectedScenes` **already carried that role** beside the
+  application scene. UIKit's compatibility path connects it regardless. The scene was
+  there the whole time, mirroring the phone, waiting for a window — which is exactly the
+  behaviour an Apple engineer describes on the forums: you are *offered* the scene, it
+  mirrors by default, and putting content in it kicks the system out of mirroring.
+  So the fix is `UIWindow(windowScene:)` against `externalScene`, with
+  `windowScene = nil` on the way back to restore mirroring — ten lines, no change to how
+  the app boots. `externalScene` matches on the role's **raw-value prefix** rather than
+  the `.windowExternalDisplayNonInteractive` constant, which is iOS 16+ while the project
+  targets 15. **Don't re-derive the scene's absence from the manifest's absence — read
+  `connectedScenes`.**
+- **A diagnostic run with no `locked+3s` row proves nothing** (18.2.1). The first trail
+  off the device looked damning — `win=-`, `winScene=-` on every row — but it contained
+  no lock at all: the display connected at 60 s and the trail was read at 118 s with no
+  `resignActive` in between, so `startNative` never ran and the window was never even
+  attempted. Every reading about the takeover was vacuous. The instrument now says so in
+  the panel. Check for the row before interpreting anything.
 - **A layer added while backgrounded may never be committed** (open, found 18.2.0).
   `ensureExternalWindow()` runs at `willResignActive` — correctly, that is the last
   guaranteed composite pass — but the window is *empty* then, because the `AVPlayer`
