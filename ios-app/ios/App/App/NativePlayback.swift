@@ -374,7 +374,10 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     func tick(position: Double, paused: Bool, duration: Double) {
         guard armed.active else { return }
         armed.position = position
-        armed.paused = paused
+        // Same guard as arm(): while WE are the player, the page's `paused` is a
+        // stale echo of an element WebKit paused for us, not a command. This was
+        // the writer that still flipped armPaused to Y after the handoff.
+        if !isNativeActive { armed.paused = paused }
         if duration > 0 { armed.duration = duration }
         armed.armedAt = Date()
         if !isNativeActive {
@@ -1272,6 +1275,15 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private var diagTrail: [[String: Any]] = []
     private var diagT0 = Date()
 
+    private static func itemStatusName(_ s: AVPlayerItem.Status?) -> String {
+        switch s {
+        case .some(.readyToPlay): return "ready"
+        case .some(.failed):      return "FAILED"
+        case .some(.unknown):     return "unknown"
+        default:                  return "-"
+        }
+    }
+
     private static func tcsName(_ s: AVPlayer.TimeControlStatus?) -> String {
         switch s {
         case .some(.playing):                    return "play"
@@ -1328,11 +1340,15 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             "tcs":         Self.tcsName(player?.timeControlStatus),
             "pos":         player.map { CMTimeGetSeconds($0.currentTime()) }
                              .flatMap { $0.isFinite ? Double(round($0 * 10) / 10) : nil } ?? -1,
-            "likely":      player?.currentItem?.isPlaybackLikelyToKeepUp ?? false,
             // Per row, because the header's copy is read after stopNative() has
             // already reset the flag — it reported INACTIVE no matter what
             // happened at the handoff, which is the moment that matters.
             "sess":        sessionActivated,
+            "likely":       player?.currentItem?.isPlaybackLikelyToKeepUp ?? false,
+            // AVPlayer states its own reason for not playing. We have never asked.
+            "waitReason":  (player?.reasonForWaitingToPlay?.rawValue as String?) ?? "",
+            "itemStatus":  Self.itemStatusName(player?.currentItem?.status),
+            "itemErr":     player?.currentItem?.error?.localizedDescription ?? "",
             "armPaused":   armed.paused,
         ]
         if let b = ext?.bounds { row["extBounds"] = "\(Int(b.width))x\(Int(b.height))" }
@@ -1380,7 +1396,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             // Bump with any change to this file. Two runs have already been
             // ambiguous about whether the app had been rebuilt, and the trail
             // should never leave that in doubt.
-            "build": "18.4.4",
+            "build": "18.4.6",
             "audioSession": sessionActivated ? "active" : "INACTIVE",
             "audioError": audioSessionError,
             "iosVersion": UIDevice.current.systemVersion,

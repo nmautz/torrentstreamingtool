@@ -20432,7 +20432,9 @@ function _appOpenAppSettings() {
     try {
       const d = await _cap.np.extDiag();
       const head = [
-        `iOS ${d.iosVersion}   app build ${d.build || "pre-18.4.0"}   mode=${d.extMode}`,
+        `iOS ${d.iosVersion}   app build ${d.build || "pre-18.4.0"}   page ${
+          (document.querySelector("[data-ui-version]") || {}).textContent || "?"
+        }   mode=${d.extMode}`,
         `audio session: ${d.audioSession || "?"}` +
           (d.audioError ? `   FAILED -> ${d.audioError}` : ""),
         `sceneManifest: ${d.sceneManifest}`,
@@ -20452,7 +20454,9 @@ function _appOpenAppSettings() {
         ` win=${b(r.extWindow)} winScene=${b(r.winScene)} extLyr=${b(r.extLayer)}` +
         ` mainLyr=${b(r.mainLayer)} extPlay=${b(r.extPlayback)} nat=${b(r.native)}` +
         ` app=${r.appState || "?"} ${r.tcs || "?"} pos=${r.pos === undefined ? "?" : r.pos}` +
-        ` sess=${b(r.sess)} armPaused=${b(r.armPaused)}` +
+        ` sess=${b(r.sess)} armPaused=${b(r.armPaused)} item=${r.itemStatus || "?"}` +
+        (r.waitReason ? ` wait="${r.waitReason}"` : "") +
+        (r.itemErr ? ` ERR="${r.itemErr}"` : "") +
         (r.extBounds ? ` ${r.extBounds}` : ""));
 
       // Verdict up front. Two runs in a row were read without ever locking the
@@ -27064,6 +27068,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.4.5</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.4.6</div>
 </body>
 </html>
