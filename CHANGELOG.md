@@ -1,5 +1,26 @@
 # Changelog
 
+## [18.5.0] — 2026-09-20
+* **Early mode now hands playback over while the app is still foreground, not at the
+  lock.** The relief-pitcher model builds the `AVPlayer` at `didEnterBackground` and calls
+  `play()` there. iOS lets a backgrounded app *continue* audio; it does not let one
+  *start* a fresh player. Every recent trail shows exactly that and nothing else: audio
+  session active before backgrounding, the seek landing precisely (`pos=448.3`),
+  `armPaused=-` so `play()` genuinely was issued — and `tcs=pause` regardless.
+* It is the same shape as the display bug, one layer down: **the moment of the lock is
+  the one moment the thing cannot be done.** Claiming the display early is what made the
+  display work, so Early mode now claims *playback* at the same point. By the time the
+  phone locks there is nothing to hand off — it is already ours and already playing, which
+  iOS is happy to continue. JS pauses the web element on `nativeStarted` (a listener that
+  had never existed, though the event has always been emitted) so two engines never run.
+* Scoped to Early mode deliberately. Normal and Mirrored keep today's behaviour, and the
+  native path still loses libass styled subtitles — which is exactly why this is not the
+  default for everyone.
+* Also in this round: `tick()` was the last unguarded writer of `armed.paused`, and each
+  sample now records `reasonForWaitingToPlay`, the item's status and its error — AVPlayer
+  states its own reason for not playing and had never been asked. The header reports the
+  **page** version beside the app build.
+
 ## [18.4.5] — 2026-09-20
 * **The seek completion re-read the pause flag after a late arm had flipped it.** The
   trail caught it in the act: `armPaused=-` at `background/attached`, `armPaused=Y` by

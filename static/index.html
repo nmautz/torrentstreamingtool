@@ -18644,6 +18644,16 @@ async function _npHandBack() {
 function _npBindEvents() {
   if (!isApp || !_cap.np || !_cap.np.addListener) return;
   try {
+    // Early mode hands off while we are still FOREGROUND, so the web element is
+    // still playing when native starts. Stop it, or both engines run at once.
+    // Intent stays "playing" — the user did not pause anything, and if this were
+    // recorded as a pause the native side would inherit it on the next handoff.
+    _cap.np.addListener("nativeStarted", (e) => {
+      if (!e || e.reason !== "early") return;
+      const v = _lpV();
+      if (v && !v.paused) { try { v.pause(); } catch (_) {} }
+      _npSetPausedIntent(false);
+    });
     _cap.np.addListener("nativeEnded", () => {
       // Only meaningful if we're still backgrounded; on return _npHandBack's
       // `ended` branch handles it. Harmless to record either way.
@@ -27068,6 +27078,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.4.6</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.5.0</div>
 </body>
 </html>

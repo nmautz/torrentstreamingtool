@@ -1046,6 +1046,27 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             self.attachExternalLayer()   // no-op until startNative makes a player
             self.diagSnap("earlyClaim")
             self.emit("displayChanged", self.displayInfo())
+
+            // EARLY HANDOFF. Start the native player NOW, while foreground.
+            //
+            // The relief-pitcher model creates the AVPlayer at
+            // didEnterBackground and calls play() there. iOS lets a backgrounded
+            // app CONTINUE audio; it does not let one START a fresh player. That
+            // is what the trails kept showing: session active, seek landing
+            // exactly right, play() issued, and tcs=pause anyway.
+            //
+            // Claiming the display already happens here, for the same class of
+            // reason — the moment of the lock is the one moment the thing cannot
+            // be done. So take playback here too. By the time the phone locks
+            // there is nothing left to hand off: it is already ours and already
+            // playing, which is a state iOS is happy to continue.
+            //
+            // The web element must stop, or two engines play at once; JS does
+            // that on the nativeStarted event.
+            if !self.isNativeActive, self.armed.url != nil {
+                self.startNative(reason: "early")
+                self.diagSnap("earlyHandoff")
+            }
         }
     }
 
@@ -1396,7 +1417,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             // Bump with any change to this file. Two runs have already been
             // ambiguous about whether the app had been rebuilt, and the trail
             // should never leave that in doubt.
-            "build": "18.4.6",
+            "build": "18.5.0",
             "audioSession": sessionActivated ? "active" : "INACTIVE",
             "audioError": audioSessionError,
             "iosVersion": UIDevice.current.systemVersion,
