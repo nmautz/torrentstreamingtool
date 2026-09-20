@@ -20480,6 +20480,14 @@ function _appOpenAppSettings() {
       const blipTarget = trail.filter(isTarget).pop();
       // Did the playhead MOVE while locked? A frozen picture with an advancing
       // position is suspended video decode; a static position is a paused player.
+      const withTcs = locked.filter((r) => r.tcs && r.tcs !== "-");
+      if (withTcs.length) {
+        const bad = withTcs.filter((r) => r.tcs !== "play");
+        if (bad.length === withTcs.length) {
+          verdict.push(`PLAYER: tcs=${bad[0].tcs} on every locked sample - it is NOT`,
+                       "        playing. Nothing about the display matters until this is.");
+        }
+      }
       const withPos = locked.filter((r) => typeof r.pos === "number" && r.pos >= 0);
       if (withPos.length >= 2) {
         const d = withPos[withPos.length - 1].pos - withPos[0].pos;
@@ -20556,12 +20564,17 @@ function _appOpenAppSettings() {
           // run, and the display columns are meaningless. Judge it on whether the
           // lock held, which is the only thing it can tell us.
           const held = locked.filter((r) => r.appState === "bg" && r.native);
+          const playing = held.filter((r) => r.tcs === "play");
           verdict.push(held.length
             ? `CONTROL RUN (no display): the lock HELD - ${held.length} locked sample(s)`
             : "CONTROL RUN (no display): the lock did NOT hold even with nothing",
             held.length
-              ? `        with app=bg and playback running, out to ${held[held.length - 1].t}s.`
+              ? `        with app=bg and a live player, out to ${held[held.length - 1].t}s.`
               : "        plugged in, so the wake is not the display's doing.");
+          if (held.length && !playing.length) {
+            verdict.push("        But the player was NOT PLAYING (tcs=pause) - surviving",
+                         "        the lock is not the same as playing through it.");
+          }
         } else if (!L.extScene && !L.extScreen) {
           verdict.push("RESULT: the external display was GONE while locked (scr=1).",
                        "        Neither path can target a display iOS has taken away.");
@@ -27039,6 +27052,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.4.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.4.4</div>
 </body>
 </html>

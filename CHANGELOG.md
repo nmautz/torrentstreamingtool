@@ -1,5 +1,18 @@
 # Changelog
 
+## [18.4.4] — 2026-09-20
+* **The pause bug reproduces with no display attached at all** — `tcs=pause` with
+  `pos=441.7` at `locked+3s`, no scene, no window, nothing plugged in. Same signature as
+  the glasses runs, which confirms 18.4.3's diagnosis from the other direction: the
+  display was never involved in this failure.
+* **Stopped the readout calling a paused player "playback running".** The control-run
+  verdict checked only that a player object existed, so it reported a lock that held with
+  "playback running" while `tcs=pause` sat in the same row. It now says "a live player",
+  and adds a separate line when nothing was actually playing.
+* A single locked sample is now enough to report the transport state — the `PLAYHEAD:`
+  line needed two samples to say anything, so the most important fact in the trail went
+  unreported whenever the phone was picked up early.
+
 ## [18.4.3] — 2026-09-20
 * **Found why the native player never played: we tell it the episode is paused, because
   the thing we are rescuing it from just paused it.** WebKit pauses a video-bearing
