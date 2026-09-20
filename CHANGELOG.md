@@ -1,5 +1,29 @@
 # Changelog
 
+## [18.3.0] — 2026-09-20
+* **New: "Early" monitor-feed mode — claim the display when the episode starts, not
+  when the phone locks.** The trails had made a persuasive case that nothing could work:
+  at `resignActive` the scene was gone, and the external `UIScreen` vanished for the
+  whole locked stretch (`scr=1` for 103 s, back on unlock). Read as "iOS cuts the
+  display at lock". **That conclusion was wrong, and the counter-example settles it:
+  Viture's own app keeps content on the glasses through a lock.**
+* The distinction is **mirroring vs ownership**. A mirrored display is slaved to the
+  phone's screen, so locking kills it — and mirroring is all we ever had, because the
+  one moment we tried to take the display was the one moment it is untakeable. A display
+  an app *owns* through its external-display scene is not tied to the phone's screen at
+  all.
+* So `extMode` gains a third value. **At lock** (`window`) is the old behaviour;
+  **Early** (`early`) claims the display on `arm` while the app is comfortably foreground
+  and the scene is live, and **holds it across foreground/background** — `didBecomeActive`
+  no longer hands it back, or every unlock would return it to mirroring and the next lock
+  would kill it again. `stopNative` still releases it when playback ends.
+  **Mirrored** (`route`) is unchanged.
+* The cost is visible, and is why it is a setting: claiming the display stops mirroring
+  at once, so the monitor goes **black** until the handoff puts a player layer in the
+  window. That black screen is also the confirmation that the takeover happened.
+* `sceneConnect` now also claims for early mode, so plugging the glasses in mid-episode
+  works rather than needing a restart.
+
 ## [18.2.4] — 2026-09-20
 * **The trail now records `UIApplication.applicationState` per sample.** Run 4's
   `locked+3s` was taken while the app was foreground again and neither the readout nor

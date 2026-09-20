@@ -18448,7 +18448,8 @@ function _appPlaybackPrefs() {
   try {
     bg = localStorage.getItem(_APP_BGPLAY_KEY) !== "0";
     tv = localStorage.getItem(_APP_TVMODE_KEY) !== "0";
-    ext = localStorage.getItem(_APP_EXTMODE_KEY) === "route" ? "route" : "window";
+    const e = localStorage.getItem(_APP_EXTMODE_KEY);
+    ext = (e === "route" || e === "early") ? e : "window";
   } catch (_) {}
   return { bg, tv, ext };
 }
@@ -18814,7 +18815,7 @@ async function _appTryLocalHandoff(itemId, filePath, seekTo) {
         // background playback would silently stop working in the common case.
         bg:    localStorage.getItem(_APP_BGPLAY_KEY) !== "0",
         tvm:   localStorage.getItem(_APP_TVMODE_KEY) !== "0",
-        ext:   localStorage.getItem(_APP_EXTMODE_KEY) === "route" ? "route" : "window",
+        ext:   _appPlaybackPrefs().ext,
       });
     } catch (_) {}
     const q = new URLSearchParams({
@@ -20293,10 +20294,13 @@ function _appOpenAppSettings() {
           font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;"></button>
       </div>
       <div style="font-size:12px;color:#8a8a92;margin-top:8px;line-height:1.45;">
-        <b style="color:#c9c9cf;">Direct</b> sends the picture straight to the monitor and stops mirroring —
-        the right answer for most adapters, since a mirrored screen shows the lock screen.
-        <b style="color:#c9c9cf;">Mirrored</b> keeps mirroring and lets iOS route the video instead. If the
-        monitor goes blank when you lock the phone, switch to the other one.
+        A mirrored display is tied to the phone's screen, so locking the phone kills it.
+        Taking the display over is what breaks that link.
+        <b style="color:#c9c9cf;">At lock</b> claims it as the phone locks — usually too late, because
+        mirroring is already collapsing by then.
+        <b style="color:#c9c9cf;">Early</b> claims it the moment an episode starts: the monitor goes
+        <i>black</i> until you lock the phone, and that black screen is the proof it worked.
+        <b style="color:#c9c9cf;">Mirrored</b> leaves mirroring up and lets iOS route the video instead.
       </div>
       <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;">
         <div style="font-size:14px;font-weight:700;">Monitor diagnostics</div>
@@ -20367,11 +20371,12 @@ function _appOpenAppSettings() {
     });
   };
   // Not a boolean — two named routes to the monitor, same visual language.
+  const _EXT_LABEL = { window: "At lock", early: "Early", route: "Mirrored" };
+  const _EXT_NEXT  = { window: "early", early: "route", route: "window" };
   const paintExtTgl = () => {
     const t = ov.querySelector("#appSetExtTgl");
     if (!t) return;
-    const direct = _appPlaybackPrefs().ext !== "route";
-    t.textContent = direct ? "Direct" : "Mirrored";
+    t.textContent = _EXT_LABEL[_appPlaybackPrefs().ext] || "At lock";
     t.style.background = "transparent";
     t.style.color = "#f2f2f4";
     t.style.border = "1px solid #3a7afe";
@@ -20467,7 +20472,7 @@ function _appOpenAppSettings() {
     }
   };
   ov.querySelector("#appSetExtTgl").onclick = () => {
-    const next = _appPlaybackPrefs().ext === "route" ? "window" : "route";
+    const next = _EXT_NEXT[_appPlaybackPrefs().ext] || "early";
     try { localStorage.setItem(_APP_EXTMODE_KEY, next); } catch (_) {}
     paintExtTgl();
     _npArm();   // the native side reads this at handoff, so re-push it now
@@ -26927,6 +26932,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.2.4</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.3.0</div>
 </body>
 </html>

@@ -305,6 +305,11 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         } else if wasActive {
             PlaybackLiveActivity.shared.end()
         }
+
+        // Early mode takes the display now, while the app can still draw and the
+        // scene is live. Idempotent, so riding the arm push is enough — no extra
+        // JS surface, and it self-heals if the glasses are plugged in mid-episode.
+        maybeClaimEarly()
     }
 
     func tick(position: Double, paused: Bool, duration: Double) {
@@ -660,7 +665,11 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // become primary again, and TV Mode's whole premise is that the monitor
         // mirrors it. Safe when nothing was ever claimed.
         diagSnap("becomeActive")   // read BEFORE the hand-back undoes the evidence
-        detachExternalWindow()
+        // Early mode HOLDS the display across foreground/background. Handing it back
+        // here would return it to mirroring on every unlock, and the next lock would
+        // kill it again — which is the exact failure this mode exists to escape.
+        // stopNative() still releases it when playback really ends.
+        if !earlyClaim { detachExternalWindow() }
         if tvModeOn { applyBlank(true) }   // re-dim after a transient interruption
         guard isNativeActive else { return }
 
@@ -922,6 +931,43 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         externalScene != nil && armed.extMode != "route"
     }
 
+    /// Claim the display as soon as an episode is armed, rather than waiting for
+    /// the lock.
+    ///
+    /// WHY THIS MODE EXISTS. Claiming at `willResignActive` cannot work, and the
+    /// trails say why: by then mirroring is already collapsing and the scene is
+    /// gone (`scene=-` at resignActive, and the external UIScreen itself vanishes
+    /// for the whole locked stretch). That looked like "iOS cuts the display at
+    /// lock, nothing to be done" — but Viture's own app keeps content on the
+    /// glasses through a lock, so it plainly can be done.
+    ///
+    /// The distinction is MIRRORING vs OWNERSHIP. A mirrored display is slaved to
+    /// the phone's screen, so locking kills it. A display an app owns through its
+    /// external-display scene is not — which is the state we never reached,
+    /// because we only ever tried to reach it at the one moment it is unreachable.
+    /// So: take the display while the app is comfortably foreground and the scene
+    /// is live, and still hold it when the lock arrives.
+    ///
+    /// The cost is visible and is why this is a setting rather than the default:
+    /// claiming the display stops mirroring immediately, so the glasses go BLACK
+    /// until the handoff puts a player layer in the window. That black screen is
+    /// also the confirmation that the takeover happened.
+    private var earlyClaim: Bool { armed.extMode == "early" }
+
+    /// Idempotent; safe to call on every arm.
+    private func maybeClaimEarly() {
+        guard earlyClaim, armed.active, armed.handoffEnabled else { return }
+        onMain { [weak self] in
+            guard let self = self, self.extWindow == nil,
+                  self.externalScene != nil else { return }
+            self.detachFallbackLayer()
+            self.ensureExternalWindow()
+            self.attachExternalLayer()   // no-op until startNative makes a player
+            self.diagSnap("earlyClaim")
+            self.emit("displayChanged", self.displayInfo())
+        }
+    }
+
     /// Give the player a video surface when — and ONLY when — there is a monitor to
     /// put it on. A layerless AVPlayer is audio-only, which is the bug with a
     /// display attached and exactly the behaviour we want without one: attaching an
@@ -1054,7 +1100,8 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         guard (note.object as? UIWindowScene) != nil else { return }
         onMain { [weak self] in
             guard let self = self else { return }
-            if self.isNativeActive, self.wantsOwnExternalWindow, self.extWindow == nil {
+            if (self.isNativeActive || self.earlyClaim), self.wantsOwnExternalWindow,
+               self.extWindow == nil, self.armed.active {
                 // Drop the consolation prize first — two surfaces for one player
                 // would have AVFoundation's route and our window fighting over
                 // the same display.
