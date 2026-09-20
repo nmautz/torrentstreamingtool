@@ -115,6 +115,7 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "state",     returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setTvMode", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "displays",  returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "extDiag",   returnType: CAPPluginReturnPromise),
     ]
 
     private let mgr = NativePlaybackManager.shared
@@ -164,6 +165,10 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
 
     @objc func displays(_ call: CAPPluginCall) {
         call.resolve(mgr.displayInfo())
+    }
+
+    @objc func extDiag(_ call: CAPPluginCall) {
+        call.resolve(mgr.extDiagInfo())
     }
 }
 
@@ -355,6 +360,11 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // playback, and a connected monitor just keeps mirroring — which, once the
         // phone is locked, means mirroring the lock screen. Give it a surface.
         attachVideoSurface()
+        // `takeover` reaches startNative off the main thread, and the trail is
+        // main-only. Same queue as attachVideoSurface's own hop, so it still
+        // lands after the surface work.
+        onMain { [weak self] in self?.diagSnap("background/attached") }
+        scheduleLockedSnaps()
 
         statusObs = it.observe(\.status, options: [.new]) { [weak self] obs, _ in
             guard let self = self, obs.status == .readyToPlay else { return }
@@ -639,6 +649,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // Hand the external display back to mirroring: the web player is about to
         // become primary again, and TV Mode's whole premise is that the monitor
         // mirrors it. Safe when nothing was ever claimed.
+        diagSnap("becomeActive")   // read BEFORE the hand-back undoes the evidence
         detachExternalWindow()
         if tvModeOn { applyBlank(true) }   // re-dim after a transient interruption
         guard isNativeActive else { return }
@@ -832,6 +843,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         if armed.active, armed.handoffEnabled, wantsOwnExternalWindow {
             onMain { [weak self] in self?.ensureExternalWindow() }
         }
+        onMain { [weak self] in self?.diagSnap("resignActive") }
     }
 
     @objc private func appWillTerminate() {
@@ -905,8 +917,14 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         let vc = UIViewController()
         vc.view.backgroundColor = .black
         let w = UIWindow(frame: screen.bounds)
-        w.screen = screen                 // deprecated in iOS 13, but this app is
-                                          // non-scene-based, so it is still the path
+        // DEPRECATED IN iOS 13 AND SUSPECTED INERT HERE. The old comment claimed
+        // being non-scene-based kept this path alive; it is the opposite. Since
+        // iOS 13 this setter means "move me to the window scene on that screen",
+        // and an app with no UIApplicationSceneManifest is never handed a
+        // windowExternalDisplayNonInteractive scene to move onto — so the window
+        // is never presented and mirroring is never displaced. See the
+        // "External-display diagnostics" section; `extDiag()` measures it.
+        w.screen = screen
         w.backgroundColor = .black
         w.rootViewController = vc
         w.isHidden = false
@@ -981,6 +999,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         } else if externalScreen == nil {
             detachExternalWindow()
         }
+        diagSnap("screenChange")
         emit("displayChanged", displayInfo())
     }
 
@@ -991,6 +1010,116 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             "name": external.map { "\(Int($0.bounds.width))x\(Int($0.bounds.height))" } ?? "",
             "externalPlayback": player?.isExternalPlaybackActive ?? false,
             "ownWindow": extWindow != nil,
+        ]
+    }
+
+    // MARK: External-display diagnostics
+
+    // WHY THIS EXISTS
+    // Direct mode has never once displaced mirroring on a real device — it
+    // behaves identically to Mirrored. Apple's current documentation says why,
+    // and it is not a tuning problem:
+    //
+    //   * `UIScreen.mirrored`: "To disable mirroring and present unique content
+    //     on the external display, REGISTER A SCENE ACCESSORY."
+    //   * "Presenting content on a connected display": "To present content on a
+    //     connected display, you attach windows to UIWindowScene objects that
+    //     the system provides and respond to life-cycle events using scene
+    //     delegates." No UIScreen-based path is documented at all any more.
+    //   * `UIWindow.screen` — deprecated, "Use windowScene instead".
+    //     `UIScreen.screens` / `UIScreen.didConnectNotification` — deprecated
+    //     at iOS 16.0, "use UIApplication.shared.openSessions" / a scene delegate.
+    //
+    // This app ships no `UIApplicationSceneManifest`, so the system never
+    // connects a `windowExternalDisplayNonInteractive` scene to it. Since iOS 13
+    // the `window.screen` setter means "move me to the window scene on that
+    // screen"; with no such scene there is nothing to move onto, the window is
+    // never presented, and mirroring is never displaced. The comment in
+    // `ensureExternalWindow` has it backwards: being non-scene-based is not what
+    // keeps the legacy path alive, it is what makes it impossible.
+    //
+    // Migrating the app to scenes changes its launch path, so measure before
+    // shipping: this records what actually happens at each lifecycle edge. Two
+    // fields decide it —
+    //   `winScene` : false => our UIWindow belongs to no scene, i.e. it was
+    //                never presented anywhere. Proves the diagnosis.
+    //   `mirrored` : still true at "locked+3s" => the takeover did not happen
+    //                and the monitor is showing the lock screen.
+    // Both readings only mean anything WHILE THE PHONE IS LOCKED, which is
+    // exactly when nothing can display them — hence a buffered trail read back
+    // after unlocking rather than a live call.
+
+    private var diagTrail: [[String: Any]] = []
+    private var diagT0 = Date()
+
+    private func diagSnap(_ label: String) {
+        let ext = externalScreen
+        // Both of these are OPTIONAL properties reached through OPTIONAL chaining,
+        // so the naive `ext?.mirrored != nil` is a double optional and is true
+        // whenever `ext` exists — i.e. exactly the always-true reading that would
+        // make this whole instrument useless. Flatten first.
+        let mirroredFrom: UIScreen? = ext.flatMap { $0.mirrored }
+        let winScene: UIWindowScene? = extWindow.flatMap { $0.windowScene }
+        var row: [String: Any] = [
+            "at":          label,
+            "t":           String(format: "%.1f", Date().timeIntervalSince(diagT0)),
+            "screens":     UIScreen.screens.count,
+            "extScreen":   ext != nil,
+            "mirrored":    mirroredFrom != nil,
+            "extWindow":   extWindow != nil,
+            "winScene":    winScene != nil,
+            "winOnExt":    extWindow != nil && ext != nil && extWindow?.screen === ext,
+            "extLayer":    extLayer != nil,
+            "mainLayer":   mainLayer != nil,
+            "extPlayback": player?.isExternalPlaybackActive ?? false,
+            "native":      isNativeActive,
+            "mode":        armed.extMode,
+        ]
+        if let b = ext?.bounds { row["extBounds"] = "\(Int(b.width))x\(Int(b.height))" }
+        diagTrail.append(row)
+        // A lock/unlock cycle produces ~6 rows; keep a few cycles, drop the rest.
+        if diagTrail.count > 40 { diagTrail.removeFirst(diagTrail.count - 40) }
+    }
+
+    /// Snapshots taken from the background, where nothing else can run. The app
+    /// is alive here (the `audio` background mode plus the handoff's bg task),
+    /// so these fire; if they are MISSING from the trail, that is itself the
+    /// finding — the process was suspended instead of playing.
+    private func scheduleLockedSnaps() {
+        for d in [3.0, 10.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + d) { [weak self] in
+                guard let self = self, self.isNativeActive else { return }
+                self.diagSnap("locked+\(Int(d))s")
+            }
+        }
+    }
+
+    /// Capacitor delivers plugin methods off the main thread, and everything read
+    /// here is UIKit. Blocking on main from a background queue is safe (main is
+    /// not waiting on us); the guard is only for the already-on-main case.
+    private func onMainSync<T>(_ work: () -> T) -> T {
+        if Thread.isMainThread { return work() }
+        return DispatchQueue.main.sync(execute: work)
+    }
+
+    func extDiagInfo() -> [String: Any] {
+        onMainSync { extDiagInfoOnMain() }
+    }
+
+    private func extDiagInfoOnMain() -> [String: Any] {
+        diagSnap("read")
+        let app = UIApplication.shared
+        let roles = app.connectedScenes.map { $0.session.role.rawValue }
+        let openRoles = app.openSessions.map { $0.role.rawValue }
+        return [
+            // nil => pre-scene lifecycle => no external-display scene can exist.
+            "sceneManifest": Bundle.main.object(forInfoDictionaryKey: "UIApplicationSceneManifest") != nil,
+            "connectedScenes": roles,
+            "openSessions": openRoles,
+            "externalDisplayScene": roles.contains(where: { $0.contains("ExternalDisplay") }),
+            "iosVersion": UIDevice.current.systemVersion,
+            "extMode": armed.extMode,
+            "trail": diagTrail,
         ]
     }
 

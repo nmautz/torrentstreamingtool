@@ -20298,6 +20298,22 @@ function _appOpenAppSettings() {
         <b style="color:#c9c9cf;">Mirrored</b> keeps mirroring and lets iOS route the video instead. If the
         monitor goes blank when you lock the phone, switch to the other one.
       </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;">
+        <div style="font-size:14px;font-weight:700;">Monitor diagnostics</div>
+        <button id="appSetDiagBtn" style="all:unset;cursor:pointer;min-width:74px;text-align:center;padding:8px 12px;
+          font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#f2f2f4;
+          border:1px solid #3a7afe;">Read</button>
+      </div>
+      <div style="font-size:12px;color:#8a8a92;margin-top:8px;line-height:1.45;">
+        Records what the monitor handoff actually did at each step. Plug the monitor in,
+        start an episode, lock the phone for ~20 seconds, unlock, then press Read.
+        <b style="color:#c9c9cf;">winScene:false</b> means our video window was never attached to a
+        display, and <b style="color:#c9c9cf;">mirrored:true</b> at <b style="color:#c9c9cf;">locked+3s</b> means the
+        monitor was still mirroring the lock screen.
+      </div>
+      <pre id="appSetDiagOut" style="display:none;font-size:10px;line-height:1.4;color:#c9c9cf;background:#0d0d10;
+        border:1px solid #2a2a30;padding:10px;margin-top:10px;max-height:260px;overflow:auto;
+        white-space:pre;user-select:text;-webkit-user-select:text;"></pre>
     </div>
 
     <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;margin:2px 0 8px;">Auto-manage downloads</div>
@@ -20361,6 +20377,40 @@ function _appOpenAppSettings() {
   };
   paintPlaybackTgls();
   paintExtTgl();
+  // Monitor diagnostics. The readings that decide whether Direct mode ever took
+  // the display over can only be taken while the phone is LOCKED, so the native
+  // side buffers a trail and this just prints it back. Rendered as fixed-width
+  // rows rather than raw JSON so it is legible on a phone and copyable by hand.
+  ov.querySelector("#appSetDiagBtn").onclick = async () => {
+    const out = ov.querySelector("#appSetDiagOut");
+    out.style.display = "block";
+    if (!(_cap && _cap.np && _cap.np.extDiag)) {
+      out.textContent = "Not available — rebuild the app from Xcode to pick this up.";
+      return;
+    }
+    out.textContent = "Reading…";
+    try {
+      const d = await _cap.np.extDiag();
+      const head = [
+        `iOS ${d.iosVersion}   mode=${d.extMode}`,
+        `sceneManifest: ${d.sceneManifest}`,
+        `externalDisplayScene: ${d.externalDisplayScene}`,
+        `connectedScenes: ${(d.connectedScenes || []).join(", ") || "(none)"}`,
+        `openSessions: ${(d.openSessions || []).join(", ") || "(none)"}`,
+        "",
+      ];
+      const b = (v) => (v ? "Y" : "-");
+      const rows = (d.trail || []).map((r) =>
+        `${String(r.at).padEnd(19)} ${String(r.t).padStart(6)}s  scr=${r.screens}` +
+        ` ext=${b(r.extScreen)} mir=${b(r.mirrored)} win=${b(r.extWindow)}` +
+        ` winScene=${b(r.winScene)} onExt=${b(r.winOnExt)} extLyr=${b(r.extLayer)}` +
+        ` mainLyr=${b(r.mainLayer)} extPlay=${b(r.extPlayback)}` +
+        (r.extBounds ? ` ${r.extBounds}` : ""));
+      out.textContent = head.concat(rows.length ? rows : ["(no trail — nothing has locked yet)"]).join("\n");
+    } catch (e) {
+      out.textContent = "Failed: " + (e && e.message ? e.message : String(e));
+    }
+  };
   ov.querySelector("#appSetExtTgl").onclick = () => {
     const next = _appPlaybackPrefs().ext === "route" ? "window" : "route";
     try { localStorage.setItem(_APP_EXTMODE_KEY, next); } catch (_) {}
@@ -26822,6 +26872,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.1.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.2.0</div>
 </body>
 </html>

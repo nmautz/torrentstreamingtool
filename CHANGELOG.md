@@ -1,5 +1,35 @@
 # Changelog
 
+## [18.2.0] — 2026-09-20
+* **Monitor diagnostics for the iOS external-display handoff, and the reason it
+  was needed.** "Direct" has never once displaced mirroring on a real device —
+  it behaves identically to "Mirrored". Apple's current documentation says why,
+  and it is not a tuning problem: `UIScreen.mirrored` states that the way to
+  disable mirroring is to *register a scene accessory*, and *Presenting content
+  on a connected display* documents only one mechanism — attaching a `UIWindow`
+  to the `UIWindowScene` the system hands you for the
+  `windowExternalDisplayNonInteractive` role. `UIWindow.screen` is deprecated in
+  favour of `windowScene`; `UIScreen.screens` and `UIScreen.didConnectNotification`
+  were deprecated at iOS 16.0 in favour of scenes. This app ships **no**
+  `UIApplicationSceneManifest`, so no external-display scene is ever connected to
+  it, and `window.screen = external` — which since iOS 13 means "move me to the
+  window scene on that screen" — has nothing to move onto. The window is never
+  presented and mirroring is never displaced. The code comment claiming that
+  being non-scene-based *kept* the legacy path alive had it exactly backwards.
+* Rather than migrate the app's launch path on a theory, this ships the
+  measurement: `NativePlayback.extDiag()` buffers a trail of what the handoff
+  actually did at `resignActive`, `background/attached`, `locked+3s`,
+  `locked+10s`, `screenChange` and `becomeActive` — readings that only mean
+  anything while the phone is locked, which is exactly when nothing can display
+  them. Surfaced as **☰ App → Settings → Playback → Monitor diagnostics**.
+  `winScene:false` proves the window belongs to no scene; `mirrored:true` at
+  `locked+3s` proves the monitor was still showing the lock screen.
+* Also recorded a second-order bug the scene fix would not cure on its own: the
+  `AVPlayerLayer` is added at `didEnterBackground`, *after* the window's last
+  guaranteed composite pass at `willResignActive`, and a backgrounded app cannot
+  commit a layer-tree change.
+* No behaviour change — diagnostics only.
+
 ## [18.1.3] — 2026-09-19
 * **Fixed: re-downloading an evicted source left it still marked evicted.**
   Re-downloading is the documented way to undo an eviction, but nothing cleared

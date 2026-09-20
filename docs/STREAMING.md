@@ -1406,6 +1406,32 @@ locked**, `streamlink_app_extmode`, passed through `arm()` as `extMode`):
 | **Direct** (`window`, default) | a `UIWindow` of our own on the external `UIScreen` with an `AVPlayerLayer` in it. Creating it **replaces mirroring** for that screen, so the lock screen never reaches the monitor. Built at `willResignActive` — the last moment the app is guaranteed a composite pass — and destroyed at `didBecomeActive`, so foreground/TV Mode still get their mirror. | most wired adapters |
 | **Mirrored** (`route`) | leaves mirroring up and gives the player a full-screen `AVPlayerLayer` at the back of the app's own window (invisible behind the opaque webview), so AVFoundation's external-screen route has something to take over. | if Direct leaves the monitor blank |
 
+> **⚠️ Direct mode does not work, and cannot work as written (18.2.0).** Nobody has
+> ever got a picture onto the TV this way — it behaves exactly like Mirrored.
+> Replacing mirroring is a **scene** operation on current iOS: `UIScreen.mirrored`'s
+> documentation says the way to disable mirroring is to *register a scene accessory*,
+> and *Presenting content on a connected display* documents only attaching a `UIWindow`
+> to the `UIWindowScene` the system provides for the
+> `windowExternalDisplayNonInteractive` role. This app has **no
+> `UIApplicationSceneManifest`**, so it is never handed that scene, and
+> `window.screen = external` — which since iOS 13 means "move me to the window scene on
+> that screen" — has nothing to move onto. Detection is fine (`UIScreen.screens` still
+> reports the monitor; the TV Mode button appears); only the takeover fails. Fixing it
+> means adopting scenes, plus `UIViewController.registerSceneAccessory(_:)` for
+> **iOS 27+**, where the scene is no longer connected automatically. Until then TV Mode
+> is the only path that puts the episode on the TV. Full reasoning and the second-order
+> "layer added while backgrounded" bug are in [GOTCHAS.md](GOTCHAS.md).
+>
+> **Measuring it:** ☰ App → Settings → Playback → **Monitor diagnostics** calls
+> `NativePlayback.extDiag()`, which prints the scene manifest / connected scene roles /
+> `openSessions` and a buffered trail sampled at `resignActive`,
+> `background/attached`, `locked+3s`, `locked+10s`, `screenChange` and `becomeActive`.
+> It is buffered rather than live because the readings only mean anything while the
+> phone is locked. `winScene:false` ⇒ the window belongs to no scene at all;
+> `mirrored:true` at `locked+3s` ⇒ the monitor was still showing the lock screen. A
+> *missing* `locked+3s` row is itself a finding — the process was suspended, not
+> playing.
+
 **With no display connected, neither layer is attached** — deliberately. A main-screen
 `AVPlayerLayer` is the classic way to get AVFoundation to *suspend* video on background
 (the documented cure for background audio is `playerLayer.player = nil`), so attaching
