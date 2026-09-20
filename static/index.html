@@ -18460,6 +18460,17 @@ function _npOk() {
             && _appPlaybackPrefs().bg);
 }
 
+// The last paused state observed while the page was actually VISIBLE.
+//
+// WebKit pauses a video-bearing <video> the instant the app backgrounds — that
+// is the entire thing this handoff exists to rescue. So the element's own
+// `paused` flag is FALSE INFORMATION at exactly the moment we hand off: the
+// visibilitychange->hidden arm reported paused:true, seekAndPlay's
+// `if !armed.paused { play() }` skipped, and the native player started paused
+// and stayed that way. Measured symptom: no audio after locking, a frozen first
+// frame on the display, and both fixed by pressing play on the lock screen.
+// So report intent (what the user left it doing) rather than the element state.
+let _npVisiblePaused = false;
 let _npExternal = false;     // an external display / AirPlay route is present
 let _npArmed = false;        // we've told native a session is live
 let _npLastTick = 0;
@@ -18490,6 +18501,14 @@ function _npSeriesName() {
   } catch (_) { return ""; }
 }
 
+// Element state while visible, last-visible state once hidden. See
+// _npVisiblePaused.
+function _npPausedIntent(v) {
+  const live = !!(v && v.paused);
+  if (document.visibilityState === "visible") { _npVisiblePaused = live; return live; }
+  return _npVisiblePaused;
+}
+
 function _npPayload() {
   const v = _lpV();
   // The project's trusted-playhead rule: currentTime reads 0 after iOS resets
@@ -18505,7 +18524,7 @@ function _npPayload() {
     url: _npAbs(lp._nativeMaster),
     position: t,
     duration: (v && v.duration > 0) ? v.duration : (lp.duration || 0),
-    paused: !!(v && v.paused),
+    paused: _npPausedIntent(v),
     rate: (v && v.playbackRate) || 1,
     title: lp.name || "",
     series: _npSeriesName(),
@@ -18557,7 +18576,7 @@ function _npTick() {
   try {
     _cap.np.tick({
       position: (v.currentTime > 2) ? v.currentTime : (lp.lastKnownT || 0),
-      paused: !!v.paused,
+      paused: _npPausedIntent(v),
       duration: v.duration > 0 ? v.duration : (lp.duration || 0),
     });
   } catch (_) {}
@@ -20424,6 +20443,7 @@ function _appOpenAppSettings() {
         ` win=${b(r.extWindow)} winScene=${b(r.winScene)} extLyr=${b(r.extLayer)}` +
         ` mainLyr=${b(r.mainLayer)} extPlay=${b(r.extPlayback)} nat=${b(r.native)}` +
         ` app=${r.appState || "?"} ${r.tcs || "?"} pos=${r.pos === undefined ? "?" : r.pos}` +
+        ` sess=${b(r.sess)} armPaused=${b(r.armPaused)}` +
         (r.extBounds ? ` ${r.extBounds}` : ""));
 
       // Verdict up front. Two runs in a row were read without ever locking the
@@ -27019,6 +27039,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.4.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.4.3</div>
 </body>
 </html>

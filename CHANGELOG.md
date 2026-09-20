@@ -1,5 +1,22 @@
 # Changelog
 
+## [18.4.3] — 2026-09-20
+* **Found why the native player never played: we tell it the episode is paused, because
+  the thing we are rescuing it from just paused it.** WebKit pauses a video-bearing
+  `<video>` the instant the app backgrounds — the whole premise of this feature — and the
+  `visibilitychange`→hidden handler arms the plugin at that same moment, reading
+  `paused: !!(v && v.paused)` straight off the element. So the final arm before every
+  handoff said `paused: true`, `seekAndPlay`'s `if !armed.paused { play() }` skipped, and
+  the player sat paused at the right position forever. The trail shows it exactly:
+  `tcs=pause` with `pos=440` at `locked+3s` — correctly seeked, never playing. It is also
+  every symptom at once: no audio after locking, a frozen first frame on the display, and
+  both cured by pressing play on the lock screen.
+* `_npPayload` and `_npTick` now report **intent** — the last paused state observed while
+  the page was actually visible — rather than the element's state at the moment of hiding.
+* **The `audio session:` header was lying.** It is read after `stopNative()` has reset the
+  flag, so it printed `INACTIVE` regardless of what happened at the handoff. Session state
+  and `armed.paused` are now recorded **per row**, where the handoff moment is visible.
+
 ## [18.4.2] — 2026-09-20
 * **Fixed the bug under all of this: the audio session was claimed from the BACKGROUND,
   where iOS will not grant it.** The decisive report was about the case that supposedly

@@ -1318,6 +1318,11 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             "pos":         player.map { CMTimeGetSeconds($0.currentTime()) }
                              .flatMap { $0.isFinite ? Double(round($0 * 10) / 10) : nil } ?? -1,
             "likely":      player?.currentItem?.isPlaybackLikelyToKeepUp ?? false,
+            // Per row, because the header's copy is read after stopNative() has
+            // already reset the flag — it reported INACTIVE no matter what
+            // happened at the handoff, which is the moment that matters.
+            "sess":        sessionActivated,
+            "armPaused":   armed.paused,
         ]
         if let b = ext?.bounds { row["extBounds"] = "\(Int(b.width))x\(Int(b.height))" }
         diagTrail.append(row)
@@ -1364,7 +1369,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             // Bump with any change to this file. Two runs have already been
             // ambiguous about whether the app had been rebuilt, and the trail
             // should never leave that in doubt.
-            "build": "18.4.2",
+            "build": "18.4.3",
             "audioSession": sessionActivated ? "active" : "INACTIVE",
             "audioError": audioSessionError,
             "iosVersion": UIDevice.current.systemVersion,
