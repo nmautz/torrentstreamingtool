@@ -1,5 +1,19 @@
 # Changelog
 
+## [18.4.1] — 2026-09-20
+* **18.4.0 confirmed on device: the locked session now survives.** `locked+3s`,
+  `locked+10s` and `locked+20s` all present with `win=Y winScene=Y extLyr=Y nat=Y`. The
+  geometry fix landed too — a frame reaches the display and stays, correctly, where before
+  it flashed and vanished.
+* **The remaining failure is new and narrow: the layer presents ONE frame and never
+  updates.** It persists through unlock, even while the phone resumes playing, and only
+  clears when playback ends. Two causes fit and the trail could not tell them apart — a
+  paused player, or a running player whose video decode is suspended while the device is
+  locked. So each sample now records the player itself: `rate`, `timeControlStatus`,
+  `currentTime` and `isPlaybackLikelyToKeepUp`, and the readout reports whether the
+  playhead **moved** across the locked samples. Advancing position plus a frozen picture
+  means suspended decode; a static position means a paused player.
+
 ## [18.4.0] — 2026-09-20
 * **The native player was destroying itself ~5 s into every locked session.**
   `didBecomeActive` arms a 5-second deadline that calls `stopNative()`, there to catch a

@@ -1231,6 +1231,15 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private var diagTrail: [[String: Any]] = []
     private var diagT0 = Date()
 
+    private static func tcsName(_ s: AVPlayer.TimeControlStatus?) -> String {
+        switch s {
+        case .some(.playing):                    return "play"
+        case .some(.paused):                     return "pause"
+        case .some(.waitingToPlayAtSpecifiedRate): return "wait"
+        default:                                 return "-"
+        }
+    }
+
     private static func stateName(_ s: UIApplication.State) -> String {
         switch s {
         case .active:   return "act"
@@ -1269,6 +1278,16 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             // device woke, but there is one for whether we were foreground when the
             // sample was taken, and that is the part that invalidates a reading.
             "appState":    Self.stateName(UIApplication.shared.applicationState),
+            // Is the PLAYER actually running? A frozen picture has two very
+            // different causes and the columns above cannot tell them apart:
+            // a paused player (rate 0, position static) versus a playing one
+            // whose video decode has been suspended (rate 1, position advancing,
+            // last frame stuck on screen). `pos` across locked+3/10/20 settles it.
+            "rate":        Double(player?.rate ?? 0),
+            "tcs":         Self.tcsName(player?.timeControlStatus),
+            "pos":         player.map { CMTimeGetSeconds($0.currentTime()) }
+                             .flatMap { $0.isFinite ? Double(round($0 * 10) / 10) : nil } ?? -1,
+            "likely":      player?.currentItem?.isPlaybackLikelyToKeepUp ?? false,
         ]
         if let b = ext?.bounds { row["extBounds"] = "\(Int(b.width))x\(Int(b.height))" }
         diagTrail.append(row)
@@ -1315,7 +1334,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             // Bump with any change to this file. Two runs have already been
             // ambiguous about whether the app had been rebuilt, and the trail
             // should never leave that in doubt.
-            "build": "18.4.0",
+            "build": "18.4.1",
             "iosVersion": UIDevice.current.systemVersion,
             "extMode": armed.extMode,
             "trail": diagTrail,
