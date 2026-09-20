@@ -31407,9 +31407,12 @@ def _evict_candidates_sync(lib: dict, policy: "srcevict.Policy", now: datetime,
             try:
                 source_bytes = src.stat().st_size
             except OSError:
-                # No source to delete. Not "already evicted" — there is no bundle
-                # record vouching for it — so it is simply not a candidate.
-                out.append(srcevict.block(base, srcevict.BLOCK_ALREADY_EVICTED))
+                # No source on disk and no `files[].bundle` vouching for it: a
+                # deselected file, one that never downloaded, or one that vanished.
+                # Its own reason, NOT `already-evicted` — reporting a file the
+                # sweep never touched as "source already reclaimed" makes the dry
+                # run look like eviction has been running all along.
+                out.append(srcevict.block(base, srcevict.BLOCK_NO_SOURCE))
                 continue
             base = srcevict.Candidate(
                 path=path, series_key=skey, name=name,
@@ -31556,6 +31559,11 @@ async def _build_evict_plan() -> dict:
         "blocked_count":  len(p.blocked),
         "blockers":       [{"reason": r, "files": n, "bytes": b, "human": human_size(b)}
                            for (r, n, b) in srcevict.blocker_summary(candidates)],
+        # The actionable half: files where this reason is the ONLY thing stopping
+        # them, so "clear this one obstacle and N files / X GB open up" is a
+        # promise the pool can actually keep.
+        "sole_blockers":  [{"reason": r, "files": n, "bytes": b, "human": human_size(b)}
+                           for (r, n, b) in srcevict.sole_blocker_summary(candidates)],
         # Capped: a full library is thousands of files and the admin card shows a
         # table, not a census. The totals above describe the whole pool.
         "would_delete":   [row(c) for c in p.would_delete[:200]],

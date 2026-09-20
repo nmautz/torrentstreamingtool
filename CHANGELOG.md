@@ -1,5 +1,20 @@
 # Changelog
 
+## [18.0.1] — 2026-09-19
+* **Fixed: the dry run reported 37 files as "source already reclaimed" when nothing
+  had ever been reclaimed.** A file with no source on disk and no `files[].bundle`
+  record — a deselected file, one that never finished downloading, one that vanished
+  — was blocked under `already-evicted`, which in the admin card reads as eviction
+  having already run. Measured on the box the first time the dry run was pointed at
+  the real library. It now has its own reason, `no-source`.
+* **Added: "waiting on one thing only".** The plain blocker summary counts a file
+  under every reason it carries, which cannot answer the question that actually
+  decides whether to build the sweep — *clear this one obstacle and how much opens
+  up?* `sole_blocker_summary` counts only files where a reason is the sole blocker,
+  so the number is a promise the pool can keep. First live dry run: 613 files, 0
+  eligible, dominated by 436 `unverified` — the bundle audit had not swept since the
+  reboot, which is the gate correctly refusing to act without evidence.
+
 ## [18.0.0] — 2026-09-19
 * **New: Reclaim Source Files — delete a prepped episode's source, keep its bundle.
   Dry run only in this release; nothing is deleted yet.** A prepped episode exists on

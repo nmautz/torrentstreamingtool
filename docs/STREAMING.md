@@ -2500,7 +2500,9 @@ something recent.
 check it cannot *establish* blocks rather than passes — missing evidence is not
 permission. The blockers (all surfaced in the dry run) are:
 
-`not-aged` · `no-bundle` · `unverified` (no current `bundle_check`) · `damaged` ·
+`not-aged` · `no-bundle` · `unverified` (no current `bundle_check`) · `damaged` · `no-source`
+(nothing on disk and no `bundle` record — distinct from `already-evicted`, which means
+a sweep really did take it) ·
 `incomplete-bundle` (`_bundle_playable_sync`: a playlist references a missing or
 zero-byte segment, or the `init_*.mp4` is gone) · `source-incomplete` (qBit not at
 100%, or unreachable) · `in-progress` (a non-completed position > 5s for any
@@ -2508,6 +2510,12 @@ profile) · `next-up` (any profile's `find_series_resume_hint`, for profiles tha
 have actually started that series) · `busy` (playing in VLC, mid-compress, feeding
 a JIT session, prep job on the key, or the item is racing) · `already-evicted` ·
 `not-video`.
+
+The dry run reports each reason twice: once counting **every** file that carries it,
+and once counting only files where it is the **sole** blocker
+(`srcevict.sole_blocker_summary`). The second is the actionable one — a file also
+waiting on the clock is not waiting on the bundle audit, so counting it under
+`unverified` would promise a pool that finishing the audit could not deliver.
 
 `unverified` is load-bearing: `bundle_check` is what proves the bundle is not a
 frozen-picture wreck, and it is written by the idle audit, so a freshly prepped

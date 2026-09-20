@@ -68,7 +68,8 @@ GB_RANGE = (1.0, 1_000_000.0)
 # would free 0 bytes" is useless without "...and here is what is holding each
 # file back". Ordered roughly cheapest-to-establish first.
 BLOCK_NOT_VIDEO = "not-video"              # not a video file; nothing prepped it
-BLOCK_ALREADY_EVICTED = "already-evicted"  # source is already gone
+BLOCK_ALREADY_EVICTED = "already-evicted"  # source already reclaimed by a previous sweep
+BLOCK_NO_SOURCE = "no-source"              # no source on disk and no eviction record vouching for it
 BLOCK_NOT_AGED = "not-aged"                # series touched inside the clock
 BLOCK_NO_BUNDLE = "no-bundle"              # nothing to play once the source goes
 BLOCK_STALE_VERSION = "stale-version"      # bundle predates the current format
@@ -86,7 +87,7 @@ BLOCKER_ORDER = (
     BLOCK_NOT_AGED, BLOCK_NO_BUNDLE, BLOCK_UNVERIFIED, BLOCK_DAMAGED,
     BLOCK_INCOMPLETE_BUNDLE, BLOCK_SOURCE_INCOMPLETE, BLOCK_STALE_VERSION,
     BLOCK_IN_PROGRESS, BLOCK_NEXT_UP, BLOCK_BUSY, BLOCK_ALREADY_EVICTED,
-    BLOCK_NOT_VIDEO,
+    BLOCK_NO_SOURCE, BLOCK_NOT_VIDEO,
 )
 
 
@@ -316,6 +317,28 @@ def blocker_summary(candidates: Sequence[Candidate]) -> list:
         for r in c.blockers:
             n, b = counts.get(r, (0, 0))
             counts[r] = (n + 1, b + c.source_bytes)
+    known = [(r, *counts[r]) for r in BLOCKER_ORDER if r in counts]
+    rest = sorted((r, *v) for r, v in counts.items() if r not in BLOCKER_ORDER)
+    return [(r, n, b) for (r, n, b) in known + rest]
+
+
+def sole_blocker_summary(candidates: Sequence[Candidate]) -> list:
+    """`[(reason, file_count, bytes)]` counting only files where that reason is the
+    **one and only** thing stopping them.
+
+    This is the actionable half of the readout, and it answers a question the plain
+    summary cannot: *if this single obstacle cleared, how much would open up?* A
+    file blocked by both `not-aged` and `unverified` is not waiting on the bundle
+    audit -- it is waiting on time -- so counting it under `unverified` would
+    promise a pool that finishing the audit could not deliver.
+    """
+    counts: dict = {}
+    for c in candidates:
+        if len(c.blockers) != 1:
+            continue
+        r = c.blockers[0]
+        n, b = counts.get(r, (0, 0))
+        counts[r] = (n + 1, b + c.source_bytes)
     known = [(r, *counts[r]) for r in BLOCKER_ORDER if r in counts]
     rest = sorted((r, *v) for r, v in counts.items() if r not in BLOCKER_ORDER)
     return [(r, n, b) for (r, n, b) in known + rest]

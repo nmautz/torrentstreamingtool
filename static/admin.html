@@ -6305,7 +6305,8 @@ const _SE_BLOCKERS = {
   "in-progress":        "Someone is part-way through it",
   "next-up":            "It's someone's next episode",
   "busy":               "Playing, compressing, prepping or racing",
-  "already-evicted":    "Source already gone",
+  "already-evicted":    "Source already reclaimed by an earlier sweep",
+  "no-source":          "No source on disk (deselected, or never downloaded)",
   "not-video":          "Not a video file",
 };
 
@@ -6397,6 +6398,12 @@ function _seRenderPlan(d){
     ? `<span class="text-amber-300">Below the ${d.floor_gb} GB floor — a sweep would run and take ${_esc(d.would_free_human)}${d.met ? "" : " (not enough to reach the target)"}.</span>`
     : `<span class="text-green-400">Above the ${d.floor_gb} GB floor — a sweep would take nothing.</span>`;
 
+  const sole = (d.sole_blockers || []).map(b => `
+    <div class="flex items-baseline justify-between gap-3 py-0.5">
+      <span class="text-gray-400">${_esc(_SE_BLOCKERS[b.reason] || b.reason)}</span>
+      <span class="font-mono text-amber-300/80">${b.files} · ${_esc(b.human)}</span>
+    </div>`).join("");
+
   const blockers = (d.blockers || []).map(b => `
     <div class="flex items-baseline justify-between gap-3 py-0.5">
       <span class="text-gray-500">${_esc(_SE_BLOCKERS[b.reason] || b.reason)}</span>
@@ -6417,8 +6424,12 @@ function _seRenderPlan(d){
       </div>
       <div>${trigger}</div>
       ${d.enabled ? "" : `<div class="text-gray-600">Policy is switched off, so a sweep would not run at all — the eligible pool above is what it <em>would</em> reach if you turned it on.</div>`}
+      ${sole ? `<div class="pt-1">
+        <div class="text-[10px] uppercase tracking-widest text-gray-600 mb-1">Waiting on one thing only<span class="help-tip" tabindex="0" data-tip="Files where this is the ONLY obstacle — clear it and they become eligible. A file also waiting on the clock isn't counted here, because fixing the other thing wouldn't release it.">?</span></div>
+        <div class="space-y-0.5">${sole}</div>
+      </div>` : ""}
       <details class="pt-1">
-        <summary class="cursor-pointer text-gray-500 hover:text-gray-300">Why everything else is held back</summary>
+        <summary class="cursor-pointer text-gray-500 hover:text-gray-300">Every reason, including files with several</summary>
         <div class="pt-2 space-y-0.5">${blockers || '<span class="text-gray-600">Nothing blocked.</span>'}</div>
       </details>
     </div>

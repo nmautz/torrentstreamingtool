@@ -200,6 +200,37 @@ ok("summary: follows BLOCKER_ORDER",
    [r for (r, _, _) in summary] == [se.BLOCK_NOT_AGED, se.BLOCK_DAMAGED])
 ok("summary: empty in, empty out", se.blocker_summary([]) == [])
 
+# ── sole_blocker_summary ──────────────────────────────────────────────────────
+pool2 = [
+    se.block(cand("/a.mkv", "s", 1, gb=2), se.BLOCK_UNVERIFIED),                    # sole
+    se.block(cand("/b.mkv", "s", 1, gb=3), se.BLOCK_UNVERIFIED),                    # sole
+    se.block(cand("/c.mkv", "s", 1, gb=9), se.BLOCK_UNVERIFIED, se.BLOCK_NOT_AGED), # not sole
+    se.block(cand("/d.mkv", "s", 1, gb=4), se.BLOCK_NOT_AGED),                      # sole
+    cand("/e.mkv", "s", 99, gb=7),                                                  # eligible
+]
+sole = {r: (n, b) for (r, n, b) in se.sole_blocker_summary(pool2)}
+ok("sole: counts only files with exactly one blocker", sole[se.BLOCK_UNVERIFIED][0] == 2)
+ok("sole: sums their bytes", sole[se.BLOCK_UNVERIFIED][1] == int(5 * GIB))
+# The whole point: a file ALSO waiting on the clock is not waiting on the audit,
+# so finishing the audit cannot deliver it. Counting it would overpromise the pool.
+ok("sole: a multi-blocker file is excluded from every reason it carries",
+   sole[se.BLOCK_NOT_AGED] == (1, int(4 * GIB))          # d only; c is excluded
+   and sole[se.BLOCK_UNVERIFIED] == (2, int(5 * GIB)),   # a+b only; c is excluded
+   "c.mkv (9 GiB, unverified AND not-aged) must not be counted under either")
+ok("sole: eligible files appear nowhere", sum(n for (_, n, _) in se.sole_blocker_summary(pool2)) == 3)
+ok("sole: never exceeds the plain summary for the same reason",
+   all(sole.get(r, (0, 0))[0] <= n
+       for (r, n, _) in se.blocker_summary(pool2)))
+ok("sole: empty in, empty out", se.sole_blocker_summary([]) == [])
+ok("sole: follows BLOCKER_ORDER",
+   [r for (r, _, _) in se.sole_blocker_summary(pool2)] == [se.BLOCK_NOT_AGED, se.BLOCK_UNVERIFIED])
+
+# ── no-source is its own reason ───────────────────────────────────────────────
+# A file the sweep never touched must never be reported as "source already
+# reclaimed" — that reads as eviction having run when it has not.
+ok("no-source is distinct from already-evicted", se.BLOCK_NO_SOURCE != se.BLOCK_ALREADY_EVICTED)
+ok("no-source is in BLOCKER_ORDER", se.BLOCK_NO_SOURCE in se.BLOCKER_ORDER)
+
 # ── parse_iso ─────────────────────────────────────────────────────────────────
 ok("iso: trailing Z is accepted (3.9-safe)",
    se.parse_iso("2026-09-19T12:00:00Z") == NOW)
