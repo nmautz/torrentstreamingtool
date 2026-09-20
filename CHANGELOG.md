@@ -1,5 +1,23 @@
 # Changelog
 
+## [18.5.4] — 2026-09-20
+* **The "playing elsewhere" banner no longer fights the iOS status bar.** It was its
+  own sticky strip above the header, which made it the topmost element in the flow — and
+  `.safe-top` belongs to the header, because two stacked top-of-flow elements cannot both
+  claim that inset. So in the iOS app the clock / Dynamic Island sat directly on top of
+  its text and its **Play Here** button. It now renders **inside the navbar**, standing in
+  for the StreamLink wordmark for exactly as long as it is up: the header already owns the
+  safe-area padding, the wordmark is decoration and someone's playback is not, and the
+  chrome gains no permanent height. It also drops the `body.fc-open` hide rule the other
+  top banners need — the fullscreen overlay is a solid `z-50` sheet over a `z-40` navbar,
+  so it was already covered.
+* **Its rows wrap instead of squashing on a narrow screen.** At phone widths — and in any
+  window of that aspect — the icon, title, clock and **Play Here** were all fighting for
+  one line. The clock and button now drop onto a second line once the title's `7rem` floor
+  stops fitting beside them. That floor is a real `min-width` rather than `min-w-0`: a flex
+  item allowed to shrink to zero never wraps, it just squashes. The clock is no longer
+  hidden below 400px either — wrapping finally gives it somewhere to go.
+
 ## [18.5.3] — 2026-09-20
 * **The clock and seek bar now follow the native player.** 18.5.2 had the page poll
   `state()` once a second; play/pause and ±10 s worked but the readouts never moved. The

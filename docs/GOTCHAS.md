@@ -3113,6 +3113,35 @@ phones (~47pt) sit comfortably under it — a small dark band beats either the s
 bar covering the controls or the intermittent drift. (Browsers are untouched — they
 keep `.safe-top { padding-top: env(safe-area-inset-top) }`.)
 
+### Only ONE element can own the top safe-area inset — don't stack a banner above the header
+`.safe-top` lives on `<header>`, so the header is the thing that clears the status bar /
+Dynamic Island. Put **anything else** first in the `<body>` flow — a sticky notification
+strip, say — and *it* becomes the topmost element while the padding stays on the header
+below it, so the iOS clock sits straight on top of the new strip's text and buttons. This
+bit `#elsewhereBanner` (the cross-device "playing elsewhere" banner): its **Play Here**
+button was under the status bar in the app, and under the window chrome in any narrow
+browser window.
+
+The tempting fix — add `.safe-top` to the banner too — is wrong: now *both* pad, and when
+both are visible you get 59pt of dead band twice. Conditionalising it ("pad whichever is
+topmost") means JS that has to know every combination of banners.
+
+**So don't stack. Put the thing inside the header** and let the header keep owning the
+inset. `#elsewhereBanner` now renders in the `#navLogo` wordmark's slot and
+`renderElsewhere()` hides the wordmark while it is up — the wordmark is decoration,
+someone's playback is not, and the chrome gains no permanent height. A side benefit: it
+no longer needs the `body.fc-open { display:none }` rule the other top banners carry,
+because the fullscreen overlay is a solid `fixed inset-0 z-50` sheet over a `z-40` navbar
+and already covers it. (`#serverAttentionBanner` still sits above the header and still has
+this problem — it is dismissable and short-lived, so it has not been moved.)
+
+**Related, on the same banner:** `min-w-0` on a flex item **prevents** wrapping. Tailwind's
+`min-w-0` is the standard way to let a `truncate` child shrink, but an item that can shrink
+to zero never overflows the line, so `flex-wrap` on the parent does nothing and the row
+just squashes — icon, title, clock and button all crushed onto one line at phone widths.
+Give the text column a real floor (`style="min-width:7rem"`): it still truncates past that
+floor, and once the floor stops fitting the trailing block wraps to a second line.
+
 ### In the app, lock the viewport (`maximum-scale=1, user-scalable=no`) — injected natively, not in the page
 iOS auto-zooms the WebView whenever an input with `font-size < 16px` gains focus (the
 PIN pad, the search box, profile/episode fields). The host dashboard's `<meta

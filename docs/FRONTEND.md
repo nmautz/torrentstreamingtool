@@ -1060,10 +1060,28 @@ Password-protected at `/admin`. Token stored in `sessionStorage.admin_token` and
 The `#elsewhereBanner` strip and everything behind it. Backend contract and the
 design reasoning live in [STREAMING.md § 8](STREAMING.md); this is the client map.
 
-**Markup.** `#elsewhereBanner` sits directly after `#serverAttentionBanner`, sticky
-at `z-[65]` (under that banner's `z-70`, over the page). Hidden by `body.fc-open`
-alongside the other top banners, and `pointer-events:auto` so the hold buttons work.
-It is **empty in the document** — every row is written by `renderElsewhere()`.
+**Markup.** `#elsewhereBanner` lives **inside the navbar**, in the slot the
+`#navLogo` wordmark otherwise occupies (18.5.4); `renderElsewhere()` hides
+`#navLogo` for exactly as long as the banner is showing, so the header gains no
+permanent height. It is **empty in the document** — every row is written by
+`renderElsewhere()` — and keeps `pointer-events:auto` so the hold buttons work.
+
+It was previously its own sticky `z-[65]` strip above `<header>`. That made it
+the topmost element in the flow with no safe-area padding of its own, and
+`.safe-top` is owned by the header — two stacked top-of-flow elements cannot both
+claim that inset — so in the iOS app the status bar / Dynamic Island sat on top
+of its text and its **Play Here** button. Living in the header fixes that by
+construction. It also no longer needs the `body.fc-open` hide rule the other top
+banners have: the fullscreen overlay is a solid `fixed inset-0 z-50` sheet and the
+navbar is `z-40`, so it is already covered.
+
+**Row layout.** Each row is `flex flex-wrap`; the title column carries a real
+`min-width:7rem` rather than `min-w-0`, because a flex item allowed to shrink to
+zero never wraps — it just squashes. Past that floor the clock + **Play Here**
+block drops onto a second line, which is what happens on a phone once the nav's
+right-hand cluster has taken its share of the row. The clock is no longer hidden
+below 400px (the old `.xs\:block` shim is gone) — wrapping gives it somewhere to
+go.
 
 **Identity (device-local, `localStorage`).**
 

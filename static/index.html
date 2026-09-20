@@ -354,18 +354,30 @@
        control tiles below, since users rely on muscle memory for those) and has
        pointer-events:none so it can never block a control. */
     body.fc-open #serverAttentionBanner,
-    body.fc-open #elsewhereBanner,
     body.fc-open #globalToast { display:none !important; }
-    /* The "playing elsewhere" banner sits below the server-attention banner's
-       z-70 but above the page, and — unlike that one — it is NOT dismissable, so
-       it must never swallow a tap meant for something underneath. It only ever
-       renders above the page flow (sticky, at the top), so capturing pointer
-       events on the strip itself is safe and is what the hold-to-pull buttons
-       need. */
+    /* ── The "playing elsewhere" banner lives INSIDE the navbar ─────────────
+       It used to be its own sticky strip ABOVE the header, which made it the
+       topmost element in the flow with no safe-area padding of its own — so in
+       the iOS app the status bar / Dynamic Island sat on top of its text and its
+       Play Here button (`.safe-top` is owned by the header, and two stacked
+       top-of-flow elements cannot both claim that inset). On a narrow window it
+       also cost a whole extra band of chrome above an already two-row navbar.
+       It now takes the StreamLink wordmark's slot inside the header, which
+       already carries `.safe-top`; renderElsewhere() hides #navLogo for exactly
+       as long as the banner is showing, so the two are mutually exclusive and
+       the navbar gains no permanent height.
+       No `body.fc-open` hide rule is needed any more: the fullscreen overlay is
+       a solid `fixed inset-0 z-50` sheet and the navbar is z-40, so the banner
+       is already covered by it.
+       The rows wrap on their own — the clock + Play Here block drops onto a
+       second line the moment the title's 7.5rem floor stops fitting beside it,
+       which is what happens on a phone once the right-hand nav cluster has taken
+       its width. That floor is a real `min-width` rather than `min-w-0`: a flex
+       item allowed to shrink to zero never wraps, it just squashes. */
     #elsewhereBanner { pointer-events: auto; }
-    /* The clock column is hidden on the narrowest phones (Tailwind has no `xs`
-       breakpoint by default, so define the one class we use). */
-    @media (min-width: 400px) { .xs\:block { display: block !important; } }
+    /* `.hidden` and `.flex` are the same specificity, so state the winner
+       outright rather than relying on Tailwind's emit order for the swap. */
+    #navLogo.hidden { display: none !important; }
     /* The server-attention banner floats at z-70 — above the on-device player
        (z-50) and its Stop / To TV control bar. It's dismissable, so a shown banner
        should BLOCK clicks so an accidental tap can't fall through to a UI button
@@ -2423,16 +2435,6 @@
     class="flex-shrink-0 -my-1.5 -mr-1 p-1.5 leading-none text-base opacity-70 hover:opacity-100 transition-opacity">×</button>
 </div>
 
-<!-- ── "Playing elsewhere" banner (cross-device sessions) ─────────────────── -->
-<!-- One row per live session on another device signed in as this profile, plus
-     the TV whoever started it. Each row holds to pull that playback onto THIS
-     device. Rendered entirely by renderElsewhere(); hidden when the list is
-     empty and on the ?tv=1 kiosk (no pointer, and it is itself one of the
-     sessions being listed). Sits above the navbar like the server-attention
-     banner and below the fullscreen overlay's own notice strip. -->
-<div id="elsewhereBanner"
-  class="hidden sticky top-0 z-[65] bg-indigo-950/70 border-b border-indigo-900 divide-y divide-indigo-900/60"></div>
-
 <!-- Host-performance banner removed: CPU/GPU/RAM/network busy/overloaded states
      are transient background-work noise and are no longer surfaced to the user. -->
 
@@ -2443,10 +2445,23 @@
   <div class="safe-top">
     <div class="max-w-screen-2xl mx-auto px-2 sm:px-3">
       <div class="flex items-center gap-1 sm:gap-2 flex-wrap sm:flex-nowrap">
-        <!-- Logo -->
-        <div class="font-black text-base sm:text-lg tracking-wide uppercase whitespace-nowrap flex-shrink-0 h-12 sm:h-14 flex items-center mr-0 sm:mr-1">
+        <!-- Logo — hidden by renderElsewhere() while the "playing elsewhere"
+             banner below is standing in this slot. -->
+        <div id="navLogo" class="font-black text-base sm:text-lg tracking-wide uppercase whitespace-nowrap flex-shrink-0 h-12 sm:h-14 flex items-center mr-0 sm:mr-1">
           <span class="text-indigo-500">Stream</span><span class="text-white">Link</span>
         </div>
+        <!-- "Playing elsewhere" banner (cross-device sessions).
+             One row per live session on another device signed in as this
+             profile, plus the TV whoever started it. Each row holds to pull that
+             playback onto THIS device. Rendered entirely by renderElsewhere();
+             hidden when the list is empty and on the ?tv=1 kiosk (no pointer,
+             and it is itself one of the sessions being listed). It takes the
+             wordmark's place rather than adding a strip of its own — see the CSS
+             note on #elsewhereBanner for why it has to live inside the header,
+             and why the min-width is a wrap trigger rather than decoration. -->
+        <div id="elsewhereBanner"
+          class="hidden flex-1 my-1.5 bg-indigo-950/70 border border-indigo-900 divide-y divide-indigo-900/60"
+          style="min-width:7.5rem"></div>
         <!-- Tabs: order-3 + w-full on mobile (wraps to row 2), order-2 inline on sm+ -->
         <div class="order-3 sm:order-2 w-full sm:w-auto flex sm:flex-shrink-0 h-11 sm:h-14 border-t border-gray-800 sm:border-t-0 -mx-2 sm:mx-0">
           <button id="tabSearch" onclick="switchTab('search')"
@@ -21601,13 +21616,20 @@ function _pbAgedPos(s){
 function renderElsewhere(){
   const el = document.getElementById("elsewhereBanner");
   if(!el) return;
+  // The banner stands in the StreamLink wordmark's slot inside the navbar, so
+  // the two are mutually exclusive: the wordmark is decoration, the banner is
+  // someone's playback. Living in the header is what keeps it out from under
+  // the iOS status bar — see the CSS note on #elsewhereBanner.
+  const logo = document.getElementById("navLogo");
   const list = (pbSessions || []).filter(s => s && s.item_id && !_pbIsHere(s));
   if(!list.length || TV_MODE){
     el.classList.add("hidden");
+    if(logo) logo.classList.remove("hidden");
     if(_pbTickTimer){ clearInterval(_pbTickTimer); _pbTickTimer = null; }
     return;
   }
   el.classList.remove("hidden");
+  if(logo) logo.classList.add("hidden");
   el.innerHTML = list.map(s => {
     const mine = !s.profile_id || s.profile_id === profile.id;
     const icon = s.surface === "tv" ? "monitor" : "phone";
@@ -21624,24 +21646,31 @@ function renderElsewhere(){
     const who = (!mine && s.profile_name)
       ? `<span class="inline-flex items-center gap-1 ml-1.5 px-1.5 py-px text-[9px] font-black uppercase tracking-wider"
               style="background:${avatarBg(s.profile_color)}">${escHtml(s.profile_name)}</span>` : "";
+    // flex-wrap + a real min-width on the text column (never min-w-0, which
+    // would let it squash to nothing and so never wrap) drops the clock and
+    // Play Here onto a second line on a phone, where the nav's right-hand
+    // cluster has already taken its share of the row. The clock is no longer
+    // hidden under 400px — wrapping gives it somewhere to go.
     return `
-    <div class="flex items-center gap-3 px-3 py-2">
+    <div class="flex flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5">
       <span class="flex-shrink-0 text-indigo-400">${ic(icon)}</span>
-      <div class="min-w-0 flex-1 leading-tight">
+      <div class="flex-1 leading-tight" style="min-width:7rem">
         <div class="text-[10px] font-black uppercase tracking-widest text-indigo-400 truncate">
           ${stateWord} on ${escHtml(s.device_name)}${who}
         </div>
         <div class="text-xs text-gray-300 truncate">${escHtml(s.title || "Library item")}</div>
       </div>
-      <div class="flex-shrink-0 text-[11px] font-mono text-gray-500 tabular-nums hidden xs:block"
-           data-pb-clock="${escHtml(s.id)}">${clock}</div>
-      <button type="button" data-pb-pull="${escHtml(s.id)}"
-        onpointerdown="_holdStart(this, _pbPullFromBtn, event)"
-        onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
-        title="Hold to play here — this device takes over and ${escHtml(s.device_name)} stops"
-        class="hold-btn flex-shrink-0 px-3 py-1.5 text-[10px] font-black uppercase tracking-wide
-               border border-indigo-700 text-indigo-300 hover:bg-indigo-900/50 active:bg-indigo-900
-               transition-colors">Play Here</button>
+      <div class="flex items-center gap-2 flex-shrink-0 ml-auto">
+        <div class="text-[11px] font-mono text-gray-500 tabular-nums"
+             data-pb-clock="${escHtml(s.id)}">${clock}</div>
+        <button type="button" data-pb-pull="${escHtml(s.id)}"
+          onpointerdown="_holdStart(this, _pbPullFromBtn, event)"
+          onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
+          title="Hold to play here — this device takes over and ${escHtml(s.device_name)} stops"
+          class="hold-btn flex-shrink-0 px-3 py-1.5 text-[10px] font-black uppercase tracking-wide
+                 border border-indigo-700 text-indigo-300 hover:bg-indigo-900/50 active:bg-indigo-900
+                 transition-colors">Play Here</button>
+      </div>
     </div>`;
   }).join("");
   // 1 Hz clock ageing, alive only while the banner is. Repaints the two time
@@ -27170,6 +27199,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.5.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.5.4</div>
 </body>
 </html>

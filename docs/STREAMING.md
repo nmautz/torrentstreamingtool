@@ -1957,6 +1957,10 @@ kiosk's own player, where VLC is idle by design and would answer with zeros.
   per session, hold-to-pull (`_pbPullFromBtn` → `pullPlayback`). Refreshed by
   `_pbOnRev()` off the `state` event and on a profile switch. A 1 Hz timer
   repaints only the clock cells — a full re-render mid-hold would drop the hold.
+  It renders **inside the navbar**, standing in for the `#navLogo` wordmark while
+  it is up (18.5.4) — as its own strip above `<header>` it had no safe-area inset
+  of its own and the iOS status bar covered it. See
+  [FRONTEND.md § Cross-device playback sessions](FRONTEND.md).
 - **Not on the `?tv=1` kiosk.** It is the couch surface, driven by a remote with
   no pointer, and it is itself one of the sessions being listed.
 
