@@ -1406,30 +1406,62 @@ locked**, `streamlink_app_extmode`, passed through `arm()` as `extMode`):
 | **Direct** (`window`, default) | a `UIWindow` of our own in the external display's **`UIWindowScene`** (`UIWindow(windowScene:)`), with an `AVPlayerLayer` in it. Putting content in that scene **replaces mirroring** for the display, so the lock screen never reaches the monitor. Built at `willResignActive` — the last moment the app is guaranteed a composite pass — and released at `didBecomeActive` with `windowScene = nil`, which hands the display back to mirroring so foreground/TV Mode still get it. | most wired adapters |
 | **Mirrored** (`route`) | leaves mirroring up and gives the player a full-screen `AVPlayerLayer` at the back of the app's own window (invisible behind the opaque webview), so AVFoundation's external-screen route has something to take over. | if Direct leaves the monitor blank |
 
-> **Direct mode was broken from the start, and the fix is not the one 18.2.0 predicted
-> (fixed 18.2.1).** It had never once displaced mirroring — it behaved exactly like
-> Mirrored — because `ensureExternalWindow()` built its window with a frame and then set
-> `w.screen`. Since iOS 13 that means "move me to the window scene on that screen", and
-> nothing ever named a scene, so the window was never presented.
+> ### Wired external display: what actually works (18.5.x)
 >
-> 18.2.0 reasoned from the missing `UIApplicationSceneManifest` that the app could never
-> be handed a `windowExternalDisplayNonInteractive` scene, and called for a full scene
-> migration. **Measured on iOS 27, that scene is already connected** — UIKit's
-> compatibility path provides it without the manifest, and without the `UISceneAccessory`
-> registration Apple's article says iOS 27 requires. So the fix is
-> `UIWindow(windowScene: externalScene)` plus `windowScene = nil` to hand the display
-> back, and the app's launch path is untouched. Full reasoning in
-> [GOTCHAS.md](GOTCHAS.md).
+> This took a full day of on-device trails and three wrong diagnoses. The
+> conclusion is one sentence: **everything must be claimed BEFORE the lock, because
+> the moment of the lock is the one moment nothing can be claimed.**
+>
+> **1. The display is reached through its SCENE, not its screen.** `UIWindow(frame:)`
+> + `w.screen = external` is the pre-iOS-13 path; since iOS 13 that setter means
+> "move me to the window scene on that screen", and with no scene named the window
+> is never presented. `UIWindow(windowScene:)` against the external-display scene is
+> what kicks iOS out of mirroring. **The scene exists even with no
+> `UIApplicationSceneManifest`** — measured on iOS 27, `connectedScenes` carries
+> `UIWindowSceneSessionRoleExternalDisplayNonInteractive` via UIKit's compatibility
+> path. Do not re-derive its absence from the manifest's absence; read
+> `connectedScenes`.
+>
+> **2. The scene must be claimed early, and held.** iOS tears the external-display
+> scene down at the lock even when we own it, and `willResignActive` is already too
+> late — the scene is gone by then. `maybeClaimEarly()` claims it on `arm`, while
+> foreground, and `didBecomeActive` does **not** hand it back (doing so returns the
+> display to mirroring on every unlock, and the next lock kills it again).
+> `sceneDidConnect` reclaims if the scene returns mid-session.
+>
+> **3. The player must be started early too.** iOS lets a backgrounded app
+> *continue* audio; it does not let one *start* a fresh `AVPlayer`. The old model
+> built the player at `didEnterBackground` and called `play()` there — the trails
+> showed the audio session active, the seek landing exactly, `play()` issued, and
+> `tcs=pause` regardless. Early mode now hands off at `earlyClaim` time, foreground,
+> and JS pauses the web element on `nativeStarted`.
+>
+> **4. The layer must be a BACKING layer.** An `AVPlayerLayer` added as a sublayer
+> with `l.frame = root.bounds` reads the bounds at attach time — and the window is
+> rebuilt from `sceneDidConnect` while backgrounded, where no layout pass runs.
+> `ExternalPlayerView` (`layerClass = AVPlayerLayer`) cannot have the wrong size.
+>
+> **5. Once native holds the display, the page is a REMOTE.** Playing the web
+> element starts a second engine, which takes the audio session and interrupts the
+> player feeding the display. `lpTogglePlay` / `_lpCommitSeek` / `lpSeekBy` route to
+> `setPaused` / `seekTo`; `_lpCtlSync` and `_lpCtlTick` read a 1 Hz mirror of the
+> native transport (`_npStartPoll`), because the element is parked at a stale
+> position; `_lpFlushProgress` and `lpStop` must never write that stale position.
 >
 > **Measuring it:** ☰ App → Settings → Playback → **Monitor diagnostics** calls
-> `NativePlayback.extDiag()`, which prints the scene manifest / connected scene roles /
-> `openSessions` and a buffered trail sampled at `resignActive`,
-> `background/attached`, `locked+3s`, `locked+10s`, `screenChange` and `becomeActive`.
-> It is buffered rather than live because the readings only mean anything while the
-> phone is locked. **A run with no `locked+3s` row tested nothing** — the first one had
-> no lock in it and every takeover reading was vacuous. On that row, `winScene=Y` with
-> `mir=-` is the takeover working; `mir=Y` is the monitor still showing the lock screen;
-> a missing row means the process was suspended rather than playing.
+> `NativePlayback.extDiag()`. It prints the app build, page version, audio-session
+> state and scene roles, then a buffered trail sampled at every lifecycle edge plus
+> `locked+3s/10s/20s`. It is buffered because the readings only mean anything while
+> the phone is locked. Read `tcs=` and `pos=` first: a trail can look perfect on
+> every structural column and still be a player that never started.
+>
+> **Traps the trails walked into, each of which cost a round:**
+> - `app=act` does **not** mean the phone unlocked. With a live external-display
+>   scene iOS keeps the app active because it is driving a screen that is still on.
+> - A run with no `locked+` row tested nothing.
+> - The display hotplugs at every lock (`scr` 2→1→2), which is normal.
+> - `UIApplication.State`, `applicationState` and the page's `<video>.paused` all
+>   describe something other than what you are asking about.
 
 **With no display connected, neither layer is attached** — deliberately. A main-screen
 `AVPlayerLayer` is the classic way to get AVFoundation to *suspend* video on background

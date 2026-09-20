@@ -18477,6 +18477,31 @@ let _npVisiblePaused = false;
 // display — measured as "pressed play, the glasses went paused and the phone
 // resumed from the old position".
 let _npHolding = false;
+// Mirror of the NATIVE player's transport, polled at 1 Hz while it holds the
+// display. The page's own <video> is parked at a stale position, so every
+// control and readout has to read this instead or the UI describes a player
+// nobody is watching.
+let _npNativePos = 0;
+let _npNativeDur = 0;
+let _npPollTimer = null;
+
+function _npStartPoll() {
+  if (_npPollTimer || !_cap.np) return;
+  _npPollTimer = setInterval(async () => {
+    if (!_npHolding) return;
+    let st = null;
+    try { st = await _cap.np.state(); } catch (_) { return; }
+    if (!st || !st.native) { _npStopPoll(); _npHolding = false; return; }
+    _npNativePos = st.position || 0;
+    _npNativePaused = !!st.paused;
+    if (typeof _lpCtlTick === "function") { _lpCtlTick(); _lpCtlSync(); }
+  }, 1000);
+}
+function _npStopPoll() {
+  if (_npPollTimer) { clearInterval(_npPollTimer); _npPollTimer = null; }
+}
+// Position the UI should show: native's while it holds, the element's otherwise.
+function _npUiTime(v) { return _npHolding ? _npNativePos : ((v && v.currentTime) || 0); }
 let _npExternal = false;     // an external display / AirPlay route is present
 let _npArmed = false;        // we've told native a session is live
 let _npLastTick = 0;
@@ -18660,9 +18685,13 @@ function _npBindEvents() {
       if (v && !v.paused) { try { v.pause(); } catch (_) {} }
       _npSetPausedIntent(false);
       _npHolding = true;
+      _npNativePaused = false;
+      _npNativeDur = lp.duration || 0;
+      _npStartPoll();
     });
     _cap.np.addListener("nativeEnded", () => {
       _npHolding = false;
+      _npStopPoll();
       // Only meaningful if we're still backgrounded; on return _npHandBack's
       // `ended` branch handles it. Harmless to record either way.
       lp._nativeEnded = true;
@@ -24633,6 +24662,14 @@ function _lpCancelSeekVerify() { _lpSeekVerifyToken++; }
 // Every user-intent seek (±10 s, scrub commit, skip-intro) funnels through here.
 function _lpCommitSeek(t) {
   const v = _lpV(); if (!v) return;
+  if (_npHolding && _cap.np) {
+    // Optimistic local update so the bar responds at once; the 1 Hz poll
+    // reconciles it. Never touch the element — it is not the player.
+    _npNativePos = t;
+    try { _cap.np.seekTo({ position: t }); } catch (_) {}
+    _lpCtlTick();
+    return;
+  }
   const anchor = v.currentTime || 0;
   try { v.currentTime = t; } catch (_) {}
   _lpVerifySeek(v, anchor, t);
@@ -24691,9 +24728,9 @@ function _lpPipelineRebuild(t) {
 
 function lpSeekBy(delta) {
   const v = _lpV();
-  const d = v.duration || lp.duration || 0;
+  const d = v.duration || lp.duration || _npNativeDur || 0;
   if (!d) return;
-  _lpCommitSeek(Math.min(Math.max((v.currentTime || 0) + delta, 0), d - 0.5));
+  _lpCommitSeek(Math.min(Math.max(_npUiTime(v) + delta, 0), d - 0.5));
   _lpCtlShow(); _lpCtlTick();
 }
 
@@ -25295,8 +25332,11 @@ function _lpRotated() {
 function _lpCtlSync() {
   const v = _lpV(); if (!v) return;
   const btn = document.getElementById("lpPlayBtn");
-  btn.querySelector(".lp-ic-play").classList.toggle("hidden", !v.paused);
-  btn.querySelector(".lp-ic-pause").classList.toggle("hidden", v.paused);
+  // While native holds the display the element is parked and always reads
+  // paused; show what the DISPLAY is doing instead.
+  const paused = _npHolding ? _npNativePaused : v.paused;
+  btn.querySelector(".lp-ic-play").classList.toggle("hidden", !paused);
+  btn.querySelector(".lp-ic-pause").classList.toggle("hidden", paused);
   const mute = document.getElementById("lpMuteBtn");
   mute.querySelector(".lp-ic-vol").classList.toggle("hidden", v.muted);
   mute.querySelector(".lp-ic-muted").classList.toggle("hidden", !v.muted);
@@ -25309,8 +25349,8 @@ function _lpCtlSync() {
 // scrubbing it previews the drag position without touching currentTime.
 function _lpCtlTick() {
   const v = _lpV(); if (!v) return;
-  const d = v.duration || lp.duration || 0;
-  const t = _lpScrub ? _lpScrub.t : (v.currentTime || 0);
+  const d = v.duration || lp.duration || _npNativeDur || 0;
+  const t = _lpScrub ? _lpScrub.t : _npUiTime(v);
   document.getElementById("lpTimeCur").textContent = fmtTimeSecs(t);
   document.getElementById("lpTimeDur").textContent = d ? fmtTimeSecs(d) : "–:––";
   const pct = d ? Math.min(t / d * 100, 100) : 0;
@@ -25497,12 +25537,19 @@ async function lpStop() {
   // Idempotent, so the yield path calling lpStop() after its own stop is fine.
   _pbBeatStop(false);
   const v = document.getElementById("lpVideo");
+  // Capture the NATIVE position before disarming tears the player down. While
+  // it holds the display our element is parked at the handoff position, and
+  // saving that below would wipe out everything watched on the glasses.
+  const heldPos = _npHolding ? _npNativePos : 0;
+  const wasHolding = _npHolding;
   // Playback is over: no handoff, and drop TV Mode so the phone's screen comes
   // back (setTvMode(false) is idempotent and restores brightness).
   _npDisarm();
+  _npHolding = false; _npStopPoll();
   if (_npTvMode) _npSetTvMode(false);
   lp._nativeMaster = null; lp._nextNative = null;
-  const t = v.currentTime || 0; const d = v.duration || lp.duration || 0;
+  const t = wasHolding ? heldPos : (v.currentTime || 0);
+  const d = v.duration || lp.duration || _npNativeDur || 0;
   // Guard t≥5 (same near-zero guard _lpFlushProgress / lpNavEp / the timeupdate
   // saver already use): stopping before the resume seek has landed — or in the
   // first seconds — reads currentTime≈0, and saving that WIPES a near-finished
@@ -25816,6 +25863,10 @@ function _lpWarmNextEp() {
 // aborted by the browser.
 function _lpFlushProgress(useBeacon) {
   if (!lp.itemId || !lp.filePath) return;
+  // Native owns playback and posts its own progress every 15 s. Our element is
+  // PARKED at a stale position, so writing it here would overwrite a good
+  // position with an old one and send Resume back to where the handoff began.
+  if (_npHolding) return;
   if (!_lpProfileId() && !_appOffline) return;
   const v = document.getElementById("lpVideo");
   const t = v.currentTime || 0;
@@ -27102,6 +27153,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.5.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.5.2</div>
 </body>
 </html>

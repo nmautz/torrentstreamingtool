@@ -2509,16 +2509,34 @@ Eleven constraints, each of which independently breaks the feature. See
   `resignActive` in between, so `startNative` never ran and the window was never even
   attempted. Every reading about the takeover was vacuous. The instrument now says so in
   the panel. Check for the row before interpreting anything.
-- **A layer added while backgrounded may never be committed** (open, found 18.2.0).
-  `ensureExternalWindow()` runs at `willResignActive` — correctly, that is the last
-  guaranteed composite pass — but the window is *empty* then, because the `AVPlayer`
-  does not exist until `startNative` at `didEnterBackground`. So the `AVPlayerLayer`
-  is inserted into the layer tree from the background, and a backgrounded app cannot
-  draw (see the libass entry below). A layer already in the tree keeps updating,
-  because the media server feeds it — that is what makes Direct mode conceivable at
-  all — but *getting it into* the tree needs a Core Animation commit the app is no
-  longer guaranteed. Whatever replaces the window, the player and its layer must both
-  exist before the app resigns active.
+- **A layer added while backgrounded may never be sized** (fixed 18.3.5). The window is
+  rebuilt from `sceneDidConnect` while the app is backgrounded, where no layout pass runs,
+  so an `AVPlayerLayer` added as a sublayer with `l.frame = root.bounds` got whatever
+  bounds the view had at init — and a hand-added sublayer never resizes afterwards.
+  Measured symptom: display held, `extLyr=Y`, glasses black. `ExternalPlayerView`
+  (`layerClass = AVPlayerLayer`) cannot have the wrong size.
+- **iOS will not let a backgrounded app START an AVPlayer** (the root cause, fixed 18.5.0).
+  It will let one *continue* audio under the `audio` background mode; it will not let one
+  begin. The relief-pitcher model built the player at `didEnterBackground` and called
+  `play()` there, and the trails showed the audio session active, the seek landing exactly,
+  `play()` genuinely issued — and `tcs=pause` every time. This is the same shape as the
+  display bug one layer down: **the moment of the lock is the one moment nothing can be
+  claimed.** Early mode hands off at `arm` time instead, foreground, where iOS permits it.
+- **Anything that reads `<video>.paused` around a background transition is reading the
+  system, not the user** (fixed 18.4.3/18.4.5). WebKit pauses the element the instant the
+  app backgrounds — the very thing the handoff exists to rescue — and
+  `visibilitychange`→hidden fires *after* that, so the final arm before every handoff said
+  `paused: true` and `seekAndPlay` skipped `play()`. Worse, `p.seek` is async and arms keep
+  arriving during it, so the completion re-read a flag a later arm had flipped. Intent is
+  now written only by real transport actions, `startNative` captures `shouldPlay` at the
+  instant of handoff, and neither `arm()` nor `tick()` may pause a native player that is
+  already running.
+- **Two engines cannot share the audio session** (fixed 18.5.1). Once native holds the
+  display, playing the page's element takes the session and interrupts the `AVPlayer`
+  feeding the display. The page must act as a remote: route transport to `setPaused` /
+  `seekTo`, read the transport from a 1 Hz mirror, and never write the parked element's
+  position to progress — that stale value would send Resume back to where the handoff
+  began.
 - **TV Mode may not draw ANYTHING opaque — the monitor is mirroring that framebuffer**
   (fixed 14.1.1). `#lpTvVeil` was a full-screen black `<div>`, so "blank the phone"
   blanked the TV as well and the episode disappeared from both screens at once. The

@@ -1,5 +1,30 @@
 # Changelog
 
+## [18.5.2] — 2026-09-20
+* **The page is now a full remote while native holds the display**, not just for
+  play/pause. `_lpCommitSeek` and `lpSeekBy` route to a new `seekTo` plugin method;
+  `_lpCtlSync` and `_lpCtlTick` read a **1 Hz mirror** of the native transport rather than
+  the parked `<video>`, so the play icon, clock and seek bar describe what is on the
+  glasses instead of a player nobody is watching.
+* **Fixed a progress-loss bug this would have caused.** `lpStop` saved
+  `v.currentTime` — the *parked* element's position — and `_lpFlushProgress` did the same
+  on every background transition. Either would have overwritten a good position with the
+  one the handoff began at, sending Resume back to the start of the session. `lpStop` now
+  captures the native position before disarming tears the player down, and
+  `_lpFlushProgress` defers to native, which posts its own progress every 15 s.
+* **The `audio session:` header is honest again.** It read `sessionActivated`, which
+  `stopNative()` resets, so it printed `INACTIVE` however the handoff had actually gone.
+  It now distinguishes `active now` / `released (was active)` / `NEVER ACTIVATED`.
+* Swift build marker and page version are aligned at **18.5.2**; the header prints both.
+* **Docs rewritten to match what was learned**, replacing text that still described the
+  approach that never worked. [STREAMING.md § 2b](docs/STREAMING.md) now leads with the
+  one sentence that matters — *everything must be claimed before the lock, because the
+  moment of the lock is the one moment nothing can be claimed* — and lists the five
+  things that must each be right. [GOTCHAS.md](docs/GOTCHAS.md) gains the four traps that
+  each cost a round: the backgrounded-layer sizing, the background-start refusal, reading
+  `<video>.paused` across a background transition, and two engines fighting over the
+  audio session.
+
 ## [18.5.1] — 2026-09-20
 * **Early mode works end to end.** Confirmed on device: `tcs=play` with the playhead
   advancing 450.4 → 457.5 → 466.4 across `locked+3s/10s/20s`, window on the external

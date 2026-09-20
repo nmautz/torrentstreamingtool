@@ -117,6 +117,7 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "displays",  returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "extDiag",   returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setPaused", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "seekTo",    returnType: CAPPluginReturnPromise),
     ]
 
     private let mgr = NativePlaybackManager.shared
@@ -178,6 +179,11 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
         mgr.setPaused(call.getBool("paused") ?? false)
         call.resolve(mgr.snapshot())
     }
+
+    @objc func seekTo(_ call: CAPPluginCall) {
+        mgr.seekTo(call.getDouble("position") ?? 0)
+        call.resolve(mgr.snapshot())
+    }
 }
 
 // MARK: - External player view
@@ -235,6 +241,11 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private var sessionActivated = false
     /// Last audio-session activation failure, surfaced in the diagnostics.
     private var audioSessionError = ""
+    /// The header used to read `sessionActivated`, which stopNative() resets — so
+    /// it printed INACTIVE however the handoff had actually gone. This one is
+    /// sticky for the life of the process and answers the question that was
+    /// being asked.
+    private var audioEverActivated = false
     private var endedFlag = false
     private var handBackDeadline: DispatchWorkItem?
 
@@ -374,6 +385,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             try s.setActive(true)
             sessionActivated = true
             audioSessionError = ""
+            audioEverActivated = true
         } catch {
             audioSessionError = "\(Self.stateName(UIApplication.shared.applicationState)): \(error.localizedDescription)"
         }
@@ -401,6 +413,23 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         if paused { p.pause() } else { p.play() }
         updateNowPlaying()
         PlaybackLiveActivity.shared.update(state: liveActivityState(), force: true)
+    }
+
+    /// Seek the native player. The page's seek bar and ±10 s buttons route here
+    /// while native holds the display; acting on the parked <video> would move a
+    /// player nobody is watching.
+    func seekTo(_ t: Double) {
+        guard let p = player else { return }
+        let clamped = armed.duration > 1 ? min(max(t, 0), armed.duration - 0.5) : max(t, 0)
+        armed.position = clamped
+        armed.armedAt = Date()
+        p.seek(to: CMTime(seconds: clamped, preferredTimescale: 600),
+               toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+            guard let self = self else { return }
+            if !self.armed.paused { p.play() }
+            self.updateNowPlaying()
+            self.maybePostProgress(clamped, force: true)
+        }
     }
 
     /// True while the native player is the presentation and the page must not
@@ -1439,8 +1468,9 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             // Bump with any change to this file. Two runs have already been
             // ambiguous about whether the app had been rebuilt, and the trail
             // should never leave that in doubt.
-            "build": "18.5.1",
-            "audioSession": sessionActivated ? "active" : "INACTIVE",
+            "build": "18.5.2",
+            "audioSession": sessionActivated ? "active now"
+                             : (audioEverActivated ? "released (was active)" : "NEVER ACTIVATED"),
             "audioError": audioSessionError,
             "iosVersion": UIDevice.current.systemVersion,
             "extMode": armed.extMode,
