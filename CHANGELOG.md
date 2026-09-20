@@ -1,5 +1,27 @@
 # Changelog
 
+## [18.3.5] — 2026-09-20
+* **The lock was holding all along — `app=act` never meant the phone had unlocked.**
+  Confirmed on device: through a whole run whose rows all read `app=act`, the phone's
+  screen stayed dark. With a live external-display scene iOS keeps the app **active**
+  because it is driving a screen that is still on; `UIApplication.State` describes the
+  app, not the lock. Three rounds of "THE LOCK DID NOT HOLD" were wrong, and the Face ID
+  advice they carried was a wild goose chase. Foreground now only disqualifies a locked
+  sample when no display is attached.
+* **Fixed the black picture: the player layer had no size.** `attachExternalLayer` added
+  an `AVPlayerLayer` as a sublayer and set `l.frame = root.bounds` **once**, at attach
+  time — and the window carrying it is rebuilt from `sceneDidConnect` while the app is
+  backgrounded, where no layout pass runs. So `bounds` was whatever it was at init, and a
+  hand-added sublayer never resizes afterwards either. Measured symptom: display held,
+  `extLyr=Y`, playback running, glasses black.
+  The layer is now the **backing layer** of a new `ExternalPlayerView`
+  (`layerClass = AVPlayerLayer`), pinned to the window by an autoresizing mask, with an
+  explicit fallback to the scene's screen bounds if the view was never laid out. A
+  backing layer cannot have the wrong size.
+* The readout stops claiming a picture it cannot see: `TARGET STATE HELD` now says
+  explicitly that whether a picture reached the display is the one thing the trail can't
+  report, and to look at the glasses.
+
 ## [18.3.4] — 2026-09-20
 * **The wake is the glasses, not us — isolated.** Run 8, with the display **unplugged**:
   `background/attached` at 12.6 s then `locked+3s`, `locked+10s` and `locked+20s` all

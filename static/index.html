@@ -20446,14 +20446,15 @@ function _appOpenAppSettings() {
       // was wrong, so a transient no longer counts: only a `locked+` sample, taken
       // 3s or more into the lock, is evidence the state held.
       const isTarget = (r) => r.extWindow && r.winScene && r.extLayer &&
-        r.mirrored === false && r.native && r.appState === "bg";
+        r.mirrored === false && r.native;
       const heldTarget = trail.filter((r) =>
         String(r.at).indexOf("locked+") === 0 && isTarget(r)).pop();
       const blipTarget = trail.filter(isTarget).pop();
       if (heldTarget) {
         verdict.push(`TARGET STATE HELD at ${heldTarget.t}s - window on the scene,`,
-                     "        mirroring off, player layer attached, app backgrounded.",
-                     "        This is the feature working.");
+                     "        mirroring off, player layer attached, playback running.",
+                     "        Whether a PICTURE reached the display is the one thing",
+                     "        this trail cannot tell you - look at the glasses.");
       } else if (blipTarget) {
         const woke = trail.some((r) => r.at === "becomeActive" && r.t === blipTarget.t);
         verdict.push(`TARGET STATE touched at ${blipTarget.t}s, but only for an instant` +
@@ -20481,12 +20482,16 @@ function _appOpenAppSettings() {
         // scene had come back. Detect the interruption rather than reading the row.
         const iAttach = trail.findIndex((r) => r.at === "background/attached");
         const iLocked = trail.indexOf(L);
-        // appState is the direct reading; the becomeActive scan is the fallback for
-        // builds that predate it. Either way, a sample taken while foreground says
-        // nothing about a locked phone.
-        const woke = (L.appState && L.appState !== "bg") ||
+        // app=act does NOT mean the phone unlocked when a display is attached.
+        // Confirmed on device: the phone's screen stayed dark for a whole run whose
+        // rows all read app=act. iOS keeps the app ACTIVE because it is driving the
+        // external display; UIApplication.State describes the app, not the lock. So
+        // only treat foreground as disqualifying when there is no display in play —
+        // otherwise the only thing that matters is whether playback survived.
+        const hadDisplay = trail.some((r) => r.extScreen);
+        const woke = !hadDisplay && ((L.appState && L.appState !== "bg") ||
           (iAttach >= 0 && iLocked > iAttach &&
-           trail.slice(iAttach + 1, iLocked).some((r) => r.at === "becomeActive"));
+           trail.slice(iAttach + 1, iLocked).some((r) => r.at === "becomeActive")));
         if (woke) {
           verdict.push("RESULT: THE LOCK DID NOT HOLD - the app returned to the",
                        "        foreground before the sample, so this row describes an",
@@ -26995,6 +27000,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.3.4</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.3.5</div>
 </body>
 </html>

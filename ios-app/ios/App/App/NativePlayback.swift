@@ -172,6 +172,25 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
     }
 }
 
+// MARK: - External player view
+
+/// A view whose BACKING layer is the `AVPlayerLayer`.
+///
+/// The first version added an `AVPlayerLayer` as a sublayer and set
+/// `l.frame = root.bounds` once, at attach time — which reads the bounds at
+/// exactly the wrong moment. The window carrying it is rebuilt from
+/// `sceneDidConnect` while the app is BACKGROUNDED, where no layout pass runs, so
+/// `bounds` is whatever it was at init; and a hand-added sublayer never resizes
+/// afterwards either. Measured symptom: we held the display with `extLyr=Y`,
+/// playback running, and the glasses showed black.
+///
+/// A backing layer cannot have the wrong size — UIKit sizes it with the view, and
+/// the view is pinned to the window by its autoresizing mask.
+final class ExternalPlayerView: UIView {
+    override class var layerClass: AnyClass { AVPlayerLayer.self }
+    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+}
+
 // MARK: - Manager
 
 /// Process-wide owner of the AVPlayer, the audio session, the Now Playing item
@@ -1000,7 +1019,12 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private func ensureExternalWindow() {
         guard extWindow == nil, let scene = externalScene else { return }
         let vc = UIViewController()
-        vc.view.backgroundColor = .black
+        // A view whose BACKING layer is the AVPlayerLayer, rather than a layer
+        // hand-added as a sublayer. See ExternalPlayerView for why that matters.
+        let pv = ExternalPlayerView(frame: scene.screen.bounds)
+        pv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        pv.backgroundColor = .black
+        vc.view = pv
         // `UIWindow(windowScene:)` is the whole fix. The old code built the window
         // with a frame and then set `w.screen`, which since iOS 13 means "move me to
         // the window scene on that screen" — a resolution step that found nothing,
@@ -1018,12 +1042,16 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
 
     private func attachExternalLayer() {
         guard extLayer == nil, let p = player,
-              let root = extWindow?.rootViewController?.view else { return }
-        let l = AVPlayerLayer(player: p)
+              let pv = extWindow?.rootViewController?.view as? ExternalPlayerView
+        else { return }
+        // Belt and braces on the geometry: the autoresizing mask keeps the view
+        // matched to the window, but that window may never have been laid out, so
+        // pin it to the scene's screen explicitly as well.
+        if pv.bounds.isEmpty, let b = externalScene?.screen.bounds { pv.frame = b }
+        let l = pv.playerLayer
         l.videoGravity = .resizeAspect
         l.backgroundColor = UIColor.black.cgColor
-        l.frame = root.bounds
-        root.layer.addSublayer(l)
+        l.player = p
         extLayer = l
         // Our window IS the external presentation. Letting AVFoundation also try
         // to seize the screen would have the two fighting over it.
@@ -1033,8 +1061,10 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private func detachExternalWindow() {
         onMain { [weak self] in
             guard let self = self else { return }
+            // Backing layer of ExternalPlayerView now — detaching the player IS
+            // the teardown; removeFromSuperlayer() would strip the view's own
+            // layer out from under it.
             self.extLayer?.player = nil
-            self.extLayer?.removeFromSuperlayer()
             self.extLayer = nil
             self.extWindow?.isHidden = true
             self.extWindow?.rootViewController = nil
