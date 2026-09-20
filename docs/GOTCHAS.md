@@ -4434,3 +4434,53 @@ of every show nobody has played.
 - [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md) — VPN guard at the process level
 - [ANALYZER.md](ANALYZER.md) — Smart Skip algorithm details and fallback chain
 - [STT.md](STT.md) — AI auto-subtitle pipeline
+
+### An orphan bundle is defined by "no library file maps to it" — and an evicted source breaks that definition
+
+`_offline_cache_inventory_sync` walks the library, computes each file's cache key
+and marks it `matched`; everything left over is an **orphan**. It used to reach
+that key through `src.exists()` + `_offline_cache_key(src)`, both of which need
+the source file. Source eviction (18.0.0) deletes exactly that file while the
+bundle becomes the *only* copy — so an evicted file's bundle matched nothing and
+landed in `orphans`.
+
+That is not a cosmetic mis-label. `cache_autopurge_loop` deletes **every orphan**
+once the cache passes `max_gb`, which means the feature would have destroyed
+precisely the bundles it was told to keep, at exactly the moment disk pressure
+made them unrecoverable — and the only way back is re-downloading every release.
+The inventory now resolves an evicted file through `_evicted_bundle_dir(f)` before
+falling back to the stat, and each entry carries `source_evicted` so the UI can
+warn. **Any new code that decides what a bundle "belongs to" must go through
+`_bundle_dir_for_file`, never `_offline_cache_dir(Path(f["path"]))` directly.**
+
+### `files[].size_bytes` goes stale — never derive a cache key from it
+
+`_offline_cache_key_for(name, size)` will happily build a key from library
+metadata with no disk access, which makes it tempting as the source-optional
+addressing path. It is wrong. The compression tool rewrites a file **in place**
+and records `compressed` / `compressed_at` ([main.py](../main.py),
+`_run_file_compression`) but never refreshes `size_bytes` — so for every
+compressed file the stored size is the pre-compression one, and a key derived
+from it addresses a bundle directory that does not exist.
+
+The v8 key is only guaranteed to match a `stat()` of the live file. Anything that
+must survive the file's deletion therefore **stores the key it verified** rather
+than recomputing one: that is what `files[].bundle.key` is, written once by the
+eviction, alongside a frozen `sig` so `_bundle_check_current` doesn't retire the
+verdict that authorised the deletion in the first place. `bundle_check.key`
+already used this pattern; source eviction follows it.
+
+### A position is not the only thing worth protecting — "next up" needs the resume hint, not the episode number
+
+The source-eviction gate has to answer "is this somebody's next episode?" without
+re-deriving episode ordering, which `episodes.py`, `animemap.py` and the section
+logic have each already solved differently. It calls
+`find_series_resume_hint(members, profile_id)` — the same function the library
+grid uses to decide which episode a show opens on — so the protected file is
+always the one the UI would actually play next.
+
+It asks only for profiles that have **started** that series (a non-empty
+`file_progress` for one of its items). For a series nobody has opened, "next up"
+is just episode 1, and blocking it would spare one arbitrary file per show for no
+benefit while adding noise to the dry run.
+

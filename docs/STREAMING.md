@@ -35,6 +35,10 @@ Read this when changing anything related to:
 - **Bundle integrity** — `bundlecheck.py`, the pre-swap check in `_run_offline_job`,
   `_run_bundle_audit`, `/api/admin/bundle-audit`, `files[].bundle_check`. See
   [§ Bundle integrity](#bundle-integrity--born-verified-plus-a-sweep)
+- **Source eviction** — `srcevict.py`, `_build_evict_plan`,
+  `/api/admin/source-eviction*`, `files[].bundle`, the source-optional addressing
+  helpers (`_file_evicted` / `_bundle_dir_for_file`). Dry run only in 18.0.0. See
+  [§ Source eviction](#source-eviction-1800--deleting-the-source-keeping-the-bundle)
 - The prep **lag warning** (`#prepWarnModal`, `confirmStreamPrepWarning`), the
   **Pause/Resume** controls on `#globalPrepBar` (`/api/offline-prep/pause` +
   `/resume`, `_pause_prep` / `_resume_prep`), or **automatic auto-prep**
@@ -2439,6 +2443,121 @@ disk until the admin purges them. Pre-`v3-hls` MP4 caches surface as
 
 ---
 
+## Source eviction (18.0.0) — deleting the source, keeping the bundle
+
+A prepped episode exists on disk **twice**: the source the torrent downloaded,
+and the HLS bundle prep built from it. Per *State + storage* above, the bundle is
+roughly **1.7x the source video** (Original rung + 720p + 480p + AAC per audio
+track), so the pair costs ~2.7x and deleting the source reclaims **~37%** of it —
+not the 60%+ that "delete the source" intuitively suggests.
+
+The bundle is what every phone, every browser and the TV kiosk actually play. The
+source is what **VLC** plays, and what a fixed list of features re-reads later.
+Eviction therefore buys disk and sells capability, per file:
+
+| Still works | Gone for that file |
+|---|---|
+| On-device / browser playback (bundle) | VLC on the TV: 5.1 audio, HDR10, image subs, frame-accurate seek |
+| iOS download-to-device (`/bundle-manifest`) | On-demand JIT — the fallback when a bundle is purged |
+| Subtitles already mirrored into the bundle | Automatic subtitle fetch (`subsync` aligns against source audio) |
+| Progress, skip data, watched state | Source validation, repair, compression, fingerprinting, clips |
+| Re-adoption on re-download (see *Recovery*) | Any future `OFFLINE_CACHE_VERSION` rebuild |
+
+That last row is the quiet one. The bundle format has moved v3 -> v7 -> v8 and
+gained the audio pin, the edit-list re-encode and the resync repair — **all
+applied by rebuilding from source**. An evicted file's bundle is frozen at the
+format it was built in.
+
+### The policy: two clocks, two disk marks
+
+The arithmetic is in **[srcevict.py](../srcevict.py)** (pure, `tests/test_srcevict.py`);
+`main.py` gathers the facts. The split is the whole design:
+
+* **Age decides what is ELIGIBLE.** A series untouched for `idle_days` (default
+  **15**) joins the pool. A series nothing has **ever** played ages from its
+  download date on the shorter `never_played_days` (default **7**).
+* **Free space decides what is TAKEN.** Nothing is deleted while the disk is above
+  `floor_gb`; below it, the oldest candidates are taken until free space is back
+  above `target_gb`, then it stops. `policy_from` forces `target_gb > floor_gb` —
+  without hysteresis a disk sitting on the line sweeps one file every tick forever.
+
+The short default clock is safe *because* of that split: a deep candidate pool
+means the sweep always has something old to take and never has to reach for
+something recent.
+
+> **The clock is per SERIES, not per file and not per item.** Touching any episode
+> protects the whole show, so a part-watched season is never half-evicted under a
+> viewer. Per *item* would not do — a show downloaded one torrent per episode is
+> many items, and an item-level clock ages each episode separately, which is the
+> per-episode behaviour this rejects. `_series_clocks_sync` rolls up every
+> profile's every `file_progress.updated_at` across every item sharing a
+> `_series_key`, falling back to the **newest** `added_at` (a show still receiving
+> episodes is live content even if nobody has started it).
+
+### The gate
+
+`_evict_candidates_sync` blocks a file unless **every** check passes, and any
+check it cannot *establish* blocks rather than passes — missing evidence is not
+permission. The blockers (all surfaced in the dry run) are:
+
+`not-aged` · `no-bundle` · `unverified` (no current `bundle_check`) · `damaged` ·
+`incomplete-bundle` (`_bundle_playable_sync`: a playlist references a missing or
+zero-byte segment, or the `init_*.mp4` is gone) · `source-incomplete` (qBit not at
+100%, or unreachable) · `in-progress` (a non-completed position > 5s for any
+profile) · `next-up` (any profile's `find_series_resume_hint`, for profiles that
+have actually started that series) · `busy` (playing in VLC, mid-compress, feeding
+a JIT session, prep job on the key, or the item is racing) · `already-evicted` ·
+`not-video`.
+
+`unverified` is load-bearing: `bundle_check` is what proves the bundle is not a
+frozen-picture wreck, and it is written by the idle audit, so a freshly prepped
+file is not evictable until the sweep has looked at it.
+
+### Addressing a bundle with no source
+
+`_offline_cache_key(src)` **stats the source**, so every path above it assumes the
+media file is there. The `files[].bundle` record is what replaces that stat:
+
+```jsonc
+"bundle": {
+  "key": "2d875416183a7db114b2635b",   // the key VERIFIED at eviction, never recomputed
+  "sig": "1789088941:887958693",       // the source's frozen mtime:size
+  "source_evicted": true,
+  "evicted_at": "2026-09-19T20:00:00Z"
+}
+```
+
+Three helpers read it — `_file_evicted`, `_evicted_bundle_dir`,
+`_bundle_dir_for_file` (the one entry point that works in both modes) — plus
+`_file_sig_for`, which keeps `_bundle_check_current` from retiring every verdict
+on every evicted file the moment there is no signature left to read.
+
+> **The key is stored, never re-derived.** Deriving it from `files[].size_bytes`
+> would be wrong: the compression tool rewrites a file in place and sets
+> `compressed`/`compressed_at` but **never refreshes `size_bytes`**, so a
+> compressed file's stored size is stale and would address a bundle that does not
+> exist. See [GOTCHAS.md](GOTCHAS.md).
+
+### Recovery
+
+The v8 key is `sha256(version | filename | size)` — path- and mtime-independent.
+**Re-download the identical release and it produces the same key and re-adopts the
+existing bundle**, with progress and skip data intact and no re-prep. A wrong
+eviction therefore costs bandwidth, not the episode.
+
+### What ships in 18.0.0: dry run only
+
+The policy, the gate, the source-optional addressing and the admin card are all
+in. **The sweep that acts on the plan is not wired up — nothing is deleted.**
+`POST /api/admin/source-eviction/dry-run` (Admin -> Storage -> **Reclaim Source
+Files** -> *Dry Run*) computes the whole plan and reports it: free space now, the
+eligible pool, what a sweep would take this instant, and a per-reason breakdown of
+what is holding everything else back. The toggle and thresholds are saved so the
+feature can be sized against a real library before it is allowed to delete
+anything.
+
+---
+
 ## Things that are **not** stream-to-device
 
 - The Search tab — depends on Jackett, which depends on the host.
@@ -2448,6 +2567,8 @@ disk until the admin purges them. Pre-`v3-hls` MP4 caches surface as
 - VLC playback — needs the host; reads the source MKV directly so all
   audio tracks / 5.1 channels / image subs work natively (the local
   browser player limitations don't apply to TV mode).
+  **A source-evicted file has no MKV to read**, so it is device-only — see
+  [§ Source eviction](#source-eviction-1800--deleting-the-source-keeping-the-bundle).
 - Truly-offline playback — gone. If the host is unreachable, neither the
   chooser nor `lpPlay` can do anything useful.
 

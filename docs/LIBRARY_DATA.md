@@ -199,6 +199,8 @@ or HDR content — the browser path downmixes to AAC stereo and does no tone map
 
 `settings.scheduled_reboot`: managed by the **System** admin tab (see [ADMIN.md §7](ADMIN.md)). The `scheduled_reboot_loop` task reboots the host daily at `time` (in `timezone`) once it's been idle for `idle_minutes`, but only within `catch_up_hours` of `time` — past that it stands down until tomorrow rather than chasing an idle gap all day (which is how a 02:00 reboot once landed at 14:44, mid-session). `last_fired` is an internal guard (the tz date of the last fire) that stops the just-rebooted machine from re-arming and looping; it's reset to `""` whenever the config is saved so a newly-set time can arm the same day. Lives under `settings` because it applies to the physical host, not an individual viewer.
 
+`settings.source_eviction`: the **source eviction** policy — `{enabled, idle_days, never_played_days, floor_gb, target_gb}`, read via `_src_evict_cfg` into a clamped `srcevict.Policy`. Age decides what is *eligible* (`idle_days` since a **series** was last played, default 15; `never_played_days` since download for a series nobody ever opened, default 7), free space decides what is *taken* (`floor_gb` starts a sweep, `target_gb` stops it; `policy_from` forces target above floor so a disk on the line can't sweep forever). Managed by the **Storage** admin tab's *Reclaim Source Files* card. Off by default, and in 18.0.0 the sweep is **not wired up** — the policy exists so the dry run can be sized against a real library. See [STREAMING.md § Source eviction](STREAMING.md).
+
 `settings.auto_prep`: managed by the **System** admin tab's *Automatic Stream Prep* card (see [ADMIN.md § Automatic Stream Prep](ADMIN.md)); read via `_auto_prep_cfg`. One `mode` drives the `auto_prep_loop` task — `"always"` preps every un-prepped library file regardless of activity (re-enqueuing new content ~every 5 min while engaged); `"idle"` preps only while the host has been idle (`_machine_in_use`) for `idle_minutes` and stops on activity, with `on_activity` choosing the stop kind (`"hard"` ⇒ `_pause_prep(kill=True)` discards the in-flight encode — restarts from scratch later, no mid-file checkpoint; `"soft"` ⇒ `kill=False` lets it finish then holds); `"off"` never auto-preps. `idle_minutes` is clamped 1–720. Engagement is tracked in-memory (`state.auto_prep_engaged`), so there's no persisted fire-guard. **Lazy migration:** if `auto_prep` is absent, `_auto_prep_cfg` derives a default from the legacy `idle_prep`/`overnight_prep` keys (either enabled ⇒ `mode:"idle"`, else `"off"`); the new key is written on first save and the legacy keys are then ignored. Replaces the former separate `overnight_prep` + `idle_prep` (the fixed nightly time-window is gone). Lives under `settings` because it applies to the physical host.
 
 `settings.play_prep`: managed by the **System** admin tab's *Auto-Prep on Play* card; read via `_play_prep_cfg`. **Default ON.** When enabled, every VLC library play preps the playing episode for on-device then the rest of the playlist one episode at a time (`_maybe_start_play_prep` → `_play_prep_chain`, tracked on `state.play_prep_task`). The episode is skipped if resumed with <5 min left (`PLAY_PREP_TAIL_SECS`). Unlike `auto_prep`'s bulk jobs, its jobs are queued **interactive**, so they run regardless of the `auto_prep` mode and live activity (the bulk pause gate and activity-kill don't touch them). Lives under `settings` because it applies to the physical host. See [STREAMING.md § Auto-prep on play](STREAMING.md).
@@ -624,6 +626,12 @@ in the `/files` response. See [STREAMING.md](STREAMING.md).
     "sig":    "1718900000:1329062039",   //   mtime:size — re-validate when it changes
     "at":     "2026-06-09T17:40:00Z"
   },
+  "bundle": {                            // optional (18.0.0); written ONCE, by source eviction
+    "key":  "2d875416183a7db114b2635b",  //   the bundle key VERIFIED at eviction — stored, never recomputed
+    "sig":  "1789088941:887958693",      //   the source's frozen mtime:size, so stored verdicts don't all retire
+    "source_evicted": true,              //   the source file is gone; this bundle is the only copy
+    "evicted_at": "2026-09-19T20:00:00Z"
+  },
   "bundle_check": {                      // optional (17.15.0); written by the HLS bundle integrity audit
     "damaged": true,                     //   a long stretch of the BUNDLE is dead (≠ `validation`, which judges the SOURCE)
     "dead_secs": 932.0,
@@ -808,6 +816,20 @@ which can't be recovered). The marker survives the download monitor's `build_fil
 [GOTCHAS.md](GOTCHAS.md) and [API.md](API.md).
 
 `bundle_check` is the persisted verdict from the **HLS bundle integrity audit** (17.15.0) — a different question from `validation`. `validation` asks whether the **source file** decodes; `bundle_check` asks whether the **bundle we built from it** is watchable. They come apart in exactly the case that motivated it: a perfectly good source prepped while its torrent was still downloading gives a clean `validation` and a dead bundle, because ffmpeg fills a sparse file's holes with duplicated frames and silence and still exits 0. Written by the pre-swap check in `_run_offline_job` and by `_run_bundle_audit`; retired automatically when either the cache `key` or the source `sig` moves, so a re-download, repair or recompress un-condemns a file without anyone clearing anything. `unbuildable` is the only sticky part — it stops `_enqueue_library_prep` re-encoding a holed source on the prep timer for ever, and an explicit prep still overrides it. See [STREAMING.md § Bundle integrity](STREAMING.md) and [GOTCHAS.md](GOTCHAS.md).
+
+`bundle` is written by **source eviction** (18.0.0) and by nothing else. It marks a
+file whose *source* was deleted to reclaim disk while its prepped bundle was kept,
+and it carries the two facts that stop the rest of the system reading that as
+corruption: the bundle `key` (stored rather than recomputed —
+`_offline_cache_key` stats the source, and `files[].size_bytes` goes stale on a
+compressed file, so neither can answer once the file is gone) and the source's
+last `sig` (so `_bundle_check_current` doesn't retire the very verdict that
+authorised the deletion). Read through `_file_evicted` / `_bundle_dir_for_file` /
+`_file_sig_for`, never by poking at the dict. An evicted file still plays on every
+device surface and still downloads to the phone; it loses VLC, JIT, repair,
+re-prep and fingerprinting. Re-downloading the identical release restores the
+source and re-adopts the same bundle. See
+[STREAMING.md § Source eviction](STREAMING.md) and [GOTCHAS.md](GOTCHAS.md).
 
 `validation` is the persisted verdict from the source-file validator (the manual admin scan **and** the idle `background_maintenance_loop` auto-validator both write it). It lets the validator skip already-checked files, drives the Activity tab's "never-validated" backlog count, and makes auto-validation **resume after a restart**. A file is re-validated only when its `sig` (mtime:size) changes — i.e. it was re-downloaded, repaired, or re-encoded — or, for a `missing` verdict, once the file exists again. See [BACKEND.md](BACKEND.md) and [ADMIN.md § Automatic Maintenance](ADMIN.md).
 

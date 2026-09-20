@@ -10636,6 +10636,13 @@ function _epCardHtml(f){
   const compressedBadge = f.compressed
     ? `<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 border border-gray-700 uppercase tracking-widest font-bold" title="Re-encoded to save space — this copy was shrunk to save space, so it can no longer be shared with others or re-downloaded.">⤓ Compressed</span>`
     : "";
+  // Source file reclaimed to free disk - the prepped bundle is the only copy left.
+  // Plays here and on every phone exactly as before; what it gives up is the TV's
+  // VLC path (5.1 audio, HDR10, image subtitles, frame-accurate seek) and any
+  // future re-prep or repair. Re-downloading the identical release restores it.
+  const evictedBadge = f.source_evicted
+    ? `<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 border border-gray-700 uppercase tracking-widest font-bold" title="Source reclaimed to free disk space - the on-device copy is all that is left. It plays normally here and on your phone, but not through VLC on the TV (no 5.1 audio, no HDR, no image subtitles). Re-download the same release to bring the source back.">${ic("phone")} Bundle Only</span>`
+    : "";
 
   const prepState = prepFileState.get(offKey(fid,f.path));
   const isReady    = prepState === "ready";
@@ -10716,6 +10723,7 @@ function _epCardHtml(f){
               ${watchedBadge}
               ${notDlBadge}
               ${compressedBadge}
+              ${evictedBadge}
               ${greenBadge}
               ${(isReady&&!notDownloaded)?'<span class="text-[10px] text-emerald-500 font-bold uppercase tracking-widest">● Stream Ready</span>':''}
             </div>
@@ -26814,6 +26822,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.15.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.0.0</div>
 </body>
 </html>

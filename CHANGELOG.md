@@ -1,5 +1,53 @@
 # Changelog
 
+## [18.0.0] — 2026-09-19
+* **New: Reclaim Source Files — delete a prepped episode's source, keep its bundle.
+  Dry run only in this release; nothing is deleted yet.** A prepped episode exists on
+  disk twice: the source the torrent downloaded, and the HLS bundle prep built from
+  it. The bundle is roughly 1.7x the source video (Original + 720p + 480p + AAC per
+  track), so the pair costs ~2.7x and deleting the source reclaims **~37%** of it —
+  not the 60%+ it intuitively sounds like. The bundle is what every phone, browser and
+  the TV kiosk actually play; the source is what VLC plays and what repair, re-prep,
+  JIT, clipping, subtitle-sync and fingerprinting re-read later. This release lands
+  the whole policy and the measurement, and stops short of the deletion.
+  * **Two clocks, two disk marks, and the split is the design.** *Age* decides what is
+    **eligible** — a series untouched for `idle_days` (default 15), or one nothing has
+    ever played, `never_played_days` (default 7) since its download date. *Free space*
+    decides what is **taken** — nothing goes while the disk is above `floor_gb`, and
+    below it the oldest candidates are taken only until free space is back above
+    `target_gb`. The short default clock is safe precisely because of that split: a
+    deep pool means the sweep always has something old to take.
+  * **The clock is per series, not per file and not per item.** Touching any episode
+    protects the whole show, so a part-watched season is never half-reclaimed under
+    you. Per *item* would not do — a show downloaded one torrent per episode is many
+    items, and an item-level clock ages each episode separately.
+  * **The gate is unanimous, and missing evidence never reads as permission.** A file
+    needs a current clean `bundle_check`, every playlist segment and init segment
+    present and non-empty, a torrent qBittorrent calls finished, no in-progress
+    position for any profile, and it must not be anyone's next-up episode, playing,
+    compressing, prepping or racing. Anything that cannot be *established* blocks.
+  * **The orphan purge would have eaten the bundles it was told to keep.** An orphan
+    bundle is defined as one no library file maps to — resolved by stat'ing the
+    source, which eviction deletes. So an evicted file's bundle matched nothing,
+    landed in `orphans`, and `cache_autopurge_loop` deletes every orphan once the
+    cache passes its cap: the feature would have destroyed exactly the bundles it kept,
+    at the moment disk pressure made them unrecoverable. The inventory now resolves
+    through the stored key first. Fixed before anything could delete.
+  * **The key is stored, never recomputed.** `_offline_cache_key` stats the source, and
+    `files[].size_bytes` is stale for every compressed file (the compression tool
+    rewrites in place and never refreshes it), so neither can address a bundle once
+    the source is gone. `files[].bundle` records the key verified at eviction plus the
+    source's frozen signature.
+  * **Recovery is a re-download, not a re-prep.** The v8 key is
+    `sha256(version | filename | size)`, so re-fetching the identical release produces
+    the same key and re-adopts the existing bundle with progress and skip data intact.
+    A wrong eviction costs bandwidth, not the episode.
+  * Admin → Storage → **Reclaim Source Files**: policy fields plus **Dry Run**, which
+    reports free space, the eligible pool, what a sweep would take right now, and a
+    per-reason breakdown of what holds everything else back. Evicted files are badged
+    **Bundle Only** in the episode list. New leaf module `srcevict.py` with 69 unit
+    tests in `tests/test_srcevict.py`.
+
 ## [17.15.0] — 2026-09-19
 * **Fixed: an episode that plays in VLC but freezes on a phone, forever.** *Hacks*
   S03E03 ran its timer while the picture sat on one frame from 1:19 to 7:35 (and in

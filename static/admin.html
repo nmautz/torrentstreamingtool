@@ -743,6 +743,61 @@
         <div id="ooList" class="space-y-1.5 text-[11px] text-gray-400">Loading…</div>
       </div>
     </div>
+
+    <!-- Reclaim source files (dry run only — the sweep is not wired up yet) -->
+    <div class="bg-gray-900 border border-amber-900/60">
+      <div class="px-5 py-4 border-b border-amber-900/60 flex items-start justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-sm font-black uppercase tracking-wide text-amber-300">Reclaim Source Files<span class="help-tip" tabindex="0" data-tip="A prepped episode exists twice: the downloaded source and the bundle built from it. The bundle is what phones, browsers and the TV kiosk play. Deleting the source frees roughly 37% of the pair and gives up VLC 5.1/HDR, repair, re-prep and fingerprinting for that episode — recoverable only by re-downloading the identical release.">?</span></h2>
+          <p class="text-xs text-amber-200/70 mt-0.5">Delete a prepped episode's <strong>source file</strong>, keeping its on-device bundle. Age decides what is <em>eligible</em>; free space decides what is actually <em>taken</em>.</p>
+        </div>
+        <label class="flex-shrink-0 inline-flex items-center cursor-pointer">
+          <input id="seEnabled" type="checkbox" class="sr-only peer" onchange="saveSourceEviction()">
+          <div class="w-11 h-6 bg-gray-700 peer-checked:bg-amber-600 transition-colors relative after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:h-5 after:w-5 after:transition-transform peer-checked:after:translate-x-5"></div>
+        </label>
+      </div>
+
+      <div class="px-5 py-3 border-b border-amber-900/60 text-[11px] text-amber-200/80 bg-amber-950/20">
+        <strong>Dry run only.</strong> Nothing is deleted yet — the sweep that acts on this policy is not switched on. The toggle and thresholds are saved so you can size the feature against your real library first.
+      </div>
+
+      <div class="px-5 py-4 grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div>
+          <label class="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Idle Days<span class="help-tip" tabindex="0" data-tip="Days since ANY episode of the show was last played, by anyone. Touching one episode protects the whole show, so a part-watched season is never half-reclaimed.">?</span></label>
+          <input id="seIdleDays" type="number" min="1" max="3650" step="1" value="15"
+            class="w-full bg-gray-950 border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:outline-none focus:border-amber-500"/>
+        </div>
+        <div>
+          <label class="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Never Played<span class="help-tip" tabindex="0" data-tip="For a show nobody has ever opened, the clock runs from its download date on this shorter setting instead.">?</span></label>
+          <input id="seNeverDays" type="number" min="1" max="3650" step="1" value="7"
+            class="w-full bg-gray-950 border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:outline-none focus:border-amber-500"/>
+        </div>
+        <div>
+          <label class="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Sweep Below (GB)<span class="help-tip" tabindex="0" data-tip="Free space that starts a sweep. Above this, nothing is ever deleted however many episodes are eligible.">?</span></label>
+          <input id="seFloorGb" type="number" min="1" max="1000000" step="1" value="100"
+            class="w-full bg-gray-950 border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:outline-none focus:border-amber-500"/>
+        </div>
+        <div>
+          <label class="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Stop At (GB)<span class="help-tip" tabindex="0" data-tip="Free space that stops the sweep. Must be above the floor — otherwise a disk sitting on the line would delete one file every tick forever.">?</span></label>
+          <input id="seTargetGb" type="number" min="1" max="1000000" step="1" value="150"
+            class="w-full bg-gray-950 border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:outline-none focus:border-amber-500"/>
+        </div>
+      </div>
+
+      <div class="px-5 pb-4 flex items-center gap-2 flex-wrap">
+        <button onclick="saveSourceEviction(this)"
+          class="text-xs font-bold uppercase tracking-wide px-4 py-2 border border-amber-700 bg-amber-900/40 text-amber-300 hover:bg-amber-900 transition-colors">
+          Save
+        </button>
+        <button id="seDryRunBtn" onclick="runSourceEvictionDryRun(this)"
+          class="text-xs font-bold uppercase tracking-wide px-4 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:text-white transition-colors disabled:opacity-50">
+          Dry Run
+        </button>
+        <span id="seStatus" class="text-[11px] text-gray-500"></span>
+      </div>
+
+      <div id="seResult" class="hidden border-t border-amber-900/60"></div>
+    </div>
   </div>
 
   <!-- ── Background Video Tab ─────────────────────────────────────────────────── -->
@@ -3969,6 +4024,7 @@ async function loadStorageCompression(){
   _loadStorageItems();
   loadStorageBreakdown();
   loadOndemandOnly();
+  loadSourceEviction();
   const running = await _fetchCompression();
   if(running) startCompressionPolling();
 }
@@ -6230,6 +6286,149 @@ async function saveCacheAutopurge(btn){
   document.getElementById("apMaxGb").value = d.max_gb;
   _updateApurgeTip();
   showToast(enabled ? `Auto-purge on — orphans cleared above ${d.max_gb} GB.` : "Auto-purge off.");
+}
+
+// ── Reclaim Source Files (source eviction) ───────────────────────────────────
+// Dry run only: the policy is saved, the plan is computed and rendered, and
+// nothing is deleted. The point of the card today is the numbers — whether
+// giving up VLC/5.1/repair on the long tail is worth the GB it would return.
+
+// What is holding a file back, in the operator's words rather than the wire's.
+const _SE_BLOCKERS = {
+  "not-aged":           "Show touched too recently",
+  "no-bundle":          "No on-device bundle to fall back on",
+  "unverified":         "Bundle not audited yet",
+  "damaged":            "Bundle audit says it's damaged",
+  "incomplete-bundle":  "Bundle is missing segments",
+  "source-incomplete":  "Torrent not finished / unverified",
+  "stale-version":      "Bundle built by an older format",
+  "in-progress":        "Someone is part-way through it",
+  "next-up":            "It's someone's next episode",
+  "busy":               "Playing, compressing, prepping or racing",
+  "already-evicted":    "Source already gone",
+  "not-video":          "Not a video file",
+};
+
+async function loadSourceEviction(){
+  let r;
+  try{
+    r = await fetch("/api/admin/source-eviction", {headers: authHeader()});
+  }catch(_){ return; }
+  if(!r.ok) return;
+  const d = await r.json();
+  document.getElementById("seEnabled").checked   = !!d.enabled;
+  document.getElementById("seIdleDays").value    = d.idle_days;
+  document.getElementById("seNeverDays").value   = d.never_played_days;
+  document.getElementById("seFloorGb").value     = d.floor_gb;
+  document.getElementById("seTargetGb").value    = d.target_gb;
+}
+
+async function saveSourceEviction(btn){
+  const body = {
+    enabled:           document.getElementById("seEnabled").checked,
+    idle_days:         parseInt(document.getElementById("seIdleDays").value, 10)  || 15,
+    never_played_days: parseInt(document.getElementById("seNeverDays").value, 10) || 7,
+    floor_gb:          parseFloat(document.getElementById("seFloorGb").value)     || 100,
+    target_gb:         parseFloat(document.getElementById("seTargetGb").value)    || 150,
+  };
+  if(btn){ btn.disabled = true; btn.classList.add("opacity-50"); _markLoading(btn, true); }
+  let r;
+  try{
+    r = await fetch("/api/admin/source-eviction", {
+      method: "POST",
+      headers: {...authHeader(), "Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+  }catch(_){
+    showToast("Network error — not saved.");
+    if(btn){ btn.disabled = false; btn.classList.remove("opacity-50"); _markLoading(btn, false); }
+    return;
+  }
+  if(btn){ btn.disabled = false; btn.classList.remove("opacity-50"); _markLoading(btn, false); }
+  if(!r.ok){ showToast(`Save failed (HTTP ${r.status}).`); return; }
+  const d = await r.json();
+  // The server forces target above floor; reflect whatever it actually stored
+  // rather than leaving the box showing a value that isn't in effect.
+  document.getElementById("seTargetGb").value = d.target_gb;
+  showToast("Policy saved. Nothing is deleted — run a dry run to see the effect.");
+}
+
+async function runSourceEvictionDryRun(btn){
+  const status = document.getElementById("seStatus");
+  const out    = document.getElementById("seResult");
+  if(btn){ btn.disabled = true; btn.classList.add("opacity-50"); _markLoading(btn, true); }
+  status.textContent = "Walking the library…";
+  let r;
+  try{
+    r = await fetch("/api/admin/source-eviction/dry-run",
+                    {method: "POST", headers: authHeader()});
+  }catch(_){
+    status.textContent = "Network error.";
+    if(btn){ btn.disabled = false; btn.classList.remove("opacity-50"); _markLoading(btn, false); }
+    return;
+  }
+  if(btn){ btn.disabled = false; btn.classList.remove("opacity-50"); _markLoading(btn, false); }
+  if(!r.ok){ status.textContent = `Failed (HTTP ${r.status}).`; return; }
+  const d = await r.json();
+  status.textContent = "";
+  out.classList.remove("hidden");
+  out.innerHTML = _seRenderPlan(d);
+}
+
+function _seRenderPlan(d){
+  const rows = (list) => list.map(c => `
+    <div class="flex items-baseline justify-between gap-3 px-5 py-1.5 border-t border-gray-800/60">
+      <div class="min-w-0">
+        <div class="truncate text-gray-300">${_esc(c.name)}</div>
+        <div class="truncate text-[10px] text-gray-600">${_esc(c.item_title)}</div>
+      </div>
+      <div class="flex-shrink-0 text-right">
+        <div class="font-mono text-gray-400">${_esc(c.bytes_human)}</div>
+        <div class="text-[10px] text-gray-600">${c.days_idle == null ? "never touched"
+            : `idle ${c.days_idle}d${c.ever_played ? "" : " (never played)"}`}</div>
+      </div>
+    </div>`).join("");
+
+  // The headline is deliberately two numbers, not one: what the policy makes
+  // available, and what a sweep would take right now. They are usually very
+  // different, and conflating them is how a disk-gated feature gets read as an
+  // age-gated one.
+  const trigger = d.triggered
+    ? `<span class="text-amber-300">Below the ${d.floor_gb} GB floor — a sweep would run and take ${_esc(d.would_free_human)}${d.met ? "" : " (not enough to reach the target)"}.</span>`
+    : `<span class="text-green-400">Above the ${d.floor_gb} GB floor — a sweep would take nothing.</span>`;
+
+  const blockers = (d.blockers || []).map(b => `
+    <div class="flex items-baseline justify-between gap-3 py-0.5">
+      <span class="text-gray-500">${_esc(_SE_BLOCKERS[b.reason] || b.reason)}</span>
+      <span class="font-mono text-gray-600">${b.files} · ${_esc(b.human)}</span>
+    </div>`).join("");
+
+  return `
+    <div class="px-5 py-4 space-y-3 text-[11px]">
+      <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+        <div><div class="text-[10px] uppercase tracking-widest text-gray-600">Free Now</div>
+             <div class="font-mono text-sm text-gray-200">${_esc(d.free_human)}</div></div>
+        <div><div class="text-[10px] uppercase tracking-widest text-gray-600">Eligible Pool</div>
+             <div class="font-mono text-sm text-gray-200">${_esc(d.eligible_human)}</div>
+             <div class="text-[10px] text-gray-600">${d.eligible_count} file${d.eligible_count!==1?"s":""}</div></div>
+        <div><div class="text-[10px] uppercase tracking-widest text-gray-600">Would Take Now</div>
+             <div class="font-mono text-sm ${d.triggered ? "text-amber-300" : "text-gray-500"}">${_esc(d.would_free_human)}</div>
+             <div class="text-[10px] text-gray-600">${(d.would_delete||[]).length} file${(d.would_delete||[]).length!==1?"s":""}</div></div>
+      </div>
+      <div>${trigger}</div>
+      ${d.enabled ? "" : `<div class="text-gray-600">Policy is switched off, so a sweep would not run at all — the eligible pool above is what it <em>would</em> reach if you turned it on.</div>`}
+      <details class="pt-1">
+        <summary class="cursor-pointer text-gray-500 hover:text-gray-300">Why everything else is held back</summary>
+        <div class="pt-2 space-y-0.5">${blockers || '<span class="text-gray-600">Nothing blocked.</span>'}</div>
+      </details>
+    </div>
+    ${(d.eligible||[]).length ? `
+      <div class="border-t border-gray-800">
+        <div class="px-5 py-2 text-[10px] font-bold uppercase tracking-widest text-gray-500">
+          Eligible, oldest first${d.eligible_count > (d.eligible||[]).length ? ` — showing ${(d.eligible||[]).length} of ${d.eligible_count}` : ""}
+        </div>
+        <div class="text-[11px]">${rows(d.eligible)}</div>
+      </div>` : ""}`;
 }
 
 // Contextual help for the Auto-Purge card: reflect the toggle + size cap.

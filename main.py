@@ -58,6 +58,7 @@ import episodes
 import racerules
 import relquality
 import reltracks
+import srcevict
 import stt
 import subpack
 import subsearch
@@ -7873,6 +7874,19 @@ def _cache_autopurge_cfg(lib: dict) -> dict:
     }
 
 
+def _src_evict_cfg(lib: dict) -> "srcevict.Policy":
+    """Read settings.source_eviction (delete a prepped file's SOURCE, keeping its
+    bundle) as a clamped `srcevict.Policy`.
+
+    Two clocks and two disk marks, all four admin-set: `idle_days` since a series
+    was last played, the shorter `never_played_days` since download for a series
+    nothing has ever opened, and the `floor_gb` / `target_gb` pair that decides
+    whether the sweep runs at all. Off by default — this is the one maintenance
+    job in the box that destroys something a re-download is the only way back from.
+    See `srcevict.py` and docs/STREAMING.md § Source eviction."""
+    return srcevict.policy_from((lib.get("settings", {}) or {}).get("source_eviction"))
+
+
 def _subs_cfg(lib: dict) -> dict:
     """Read settings.subtitles (the unified subtitle policy) with defaults.
 
@@ -14042,6 +14056,20 @@ class CacheAutopurgeReq(BaseModel):
     max_gb: float = 50.0                        # purge orphan offline-cache bundles once .offline_cache/ reaches this many GB; clamped 1–10000
 
 
+class SourceEvictionReq(BaseModel):
+    """settings.source_eviction — delete a prepped file's SOURCE, keep its bundle.
+
+    `enabled` only arms the sweep; the dry run works while it is off, which is how
+    you size the feature before letting it delete anything. Every field is clamped
+    server-side by `srcevict.policy_from` (and `target_gb` is forced above
+    `floor_gb`, so a disk sitting on the line can't sweep one file per tick)."""
+    enabled: bool = False
+    idle_days: int = srcevict.DEFAULT_IDLE_DAYS                   # since a series was last PLAYED
+    never_played_days: int = srcevict.DEFAULT_NEVER_PLAYED_DAYS   # since DOWNLOAD, for a series nobody opened
+    floor_gb: float = srcevict.DEFAULT_FLOOR_GB                   # free space that starts a sweep
+    target_gb: float = srcevict.DEFAULT_TARGET_GB                 # free space that stops it
+
+
 class ValidateFilesReq(BaseModel):
     scope: Optional[str] = None                 # None/""/"all" ⇒ whole library; else a library item id
     deep: bool = True                           # True ⇒ full ffmpeg decode (catches mid-file corruption); False ⇒ quick ffprobe header check
@@ -14767,6 +14795,12 @@ async def _build_item_files(item: dict, profile_id: str) -> list[dict]:
             # device. Absent until the file has been probed.
             "dv_profile": video.get("dv_profile"),
             "green": bool(video.get("green")),
+            # Source reclaimed — the bundle is the only copy left. Plays on every
+            # device surface exactly as before; what it costs is the VLC path (5.1
+            # audio, HDR10, image subs, frame-accurate seek), repair, re-prep and
+            # fingerprinting. The UI badges it so that trade is never a surprise.
+            # See docs/STREAMING.md § Source eviction.
+            "source_evicted": _file_evicted(f),
         })
     return out
 
@@ -23419,8 +23453,7 @@ async def library_subtitle_fetch(request: Request, item_id: str,
     if not fmeta:
         raise HTTPException(404, "File not found in this item.")
     src = Path(fmeta["path"])
-    if not src.exists():
-        raise HTTPException(404, "File not on disk.")
+    _assert_source_present(fmeta, "Subtitle search")
     sel = await _effective_sub_lang(req.lang)
     target = await _subtitle_target(item, fmeta)
     cands = await _subtitle_search(target, sel, (req.query or "").strip())
@@ -26386,6 +26419,50 @@ async def admin_set_cache_autopurge(request: Request, body: CacheAutopurgeReq) -
     return JSONResponse({"ok": True, **cfg})
 
 
+@app.get("/api/admin/source-eviction")
+async def admin_get_source_eviction(request: Request) -> JSONResponse:
+    """Current source-eviction policy. Cheap — settings only, no library walk."""
+    _require_admin(request)
+    p = _src_evict_cfg(await get_library())
+    return JSONResponse({
+        "enabled": p.enabled, "idle_days": p.idle_days,
+        "never_played_days": p.never_played_days,
+        "floor_gb": p.floor_gb, "target_gb": p.target_gb,
+    })
+
+
+@app.post("/api/admin/source-eviction")
+async def admin_set_source_eviction(request: Request, body: SourceEvictionReq) -> JSONResponse:
+    """Write the source-eviction policy (`library.json → settings.source_eviction`).
+
+    Saving `enabled` does NOT delete anything by itself — the sweep that acts on
+    this policy is not wired up yet (dry run only). See docs/STREAMING.md."""
+    _require_admin(request)
+    async with mutate_library() as lib:
+        se = lib.setdefault("settings", {}).setdefault("source_eviction", {})
+        se["enabled"]           = bool(body.enabled)
+        se["idle_days"]         = int(body.idle_days)
+        se["never_played_days"] = int(body.never_played_days)
+        se["floor_gb"]          = float(body.floor_gb)
+        se["target_gb"]         = float(body.target_gb)
+    p = _src_evict_cfg(lib)
+    return JSONResponse({
+        "ok": True, "enabled": p.enabled, "idle_days": p.idle_days,
+        "never_played_days": p.never_played_days,
+        "floor_gb": p.floor_gb, "target_gb": p.target_gb,
+    })
+
+
+@app.post("/api/admin/source-eviction/dry-run")
+async def admin_source_eviction_dry_run(request: Request) -> JSONResponse:
+    """What a sweep WOULD delete right now, and what is holding everything else
+    back. Read-only and deletes nothing — it is the only thing this feature does
+    today. Expensive (a stat per file plus a segment walk per eligible bundle),
+    so it is on-demand rather than polled."""
+    _require_admin(request)
+    return JSONResponse(await _build_evict_plan())
+
+
 @app.get("/api/admin/auto-maintenance")
 async def admin_get_auto_maintenance(request: Request) -> JSONResponse:
     """Auto-maintenance config + live backlog counts for the admin card."""
@@ -28559,6 +28636,97 @@ def _offline_cache_dir(src: Path) -> Path:
     return src.parent / OFFLINE_CACHE_DIRNAME / _offline_cache_key(src)
 
 
+# ── Source eviction: addressing a bundle whose source is gone ────────────────
+# `_offline_cache_key(src)` stats the source, so every path above it assumes the
+# media file is still there. Once source eviction deletes one, the bundle is all
+# that is left — and it must still be findable, playable and downloadable. The
+# `files[].bundle` record is what makes that possible: written ONCE, by the
+# eviction itself, carrying the key we verified at the moment we deleted.
+#
+# Deriving the key from `files[].size_bytes` instead would be wrong: the
+# compression tool rewrites a file in place and never refreshes that field
+# (`_run_file_compression` sets `compressed`/`compressed_at` only), so a
+# compressed file's stored size is stale and would address a bundle that does not
+# exist. Store the real key; never recompute it. See docs/GOTCHAS.md.
+
+def _file_evicted(f: dict) -> bool:
+    """True when this file's SOURCE has been deleted and only its bundle remains."""
+    b = f.get("bundle")
+    return bool(isinstance(b, dict) and b.get("source_evicted") and b.get("key"))
+
+
+def _evicted_bundle_dir(f: dict) -> "Optional[Path]":
+    """The bundle dir of a source-evicted file, from its stored key — no stat.
+
+    None when the file isn't evicted or the record is unusable, so callers can
+    fall back to the ordinary stat-based path.
+    """
+    if not _file_evicted(f):
+        return None
+    key = str((f.get("bundle") or {}).get("key") or "")
+    path = f.get("path", "")
+    if not key or not _CACHE_KEY_RE.match(key) or not path:
+        return None
+    return Path(path).parent / OFFLINE_CACHE_DIRNAME / key
+
+
+def _bundle_dir_for_file(f: dict) -> "Optional[Path]":
+    """This file's bundle dir whether or not its source still exists.
+
+    The one entry point that works in both modes: stored key for an evicted file,
+    a stat of the source for a normal one. None when neither can answer (source
+    gone AND no eviction record — a genuinely missing file).
+    """
+    evicted = _evicted_bundle_dir(f)
+    if evicted is not None:
+        return evicted
+    try:
+        return _offline_cache_dir(Path(f.get("path", "")))
+    except OSError:
+        return None
+
+
+def _bundle_key_for_file(f: dict) -> str:
+    """This file's bundle key in either mode, or "" when it can't be determined."""
+    d = _bundle_dir_for_file(f)
+    return d.name if d is not None else ""
+
+
+def _assert_source_present(f: dict, what: str) -> None:
+    """Gate a feature that genuinely needs the SOURCE file, not just the bundle.
+
+    Distinguishes the two ways a source can be absent, because they call for
+    completely different responses from the viewer: a file that simply vanished is
+    a fault to investigate, while an evicted one is working as designed and the
+    answer is "watch it on a phone". A bare 404 for the second case reads as a
+    broken library. See docs/STREAMING.md § Source eviction.
+    """
+    try:
+        if Path(f.get("path", "")).exists():
+            return
+    except OSError:
+        pass
+    if _file_evicted(f):
+        raise HTTPException(
+            409, f"{what} needs the original file, which was reclaimed to free "
+                 f"disk space. This episode still plays on a phone or in the "
+                 f"browser. Re-download the same release to restore the rest.")
+    raise HTTPException(404, "File not on disk.")
+
+
+def _file_sig_for(f: dict) -> str:
+    """`_file_sig` that keeps working after eviction.
+
+    A stored verdict is retired when the source's signature moves — but an evicted
+    source has NO signature, and reading that as "changed" would retire every
+    verdict on every evicted file, which is exactly the evidence the eviction gate
+    relied on. The record freezes the signature the source had when we deleted it.
+    """
+    if _file_evicted(f):
+        return str((f.get("bundle") or {}).get("sig") or "")
+    return _file_sig(f.get("path", ""))
+
+
 def _offline_cache_key_legacy(src: Path) -> str:
     """Reproduce the pre-v8 central-cache key (`version | abs_path | mtime | size`).
     Used ONLY by `_migrate_offline_cache_layout` to find old central bundles."""
@@ -29167,7 +29335,10 @@ def _bundle_check_current(f: dict, key: str) -> "Optional[dict]":
     rec = f.get("bundle_check")
     if not isinstance(rec, dict) or rec.get("key") != key:
         return None
-    if rec.get("sig") and rec.get("sig") != _file_sig(f.get("path", "")):
+    # `_file_sig_for`, not `_file_sig`: an evicted source has no signature to read,
+    # and treating that as "the file changed" would retire the very verdict the
+    # eviction gate required before deleting it.
+    if rec.get("sig") and rec.get("sig") != _file_sig_for(f):
         return None
     return rec
 
@@ -31071,6 +31242,355 @@ async def _run_bundle_audit(scope: str = "all", *, auto: bool = False) -> None:
                          len(repaired), ", ".join(repaired[:8]))
 
 
+# ── Source eviction ──────────────────────────────────────────────────────────
+# Delete a prepped file's SOURCE, keeping its bundle. The pure policy arithmetic
+# — the two clocks, the free-space trigger, the ordering — lives in `srcevict.py`
+# with its own tests; everything here is fact-gathering, and every fact gathered
+# is a reason a file might NOT be safe to delete.
+#
+# The gate is deliberately unanimous: a file needs every check to pass, and any
+# check that cannot be *established* blocks rather than passes. Missing evidence
+# is not permission. The one recovery path is a re-download of the identical
+# release — same `filename|size`, same key, bundle re-adopted — so a wrong
+# deletion costs bandwidth rather than the episode, but it is still the only
+# maintenance job in the box that destroys something.
+
+def _series_clocks_sync(lib: dict) -> "dict[str, srcevict.SeriesClock]":
+    """`series_key → SeriesClock` for the whole library.
+
+    Rolled up per SERIES, across every profile and every item in it — a show
+    downloaded one torrent per episode is many items, and an item-level clock
+    would age each episode separately, which is the per-episode behaviour this
+    design rejects. One person still watching protects it for everyone.
+    """
+    touched: dict = {}
+    added: dict = {}
+    for it in lib.get("items", []):
+        key = _series_key(it)
+        for prof in (it.get("progress") or {}).values():
+            for rec in ((prof or {}).get("file_progress") or {}).values():
+                dt = srcevict.parse_iso((rec or {}).get("updated_at", ""))
+                if dt:
+                    touched.setdefault(key, []).append(dt)
+        dt = srcevict.parse_iso(it.get("added_at", ""))
+        if dt:
+            added.setdefault(key, []).append(dt)
+    keys = set(touched) | set(added)
+    return {k: srcevict.series_clock(touched.get(k, []), added.get(k, [])) for k in keys}
+
+
+def _evict_next_up_paths(lib: dict) -> "set[str]":
+    """Every profile's next-up episode in every series it has actually started.
+
+    Only profiles with progress in that series are consulted: for a series nobody
+    has opened, "next up" is just episode 1, and blocking it would spare one
+    arbitrary file per series for no benefit.
+    """
+    out: set = set()
+    by_series: dict = {}
+    for it in lib.get("items", []):
+        by_series.setdefault(_series_key(it), []).append(it)
+    for members in by_series.values():
+        pids = {pid for m in members for pid in (m.get("progress") or {})
+                if ((m.get("progress") or {}).get(pid) or {}).get("file_progress")}
+        for pid in pids:
+            try:
+                hint = find_series_resume_hint(members, pid)
+            except Exception:
+                continue
+            if hint and hint.get("file_path"):
+                out.add(_norm_path(hint["file_path"]))
+    return out
+
+
+def _evict_in_progress_paths(lib: dict) -> "set[str]":
+    """Files somebody is part-way through: a real position, not completed.
+
+    Uses the same 5-second floor the resume logic does, so an accidental tap that
+    wrote `position_sec: 1.2` doesn't pin a source on disk forever.
+    """
+    out: set = set()
+    for it in lib.get("items", []):
+        for prof in (it.get("progress") or {}).values():
+            for path, rec in ((prof or {}).get("file_progress") or {}).items():
+                if not isinstance(rec, dict) or rec.get("completed"):
+                    continue
+                try:
+                    if float(rec.get("position_sec", 0) or 0) > 5:
+                        out.add(_norm_path(path))
+                except (TypeError, ValueError):
+                    continue
+    return out
+
+
+def _bundle_playable_sync(bdir: Path) -> bool:
+    """Is every byte this bundle's playlists reference actually on disk?
+
+    `bundle_check` judges whether the bundle's CONTENT is dead (frozen picture,
+    silence); this asks the blunter question it does not — whether the files are
+    all there. A bundle half-deleted by a stray cleanup, or one whose prep was
+    interrupted between the rename and the index registration, passes a content
+    scan of what remains while being unplayable past the first gap.
+
+    Conservative by construction: any unreadable meta, any unparseable playlist,
+    any missing or empty segment is False. This runs before an irreversible
+    delete, so "I could not tell" must mean "no".
+    """
+    try:
+        meta = json.loads((bdir / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    names = [v.get("name") for v in (meta.get("videos") or []) if v.get("name")]
+    names += [f"audio_{a.get('idx')}" for a in (meta.get("audios") or [])
+              if a.get("idx") is not None]
+    if not names:
+        return False
+    for name in names:
+        try:
+            text = (bdir / f"{name}.m3u8").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        segs = list(bundlecheck.parse_media_playlist(text))
+        if not segs:
+            return False
+        # The fmp4 init segment is referenced by EXT-X-MAP, not as a segment, so
+        # it is checked by name — a bundle without it plays nothing at all.
+        if not (bdir / f"init_{name}.mp4").exists():
+            return False
+        for fn, _dur in segs:
+            if "/" in fn or "\\" in fn:
+                return False
+            try:
+                if (bdir / fn).stat().st_size <= 0:
+                    return False
+            except OSError:
+                return False
+    return True
+
+
+def _evict_candidates_sync(lib: dict, policy: "srcevict.Policy", now: datetime,
+                           incomplete: "set[str]", busy: "set[str]",
+                           next_up: "set[str]", in_progress: "set[str]") -> list:
+    """Weigh every library file for eviction. Blocking — one stat per file plus a
+    full segment walk per bundle, so the caller runs it in a thread.
+
+    Returns every video file as a `srcevict.Candidate`, blocked or not: the dry
+    run reports what is holding each file back, and "nothing would be freed" is
+    useless without it.
+    """
+    clocks = _series_clocks_sync(lib)
+    out: list = []
+    for it in lib.get("items", []):
+        skey = _series_key(it)
+        clock = clocks.get(skey, srcevict.SeriesClock(None, False))
+        # A racing item is mid-download by definition: challengers are being
+        # fetched in parallel and `_apply_race_upgrade` may still swap its files
+        # out. Nothing in it is settled enough to delete.
+        item_racing = (it.get("race") or {}).get("state") in ("racing", "upgrading")
+        for f in it.get("files", []):
+            path = f.get("path", "")
+            if not path:
+                continue
+            src = Path(path)
+            name = f.get("name", "") or src.name
+            base = srcevict.Candidate(
+                path=path, series_key=skey, name=name,
+                item_id=it.get("id", ""), item_title=it.get("title", ""),
+                source_bytes=0, clock=clock,
+            )
+            if src.suffix.lower() not in VIDEO_EXTS:
+                out.append(srcevict.block(base, srcevict.BLOCK_NOT_VIDEO))
+                continue
+            if _file_evicted(f):
+                out.append(srcevict.block(base, srcevict.BLOCK_ALREADY_EVICTED))
+                continue
+            try:
+                source_bytes = src.stat().st_size
+            except OSError:
+                # No source to delete. Not "already evicted" — there is no bundle
+                # record vouching for it — so it is simply not a candidate.
+                out.append(srcevict.block(base, srcevict.BLOCK_ALREADY_EVICTED))
+                continue
+            base = srcevict.Candidate(
+                path=path, series_key=skey, name=name,
+                item_id=it.get("id", ""), item_title=it.get("title", ""),
+                source_bytes=source_bytes, clock=clock,
+            )
+            reasons = list(srcevict.age_blockers(clock, now, policy))
+
+            npath = _norm_path(path)
+            if npath in busy or item_racing:
+                reasons.append(srcevict.BLOCK_BUSY)
+            if npath in next_up:
+                reasons.append(srcevict.BLOCK_NEXT_UP)
+            if npath in in_progress:
+                reasons.append(srcevict.BLOCK_IN_PROGRESS)
+            if npath in incomplete:
+                reasons.append(srcevict.BLOCK_SOURCE_INCOMPLETE)
+
+            try:
+                key = _offline_cache_key(src)
+                bdir = src.parent / OFFLINE_CACHE_DIRNAME / key
+            except OSError:
+                out.append(srcevict.block(base, *reasons, srcevict.BLOCK_NO_BUNDLE))
+                continue
+            if _offline_cache_path_active(key):
+                reasons.append(srcevict.BLOCK_BUSY)
+            if not (bdir / "master.m3u8").exists():
+                # No bundle at the current OFFLINE_CACHE_VERSION. The version is
+                # baked into the key, so a bundle built by an older format simply
+                # isn't at this address — which is the correct verdict either way:
+                # there is nothing here that could be played without the source.
+                out.append(srcevict.block(base, *reasons, srcevict.BLOCK_NO_BUNDLE))
+                continue
+            chk = _bundle_check_current(f, key)
+            if chk is None:
+                # Never audited, or the verdict is stale. The idle sweep fills
+                # these in by itself; until it has, there is no evidence.
+                reasons.append(srcevict.BLOCK_UNVERIFIED)
+            elif chk.get("damaged"):
+                reasons.append(srcevict.BLOCK_DAMAGED)
+            # The segment walk is the expensive check, so it runs last — only for
+            # a file that has cleared everything else.
+            if not reasons and not _bundle_playable_sync(bdir):
+                reasons.append(srcevict.BLOCK_INCOMPLETE_BUNDLE)
+            out.append(srcevict.block(base, *reasons) if reasons else base)
+    return out
+
+
+def _evict_busy_paths() -> "set[str]":
+    """Paths that must not be touched this instant, whatever their age: playing in
+    VLC, mid-compress, or feeding a live on-demand JIT session."""
+    busy: set = set()
+    if state.library_current_file:
+        busy.add(_norm_path(state.library_current_file))
+    for s in _od_sessions.values():
+        if s.get("src"):
+            busy.add(_norm_path(str(s["src"])))
+    # The live compression lock set — the same one `_is_compressing` reads, so a
+    # file being rewritten in place can never be deleted out from under it.
+    busy |= {_norm_path(p) for p in state.compressing_paths}
+    return busy
+
+
+async def _build_evict_plan() -> dict:
+    """Gather the facts and return the sweep plan as a JSON-ready payload.
+
+    Read-only: this computes and reports, and deletes nothing. It is what the
+    admin dry run renders, and what the sweep itself will consult once eviction is
+    switched on.
+    """
+    lib = await get_library()
+    policy = _src_evict_cfg(lib)
+    now = datetime.now(timezone.utc)
+
+    # One qBit round trip for the whole library rather than one per item.
+    info_map: dict = {}
+    qbit_ok = False
+    try:
+        infos = await qbit_info_all()
+        qbit_ok = infos is not None
+        for i in (infos or []):
+            h = (i.get("hash") or "").lower()
+            if h:
+                info_map[h] = i
+    except Exception as exc:
+        log.warning("source-eviction: qBit unreachable (%s)", exc)
+
+    def _all_paths(it: dict) -> set:
+        return {_norm_path(f["path"]) for f in it.get("files", []) if f.get("path")}
+
+    incomplete: set = set()
+    for it in lib.get("items", []):
+        # `_incomplete_download_paths` deliberately TRUSTS a settled item when qBit
+        # can't answer — right for prep, where blocking on an outage would stall the
+        # whole library. It is not right here: this decides an irreversible delete,
+        # and "qBit is down" is exactly the missing evidence the gate must read as
+        # no. Block every torrent-backed file outright until qBit can confirm.
+        if not qbit_ok:
+            incomplete |= {p for p in _all_paths(it) if it.get("torrent_hash")}
+            continue
+        try:
+            incomplete |= await _incomplete_download_paths(it, info_map=info_map)
+        except Exception:
+            incomplete |= _all_paths(it)
+
+    busy = _evict_busy_paths()
+    next_up = await asyncio.to_thread(_evict_next_up_paths, lib)
+    in_progress = await asyncio.to_thread(_evict_in_progress_paths, lib)
+    candidates = await asyncio.to_thread(
+        _evict_candidates_sync, lib, policy, now, incomplete, busy, next_up, in_progress)
+
+    free_bytes = await asyncio.to_thread(_free_disk_bytes_for_library, lib)
+    p = srcevict.plan(candidates, free_bytes, policy)
+
+    def row(c) -> dict:
+        return {
+            "path": c.path, "name": c.name, "item_id": c.item_id,
+            "item_title": c.item_title, "series_key": c.series_key,
+            "bytes": c.source_bytes, "bytes_human": human_size(c.source_bytes),
+            "last_touched": c.clock.at.isoformat(timespec="seconds") if c.clock.at else "",
+            "days_idle": round(c.clock.days_idle(now), 1) if c.clock.at else None,
+            "ever_played": c.clock.ever_played,
+            "blockers": list(c.blockers),
+        }
+
+    return {
+        "enabled":        policy.enabled,
+        "idle_days":      policy.idle_days,
+        "never_played_days": policy.never_played_days,
+        "floor_gb":       policy.floor_gb,
+        "target_gb":      policy.target_gb,
+        "free_bytes":     p.free_bytes,
+        "free_human":     human_size(p.free_bytes),
+        "triggered":      p.triggered,
+        "deficit_bytes":  p.deficit_bytes,
+        "deficit_human":  human_size(p.deficit_bytes),
+        "would_free_bytes": p.would_free_bytes,
+        "would_free_human": human_size(p.would_free_bytes),
+        "shortfall_bytes":  p.shortfall_bytes,
+        "met":            p.met,
+        "eligible_count": len(p.eligible),
+        "eligible_bytes": p.eligible_bytes,
+        "eligible_human": human_size(p.eligible_bytes),
+        "blocked_count":  len(p.blocked),
+        "blockers":       [{"reason": r, "files": n, "bytes": b, "human": human_size(b)}
+                           for (r, n, b) in srcevict.blocker_summary(candidates)],
+        # Capped: a full library is thousands of files and the admin card shows a
+        # table, not a census. The totals above describe the whole pool.
+        "would_delete":   [row(c) for c in p.would_delete[:200]],
+        "eligible":       [row(c) for c in p.eligible[:200]],
+        "computed_at":    _now_iso(),
+    }
+
+
+def _free_disk_bytes_for_library(lib: dict) -> int:
+    """Free bytes on the volume the library lives on.
+
+    The library can span volumes; the one that matters is where the most bytes
+    are, since that is the disk a sweep would actually relieve. Falls back to the
+    repo's own volume when nothing can be stat'd.
+    """
+    by_root: dict = {}
+    for it in lib.get("items", []):
+        for f in it.get("files", []):
+            p = f.get("path", "")
+            if not p:
+                continue
+            try:
+                root = os.path.splitdrive(os.path.abspath(p))[0] or os.path.sep
+            except (OSError, ValueError):
+                continue
+            by_root[root] = by_root.get(root, 0) + int(f.get("size_bytes", 0) or 0)
+    candidates = sorted(by_root.items(), key=lambda kv: kv[1], reverse=True)
+    for root, _ in candidates + [(str(Path(__file__).resolve().parent), 0)]:
+        try:
+            return int(shutil.disk_usage(root or os.path.sep).free)
+        except OSError:
+            continue
+    return 0
+
+
 async def background_maintenance_loop() -> None:
     """Every 30 s, while the host is idle, drain outstanding background work that
     would otherwise wait for a manual trigger — Smart Skip fingerprinting,
@@ -32294,14 +32814,26 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
     if not target:
         raise HTTPException(404, "File not found in this item.")
     src = Path(target["path"])
-    if not src.exists():
+    # Source eviction: the media file is gone but its bundle is intact and is the
+    # only thing this endpoint was ever going to serve. Resolve from the stored
+    # key and fall through to the cached-bundle branch below. Everything past that
+    # branch needs a source (it would build one), so a missing bundle here is a
+    # genuine dead end rather than a prep to enqueue.
+    evicted_dir = _evicted_bundle_dir(target)
+    if evicted_dir is not None:
+        if not (evicted_dir / "master.m3u8").exists():
+            raise HTTPException(
+                410, "This episode's source was reclaimed and its bundle is gone. "
+                     "Re-download the same release to restore it.")
+    elif not src.exists():
         raise HTTPException(404, "File not on disk.")
     _assert_not_compressing(str(src))
 
-    sidecar_subs = await asyncio.to_thread(_list_sidecar_subs, src, item_id)
+    sidecar_subs = ([] if evicted_dir is not None
+                    else await asyncio.to_thread(_list_sidecar_subs, src, item_id))
     saved_tracks = (_saved_local_tracks(lib, item, req.profile_id, req.file_path)
                     if req.profile_id else {})
-    out_dir = _offline_cache_dir(src)
+    out_dir = evicted_dir if evicted_dir is not None else _offline_cache_dir(src)
     key = out_dir.name
     out_dir.parent.mkdir(parents=True, exist_ok=True)
 
@@ -32312,7 +32844,11 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
         # watching (see _maybe_auto_fetch_for_device). Interactive plays only:
         # `bulk` is "prep for later", and prepping a season would otherwise fire
         # one search + audio decode per episode and spend the day's downloads.
-        if not req.bulk:
+        # Skipped for an evicted source: the automatic fetch keeps nothing the
+        # audio hasn't verified (subsync decodes the SOURCE to align a candidate),
+        # so with no source it could only offer unverified subtitles — the one
+        # thing that flow exists to avoid. Manual search still works.
+        if not req.bulk and evicted_dir is None:
             await _maybe_auto_fetch_for_device(item, target, meta.get("subtitles") or [], sidecar_subs)
         return JSONResponse({
             "ready":             True,
@@ -32766,8 +33302,7 @@ async def generate_subtitles(item_id: str, req: GenerateSubsReq) -> JSONResponse
     if not target:
         raise HTTPException(404, "File not found in this item.")
     src = Path(target["path"])
-    if not src.exists():
-        raise HTTPException(404, "File not on disk.")
+    _assert_source_present(target, "AI subtitle generation")
     st = _maybe_start_stt_job(src, item_id, translate=req.translate, queue="interactive")
     return JSONResponse(st)
 
@@ -33368,10 +33903,14 @@ async def bundle_manifest(item_id: str, request: Request, file_path: str = "", p
     if not target:
         raise HTTPException(404, "File not found in this item.")
     src = Path(target["path"])
-    if not src.exists():
+    # Bundle-only endpoint: it enumerates files inside the built bundle and never
+    # reads the source, so a source-evicted episode is still downloadable to the
+    # phone — which is the one surface eviction is meant to leave fully intact.
+    # `_bundle_dir_for_file` resolves from the stored key when there is no source
+    # to stat; None means neither answer is available.
+    out_dir = _bundle_dir_for_file(target)
+    if out_dir is None:
         raise HTTPException(404, "File not on disk.")
-
-    out_dir = _offline_cache_dir(src)
     key = out_dir.name
     if not (out_dir / "master.m3u8").exists():
         return JSONResponse(
@@ -33407,7 +33946,11 @@ async def bundle_manifest(item_id: str, request: Request, file_path: str = "", p
             pass
     files, total, master_text = await asyncio.to_thread(
         _bundle_select_rung, out_dir, files, meta, keep_name)
-    sidecar_subs = await asyncio.to_thread(_list_sidecar_subs, src, item_id)
+    # Sidecar subs live beside the SOURCE, so an evicted file has none to offer —
+    # the subs it does have were copied into the bundle by `_mirror_sub_into_bundle`
+    # and come back in `meta.json` above.
+    sidecar_subs = ([] if _file_evicted(target)
+                    else await asyncio.to_thread(_list_sidecar_subs, src, item_id))
 
     # Series/episode metadata + poster so the offline Downloads picker can group
     # and label this download without the host (M3). Fetch+cache TMDb data if it
@@ -33909,8 +34452,7 @@ async def stream_ondemand(item_id: str, req: OnDemandReq) -> JSONResponse:
     if not target:
         raise HTTPException(404, "File not found in this item.")
     src = Path(target["path"])
-    if not src.exists():
-        raise HTTPException(404, "File not on disk.")
+    _assert_source_present(target, "Just-in-time streaming")
     _assert_not_compressing(str(src))
 
     info = await asyncio.to_thread(_ffprobe_full, str(src))
@@ -34293,8 +34835,7 @@ async def make_clip(item_id: str, req: ClipReq) -> JSONResponse:
     if not target:
         raise HTTPException(404, "File not found in this item.")
     src = Path(target["path"])
-    if not src.exists():
-        raise HTTPException(404, "File not on disk.")
+    _assert_source_present(target, "Clipping")
     _assert_not_compressing(str(src))
 
     # Clippable when the file is actively watchable on-device: either a full HLS
@@ -34490,12 +35031,22 @@ def _offline_cache_inventory_sync(lib: dict, jobs: list[dict]) -> dict:
         cached_n = processing_n = pending_n = error_n = partial_n = damaged_n = 0
         for f in it.get("files", []):
             src = Path(f.get("path", ""))
-            try:
-                if not src.exists():
+            # A source-evicted file has no source to stat, and its bundle is the
+            # ONLY copy left. Resolving it from the stored key here is what keeps
+            # it out of `orphans` below — and `cache_autopurge_loop` deletes every
+            # orphan once the cache outgrows its cap, so without this the feature
+            # would destroy exactly the bundles it was told to keep, at exactly the
+            # moment disk pressure made them unrecoverable. See docs/GOTCHAS.md.
+            evicted = _evicted_bundle_dir(f)
+            if evicted is not None:
+                key = evicted.name
+            else:
+                try:
+                    if not src.exists():
+                        continue
+                    key = _offline_cache_key(src)
+                except OSError:
                     continue
-                key = _offline_cache_key(src)
-            except OSError:
-                continue
             cached  = cached_dirs.get(key)
             partial = partial_dirs.get(key)
             job     = jobs_by_key.get(key)
@@ -34506,6 +35057,9 @@ def _offline_cache_inventory_sync(lib: dict, jobs: list[dict]) -> dict:
                 "root":      (cached or partial or {}).get(
                                  "root", str(src.parent / OFFLINE_CACHE_DIRNAME)),
                 "bytes":     0,
+                # Bundle-only: the source was evicted, so this bundle is the sole
+                # copy. The admin UI warns before deleting one.
+                "source_evicted": evicted is not None,
             }
             if cached:
                 # A bundle the audit judged dead is "cached" on disk but not
@@ -34646,10 +35200,18 @@ def _storage_breakdown_sync(lib: dict, bundle_by_path: dict[str, int]) -> dict:
             src = Path(p)
             if src.suffix.lower() not in VIDEO_EXTS:
                 continue
-            try:
-                sbytes = src.stat().st_size
-            except OSError:
-                sbytes = int(f.get("size_bytes", 0) or 0)
+            evicted = _file_evicted(f)
+            if evicted:
+                # An evicted source occupies nothing. Falling through to the
+                # `size_bytes` fallback below would report the bytes we just
+                # reclaimed as still in use — the Storage tab would show the sweep
+                # having freed nothing at all.
+                sbytes = 0
+            else:
+                try:
+                    sbytes = src.stat().st_size
+                except OSError:
+                    sbytes = int(f.get("size_bytes", 0) or 0)
             bbytes = int(bundle_by_path.get(p, 0) or 0)
             # Same-stem sidecars: `<stem>.srt`, `<stem>.eng.srt`, `<stem>.nfo`,
             # `<stem>-poster.jpg`, etc. Match the video's stem but exclude the
@@ -34674,6 +35236,7 @@ def _storage_breakdown_sync(lib: dict, bundle_by_path: dict[str, int]) -> dict:
                 "bundle_bytes": bbytes,
                 "extra_bytes":  ebytes,
                 "total_bytes":  total,
+                "source_evicted": evicted,
             })
             i_src += sbytes; i_bundle += bbytes; i_extra += ebytes
         if not files_out:
