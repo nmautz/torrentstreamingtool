@@ -116,6 +116,7 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "setTvMode", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "displays",  returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "extDiag",   returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setPaused", returnType: CAPPluginReturnPromise),
     ]
 
     private let mgr = NativePlaybackManager.shared
@@ -169,6 +170,13 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
 
     @objc func extDiag(_ call: CAPPluginCall) {
         call.resolve(mgr.extDiagInfo())
+    }
+
+    /// Transport control for the page while the NATIVE player owns playback.
+    /// In early mode the phone is a remote, not a second engine.
+    @objc func setPaused(_ call: CAPPluginCall) {
+        mgr.setPaused(call.getBool("paused") ?? false)
+        call.resolve(mgr.snapshot())
     }
 }
 
@@ -384,6 +392,20 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             PlaybackLiveActivity.shared.update(state: liveActivityState(), force: false)
         }
     }
+
+    /// Drive the native player directly. Only meaningful while it is the
+    /// presentation; a no-op otherwise, so the page can call it unconditionally.
+    func setPaused(_ paused: Bool) {
+        guard let p = player else { return }
+        armed.paused = paused
+        if paused { p.pause() } else { p.play() }
+        updateNowPlaying()
+        PlaybackLiveActivity.shared.update(state: liveActivityState(), force: true)
+    }
+
+    /// True while the native player is the presentation and the page must not
+    /// touch its own element.
+    var isHolding: Bool { isNativeActive && extWindow != nil }
 
     func disarm() {
         armed = ArmedPlayback()
@@ -1417,7 +1439,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             // Bump with any change to this file. Two runs have already been
             // ambiguous about whether the app had been rebuilt, and the trail
             // should never leave that in doubt.
-            "build": "18.5.0",
+            "build": "18.5.1",
             "audioSession": sessionActivated ? "active" : "INACTIVE",
             "audioError": audioSessionError,
             "iosVersion": UIDevice.current.systemVersion,
@@ -1435,6 +1457,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             "external": player?.isExternalPlaybackActive ?? false,
             "extWindow": extWindow != nil,
             "tvMode":   tvModeOn,
+            "holding":  isHolding,
         ]
     }
 

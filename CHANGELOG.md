@@ -1,5 +1,21 @@
 # Changelog
 
+## [18.5.1] — 2026-09-20
+* **Early mode works end to end.** Confirmed on device: `tcs=play` with the playhead
+  advancing 450.4 → 457.5 → 466.4 across `locked+3s/10s/20s`, window on the external
+  scene, mirroring off, layer attached — video on wired glasses through a locked phone,
+  which had never once worked.
+* **Fixed the hand-back that followed.** Native keeps holding the display (18.4.0), so the
+  page was never told anything: on unlock its element woke at the old position, and
+  pressing play started a **second engine** that seized the audio session and interrupted
+  the `AVPlayer` feeding the display — "the glasses show paused and the on-device player
+  resumed from the old playback time".
+* While native holds the display the page is now a **remote**, not a player.
+  `lpTogglePlay` drives the native player through a new `setPaused` plugin method instead
+  of its own element, and the media-recovery probes are skipped on foreground — they are
+  what left the on-device player "loading" after an unlock. `snapshot()` reports
+  `holding`.
+
 ## [18.5.0] — 2026-09-20
 * **Early mode now hands playback over while the app is still foreground, not at the
   lock.** The relief-pitcher model builds the `AVPlayer` at `didEnterBackground` and calls

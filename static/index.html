@@ -18471,6 +18471,12 @@ function _npOk() {
 // frame on the display, and both fixed by pressing play on the lock screen.
 // So report intent (what the user left it doing) rather than the element state.
 let _npVisiblePaused = false;
+// True while the NATIVE player is the presentation (early mode, display claimed).
+// The page is then a REMOTE: it must not play its own element, because a second
+// engine seizes the audio session and interrupts the AVPlayer feeding the
+// display — measured as "pressed play, the glasses went paused and the phone
+// resumed from the old position".
+let _npHolding = false;
 let _npExternal = false;     // an external display / AirPlay route is present
 let _npArmed = false;        // we've told native a session is live
 let _npLastTick = 0;
@@ -18653,8 +18659,10 @@ function _npBindEvents() {
       const v = _lpV();
       if (v && !v.paused) { try { v.pause(); } catch (_) {} }
       _npSetPausedIntent(false);
+      _npHolding = true;
     });
     _cap.np.addListener("nativeEnded", () => {
+      _npHolding = false;
       // Only meaningful if we're still backgrounded; on return _npHandBack's
       // `ended` branch handles it. Harmless to record either way.
       lp._nativeEnded = true;
@@ -24584,6 +24592,17 @@ function lpStageTap(e) {
 
 function lpTogglePlay() {
   const v = _lpV();
+  // Native owns playback: drive IT, and leave our element alone. Playing the
+  // element here would start a second engine, take the audio session, and
+  // interrupt the player feeding the display.
+  if (_npHolding && _cap.np) {
+    const next = !_npNativePaused;
+    _npNativePaused = next;
+    _npSetPausedIntent(next);
+    try { _cap.np.setPaused({ paused: next }); } catch (_) {}
+    _lpCtlShow();
+    return;
+  }
   // Record the INTENT here, where it is unambiguous — this is the user asking.
   // Everything else that pauses the element (WebKit backgrounding it, a stall,
   // a teardown) is not a wish and must not reach the native handoff.
@@ -24591,6 +24610,7 @@ function lpTogglePlay() {
   else { _npSetPausedIntent(true); v.pause(); }
   _lpCtlShow();
 }
+let _npNativePaused = false;
 
 // ── Swallowed-seek detector ─────────────────────────────────────────────────
 // Rare iOS wedge — the half 10.8.2's repaint fix didn't cover: the media
@@ -25982,6 +26002,10 @@ function _lpAttachVideoEvents() {
     // rebuild at the wrong position. Chaining also makes the order deterministic
     // instead of three timers racing. (_npHandBack resolves immediately when the
     // native player was never armed, so the browser path is unchanged.)
+    // While native holds the display there is nothing to hand back and nothing
+    // to recover: the element is deliberately parked. Probing it here is what
+    // left the on-device player "loading" after an unlock.
+    if (_npHolding) return;
     _npHandBack().then(() => {
       setTimeout(_lpRecoverActiveSub, 400);
       setTimeout(_lpRecoverMediaPipeline, 600);
@@ -27078,6 +27102,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.5.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.5.1</div>
 </body>
 </html>
