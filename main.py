@@ -31728,6 +31728,41 @@ async def _evict_one_source(f_path: str, key: str, sig: str) -> int:
     return size
 
 
+async def _reconcile_evicted_sources() -> int:
+    """Drop the eviction record from any file whose source is back on disk.
+
+    Re-downloading is the documented way to undo an eviction, and without this the
+    library would still describe those files as source-less: the episode row keeps
+    its **Bundle Only** badge, the dry run counts them `already-evicted`, and
+    `_assert_source_present` stays primed to refuse VLC and JIT.
+
+    It also closes a correctness hole. `_bundle_dir_for_file` prefers the STORED
+    key over a stat, which is the whole point while the source is gone — but if
+    what came back is a *different* release, its real key (name|size) differs and
+    the stored one would keep pointing at a bundle that no longer describes the
+    file. Clearing the record hands addressing back to the stat, which is right
+    the moment there is a file to stat.
+
+    Cheap: only files carrying a `bundle` record are examined, and the library is
+    only rewritten when something actually changed.
+    """
+    lib = await get_library()
+    back = [f.get("path", "") for it in lib.get("items", []) for f in it.get("files", [])
+            if _file_evicted(f) and f.get("path")
+            and await asyncio.to_thread(os.path.exists, f["path"])]
+    if not back:
+        return 0
+    async with mutate_library() as lib2:
+        for it in lib2.get("items", []):
+            for f in it.get("files", []):
+                if f.get("path") in back:
+                    f.pop("bundle", None)
+    _invalidate_offline_cache_inventory()
+    hls_log.info("evict: %d source(s) came back — cleared their eviction record: %s",
+                 len(back), ", ".join(Path(p).name for p in back[:6]))
+    return len(back)
+
+
 async def _run_source_eviction(*, manual: bool = False) -> dict:
     """Execute the sweep: delete the sources the plan selected, keep their bundles.
 
@@ -31834,6 +31869,12 @@ async def background_maintenance_loop() -> None:
     while True:
         try:
             lib = await get_library()
+            # Cheap and unconditional: a re-downloaded source must stop being
+            # described as evicted promptly, not only when maintenance is enabled.
+            try:
+                await _reconcile_evicted_sources()
+            except Exception as exc:
+                log.warning("evict reconcile: %s", exc)
             cfg = _auto_maint_cfg(lib)
             if (cfg["fingerprint"] or cfg["validate"] or cfg["bundles"]
                     ) and not await _machine_in_use(300):

@@ -2567,6 +2567,16 @@ on every evicted file the moment there is no signature left to read.
 
 ### Recovery
 
+`_reconcile_evicted_sources` (a cheap unconditional pass at the top of
+`background_maintenance_loop`) drops the `files[].bundle` record from any evicted
+file whose source is back on disk. Without it the library keeps describing the
+file as source-less — the **Bundle Only** badge stays, the dry run counts it
+`already-evicted`, and `_assert_source_present` keeps refusing VLC and JIT. It
+also closes a correctness hole: `_bundle_dir_for_file` prefers the stored key over
+a stat, so if what came back is a *different* release (different size, different
+real key) the stale record would go on addressing a bundle that no longer
+describes the file.
+
 The v8 key is `sha256(version | filename | size)` — path- and mtime-independent.
 **Re-download the identical release and it produces the same key and re-adopts the
 existing bundle**, with progress and skip data intact and no re-prep. A wrong

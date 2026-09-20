@@ -1,5 +1,16 @@
 # Changelog
 
+## [18.1.3] — 2026-09-19
+* **Fixed: re-downloading an evicted source left it still marked evicted.**
+  Re-downloading is the documented way to undo an eviction, but nothing cleared
+  `files[].bundle`, so the episode kept its **Bundle Only** badge, the dry run
+  counted it `already-evicted`, and VLC and JIT went on refusing it. It also left
+  a correctness hole: `_bundle_dir_for_file` prefers the stored key over a stat,
+  so a *different* release coming back (different size, different real key) would
+  keep being addressed to a bundle that no longer described it.
+  `_reconcile_evicted_sources` now clears the record as soon as the file is back.
+  Found by actually restoring the 13 test evictions.
+
 ## [18.1.2] — 2026-09-19
 * **Corrected the size claim this whole feature was justified by.** 18.0.0 said a
   bundle is "~1.7x the source" and eviction reclaims "~37%". Measured on the real
