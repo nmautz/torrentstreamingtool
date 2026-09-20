@@ -1491,7 +1491,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             // Bump with any change to this file. Two runs have already been
             // ambiguous about whether the app had been rebuilt, and the trail
             // should never leave that in doubt.
-            "build": "18.5.3",
+            "build": "18.6.0",
             "audioSession": sessionActivated ? "active now"
                              : (audioEverActivated ? "released (was active)" : "NEVER ACTIVATED"),
             "audioError": audioSessionError,

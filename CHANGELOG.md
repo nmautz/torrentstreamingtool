@@ -1,5 +1,19 @@
 # Changelog
 
+## [18.6.0] — 2026-09-20
+* **Confirmed working: two consecutive locks, video on the glasses through both.**
+* **Fixed auto-advance, which was broken at both ends.** `nativeEnded` only set a flag —
+  the branch that acted on it lives in `_npHandBack`, which early mode deliberately skips,
+  and in early mode the app is *foreground* anyway, so nothing was left to advance the
+  page. The episode ended and the player sat there until Next was pressed. It now calls
+  `_lpAdvanceOrEnd()` when native ends while holding.
+* And `nativeAdvanced` recorded the new path without moving the playlist cursor, so a
+  successful native advance never warmed the episode after it — `nextUrl` reaches native
+  only on a full `arm()`, and nothing re-armed. The chain died after one advance. It now
+  follows the advance: cursor, file, item, nav buttons, `_lpWarmNextEp()`, `_npArm()`.
+* Swift build marker and page version realigned at **18.6.0** — they had drifted to 18.5.3
+  and 18.5.4.
+
 ## [18.5.4] — 2026-09-20
 * **The "playing elsewhere" banner no longer fights the iOS status bar.** It was its
   own sticky strip above the header, which made it the topmost element in the flow — and

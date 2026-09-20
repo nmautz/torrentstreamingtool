@@ -18722,16 +18722,38 @@ function _npBindEvents() {
       _npApplyNativeTransport(e.position, e.paused, e.duration);
     });
     _cap.np.addListener("nativeEnded", () => {
+      const wasHolding = _npHolding;
       _npHolding = false;
       _npStopPoll();
       // Only meaningful if we're still backgrounded; on return _npHandBack's
       // `ended` branch handles it. Harmless to record either way.
       lp._nativeEnded = true;
+      // ...except in early mode, where we are FOREGROUND and _npHandBack is
+      // deliberately skipped, so nothing was left to act on the flag. The
+      // episode simply ended and the page sat there until Next was pressed.
+      if (wasHolding && lp.itemId) _lpAdvanceOrEnd();
     });
     _cap.np.addListener("nativeAdvanced", (e) => {
       if (e && e.request === "next") { _npDisarm(); lpNextEp(); }
       else if (e && e.request === "prev") { _npDisarm(); lpPrevEp(); }
-      else if (e && e.filePath) { lp._nativeAdvancedTo = e.filePath; }
+      else if (e && e.filePath) {
+        lp._nativeAdvancedTo = e.filePath;
+        // Native advanced in place. Follow it: move the playlist cursor, warm the
+        // episode AFTER this one, and re-arm so native learns the new nextUrl.
+        // Without this the chain stops dead after one advance, because nextUrl
+        // reaches native only on a full arm and nothing re-armed.
+        const i = (lp.playlist || []).indexOf(e.filePath);
+        if (i >= 0) {
+          lp.pi = i;
+          lp.filePath = e.filePath;
+          lp.itemId = (lp.playlistItems || [])[i] || lp.itemId;
+          lp.name = e.filePath.split(/[/\]/).pop();
+          lp._nextNative = null;
+          try { _lpRenderNavButtons(); } catch (_) {}
+          _lpWarmNextEp();
+          _npArm();
+        }
+      }
     });
     _cap.np.addListener("displayChanged", (e) => {
       const was = _npExternal;
@@ -27199,6 +27221,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.5.4</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.6.0</div>
 </body>
 </html>
