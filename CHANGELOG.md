@@ -1,5 +1,28 @@
 # Changelog
 
+## [18.4.2] — 2026-09-20
+* **Fixed the bug under all of this: the audio session was claimed from the BACKGROUND,
+  where iOS will not grant it.** The decisive report was about the case that supposedly
+  worked — with no glasses at all, audio after a lock only starts if you press play on
+  the lock screen or squeeze the AirPods. iOS lets a backgrounded app *continue* audio
+  under the `audio` background mode; it does not let one *start* audio from the background
+  with a session it did not already hold. `startNative()` runs from
+  `didEnterBackgroundNotification`, so `setActive(true)` was being called in exactly the
+  restricted case — it failed, `play()` did nothing, and **`try?` swallowed the error**,
+  which is why this never surfaced in six hours of trails. A remote command is
+  user-initiated and therefore allowed, which is precisely why pressing play worked.
+* The session is now claimed at **arm** time, while the app is foreground and an episode
+  is actually playing. The original concern still holds and is still respected —
+  `.playback` is process-wide, so claiming it at *launch* would make every WKWebView sound
+  ignore the ringer switch — but arming an episode is not launch, and `stopNative()`
+  deactivates it again when playback ends. `startNative()` keeps a fallback call for the
+  paths that reach it without an arm.
+* Activation **records its failure** instead of discarding it, and the readout prints
+  `audio session: active` or `INACTIVE   FAILED -> <state>: <reason>`.
+* This also explains the frozen frame on the glasses: with no audio session the player
+  never started, so what reached the display was simply the first frame of a player that
+  was never playing — not suspended decode, and not a compositing limit.
+
 ## [18.4.1] — 2026-09-20
 * **18.4.0 confirmed on device: the locked session now survives.** `locked+3s`,
   `locked+10s` and `locked+20s` all present with `win=Y winScene=Y extLyr=Y nat=Y`. The

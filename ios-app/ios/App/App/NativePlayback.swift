@@ -225,6 +225,8 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     /// beat that crossed with our flush cannot stop a second session.
     private var yielded = false
     private var sessionActivated = false
+    /// Last audio-session activation failure, surfaced in the diagnostics.
+    private var audioSessionError = ""
     private var endedFlag = false
     private var handBackDeadline: DispatchWorkItem?
 
@@ -325,10 +327,44 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             PlaybackLiveActivity.shared.end()
         }
 
+        // Claim the audio session while we are still FOREGROUND. This is the fix
+        // for "no audio after locking unless I press play".
+        //
+        // iOS lets a backgrounded app CONTINUE audio under the `audio` background
+        // mode; it does not generally let one START audio from the background with
+        // a session it did not already hold. startNative() runs from
+        // didEnterBackgroundNotification, so activating there was exactly the
+        // restricted case: setActive(true) failed, play() did nothing, and `try?`
+        // swallowed the error so it never surfaced. Pressing play on the lock
+        // screen worked because a remote command is user-initiated — which is
+        // precisely the shape of the symptom.
+        //
+        // The old comment's concern was that `.playback` is process-wide and
+        // activating it at LAUNCH would make every WKWebView sound ignore the
+        // ringer switch. Still true, and still respected: this fires only once an
+        // episode is actually armed with the handoff enabled, and stopNative()
+        // deactivates it again when playback ends.
+        if armed.active, armed.handoffEnabled { activateAudioSession() }
+
         // Early mode takes the display now, while the app can still draw and the
         // scene is live. Idempotent, so riding the arm push is enough — no extra
         // JS surface, and it self-heals if the glasses are plugged in mid-episode.
         maybeClaimEarly()
+    }
+
+    /// Idempotent. Records why it failed rather than swallowing it: a silent
+    /// `try?` here is what hid this bug for the life of the feature.
+    private func activateAudioSession() {
+        guard !sessionActivated else { return }
+        let s = AVAudioSession.sharedInstance()
+        do {
+            try s.setCategory(.playback, mode: .moviePlayback)
+            try s.setActive(true)
+            sessionActivated = true
+            audioSessionError = ""
+        } catch {
+            audioSessionError = "\(Self.stateName(UIApplication.shared.applicationState)): \(error.localizedDescription)"
+        }
     }
 
     func tick(position: Double, paused: Bool, duration: Double) {
@@ -368,16 +404,10 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // assertion is released.
         beginBgTask()
 
-        // Audio session is set LAZILY, here — never at launch. `.playback` is a
-        // PROCESS-WIDE setting: activating it early would make every WKWebView
-        // sound ignore the ringer switch from boot, which is not what a user
-        // who never backgrounds playback signed up for.
-        if !sessionActivated {
-            let s = AVAudioSession.sharedInstance()
-            try? s.setCategory(.playback, mode: .moviePlayback)
-            try? s.setActive(true)
-            sessionActivated = true
-        }
+        // Normally already done at arm time, while foreground — see
+        // activateAudioSession(). Kept here as a fallback for the paths that reach
+        // startNative without an arm (takeover from a remote command).
+        activateAudioSession()
 
         endedFlag = false
         let startAt = extrapolatedPosition()
@@ -1334,7 +1364,9 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             // Bump with any change to this file. Two runs have already been
             // ambiguous about whether the app had been rebuilt, and the trail
             // should never leave that in doubt.
-            "build": "18.4.1",
+            "build": "18.4.2",
+            "audioSession": sessionActivated ? "active" : "INACTIVE",
+            "audioError": audioSessionError,
             "iosVersion": UIDevice.current.systemVersion,
             "extMode": armed.extMode,
             "trail": diagTrail,
