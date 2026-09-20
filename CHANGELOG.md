@@ -1,5 +1,23 @@
 # Changelog
 
+## [18.3.2] — 2026-09-20
+* **The target state was reached.** Run 6, at 41.9 s:
+  `scene=Y mir=- win=Y winScene=Y extLyr=Y nat=Y app=bg` — our window on the
+  external-display scene, mirroring off, the **AVPlayerLayer attached**, native playback
+  running, and the app **backgrounded**. That is the whole feature, and it existed. It
+  lasted a fraction of a second because the phone woke.
+* Two things the trail makes plain. **iOS tears the external-display scene down at the
+  lock** even when we own it (`sceneDisconnect` at 41.1 s) — so claiming early is
+  necessary but not sufficient. And **18.2.3's `sceneConnect` observer is what saves it**:
+  0.8 s later the scene returned, the handler reclaimed it *from the background*, and this
+  time the player layer went in too.
+* **The wake is not ours.** It happens in every mode, including runs 4 and 5 where no
+  window was ever built — the display hotplugs at the lock (`scr` 2→1→2→1), which wakes
+  the screen, and Face ID then unlocks the phone if it can see the user. The readout now
+  says so and tells them to put the phone face down.
+* The readout also reports the target state wherever it occurs, rather than leaving a
+  sub-second window to be spotted in the columns.
+
 ## [18.3.1] — 2026-09-20
 * **Early mode works: mirroring went off for the first time.** Run 5's trail carries
   `earlyClaim ... scene=Y mir=- win=Y winScene=Y` — the window is attached to the

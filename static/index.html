@@ -20436,6 +20436,16 @@ function _appOpenAppSettings() {
           ? `CLAIM: window built at ${claim.t}s but mirroring STAYED UP.`
           : `CLAIM: display taken over at ${claim.t}s - mirroring off. This is the win.`);
       }
+      // The goal state, wherever it occurs: our window on the scene, mirroring off,
+      // the player layer in it, and the app BACKGROUNDED. Run 6 hit this for a
+      // fraction of a second and it would have been easy to miss in the columns.
+      const target = trail.filter((r) =>
+        r.extWindow && r.winScene && r.extLayer && r.mirrored === false &&
+        r.native && r.appState === "bg").pop();
+      if (target) {
+        verdict.push(`TARGET STATE REACHED at ${target.t}s - window on the scene,`,
+                     "        mirroring off, player layer attached, app backgrounded.");
+      }
       const lastRow = trail[trail.length - 1];
       const released = claim && !claim.mirrored && lastRow && !lastRow.extWindow;
       if (!locked.length) {
@@ -20463,7 +20473,17 @@ function _appOpenAppSettings() {
         if (woke) {
           verdict.push("RESULT: THE LOCK DID NOT HOLD - the app returned to the",
                        "        foreground before the sample, so this row describes an",
-                       "        UNLOCKED phone. Lock it and do not touch it for 25s.");
+                       "        UNLOCKED phone.");
+          // The display hotplugs at every lock (scr 2->1->2), which wakes the
+          // screen; if the phone can then see your face it unlocks itself and the
+          // app comes straight back. Locking harder does not help - denying Face ID
+          // a look at you does.
+          const flap = trail.filter((r) => r.at === "screenChange").length >= 3;
+          verdict.push(flap
+            ? "        The display hotplugged at the lock, which wakes the screen -"
+            : "        Something woke the screen -",
+            "        and Face ID then unlocks it if it can see you. Put the phone",
+            "        FACE DOWN, or somewhere it cannot see your face, and retry.");
         } else if (L.winScene && !L.mirrored) {
           verdict.push("RESULT: TAKEOVER WORKED - window on the display, mirroring off.");
         } else if (L.winScene) {
@@ -26947,6 +26967,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.3.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.3.2</div>
 </body>
 </html>
