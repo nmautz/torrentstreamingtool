@@ -240,6 +240,16 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
                        name: UIScreen.didConnectNotification, object: nil)
         nc.addObserver(self, selector: #selector(screenDidChange),
                        name: UIScreen.didDisconnectNotification, object: nil)
+        // The SCENE is what we actually need, and it does not arrive with the
+        // screen: 18.2.2's trail showed `scene=-` at a screenChange that reported
+        // the display present, and `scene=Y` only seconds later. Worse, it was
+        // absent again at the willResignActive where the window gets built — so
+        // the handoff silently fell through to the route layer. Watch the scene's
+        // own lifecycle rather than inferring it from the screen's.
+        nc.addObserver(self, selector: #selector(sceneDidConnect),
+                       name: UIScene.willConnectNotification, object: nil)
+        nc.addObserver(self, selector: #selector(sceneDidDisconnect),
+                       name: UIScene.didDisconnectNotification, object: nil)
     }
 
     // MARK: Arming
@@ -1036,6 +1046,43 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         emit("displayChanged", displayInfo())
     }
 
+    /// The external-display scene arriving is the moment Direct mode becomes
+    /// possible at all, and it can land AFTER we have already backgrounded and
+    /// picked the route layer. Take the display over now rather than waiting for
+    /// a `willResignActive` that has already happened.
+    @objc private func sceneDidConnect(_ note: Notification) {
+        guard (note.object as? UIWindowScene) != nil else { return }
+        onMain { [weak self] in
+            guard let self = self else { return }
+            if self.isNativeActive, self.wantsOwnExternalWindow, self.extWindow == nil {
+                // Drop the consolation prize first — two surfaces for one player
+                // would have AVFoundation's route and our window fighting over
+                // the same display.
+                self.detachFallbackLayer()
+                self.ensureExternalWindow()
+                self.attachExternalLayer()
+            }
+            self.diagSnap("sceneConnect")
+            self.emit("displayChanged", self.displayInfo())
+        }
+    }
+
+    @objc private func sceneDidDisconnect(_ note: Notification) {
+        guard (note.object as? UIWindowScene) != nil else { return }
+        onMain { [weak self] in
+            guard let self = self else { return }
+            // Our window died with the scene; clear the references so a later
+            // reconnect rebuilds instead of seeing a non-nil `extWindow` and
+            // deciding there is nothing to do.
+            if self.externalScene == nil, self.extWindow != nil {
+                self.extLayer?.player = nil
+                self.extLayer = nil
+                self.extWindow = nil
+            }
+            self.diagSnap("sceneDisconnect")
+        }
+    }
+
     func displayInfo() -> [String: Any] {
         let external = externalScreen
         return [
@@ -1124,7 +1171,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     /// so these fire; if they are MISSING from the trail, that is itself the
     /// finding — the process was suspended instead of playing.
     private func scheduleLockedSnaps() {
-        for d in [3.0, 10.0] {
+        for d in [3.0, 10.0, 20.0] {
             DispatchQueue.main.asyncAfter(deadline: .now() + d) { [weak self] in
                 guard let self = self, self.isNativeActive else { return }
                 self.diagSnap("locked+\(Int(d))s")

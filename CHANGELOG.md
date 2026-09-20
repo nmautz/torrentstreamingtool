@@ -1,5 +1,26 @@
 # Changelog
 
+## [18.2.3] — 2026-09-20
+* **The external-display SCENE does not arrive with the screen, and is absent at the
+  moment the window gets built.** The first trail containing a real lock showed
+  `scene=-` at `resignActive` — 30 s after the display had connected — so
+  `wantsOwnExternalWindow` was false, no window was built, and the handoff fell through
+  to the route layer (`mainLyr=Y`). The route did not engage either (`extPlay=-`), which
+  is why there was still no picture. Direct mode was never reached.
+* `NativePlaybackManager` now observes **`UIScene.willConnectNotification` /
+  `didDisconnectNotification`** rather than inferring the scene from
+  `UIScreen.didConnectNotification`. A scene that connects while the handoff is already
+  running takes the display over immediately (dropping the route layer first, so the two
+  never fight over one display); a scene that disconnects clears `extWindow`/`extLayer`
+  so a later reconnect rebuilds instead of seeing a stale non-nil window. Both edges are
+  sampled into the trail as `sceneConnect` / `sceneDisconnect`.
+* Locked samples now also fire at **+20 s**, not just +3 s and +10 s.
+* **The readout now detects a lock that didn't hold.** Run 4's `locked+3s` was sampled
+  2.4 s after a `becomeActive`, so it described an *unlocked* phone with the scene back —
+  and the verdict read it as a genuine result. It now looks for a `becomeActive` between
+  `background/attached` and the locked row and says so. It also names the cause when the
+  locked row shows the display gone (`scr=1`) or the scene missing.
+
 ## [18.2.2] — 2026-09-20
 * **Fixed: the diagnostics readout couldn't tell "field absent" from "field false",
   and didn't say when a run tested nothing.** `b()` mapped `undefined` and `false` both

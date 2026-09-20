@@ -20428,13 +20428,32 @@ function _appOpenAppSettings() {
                      "        button, wait 20s, then unlock and press Read.");
       } else {
         const L = locked[0];
-        verdict.push(L.winScene && !L.mirrored
-          ? "RESULT: TAKEOVER WORKED - window on the display, mirroring off."
-          : (L.winScene
-              ? "RESULT: window attached to the scene, but mirroring stayed up."
-              : (L.extWindow
-                  ? "RESULT: window built but attached to no scene."
-                  : "RESULT: no window was built - check scene= on the locked row.")));
+        // A lock that did not STAY locked measures nothing: run 4's locked+3s was
+        // sampled 2.4s after a becomeActive, so the app was foreground and the
+        // scene had come back. Detect the interruption rather than reading the row.
+        const iAttach = trail.findIndex((r) => r.at === "background/attached");
+        const iLocked = trail.indexOf(L);
+        const woke = iAttach >= 0 && iLocked > iAttach &&
+          trail.slice(iAttach + 1, iLocked).some((r) => r.at === "becomeActive");
+        if (woke) {
+          verdict.push("RESULT: THE LOCK DID NOT HOLD - the app returned to the",
+                       "        foreground before the sample, so this row describes an",
+                       "        UNLOCKED phone. Lock it and do not touch it for 25s.");
+        } else if (L.winScene && !L.mirrored) {
+          verdict.push("RESULT: TAKEOVER WORKED - window on the display, mirroring off.");
+        } else if (L.winScene) {
+          verdict.push("RESULT: window attached to the scene, but mirroring stayed up.");
+        } else if (L.extWindow) {
+          verdict.push("RESULT: window built but attached to no scene.");
+        } else if (!L.extScene && !L.extScreen) {
+          verdict.push("RESULT: the external display was GONE while locked (scr=1).",
+                       "        Neither path can target a display iOS has taken away.");
+        } else if (!L.extScene) {
+          verdict.push("RESULT: no external-display SCENE while locked, though the",
+                       "        screen was still there - so no window could be built.");
+        } else {
+          verdict.push("RESULT: scene present but no window was built.");
+        }
       }
       verdict.push("");
       out.textContent = head.concat(verdict, rows.length ? rows : ["(no trail yet)"]).join("\n");
@@ -26903,6 +26922,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.2.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.2.3</div>
 </body>
 </html>
