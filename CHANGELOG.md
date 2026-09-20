@@ -1,5 +1,19 @@
 # Changelog
 
+## [18.3.3] — 2026-09-20
+* **Walked back 18.3.2's "target state reached".** In runs 6 and 7 the qualifying row is
+  a `sceneConnect` whose timestamp matches a `becomeActive` to the tenth of a second —
+  41.9 s in one, 27.9 s in the other. The scene almost certainly came back *because the
+  phone unlocked*, and `app=bg` only because `didBecomeActive` had not fired yet in that
+  same instant. Ordering within a tenth of a second is dispatch order, not causality, and
+  reading it as success was exactly the mistake the instrument exists to prevent.
+* The readout now distinguishes **HELD** from **touched**: only a `locked+` sample — taken
+  3 s or more into the lock, long after any wake transient — counts as the feature
+  working. A transient is reported as a transient, and says so when a wake shares its
+  timestamp.
+* Nothing yet proves the reclaim works while genuinely locked. Every run so far has ended
+  with the phone waking ~0.8 s after the lock.
+
 ## [18.3.2] — 2026-09-20
 * **The target state was reached.** Run 6, at 41.9 s:
   `scene=Y mir=- win=Y winScene=Y extLyr=Y nat=Y app=bg` — our window on the

@@ -20436,15 +20436,32 @@ function _appOpenAppSettings() {
           ? `CLAIM: window built at ${claim.t}s but mirroring STAYED UP.`
           : `CLAIM: display taken over at ${claim.t}s - mirroring off. This is the win.`);
       }
-      // The goal state, wherever it occurs: our window on the scene, mirroring off,
-      // the player layer in it, and the app BACKGROUNDED. Run 6 hit this for a
-      // fraction of a second and it would have been easy to miss in the columns.
-      const target = trail.filter((r) =>
-        r.extWindow && r.winScene && r.extLayer && r.mirrored === false &&
-        r.native && r.appState === "bg").pop();
-      if (target) {
-        verdict.push(`TARGET STATE REACHED at ${target.t}s - window on the scene,`,
-                     "        mirroring off, player layer attached, app backgrounded.");
+      // The goal state: our window on the scene, mirroring off, the player layer in
+      // it, app BACKGROUNDED.
+      //
+      // Runs 6 and 7 hit this on a `sceneConnect` row whose timestamp matched a
+      // `becomeActive` to the tenth of a second — i.e. at the instant the phone
+      // WOKE. The scene very likely came back BECAUSE of the unlock, and app=bg
+      // only because didBecomeActive had not fired yet. Reporting that as success
+      // was wrong, so a transient no longer counts: only a `locked+` sample, taken
+      // 3s or more into the lock, is evidence the state held.
+      const isTarget = (r) => r.extWindow && r.winScene && r.extLayer &&
+        r.mirrored === false && r.native && r.appState === "bg";
+      const heldTarget = trail.filter((r) =>
+        String(r.at).indexOf("locked+") === 0 && isTarget(r)).pop();
+      const blipTarget = trail.filter(isTarget).pop();
+      if (heldTarget) {
+        verdict.push(`TARGET STATE HELD at ${heldTarget.t}s - window on the scene,`,
+                     "        mirroring off, player layer attached, app backgrounded.",
+                     "        This is the feature working.");
+      } else if (blipTarget) {
+        const woke = trail.some((r) => r.at === "becomeActive" && r.t === blipTarget.t);
+        verdict.push(`TARGET STATE touched at ${blipTarget.t}s, but only for an instant` +
+                     (woke ? " -" : "."),
+                     woke ? "        the phone woke in that same tenth of a second, so this is"
+                          : "        it did not survive to a locked+ sample.",
+                     woke ? "        probably the UNLOCK restoring the scene, not the lock holding."
+                          : "");
       }
       const lastRow = trail[trail.length - 1];
       const released = claim && !claim.mirrored && lastRow && !lastRow.extWindow;
@@ -26967,6 +26984,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.3.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.3.3</div>
 </body>
 </html>
