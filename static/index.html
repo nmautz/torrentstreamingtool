@@ -20507,6 +20507,17 @@ function _appOpenAppSettings() {
           verdict.push("RESULT: window attached to the scene, but mirroring stayed up.");
         } else if (L.extWindow) {
           verdict.push("RESULT: window built but attached to no scene.");
+        } else if (!trail.some((r) => r.extScreen)) {
+          // No display was connected at ANY point: this is the audio-only control
+          // run, and the display columns are meaningless. Judge it on whether the
+          // lock held, which is the only thing it can tell us.
+          const held = locked.filter((r) => r.appState === "bg" && r.native);
+          verdict.push(held.length
+            ? `CONTROL RUN (no display): the lock HELD - ${held.length} locked sample(s)`
+            : "CONTROL RUN (no display): the lock did NOT hold even with nothing",
+            held.length
+              ? `        with app=bg and playback running, out to ${held[held.length - 1].t}s.`
+              : "        plugged in, so the wake is not the display's doing.");
         } else if (!L.extScene && !L.extScreen) {
           verdict.push("RESULT: the external display was GONE while locked (scr=1).",
                        "        Neither path can target a display iOS has taken away.");
@@ -26984,6 +26995,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.3.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.3.4</div>
 </body>
 </html>

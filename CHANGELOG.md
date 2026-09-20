@@ -1,5 +1,22 @@
 # Changelog
 
+## [18.3.4] — 2026-09-20
+* **The wake is the glasses, not us — isolated.** Run 8, with the display **unplugged**:
+  `background/attached` at 12.6 s then `locked+3s`, `locked+10s` and `locked+20s` all
+  `nat=Y app=bg`, out to 48.2 s. The phone stayed locked for 37 seconds with native
+  playback running throughout, and only went `act` at 50.0 s when it was picked up. Plain
+  background playback is sound; the ~0.8 s wake happens **only** with the glasses
+  attached.
+* The readout no longer calls that run a failure. A trail where no row ever saw a display
+  is a **control run**, judged solely on whether the lock held — previously it hit the
+  "external display was GONE while locked" branch and reported a successful control as a
+  loss.
+* **Open, and it changes the whole reading:** `app=act` may not mean the user unlocked.
+  With a live external-display scene, iOS may hold the app `active` because it is driving
+  a screen that is still on, even while the phone's own screen is locked. If so, runs 6
+  and 7 may have been closer to working than they looked, and the thing to check is
+  whether the phone's screen stays dark.
+
 ## [18.3.3] — 2026-09-20
 * **Walked back 18.3.2's "target state reached".** In runs 6 and 7 the qualifying row is
   a `sceneConnect` whose timestamp matches a `becomeActive` to the tenth of a second —
