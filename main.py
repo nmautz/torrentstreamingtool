@@ -51,6 +51,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 import analyzer
 import animemap
+import bundlecheck
 import refiner
 import dvprobe
 import episodes
@@ -1393,6 +1394,10 @@ class AppState:
     auto_validate_task: Optional[asyncio.Task] = None
     auto_validate_stop: bool = False
     auto_validate_proc: Optional["asyncio.subprocess.Process"] = None
+    # ── HLS bundle integrity audit (structural, no decode — see bundlecheck.py) ──
+    bundle_audit: dict = field(default_factory=dict)      # {running, scope, auto, total, scanned, current_name, damaged:[…], repaired, stopped, error, started_at, finished_at}
+    bundle_audit_task: Optional[asyncio.Task] = None
+    bundle_audit_stop: bool = False
     # ── YouTube-on-TV (browser playback on the host display, remote-controlled) ──
     youtube_active: bool = False                          # True while a YouTube video is the active TV playback (browser, not VLC)
     youtube_video_id: Optional[str] = None               # 11-char YouTube id currently loaded on the TV page
@@ -7830,8 +7835,12 @@ def _auto_maint_cfg(lib: dict) -> dict:
         post-prep hook, which only fires for newly-added content).
       • validate    — auto deep-validate source files whose persisted verdict is
         missing or stale, one at a time.
+      • bundles     — structurally audit prepped HLS bundles for the frozen-
+        picture-over-silence damage a half-downloaded source produces, and
+        purge + re-prep the ones that fail (see `_run_bundle_audit`). Much
+        cheaper than the other two: stats, no decode.
 
-    Both run ONLY while the host is idle (no playback / recent activity) and at
+    All run ONLY while the host is idle (no playback / recent activity) and at
     below-normal OS priority, so they never compete with viewing. Defaults ON —
     the whole point is that the backlog clears itself. Consumed by
     `background_maintenance_loop`."""
@@ -7839,6 +7848,7 @@ def _auto_maint_cfg(lib: dict) -> dict:
     return {
         "fingerprint": bool(cfg.get("fingerprint", True)),
         "validate":    bool(cfg.get("validate", True)),
+        "bundles":     bool(cfg.get("bundles", True)),
     }
 
 
@@ -14037,6 +14047,10 @@ class ValidateFilesReq(BaseModel):
     deep: bool = True                           # True ⇒ full ffmpeg decode (catches mid-file corruption); False ⇒ quick ffprobe header check
 
 
+class BundleAuditReq(BaseModel):
+    scope: Optional[str] = None                 # None/""/"all" ⇒ every prepped file; else a library item id
+
+
 class RepairFilesReq(BaseModel):
     paths: Optional[list[str]] = None           # specific files to repair; defaults to the last validation scan's damaged list
     reencode: bool = False                      # allow a lossy re-encode fallback when a lossless remux can't fix it
@@ -14090,6 +14104,7 @@ class AutoMaintReq(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     fingerprint: bool = True                              # auto-run Smart Skip analysis for never-fingerprinted series while idle
     validate_files: bool = Field(True, alias="validate")  # auto deep-validate never-validated source files while idle
+    bundles: bool = True                                  # auto-audit prepped HLS bundles for frozen-picture damage while idle
 
 
 class SttConfigReq(BaseModel):
@@ -25896,6 +25911,66 @@ async def admin_stop_validate_files(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, **_file_validation_status()})
 
 
+# ── Admin: HLS bundle integrity audit ───────────────────────────────────────
+#
+# The sweep counterpart to the prep-time check. Different question from
+# validate-files: THAT asks whether the source file decodes, this asks whether
+# the bundle we built from it is watchable. A perfectly good source prepped
+# while its torrent was still downloading yields a clean source and a dead
+# bundle — which is exactly how this got here. See docs/STREAMING.md.
+
+def _bundle_audit_status() -> dict:
+    """JSON-safe snapshot of the current/last bundle audit for the admin card."""
+    ba = dict(state.bundle_audit)
+    ba.setdefault("running", False)
+    ba.setdefault("scanned", 0)
+    ba.setdefault("total", 0)
+    ba.setdefault("damaged", [])
+    ba.setdefault("repaired", 0)
+    return ba
+
+
+@app.get("/api/admin/bundle-audit")
+async def admin_get_bundle_audit(request: Request) -> JSONResponse:
+    """Current/last HLS bundle audit (progress + the damaged list it repaired)."""
+    _require_admin(request)
+    return JSONResponse(_bundle_audit_status())
+
+
+@app.post("/api/admin/bundle-audit")
+async def admin_start_bundle_audit(request: Request, body: BundleAuditReq) -> JSONResponse:
+    """Audit prepped HLS bundles for frozen-picture-over-silence damage and
+    repair what fails (purge the bundle, re-queue ordinary prep).
+
+    `scope` None/""/"all" ⇒ every prepped file, else one item id. Unlike the
+    idle sweep this re-scans bundles that already carry a verdict — it is the
+    "check it again now" button. Structural only: stats, no decode, so it costs
+    seconds for the whole library. 409 if an audit is already running.
+    """
+    _require_admin(request)
+    if state.bundle_audit.get("running"):
+        raise HTTPException(409, "A bundle audit is already running.")
+    scope = (body.scope or "all").strip() or "all"
+    state.bundle_audit_stop = False
+    state.bundle_audit = {
+        "running": True, "scope": scope, "auto": False,
+        "total": 0, "scanned": 0, "current_name": "",
+        "damaged": [], "repaired": 0, "stopped": False, "error": "",
+        "started_at": _now_iso(), "finished_at": None,
+    }
+    state.bundle_audit_task = asyncio.create_task(_run_bundle_audit(scope))
+    return JSONResponse(_bundle_audit_status())
+
+
+@app.post("/api/admin/bundle-audit/stop")
+async def admin_stop_bundle_audit(request: Request) -> JSONResponse:
+    """Stop the in-progress bundle audit. The loop halts between bundles, so any
+    repair it has already started still finishes."""
+    _require_admin(request)
+    state.bundle_audit_stop = True
+    return JSONResponse({"ok": True, **_bundle_audit_status()})
+
+
 @app.get("/api/admin/repair-files")
 async def admin_get_repair_files(request: Request) -> JSONResponse:
     """Current/last source-file repair run (progress + repaired/failed lists)."""
@@ -26325,22 +26400,27 @@ async def admin_get_auto_maintenance(request: Request) -> JSONResponse:
         "validate_backlog":    _validation_backlog(lib),
         "validate_running":    bool(state.auto_validate.get("running")),
         "analysis_running":    _any_analysis_running(),
+        "bundle_audit":        _bundle_audit_status(),
     })
 
 
 @app.post("/api/admin/auto-maintenance")
 async def admin_set_auto_maintenance(request: Request, body: AutoMaintReq) -> JSONResponse:
-    """Enable/disable the idle background fingerprint + validate workers
-    (`library.json → settings.auto_maintenance`). Turning a worker off also stops
-    its in-flight run: the next `background_maintenance_loop` tick won't restart
-    it, and auto-validation checks the stop flag between files."""
+    """Enable/disable the idle background fingerprint / validate / bundle-audit
+    workers (`library.json → settings.auto_maintenance`). Turning a worker off
+    also stops its in-flight run: the next `background_maintenance_loop` tick
+    won't restart it, and both the auto-validator and the bundle audit check
+    their stop flag between files."""
     _require_admin(request)
     async with mutate_library() as lib:
         am = lib.setdefault("settings", {}).setdefault("auto_maintenance", {})
         am["fingerprint"] = bool(body.fingerprint)
         am["validate"]    = bool(body.validate_files)
+        am["bundles"]     = bool(body.bundles)
     if not body.validate_files:
         state.auto_validate_stop = True   # halt an in-flight auto-validation pass
+    if not body.bundles:
+        state.bundle_audit_stop = True    # halt an in-flight bundle audit
     cfg = _auto_maint_cfg(lib)
     return JSONResponse({
         "ok": True, **cfg,
@@ -26509,6 +26589,24 @@ async def _activity_snapshot() -> dict:
             restart_note="Each verdict is persisted per file, so this resumes right where it left off after a restart or auto-update (it does not start over).",
             progress=(scanned / total if total else None))
 
+    # 5b. HLS bundle integrity audit
+    ba = state.bundle_audit or {}
+    if ba.get("running"):
+        total = ba.get("total") or 0
+        scanned = ba.get("scanned") or 0
+        dmg = len(ba.get("damaged") or [])
+        add(category="Stream Prep",
+            title="Bundle integrity audit",
+            status="running",
+            detail=(f"{ba.get('current_name', '')}"
+                    + (f" — {dmg} damaged so far" if dmg else "")),
+            reason=("Checking prepped bundles for the frozen-picture-over-silence damage a "
+                    "half-downloaded source produces. Structural only (segment sizes, no "
+                    "decode), and anything it finds is purged and re-prepped automatically."),
+            resumes=True,
+            restart_note="Each verdict is persisted per file, so this resumes where it left off after a restart (it does not start over).",
+            progress=(scanned / total if total else None))
+
     # 6. Smart Skip analysis
     for sk, job in (state.analysis_jobs or {}).items():
         if job.get("status") != "running":
@@ -26613,6 +26711,7 @@ async def _activity_snapshot() -> dict:
             "vpn_secure":      state.vpn_secure,
             "auto_fingerprint": maint["fingerprint"],
             "auto_validate":    maint["validate"],
+            "auto_bundles":     maint["bundles"],
         },
         "activities": acts,
         "count": len(acts),
@@ -27458,6 +27557,14 @@ OFFLINE_FFMPEG_THREADS = 2
 # Generous enough that a genuinely-encoding job (out_time ticks every ~second)
 # never trips it; only a true stall does.
 GPU_STALL_TIMEOUT_SECS = 90
+
+# How many times a file may produce a structurally-damaged bundle before prep
+# gives up on it. The first rejection is almost always a source that wasn't all
+# there yet, so the job simply re-queues and the completeness gate parks it until
+# qBit says the file is whole. A SECOND one, from a file qBit now calls finished,
+# means the holes are in the file itself — re-encoding it again would just burn
+# the GPU forever (prep retries on a timer), so we stop and record why.
+BUNDLE_DAMAGE_RETRIES = 2
 
 # Lower ffmpeg's OS scheduling priority so a bulk prep can't starve the web
 # server (the asyncio event loop), VLC playback, or qBit — the whole point of
@@ -28979,6 +29086,109 @@ def _extract_bundle_fonts(src: Path, bundle_dir: Path, info: dict) -> list[str]:
     return written
 
 
+# ── Bundle integrity: is a long stretch of this bundle dead? ─────────────────
+#
+# The arithmetic lives in `bundlecheck.py` (pure, unit-tested); these two do the
+# file IO. See docs/STREAMING.md § Bundle integrity and docs/GOTCHAS.md.
+
+def _scan_bundle_dir_sync(bundle_dir: Path) -> "Optional[bundlecheck.Verdict]":
+    """Structurally scan one bundle directory. Blocking — always call it in a
+    thread; a bundle is ~300-900 files and the stats add up.
+
+    Returns None when there is nothing to judge (no meta.json, no playlists) so a
+    caller can tell "clean" from "couldn't look". Never raises: an unreadable
+    bundle is the sweep's problem, not a reason to fail a prep.
+    """
+    try:
+        meta = json.loads((bundle_dir / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    names = [v.get("name") for v in (meta.get("videos") or []) if v.get("name")]
+    names += [f"audio_{a.get('idx')}" for a in (meta.get("audios") or [])
+              if a.get("idx") is not None]
+    renditions: dict = {}
+    for name in names:
+        try:
+            text = (bundle_dir / f"{name}.m3u8").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        segs = []
+        for fn, dur in bundlecheck.parse_media_playlist(text):
+            # Bare segment names only — a playlist is ours, but a path separator
+            # in one would walk out of the bundle. Treat anything odd as missing.
+            if "/" in fn or "\\" in fn:
+                segs.append(bundlecheck.Segment(fn, dur, -1))
+                continue
+            try:
+                segs.append(bundlecheck.Segment(fn, dur, (bundle_dir / fn).stat().st_size))
+            except OSError:
+                segs.append(bundlecheck.Segment(fn, dur, -1))
+        if segs:
+            renditions[name] = segs
+    if not renditions:
+        return None
+    return bundlecheck.scan_bundle(renditions)
+
+
+async def _scan_bundle_dir(bundle_dir: Path) -> "Optional[bundlecheck.Verdict]":
+    """Async wrapper — the scan is pure stat work, so it goes to a thread."""
+    try:
+        return await asyncio.to_thread(_scan_bundle_dir_sync, bundle_dir)
+    except Exception as exc:
+        hls_log.warning("bundle scan of %s skipped: %s", bundle_dir.name, exc)
+        return None
+
+
+def _bundle_check_record(verdict, key: str, path: str) -> dict:
+    """The verdict as it is persisted on `files[].bundle_check`.
+
+    `key` pins it to the bundle that was judged and `sig` to the source as it was
+    — so a re-download, a repair or a recompress (any of which move the cache key
+    or the file signature) retires the verdict automatically instead of leaving a
+    file permanently condemned.
+    """
+    rec = verdict.as_dict()
+    rec.update({"key": key, "sig": _file_sig(path), "at": _now_iso()})
+    return rec
+
+
+def _bundle_unbuildable(f: dict, key: str) -> bool:
+    """True when prep has already produced a damaged bundle for this exact file
+    twice and gave up. Gates AUTOMATIC prep only — an explicit press still tries,
+    because the operator may know something we don't (and it is how you confirm a
+    repair worked)."""
+    rec = _bundle_check_current(f, key)
+    return bool(rec and rec.get("unbuildable"))
+
+
+def _bundle_check_current(f: dict, key: str) -> "Optional[dict]":
+    """This file's stored bundle verdict, but only if it still describes the
+    bundle and source we have now. Stale verdicts are ignored, not trusted."""
+    rec = f.get("bundle_check")
+    if not isinstance(rec, dict) or rec.get("key") != key:
+        return None
+    if rec.get("sig") and rec.get("sig") != _file_sig(f.get("path", "")):
+        return None
+    return rec
+
+
+async def _persist_bundle_checks(records: dict) -> None:
+    """Write a batch of {path → record} into the matching `files[].bundle_check`.
+    A None value clears the entry (the bundle is gone or has been rebuilt)."""
+    if not records:
+        return
+    async with mutate_library() as lib:
+        for it in lib.get("items", []):
+            for f in it.get("files", []):
+                p = f.get("path", "")
+                if p not in records:
+                    continue
+                if records[p] is None:
+                    f.pop("bundle_check", None)
+                else:
+                    f["bundle_check"] = records[p]
+
+
 async def _prep_validate_repair(job: dict, src: Path) -> str:
     """In-prep hook for settings.prep_validate: deep-decode `src` and, if damaged,
     remux-repair it in place (lossless, no re-encode). Returns one of
@@ -29648,6 +29858,58 @@ async def _run_offline_job(job_id: str) -> None:
             }
             (tmp_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
+            # ── Born verified ────────────────────────────────────────────────
+            # ffmpeg exiting 0 does not mean the bundle is watchable. Read a
+            # source full of holes and it fills them silently — CFR duplicates
+            # the last frame, `aresample` pads silence — and the encode reports
+            # success over a picture frozen for minutes. Scan the staging dir
+            # BEFORE the swap, so a wreck is never published; the key is derived
+            # from a size a sparse file already reports, so a published wreck is
+            # never rebuilt either. Costs a few hundred stats. See
+            # docs/STREAMING.md § Bundle integrity.
+            verdict = await _scan_bundle_dir(tmp_dir)
+            if verdict is not None and verdict.damaged:
+                attempts = int(job.get("_damage_retries", 0)) + 1
+                job["_damage_retries"] = attempts
+                hls_log.error(
+                    "job %s REJECTED (attempt %d): %s — src=%s",
+                    job_id, attempts, verdict.detail, src,
+                )
+                await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
+                if attempts < BUNDLE_DAMAGE_RETRIES:
+                    # Almost always a source that wasn't all there yet. Re-queue:
+                    # the completeness gate at the top parks the job until qBit
+                    # says the file is whole, then it re-encodes from real bytes.
+                    job["status"]   = "pending"
+                    job["progress"] = 0.0
+                    asyncio.create_task(_requeue_offline_job(job_id, delay=30.0))
+                    return
+                # Twice in a row from a file qBit calls finished: the source
+                # itself is holed. Stop burning encodes on it, record why, and
+                # let the source validator / repair path take it from here. The
+                # record is pinned to this cache key + file signature, so a
+                # re-download or a repair retires it and prep resumes by itself.
+                job["status"] = "error"
+                job["error"]  = f"Bundle came out damaged twice — {verdict.detail}"
+                rec = _bundle_check_record(verdict, out_dir.name, str(src))
+                rec["unbuildable"] = True
+                try:
+                    await _persist_bundle_checks({str(src): rec})
+                except Exception as exc:
+                    hls_log.warning("job %s: could not record damage: %s", job_id, exc)
+                return
+            if verdict is not None and job.get("_damage_retries"):
+                # Only WRITE on the clean path when there is a stale damaged
+                # verdict to clear. Recording every healthy prep would cost a
+                # `library.json` write (and an `_lib_lock` acquisition) per
+                # episode of a 77-file prep-all, for information the idle sweep
+                # fills in for free. See docs/DIAGNOSTICS.md on lock pressure.
+                try:
+                    await _persist_bundle_checks(
+                        {str(src): _bundle_check_record(verdict, out_dir.name, str(src))})
+                except Exception as exc:
+                    hls_log.warning("job %s: could not record bundle check: %s", job_id, exc)
+
             # Atomic-ish swap: rename .part dir into place. Path.rename onto an
             # existing directory fails on every platform, so we drop any prior
             # output first; the master.m3u8 guard at the top of this function
@@ -29869,7 +30131,8 @@ def _activity_kick() -> None:
     print(f"[autoprep] user activity — pausing prep immediately (killed {killed} in-flight)")
 
 
-async def _incomplete_download_paths(item: dict) -> set[str]:
+async def _incomplete_download_paths(item: dict, *,
+                                     info_map: "Optional[dict]" = None) -> set[str]:
     """Normalised paths of this item's files qBittorrent has NOT finished yet.
 
     **Why prep must consult qBit and not the filesystem.** qBittorrent writes
@@ -29886,22 +30149,64 @@ async def _incomplete_download_paths(item: dict) -> set[str]:
         the *finished* file resolves to. `_maybe_start_prep_job` then reports
         "cached" forever and the bundle is **never** rebuilt.
 
-    Returns an empty set for anything not actively downloading. When the item is
-    downloading but qBit can't confirm the files (torrent gone, qBit down) every
-    file is reported incomplete — we never guess in favour of encoding.
+    **qBit is asked whatever the item's status says.** This used to return an
+    empty set for any item not marked "downloading", which made the whole guard a
+    no-op the moment the two disagreed — and they disagree routinely, because the
+    item flips to "ready" as soon as every NON-SKIP file is done
+    (`_all_nonskip_complete`). Un-skip a file, promote an idle-deferred one,
+    widen a pack slice, or recheck a torrent, and qBit starts filling a file
+    inside an item that is already "ready". Nothing flips it back until
+    `_apply_download_changes` happens to notice.
+
+    That is not theoretical: Hacks S03E03 and S03E04 were both prepped while
+    their season pack was still downloading (bundles written 18:09:01 and
+    18:12:03 against a torrent that finished at 18:15:58) and came out 48 % and
+    15 % frozen picture over silence — permanently, because the key is derived
+    from a size the sparse file already reported. See docs/GOTCHAS.md.
+
+    So the item's status is only a fallback, used when qBit can't answer:
+    unreachable + "downloading" ⇒ everything is incomplete (never guess in favour
+    of encoding), unreachable + settled ⇒ trust the item, since blocking prep on
+    a qBit outage would stall the whole library. The bundle verifier
+    (`bundlecheck`) is the backstop for that last case.
+
+    `info_map` lets a caller that already fetched `qbit_info_all()` (the enqueue
+    sweep does, once for the whole library) skip the per-item round trip.
     """
-    if item.get("status") != "downloading":
-        return set()
+    downloading = item.get("status") == "downloading"
     all_paths = {_norm_path(f["path"]) for f in item.get("files", []) if f.get("path")}
-    h = item.get("torrent_hash") or ""
+    h = (item.get("torrent_hash") or "").lower()
     if not h:
-        return all_paths
-    info = await qbit_info(h)
+        return all_paths if downloading else set()
+    info = info_map.get(h) if info_map is not None else await qbit_info(h)
     if not info:
+        return all_paths if downloading else set()
+    # Files in flight on disk for a reason other than downloading — a recheck
+    # rereads them, a move is relocating them. Neither is a moment to encode.
+    if any(k in (info.get("state", "") or "") for k in ("checking", "moving")):
         return all_paths
+    # Whole-torrent short-circuit, so the common case (a settled item on a
+    # finished torrent) costs nothing beyond the info we already have. qBit's
+    # `progress` counts only what is SELECTED, so it reaches 1.0 on a partial
+    # selection too — which is right here: a skipped file isn't on disk at all,
+    # so prep never reaches it (`p.exists()` fails first).
+    if not downloading and float(info.get("progress") or 0.0) >= 1.0:
+        return set()
     save_path = info.get("save_path", settings.qbit_download_path)
     qfiles = await qbit_files(h)
+    if not qfiles:
+        return all_paths if downloading else set()
     return await asyncio.to_thread(_incomplete_paths_sync, qfiles, save_path)
+
+
+async def _torrent_info_map() -> "Optional[dict]":
+    """`{hash: info}` for every torrent qBit tracks, in ONE call — so a sweep over
+    the whole library doesn't make a round trip per item. None when qBit is
+    unreachable, which callers pass straight through to the per-item fallback."""
+    tors = await qbit_info_all()
+    if tors is None:
+        return None
+    return {(t.get("hash") or "").lower(): t for t in tors}
 
 
 def _incomplete_paths_sync(qfiles: list, save_path: str) -> set[str]:
@@ -29938,7 +30243,10 @@ async def _src_still_downloading(src: Path) -> bool:
 
     The backstop for every prep entry point (`_run_offline_job`), so play-driven
     and interactive jobs can't slip a half-downloaded file past the enqueue-time
-    gate either. See `_incomplete_download_paths` for why `exists()` isn't enough.
+    gate either. See `_incomplete_download_paths` for why `exists()` isn't enough
+    — and for why this no longer pre-filters on `status == "downloading"`, which
+    is exactly what let two Hacks S03 bundles be encoded out of a torrent that
+    had another six minutes to run.
     """
     want = _norm_path(str(src))
     try:
@@ -29946,8 +30254,6 @@ async def _src_still_downloading(src: Path) -> bool:
     except Exception:
         return False
     for it in lib.get("items", []):
-        if it.get("status") != "downloading":
-            continue
         if any(_norm_path(f.get("path", "")) == want for f in it.get("files", [])):
             return want in await _incomplete_download_paths(it)
     return False
@@ -29965,12 +30271,17 @@ async def _enqueue_library_prep() -> int:
         return 0
     lib = await get_library()
     queued = 0
+    # One qBit call for the whole sweep. The completeness check no longer trusts
+    # the item's status (see `_incomplete_download_paths`), so it now runs for
+    # every item rather than the handful marked "downloading" — fetching the
+    # torrent list once keeps that free.
+    info_map = await _torrent_info_map()
     for item in lib.get("items", []):
         if item.get("ondemand_only"):
             continue   # on-demand-only shows never get a permanent bundle
         # Files qBit hasn't finished yet are skipped outright — encoding one
         # bakes a permanently-corrupt bundle onto the finished file's cache key.
-        incomplete = await _incomplete_download_paths(item)
+        incomplete = await _incomplete_download_paths(item, info_map=info_map)
         prep_cfg = _prep_cfg(item)
         for f in item.get("files", []):
             p = Path(f.get("path", ""))
@@ -29986,6 +30297,12 @@ async def _enqueue_library_prep() -> int:
                 if not p.exists():
                     continue
             except OSError:
+                continue
+            # Prep already built a damaged bundle from this file twice and gave
+            # up. Without this the auto-prep timer would re-encode a holed source
+            # forever. The verdict is pinned to the file's signature, so a
+            # re-download or a repair retires it and this resumes on its own.
+            if _bundle_unbuildable(f, _offline_cache_key(p)):
                 continue
             prio = _PREP_PRIO_NUM.get(_effective_prep_priority(prep_cfg, f.get("path", "")), 1)
             st = await _maybe_start_prep_job(p, item.get("id", ""), prep_prio=prio)
@@ -30627,11 +30944,139 @@ async def _run_auto_validation() -> None:
         state.auto_validate_proc = None
 
 
+def _needs_bundle_check(f: dict) -> bool:
+    """True when this file has a prepped bundle carrying no current verdict.
+
+    **Blocking** — three stats per file (source, master playlist, and the `sig`
+    comparison). Never call this on the event loop over a whole library; use
+    `_any_bundle_check_needed`, which does that walk in a thread. The library has
+    had event-loop-lag incidents from exactly this shape of work (see
+    docs/DIAGNOSTICS.md).
+    """
+    p = f.get("path", "")
+    if Path(p).suffix.lower() not in VIDEO_EXTS:
+        return False
+    try:
+        src = Path(p)
+        st = src.stat()                       # one stat, reused for the key
+        key = _offline_cache_key_for(src.name, st.st_size)
+        if not (src.parent / OFFLINE_CACHE_DIRNAME / key / "master.m3u8").exists():
+            return False
+    except OSError:
+        return False
+    return _bundle_check_current(f, key) is None
+
+
+def _any_bundle_check_needed(lib: dict) -> bool:
+    """Is there a prepped bundle anywhere with no current verdict? Blocking, so
+    the maintenance tick runs it in a thread. Short-circuits on the first hit."""
+    return any(_needs_bundle_check(f)
+               for it in lib.get("items", []) for f in it.get("files", []))
+
+
+async def _run_bundle_audit(scope: str = "all", *, auto: bool = False) -> None:
+    """Structurally audit prepped bundles, and repair the damaged ones.
+
+    This is the sweep half of the integrity work — the prep-time check
+    (`_run_offline_job`) only protects bundles built from now on, and the
+    library is full of ones built before it existed. Two of nine Hacks S03
+    bundles were wrecks nobody had noticed.
+
+    Repair is purge + re-prep: the bundle directory goes, and the file is
+    re-queued through the ordinary bulk prep path so it re-encodes from the
+    (now complete) source at the usual priority. It does NOT re-encode inline —
+    a sweep must never hold the encode slot.
+
+    `auto` marks the idle-gated run, which stops the moment the box is in use.
+    """
+    ba = state.bundle_audit
+    records: dict = {}
+    repaired: list = []
+    try:
+        lib = await get_library()
+        targets: list = []       # (item_id, item_title, path, name)
+        for item in lib.get("items", []):
+            if scope not in ("", "all") and item.get("id") != scope:
+                continue
+            for f in item.get("files", []):
+                if auto and not _needs_bundle_check(f):
+                    continue
+                targets.append((item.get("id", ""), item.get("title", ""),
+                                f.get("path", ""),
+                                f.get("name") or Path(f.get("path", "")).name))
+                await asyncio.sleep(0)
+        ba["total"] = len(targets)
+        ba["scanned"] = 0
+        for (iid, title, path, name) in targets:
+            if state.bundle_audit_stop:
+                ba["stopped"] = True
+                break
+            if auto and await _machine_in_use(60):
+                break
+            ba["current_name"] = name
+            src = Path(path)
+            try:
+                if not src.exists():
+                    ba["scanned"] += 1
+                    continue
+                key = _offline_cache_key(src)
+                bundle = _offline_cache_dir(src)
+            except OSError:
+                ba["scanned"] += 1
+                continue
+            if not (bundle / "master.m3u8").exists():
+                records[path] = None          # no bundle ⇒ retire any old verdict
+                ba["scanned"] += 1
+                continue
+            verdict = await _scan_bundle_dir(bundle)
+            ba["scanned"] += 1
+            if verdict is None:
+                continue
+            records[path] = _bundle_check_record(verdict, key, path)
+            if not verdict.damaged:
+                continue
+            hls_log.warning("bundle audit: %s is damaged — %s", name, verdict.detail)
+            ba["damaged"].append({"item_id": iid, "item_title": title, "path": path,
+                                  "name": name, "detail": verdict.detail,
+                                  "dead_secs": round(verdict.dead_secs, 1)})
+            # Purge + re-prep. The bundle is gone either way, so a viewer falls
+            # back to on-demand JIT (which reads the source directly and is
+            # unaffected) rather than sitting through the frozen copy.
+            try:
+                await asyncio.to_thread(shutil.rmtree, bundle, ignore_errors=True)
+                _invalidate_bundle_index()
+                _invalidate_offline_cache_inventory()
+                records[path] = None
+                st = await _maybe_start_prep_job(src, iid)
+                if st.get("status") in ("processing", "pending", "paused"):
+                    repaired.append(name)
+            except Exception as exc:
+                hls_log.warning("bundle audit: could not repair %s: %s", name, exc)
+            if len(records) >= 10:            # checkpoint so a crash loses ≤10
+                await _persist_bundle_checks(records)
+                records = {}
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        ba["error"] = str(e)
+        log.warning("bundle audit: %s", e)
+    finally:
+        await _persist_bundle_checks(records)
+        ba["repaired"] = len(repaired)
+        ba["running"] = False
+        ba["current_name"] = ""
+        ba["finished_at"] = _now_iso()
+        if repaired:
+            hls_log.info("bundle audit: re-queued %d damaged bundle(s): %s",
+                         len(repaired), ", ".join(repaired[:8]))
+
+
 async def background_maintenance_loop() -> None:
     """Every 30 s, while the host is idle, drain outstanding background work that
-    would otherwise wait for a manual trigger — Smart Skip fingerprinting and
-    source-file validation (see `_auto_maint_cfg`). Idle-gated and serialized so
-    it never competes with viewing and never runs both heavy passes at once.
+    would otherwise wait for a manual trigger — Smart Skip fingerprinting,
+    source-file validation and the HLS bundle audit (see `_auto_maint_cfg`).
+    Idle-gated and serialized so it never competes with viewing and never runs
+    two heavy passes at once.
 
     NB: idle is checked WITHOUT `for_prep=True` on purpose — an admin watching the
     Activity tab (which holds an SSE connection) must not block the very work the
@@ -30641,7 +31086,25 @@ async def background_maintenance_loop() -> None:
         try:
             lib = await get_library()
             cfg = _auto_maint_cfg(lib)
-            if (cfg["fingerprint"] or cfg["validate"]) and not await _machine_in_use(300):
+            if (cfg["fingerprint"] or cfg["validate"] or cfg["bundles"]
+                    ) and not await _machine_in_use(300):
+                # The bundle audit runs FIRST and alongside the others: it is
+                # stats, not decode, so it costs a fraction of a fingerprint pass
+                # — and a bundle nobody can watch is more urgent than a skip
+                # marker nobody has missed. It repairs by re-queueing ordinary
+                # bulk prep, so it never holds the encode slot itself.
+                if (cfg["bundles"] and not state.bundle_audit.get("running")
+                        # Off-thread: a few stats per library file adds up to
+                        # thousands, and this tick runs every 30 s.
+                        and await asyncio.to_thread(_any_bundle_check_needed, lib)):
+                    state.bundle_audit_stop = False
+                    state.bundle_audit = {"running": True, "scope": "all", "auto": True,
+                                          "total": 0, "scanned": 0, "current_name": "",
+                                          "damaged": [], "repaired": 0, "stopped": False,
+                                          "error": "", "started_at": _now_iso(),
+                                          "finished_at": None}
+                    state.bundle_audit_task = asyncio.create_task(
+                        _run_bundle_audit("all", auto=True))
                 started_fp = False
                 if cfg["fingerprint"] and analyzer.is_available() and not _any_analysis_running():
                     key = _find_unfingerprinted_series(lib)
@@ -34024,7 +34487,7 @@ def _offline_cache_inventory_sync(lib: dict, jobs: list[dict]) -> dict:
     for it in lib.get("items", []):
         files_out: list[dict] = []
         item_bytes = 0
-        cached_n = processing_n = pending_n = error_n = partial_n = 0
+        cached_n = processing_n = pending_n = error_n = partial_n = damaged_n = 0
         for f in it.get("files", []):
             src = Path(f.get("path", ""))
             try:
@@ -34045,11 +34508,19 @@ def _offline_cache_inventory_sync(lib: dict, jobs: list[dict]) -> dict:
                 "bytes":     0,
             }
             if cached:
-                entry["status"] = "cached"
+                # A bundle the audit judged dead is "cached" on disk but not
+                # watchable, so it gets its own status rather than sitting in the
+                # green count where nobody would look at it.
+                chk = _bundle_check_current(f, key)
+                entry["status"] = "damaged" if (chk and chk.get("damaged")) else "cached"
+                if chk and chk.get("damaged"):
+                    entry["damage"] = chk.get("detail", "")
+                    damaged_n += 1
+                else:
+                    cached_n += 1
                 entry["bytes"]  = cached["bytes"]
                 entry["mtime"]  = cached["mtime"]
                 item_bytes += cached["bytes"]
-                cached_n   += 1
                 matched_keys.add(key)
             elif job and job["status"] in ("pending", "processing"):
                 entry["status"]     = job["status"]
@@ -34106,6 +34577,7 @@ def _offline_cache_inventory_sync(lib: dict, jobs: list[dict]) -> dict:
                 "pending_count":    pending_n,
                 "error_count":      error_n,
                 "partial_count":    partial_n,
+                "damaged_count":    damaged_n,
                 "files":            sorted(files_out, key=lambda x: x["name"].lower()),
             })
     items_out.sort(key=lambda x: x["total_bytes"], reverse=True)

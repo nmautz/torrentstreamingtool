@@ -1,5 +1,46 @@
 # Changelog
 
+## [17.15.0] — 2026-09-19
+* **Fixed: an episode that plays in VLC but freezes on a phone, forever.** *Hacks*
+  S03E03 ran its timer while the picture sat on one frame from 1:19 to 7:35 (and in
+  five more windows after it), with VLC playing the same file perfectly. The bundle
+  was built from a file that was still downloading. qBittorrent writes pieces into a
+  **sparse** file, so a half-fetched episode is a full-length file with holes in it,
+  and ffmpeg reads straight through them without erroring: running CFR it duplicates
+  the last good frame to fill the timestamp gap, `aresample` pads the audio with
+  digital silence, and the encode exits **0**. What lands on disk is a frozen picture
+  over silence — permanently, because the cache key is `version | name | size` and a
+  sparse file already reports its *final* size, so the wreck is stamped with exactly
+  the key the finished file resolves to and nothing ever rebuilds it. Measured on the
+  box: the video segments in the dead stretch were byte-identical (440,977 B, the same
+  held frame 36 times over) and the audio was 6-byte AAC frames. Three fixes:
+  * **Prep now asks qBittorrent whether the file is whole, whatever the item's status
+    says.** The guard for this already existed but short-circuited on
+    `status == "downloading"` — and the item flips to **ready** as soon as every
+    *non-skip* file is done, which makes the guard a no-op the moment you un-skip a
+    file, promote an idle-deferred one, widen a pack slice or recheck a torrent. Both
+    S03E03 and S03E04 were encoded through that hole: their bundles were written at
+    18:09:01 and 18:12:03 against a torrent that finished at **18:15:58**, and came out
+    48 % and 15 % dead. Its five siblings, prepped minutes later, are perfect.
+  * **A bundle is now verified before it is published.** The staging directory is
+    scanned for long dead stretches and a wreck is never swapped into place — it
+    re-queues instead, and the completeness gate parks it until the source is really
+    there. Twice damaged from a file qBit calls finished means the holes are in the
+    file itself, so prep stops burning encodes on it and records why. The check is
+    segment-size arithmetic (`bundlecheck.py`, unit-tested): no ffmpeg, no decode,
+    a few hundred `stat` calls.
+  * **Bundles built before today are swept up too.** A new idle-time **bundle
+    integrity audit** checks every prepped bundle, purges the damaged ones and
+    re-queues them for prep on its own — the prep-time check only protects what is
+    built from now on, and there were already two wrecks in the library nobody had
+    found. Admin → Content → **Automatic Maintenance** carries the on/off and a
+    **Scan Now** button; damaged bundles show as **Damaged** in Offline Cache, and the
+    run appears on the **Activity** tab. It never holds the encode slot: repair is a
+    purge plus an ordinary bulk prep job.
+
+  Verified against the live box before shipping: the detector flags S03E03 (49 % dead,
+  worst window 1:23–7:38) and S03E04 (16 %), and calls all five healthy siblings clean.
+
 ## [17.14.0] — 2026-09-19
 * **Fixed: a downloaded episode going "Lost connection to host" after the phone was
   locked.** Lock the phone mid-episode with a downloaded copy playing and the app came

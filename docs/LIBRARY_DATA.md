@@ -623,6 +623,17 @@ in the `/files` response. See [STREAMING.md](STREAMING.md).
     "error":  "",                        //   ffmpeg/ffprobe tail when damaged
     "sig":    "1718900000:1329062039",   //   mtime:size — re-validate when it changes
     "at":     "2026-06-09T17:40:00Z"
+  },
+  "bundle_check": {                      // optional (17.15.0); written by the HLS bundle integrity audit
+    "damaged": true,                     //   a long stretch of the BUNDLE is dead (≠ `validation`, which judges the SOURCE)
+    "dead_secs": 932.0,
+    "total_secs": 1895.7,
+    "detail": "15:32 of 31:35 dead (49%) — picture frozen over silence; worst video 1:23-7:38",
+    "spans": [{"rendition": "video", "start": 83.4, "end": 458.8, "reason": "frozen"}],
+    "key":   "2d875416183a7db114b2635b", //   the bundle judged — a rebuild moves the key and retires the verdict
+    "sig":   "1789088941:887958693",     //   mtime:size of the source — ditto
+    "at":    "2026-09-19T19:40:00Z",
+    "unbuildable": true                  //   optional; prep gave up after BUNDLE_DAMAGE_RETRIES damaged encodes
   }
 }
 ```
@@ -795,6 +806,8 @@ scheduler forces it to priority 0 and never re-fetches it; and recheck, Cleanup 
 delete-to-free-space **refuse** compressed files (re-downloading would overwrite the smaller result,
 which can't be recovered). The marker survives the download monitor's `build_file_list` rebuild. See
 [GOTCHAS.md](GOTCHAS.md) and [API.md](API.md).
+
+`bundle_check` is the persisted verdict from the **HLS bundle integrity audit** (17.15.0) — a different question from `validation`. `validation` asks whether the **source file** decodes; `bundle_check` asks whether the **bundle we built from it** is watchable. They come apart in exactly the case that motivated it: a perfectly good source prepped while its torrent was still downloading gives a clean `validation` and a dead bundle, because ffmpeg fills a sparse file's holes with duplicated frames and silence and still exits 0. Written by the pre-swap check in `_run_offline_job` and by `_run_bundle_audit`; retired automatically when either the cache `key` or the source `sig` moves, so a re-download, repair or recompress un-condemns a file without anyone clearing anything. `unbuildable` is the only sticky part — it stops `_enqueue_library_prep` re-encoding a holed source on the prep timer for ever, and an explicit prep still overrides it. See [STREAMING.md § Bundle integrity](STREAMING.md) and [GOTCHAS.md](GOTCHAS.md).
 
 `validation` is the persisted verdict from the source-file validator (the manual admin scan **and** the idle `background_maintenance_loop` auto-validator both write it). It lets the validator skip already-checked files, drives the Activity tab's "never-validated" backlog count, and makes auto-validation **resume after a restart**. A file is re-validated only when its `sig` (mtime:size) changes — i.e. it was re-downloaded, repaired, or re-encoded — or, for a `missing` verdict, once the file exists again. See [BACKEND.md](BACKEND.md) and [ADMIN.md § Automatic Maintenance](ADMIN.md).
 

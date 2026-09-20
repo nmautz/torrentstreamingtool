@@ -1068,7 +1068,7 @@
       </div>
 
       <!-- Auto-validate -->
-      <div class="px-5 py-4 flex items-center justify-between gap-3">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
         <div class="min-w-0">
           <h3 class="text-xs font-black uppercase tracking-wide text-gray-200">Auto-Validate Files<span class="help-tip" tabindex="0" data-tip="Verdicts are saved into the library, so finished files are never re-checked and the pass resumes after a restart. A manual File Validator scan takes priority over it; both drain the same backlog.">?</span></h3>
           <p class="text-[11px] text-gray-500 mt-0.5">Deep-decode source files that have never been validated, to surface corruption. Each verdict is remembered, so this resumes after a restart instead of starting over.</p>
@@ -1076,6 +1076,21 @@
         </div>
         <button id="amValBtn" onclick="toggleAutoMaint('validate')"
           class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">…</button>
+      </div>
+
+      <!-- Bundle integrity audit -->
+      <div class="px-5 py-4 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h3 class="text-xs font-black uppercase tracking-wide text-gray-200">Audit Stream Bundles<span class="help-tip" tabindex="0" data-tip="A bundle prepped from a file that was still downloading plays as a frozen picture over silence — ffmpeg reads straight through the holes and still exits cleanly. This compares segment sizes (no decode), so a whole library takes seconds. Anything it finds is purged and re-prepped automatically.">?</span></h3>
+          <p class="text-[11px] text-gray-500 mt-0.5">Check prepped bundles for frozen picture over silence, and re-prep the ones that fail. Structural only — no decoding, so it is far cheaper than validation.</p>
+          <p id="amBundleStatus" class="text-[11px] text-indigo-400 mt-1 font-mono"></p>
+        </div>
+        <div class="flex-shrink-0 flex items-center gap-2">
+          <button id="amBundleRunBtn" onclick="runBundleAudit()"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">Scan Now</button>
+          <button id="amBundleBtn" onclick="toggleAutoMaint('bundles')"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">…</button>
+        </div>
       </div>
     </div>
 
@@ -3075,7 +3090,7 @@ function toggleMissingUnaired(){
 }
 
 // ── Automatic Maintenance (idle fingerprint + validate) ───────────────────────
-let _amCfg = {fingerprint:true, validate:true};
+let _amCfg = {fingerprint:true, validate:true, bundles:true};
 
 function _amRenderBtn(id, on){
   const btn = document.getElementById(id);
@@ -3089,6 +3104,8 @@ function _amRenderBtn(id, on){
 function _amRender(d){
   _amRenderBtn("amFpBtn",  _amCfg.fingerprint);
   _amRenderBtn("amValBtn", _amCfg.validate);
+  _amRenderBtn("amBundleBtn", _amCfg.bundles);
+  _amRenderBundle(d && d.bundle_audit);
   const fp = document.getElementById("amFpBacklog");
   const val = document.getElementById("amValBacklog");
   if(fp){
@@ -3107,18 +3124,74 @@ function _amRender(d){
   }
 }
 
+// The audit's own line: live progress while it runs, and what the last run found
+// once it is done — including the repair, since a damaged bundle is purged and
+// re-queued rather than just reported.
+function _amRenderBundle(ba){
+  const el = document.getElementById("amBundleStatus");
+  if(!el) return;
+  if(!ba){ el.textContent = ""; return; }
+  const dmg = (ba.damaged || []).length;
+  if(ba.running){
+    const t = ba.total || 0, n = ba.scanned || 0;
+    el.textContent = `Scanning ${n}/${t || "?"}` + (ba.current_name ? ` · ${ba.current_name}` : "")
+      + (dmg ? ` · ${dmg} damaged` : "");
+    return;
+  }
+  if(ba.error){ el.textContent = `Last scan failed: ${ba.error}`; return; }
+  if(!ba.finished_at){ el.textContent = ""; return; }
+  el.textContent = dmg
+    ? `${dmg} damaged bundle(s) found and re-queued for prep` + (ba.stopped ? " (stopped early)" : "")
+    : `${ba.scanned || 0} bundle(s) checked — all clean` + (ba.stopped ? " (stopped early)" : "");
+}
+
+// Run the audit right now over every prepped bundle. Unlike the idle sweep this
+// re-checks bundles that already have a verdict — it is the "look again" button.
+async function runBundleAudit(){
+  const btn = document.getElementById("amBundleRunBtn");
+  if(btn) btn.disabled = true;
+  try{
+    const r = await fetch("/api/admin/bundle-audit",{
+      method:"POST",
+      headers:{...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify({scope:"all"}),
+    });
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      showToast(`Scan failed: ${d.detail || r.status}`, true);
+      return;
+    }
+    _amRenderBundle(await r.json());
+    showToast("Bundle audit started — progress on the Activity tab.");
+    // Poll until it settles; it is fast (stats only), so a short tick is fine.
+    const tick = setInterval(async ()=>{
+      try{
+        const rr = await fetch("/api/admin/bundle-audit", {headers: authHeader()});
+        if(!rr.ok){ clearInterval(tick); return; }
+        const ba = await rr.json();
+        _amRenderBundle(ba);
+        if(!ba.running){ clearInterval(tick); loadOfflineCache && loadOfflineCache(); }
+      }catch(_){ clearInterval(tick); }
+    }, 1500);
+  }catch(_){
+    showToast("Scan failed.", true);
+  }finally{
+    if(btn) btn.disabled = false;
+  }
+}
+
 async function loadAutoMaint(){
   try{
     const r = await fetch("/api/admin/auto-maintenance", {headers: authHeader()});
     if(!r.ok) return;
     const d = await r.json();
-    _amCfg = {fingerprint: !!d.fingerprint, validate: !!d.validate};
+    _amCfg = {fingerprint: !!d.fingerprint, validate: !!d.validate, bundles: !!d.bundles};
     _amRender(d);
   }catch(_){}
 }
 
 async function toggleAutoMaint(which){
-  const id = which==="fingerprint" ? "amFpBtn" : "amValBtn";
+  const id = which==="fingerprint" ? "amFpBtn" : (which==="bundles" ? "amBundleBtn" : "amValBtn");
   const btn = document.getElementById(id);
   const next = {..._amCfg, [which]: !_amCfg[which]};
   if(btn) btn.disabled = true;
@@ -3134,9 +3207,10 @@ async function toggleAutoMaint(which){
       return;
     }
     const d = await r.json();
-    _amCfg = {fingerprint: !!d.fingerprint, validate: !!d.validate};
+    _amCfg = {fingerprint: !!d.fingerprint, validate: !!d.validate, bundles: !!d.bundles};
     _amRender(d);
-    const label = which==="fingerprint" ? "Auto-fingerprint" : "Auto-validate";
+    const label = which==="fingerprint" ? "Auto-fingerprint"
+                : (which==="bundles" ? "Bundle audit" : "Auto-validate");
     showToast(`${label} ${_amCfg[which] ? "enabled" : "disabled"}.`);
   }catch(_){
     showToast("Save failed.", true);
@@ -6174,6 +6248,10 @@ const _OFF_STATUS_BADGE = {
   pending:       ["Queued",     "bg-gray-800 border-gray-600 text-gray-300"],
   error:         ["Error",      "bg-red-950 border-red-700 text-red-300"],
   partial_stale: ["Partial",    "bg-amber-950 border-amber-700 text-amber-300"],
+  // On disk and complete, but the integrity audit found a long dead stretch in
+  // it — it will play as a frozen picture over silence. Not "cached": it is
+  // there and unwatchable, which is worse than missing.
+  damaged:       ["Damaged",    "bg-red-950 border-red-700 text-red-300"],
 };
 
 function _offStatusBadge(status){
@@ -6194,6 +6272,7 @@ function _renderOffFile(f){
   if(f.encoder)   sub.push(escHtml(f.encoder));
   if(f.status === "cached" && f.mtime) sub.push("modified " + new Date(f.mtime*1000).toLocaleString());
   if(f.status === "partial_stale" && f.mtime) sub.push("partial since " + new Date(f.mtime*1000).toLocaleString());
+  if(f.status === "damaged" && f.damage) sub.push(escHtml(f.damage));
   const subLine = sub.length ? `<div class="text-[10px] text-gray-600 mt-0.5">${sub.join(" · ")}</div>` : "";
   // Progress bar for live encodes.
   let progressHtml = "";
@@ -6248,6 +6327,7 @@ function _renderOffItem(it){
   if(it.cached_count)     pills.push(`<span class="text-[10px] font-mono px-1.5 py-0.5 bg-emerald-950 text-emerald-300">${it.cached_count} cached</span>`);
   if(it.processing_count) pills.push(`<span class="text-[10px] font-mono px-1.5 py-0.5 bg-amber-950 text-amber-200 blink">${it.processing_count} processing</span>`);
   if(it.pending_count)    pills.push(`<span class="text-[10px] font-mono px-1.5 py-0.5 bg-gray-800 text-gray-300">${it.pending_count} queued</span>`);
+  if(it.damaged_count)    pills.push(`<span class="text-[10px] font-mono px-1.5 py-0.5 bg-red-950 text-red-300">${it.damaged_count} damaged</span>`);
   if(it.error_count)      pills.push(`<span class="text-[10px] font-mono px-1.5 py-0.5 bg-red-950 text-red-300">${it.error_count} error</span>`);
   if(it.partial_count)    pills.push(`<span class="text-[10px] font-mono px-1.5 py-0.5 bg-amber-950 text-amber-300">${it.partial_count} partial</span>`);
   return `

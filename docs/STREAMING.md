@@ -32,6 +32,9 @@ Read this when changing anything related to:
   `prepFileState`
 - The bulk **Prep for Streaming** button on library cards
   (`prepItemForStreaming`, `/prep-all`)
+- **Bundle integrity** — `bundlecheck.py`, the pre-swap check in `_run_offline_job`,
+  `_run_bundle_audit`, `/api/admin/bundle-audit`, `files[].bundle_check`. See
+  [§ Bundle integrity](#bundle-integrity--born-verified-plus-a-sweep)
 - The prep **lag warning** (`#prepWarnModal`, `confirmStreamPrepWarning`), the
   **Pause/Resume** controls on `#globalPrepBar` (`/api/offline-prep/pause` +
   `/resume`, `_pause_prep` / `_resume_prep`), or **automatic auto-prep**
@@ -173,6 +176,91 @@ purge).
 > `hls_available: false`, and the dashboard hides all Prep / On-Device controls
 > (`no-hls` body class) and routes the play chooser straight to VLC. VLC ("On
 > TV") is unaffected — it's a separate, individually TCC-granted app.
+
+---
+
+## Bundle integrity — "born verified", plus a sweep
+
+A bundle can be structurally dead and still look perfectly built. See
+[GOTCHAS.md § ffmpeg exiting 0 does not mean the bundle is watchable](GOTCHAS.md)
+for the full mechanism; the short version is that a source with holes in it
+(qBit writes **sparse** files, so a half-fetched episode is full-length) makes
+ffmpeg duplicate the last frame and pad silence, exit `0`, and land the result on
+the key the *finished* file resolves to — so it is never rebuilt.
+
+### What the check is
+
+`bundlecheck.py` — a leaf module (stdlib only, no `main` import, tests in
+`tests/test_bundlecheck.py`). It is **segment-size arithmetic**: no ffmpeg, no
+decode, a few hundred `stat` calls per bundle. Two detectors, both scored against
+the rendition's **own** p90 so nothing needs to know its bitrate:
+
+| detector | fires on |
+|---|---|
+| `dead` | a run of segments under `DEAD_FRACTION` (0.20) of the p90 |
+| `frozen` | a run of `IDENTICAL_RUN` (4+) **byte-identical** sizes under half the p90 |
+
+A run must last `MIN_RUN_SECS` (15 s), and the **last segment of every rendition
+is never judged** — it is a legitimately tiny tail.
+
+**The verdict is not a per-rung decision.** A dead video rung alone means nothing:
+a credits roll encodes to almost nothing, and a held production card is
+byte-identical to a frozen frame. What makes the real failure unmistakable is
+that it kills both sides at once — an MP4 interleaves audio with video, so one
+hole takes both. So:
+
+* **primary** — the *overlap* of dead video and dead audio ≥ `MIN_TOTAL_SECS` (20 s).
+  No credits roll (audio playing) and no quiet passage (picture moving) can
+  produce it.
+* **secondary** — `frozen` spans alone ≥ `FROZEN_ALONE_SECS` (60 s). This is what
+  covers a bundle with no audio rendition at all, and it is deliberately strict.
+
+Every threshold is set so a **false positive** — which costs a pointless
+re-encode of a whole episode — is much more expensive than a miss, which the
+sweep picks up on its next pass anyway. Validated against the live box: it flags
+Hacks S03E03 (49 % dead, worst window 1:23–7:38) and S03E04 (16 %), and calls
+their five healthy siblings clean.
+
+### Where it runs
+
+1. **Prep time** — `_run_offline_job` scans `tmp_dir` **before the atomic swap**,
+   so a wreck is never published. A first rejection re-queues the job (the
+   completeness gate then parks it until qBit says the file is whole); a second
+   one from a file qBit calls finished means the holes are in the file itself, so
+   the job errors, records `files[].bundle_check.unbuildable`, and
+   `_enqueue_library_prep` stops picking it up. `BUNDLE_DAMAGE_RETRIES` is the
+   limit. The marker is pinned to the cache key **and** the file signature, so a
+   re-download, a repair or a recompress retires it and prep resumes by itself.
+2. **Idle sweep** — `_run_bundle_audit`, a third pass in
+   `background_maintenance_loop` alongside fingerprinting and source validation
+   (`settings.auto_maintenance.bundles`, default on). It runs *first* because it
+   is stats rather than decode, and because a bundle nobody can watch is more
+   urgent than a skip marker nobody has missed. Repair is **purge + re-queue
+   ordinary bulk prep** — it never holds the encode slot itself. Verdicts persist
+   as `files[].bundle_check`, so it resumes across restarts and never re-scans a
+   settled bundle.
+3. **On demand** — `POST /api/admin/bundle-audit` (Admin → Content → Automatic
+   Maintenance → **Scan Now**) re-checks everything, verdict or not.
+
+While a damaged bundle is purged and waiting to re-prep, playback falls back to
+**on-demand JIT**, which reads the source directly and is unaffected — better
+than sitting through the frozen copy.
+
+### `files[].bundle_check`
+
+```jsonc
+{
+  "damaged": true,
+  "dead_secs": 932.0,
+  "total_secs": 1895.7,
+  "detail": "15:32 of 31:35 dead (49%) — picture frozen over silence; worst video 1:23-7:38",
+  "spans": [{"rendition": "video", "start": 83.4, "end": 458.8, "reason": "frozen"}],
+  "key": "2d875416183a7db114b2635b",   // the bundle judged — a rebuild retires the verdict
+  "sig": "1789088941:887958693",       // mtime:size of the source — ditto
+  "at": "2026-09-19T19:40:00+00:00",
+  "unbuildable": true                  // only after BUNDLE_DAMAGE_RETRIES failures
+}
+```
 
 ---
 

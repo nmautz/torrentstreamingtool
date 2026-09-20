@@ -1929,6 +1929,92 @@ Failures inside the parallel `gather(..., return_exceptions=True)` are silently 
 
 ## Stream to Device (HLS)
 
+### ffmpeg exiting 0 does not mean the bundle is watchable (17.15.0)
+
+**The failure.** *Hacks* S03E03 played in VLC perfectly and, on a phone, sat on one
+frame from 1:19 to 7:35 while the timer kept running — and in five more windows after
+that, 48 % of the episode in total. Nothing in any log. The bundle was built while its
+season pack was still downloading.
+
+**Why nothing errored.** qBittorrent writes pieces into a **sparse** file, so a
+half-fetched episode is a full-length file with holes in it — `exists()` is true and
+`st_size` is already final. ffmpeg reads straight through the holes and reports
+success: running CFR the video filter chain **duplicates the last good frame** to fill
+the timestamp gap, and `aresample=async=1` **pads the audio with digital silence**.
+Both of those are the correct, documented behaviour for a gap; they are just
+catastrophic when the gap is a hole rather than a real discontinuity. The encode exits
+**0**, `progress=end` arrives, and prep logs `DONE`.
+
+**Why it is permanent.** `_offline_cache_key` is `version | name | size`, and the
+sparse file already reports its final size — so the wreck is stamped with *exactly*
+the key the finished file resolves to. `_maybe_start_prep_job` then answers "cached"
+for ever and the bundle is never rebuilt. Re-downloading the torrent does not help;
+the file is fine by then, and nothing re-preps it.
+
+**The signature**, measured on the box — useful if you are ever staring at one:
+
+| | healthy | dead |
+|---|---|---|
+| video, 10.4 s fmp4 segment | 3.1–8.1 MB | **440,977 B, byte-identical 36 segments running** (one held frame) |
+| audio, 6.0 s fmp4 segment | 120–135 KB | **~3.0 KB** (6-byte AAC frames = digital silence) |
+| the `sub_<i>.vtt` sidecar | cues throughout | a matching hole, because subtitle *packets* were never demuxed either |
+
+Video **and** audio go dead over the same window, because an MP4 interleaves them and
+one byte hole takes both. That is the thing to key a detector on: a credits roll
+encodes to almost nothing too, and a quiet passage is digitally silent, but neither
+kills both sides at once. `bundlecheck.py` does exactly this, on segment sizes only —
+no ffmpeg, no decode.
+
+**Three defences now, and you need all three:**
+
+1. `_incomplete_download_paths` asks qBittorrent about the file **whatever the item's
+   status says** — see the next entry, which is the actual bug.
+2. `_run_offline_job` scans the `.part` directory **before the atomic swap**, so a
+   wreck is never published. Twice damaged from a file qBit calls finished ⇒ stop and
+   record `files[].bundle_check.unbuildable` rather than re-encoding on the prep timer
+   for ever.
+3. `_run_bundle_audit` sweeps bundles built before any of this existed. It found two.
+
+**Diagnosing one by hand,** with no ffmpeg needed — fetch the playlist and compare
+segment sizes:
+
+```bash
+K=<cache_key>
+curl -sk "https://<box>/api/library/offline-cache/$K/audio_0.m3u8"
+# then per segment (the route serves Range, so this costs one byte each):
+curl -sk -H "Range: bytes=0-0" -D - -o /dev/null      "https://<box>/api/library/offline-cache/$K/seg_audio_0_00020.m4s" | grep -i content-range
+```
+
+A run of `~3.0 KB` audio segments is the tell. `HEAD` is **404** on that route — use a
+one-byte `Range` and read `Content-Range`.
+
+### An item is "ready" long before qBittorrent has finished with it (17.15.0)
+
+`item["status"]` is derived from `_all_nonskip_complete`, which flips to **ready** as
+soon as every *non-skip* file is done. It is not a statement that qBit has stopped
+writing. It goes stale the moment anything widens the selection:
+
+* un-skipping a file, or moving an idle-deferred one to `now`
+* a pack slice widening, or `_pack_slice_fallback` re-selecting the whole pack
+* a recheck / repair re-fetching missing pieces
+* any `download` schedule edit that promotes a file
+
+In all of those qBit starts filling a file inside an item that is already "ready", and
+nothing flips it back until `_apply_download_changes` happens to run.
+
+So **never pre-filter a completeness check on `status == "downloading"`.** That is
+precisely what `_incomplete_download_paths` and `_src_still_downloading` used to do,
+which made the whole half-downloaded-source guard a no-op in exactly the case it was
+written for. The proof is on the box: the S03E03 and S03E04 bundles were written at
+**18:09:01** and **18:12:03** against a torrent that finished at **18:15:58**, and came
+out 48 % and 15 % dead; their five siblings, prepped after 18:17, are perfect.
+
+qBit is now asked regardless of status, with the item's status used only as the
+fallback when qBit cannot answer (unreachable + downloading ⇒ treat everything as
+incomplete; unreachable + settled ⇒ trust the item, because blocking prep on a qBit
+outage would stall the library — the bundle verifier is the backstop for that case).
+The sweep pays for one `qbit_info_all()` call, not one per item (`_torrent_info_map`).
+
 ### H.264 `-level` must scale with the OUTPUT resolution — 4.1 kills 4K encodes
 
 H.264 level 4.1 caps at ~1080p (2.1 MP frame). Hardcoding `-level:v 4.1` on a

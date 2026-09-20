@@ -52,14 +52,15 @@ A **summary strip** shows the active count, the **Lost On Restart** count, Host 
 
 ### Automatic Maintenance (System tab)
 
-Two idle-gated background workers that drain the Outstanding Work backlog so it doesn't sit waiting on a manual trigger (`settings.auto_maintenance`, both **default ON**), driven by `background_maintenance_loop` (every 30 s):
+Three idle-gated background workers that drain the Outstanding Work backlog so it doesn't sit waiting on a manual trigger (`settings.auto_maintenance`, all **default ON**), driven by `background_maintenance_loop` (every 30 s):
 
 - **Auto-Fingerprint** — runs Smart Skip analysis for any eligible series that's never been fingerprinted, one series at a time (`_find_unfingerprinted_series` → `_run_series_analysis`). The periodic counterpart to the on-ready / post-prep hook, which only fires for newly-added content. Failed/manual entries are sticky (not auto-retried in a loop).
 - **Auto-Validate** — deep-decodes source files that have never been validated (or whose file changed), one at a time (`_run_auto_validation`), and **persists each verdict** into `library.json → files[].validation`. So it skips already-checked files and **resumes after a restart** instead of starting over — the resumable counterpart to the in-memory admin scan. Manual admin scans now persist verdicts too, so both drain the same backlog.
+- **Audit Stream Bundles** — structurally checks prepped HLS bundles for the frozen-picture-over-silence damage a half-downloaded source produces, and **purges + re-preps** the ones that fail (`_run_bundle_audit`). Verdicts persist into `library.json → files[].bundle_check`, so it resumes across restarts and never re-scans a settled bundle. It runs **first** on a tick, because it is segment-size arithmetic rather than a decode (a whole library takes seconds, against minutes per file for validation) and because a bundle nobody can watch is more urgent than a skip marker nobody has missed. Repair never holds the encode slot — it queues an ordinary bulk prep job. A **Scan Now** button re-checks everything regardless of stored verdicts. The mechanism, and why a dead video rung alone is not enough to condemn a bundle, are in [STREAMING.md § Bundle integrity](STREAMING.md) and [GOTCHAS.md](GOTCHAS.md).
 
-Both run **only while the host is idle** (`_machine_in_use(300)` — deliberately *not* `for_prep=True`, so an admin watching the Activity tab doesn't block the very work it shows) and at below-normal OS priority, and bail the instant the box is used. They're serialized so the two heavy passes never run at once, and auto-validate yields to a manual scan.
+All three run **only while the host is idle** (`_machine_in_use(300)` — deliberately *not* `for_prep=True`, so an admin watching the Activity tab doesn't block the very work it shows) and at below-normal OS priority, and bail the instant the box is used. The two *heavy* passes (fingerprint, validate) are serialized so they never run at once, and auto-validate yields to a manual scan; the bundle audit is cheap enough to run alongside them.
 
-- `GET /api/admin/auto-maintenance` → `{fingerprint, validate, analyzer_available, ffmpeg_available, fingerprint_backlog, validate_backlog, validate_running, analysis_running}`.
+- `GET /api/admin/auto-maintenance` → `{fingerprint, validate, bundles, analyzer_available, ffmpeg_available, fingerprint_backlog, validate_backlog, validate_running, analysis_running, bundle_audit}`.
 - `POST /api/admin/auto-maintenance` → `{fingerprint, validate}` saves the toggles; turning validate off also halts an in-flight auto-validation pass.
 
 ### 1. Indexers ([static/admin.html:95](../static/admin.html#L95))
@@ -154,6 +155,7 @@ Each per-file entry carries one of five statuses, surfaced as a coloured badge i
 | `pending`       | Queued behind `OFFLINE_JOB_CONCURRENCY` semaphore; ffmpeg hasn't started yet |
 | `error`         | Most recent prep job failed; the ffmpeg stderr tail is rendered inline |
 | `partial_stale` | A `<key>.part.mp4` is on disk with no live job (server crashed mid-encode) — safe to delete |
+| `damaged`       | The bundle is on disk and complete, but the integrity audit found a long dead stretch in it — it plays as a frozen picture over silence. Carries a `damage` line (`15:32 of 31:35 dead (49%) — picture frozen over silence; worst video 1:23-7:38`). Not `cached`: it is there and unwatchable, which is worse than missing. The audit purges and re-preps these automatically — see [STREAMING.md § Bundle integrity](STREAMING.md) |
 
 - **Top row** — total bytes on disk (sum of completed `.mp4` and `.part.mp4`), plus the cache directory path.
 - **Per-item rows** — every library item that has any kind of state (not just completed encodes). The summary row has small chips for the count of each status. Click the title to expand the per-file list. The header row's **Delete All** removes every completed/partial file and clears every error-state job entry for that item; active jobs are skipped (cancel them from the library card if you really want to abandon them).
