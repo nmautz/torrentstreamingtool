@@ -2446,10 +2446,29 @@ disk until the admin purges them. Pre-`v3-hls` MP4 caches surface as
 ## Source eviction (18.0.0) — deleting the source, keeping the bundle
 
 A prepped episode exists on disk **twice**: the source the torrent downloaded,
-and the HLS bundle prep built from it. Per *State + storage* above, the bundle is
-roughly **1.7x the source video** (Original rung + 720p + 480p + AAC per audio
-track), so the pair costs ~2.7x and deleting the source reclaims **~37%** of it —
-not the 60%+ that "delete the source" intuitively suggests.
+and the HLS bundle prep built from it.
+
+> **The "~1.7x" figure in *State + storage* is an average almost no individual
+> series sits near, and the direction flips.** Measured across the reference
+> library — 456.2 GB of sources against 364.2 GB of bundles, **0.80x** overall,
+> so deleting every source would reclaim **56%** of the pair:
+>
+> | Series | Source | Bundle | Bundle/source |
+> |---|---|---|---|
+> | Hunter x Hunter (Blu-Ray 10-bit) | 95.4 GB | 37.7 GB | **0.40x** |
+> | Code Geass (Blu-Ray) | 45.2 GB | 16.5 GB | 0.37x |
+> | Star Wars Ep III | 13.2 GB | 13.0 GB | 0.98x |
+> | Vinland Saga S2 | 11.0 GB | 17.7 GB | 1.62x |
+> | Futurama S05 | 3.9 GB | 9.1 GB | 2.36x |
+> | Death Note (x265 10-bit) | 5.7 GB | 18.9 GB | **3.31x** |
+>
+> The driver is the source's own bitrate. A fat Blu-Ray rip re-encodes to a
+> VBV-capped H.264 ladder **much smaller** than the original; an already-tight
+> x265 encode re-encodes to a ladder **several times bigger**. Eviction's value is
+> therefore not a constant — it is large where the source is big, and actively
+> poor where the source is already small. **Ordering candidates by age alone
+> ignores this**, and on the reference library the eligible pool was dominated by
+> Death Note, the single worst series to evict (source is 23% of its pair).
 
 The bundle is what every phone, every browser and the TV kiosk actually play. The
 source is what **VLC** plays, and what a fixed list of features re-reads later.

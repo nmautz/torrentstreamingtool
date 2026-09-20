@@ -1,5 +1,26 @@
 # Changelog
 
+## [18.1.2] — 2026-09-19
+* **Corrected the size claim this whole feature was justified by.** 18.0.0 said a
+  bundle is "~1.7x the source" and eviction reclaims "~37%". Measured on the real
+  library after the first live sweep, that average is one almost no series sits
+  near — and the direction flips. Sources total 456.2 GB against 364.2 GB of
+  bundles (**0.80x**), but per series it runs from **0.40x** (Hunter x Hunter,
+  Blu-Ray: the bundle is far *smaller* than the source) to **3.31x** (Death Note,
+  x265: the H.264 ladder is over three times *bigger*). The driver is the source's
+  own bitrate — a fat rip re-encodes down to a VBV-capped ladder, a tight x265
+  encode re-encodes up.
+* **Which means the age ordering is picking the worst candidates.** `srcevict`
+  orders oldest-first, which is the right *safety* ordering but is blind to value:
+  on this library the eligible pool was entirely Death Note, the single worst
+  series to evict (its source is 23% of its pair). Recorded in `srcevict.py` and
+  docs/STREAMING.md as a known limitation rather than silently left in place.
+* Verified live: the first real sweep reclaimed 13 Death Note sources (2.12 GB).
+  The evicted episodes still serve `ready:true` from `/offline-prepare` with both
+  audio and both subtitle tracks, stream real segments, stay out of `orphans`, and
+  report 0 source bytes in the storage breakdown. JIT correctly refuses them with
+  a 409 that names the feature and says the episode still plays on a phone.
+
 ## [18.1.1] — 2026-09-19
 * **Fixed: "Reclaim Now" could never reclaim anything — it aborted on its own
   trigger.** `_run_source_eviction` checks `_machine_in_use(60)` before each file

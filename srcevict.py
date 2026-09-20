@@ -1,17 +1,26 @@
 """When may a source file be deleted, now that its bundle can be played without it?
 
 A prepped episode exists on disk twice: the source the torrent downloaded, and
-the HLS bundle prep built from it (Original rung + 720p + 480p + AAC per audio
-track, so roughly 1.7x the source video -- see docs/STREAMING.md "State +
-storage"). The bundle is what every phone, every browser and the TV kiosk
-actually play. The source is what VLC plays, what the analyzer fingerprints,
-what subsync aligns against, what a repair rewrites, and what a future
-`OFFLINE_CACHE_VERSION` bump would rebuild from.
+the HLS bundle prep built from it. The bundle is what every phone, every browser
+and the TV kiosk actually play. The source is what VLC plays, what the analyzer
+fingerprints, what subsync aligns against, what a repair rewrites, and what a
+future `OFFLINE_CACHE_VERSION` bump would rebuild from.
 
-Deleting the source therefore reclaims about 37% of the pair and gives up a
-fixed list of capabilities for that file. That trade is only ever worth making
-for content nobody is going to touch, and only when the disk actually needs the
-room -- which is the whole shape of the policy below:
+How much deleting the source reclaims varies WILDLY by series, and the direction
+flips. Measured on the reference library it ranges from 0.37x (a Blu-Ray rip,
+whose bundle is far smaller than the source) to 3.31x (a tight x265 encode, whose
+H.264 ladder is several times bigger) -- so the source can be either the big half
+or the small half of the pair. See docs/STREAMING.md "Source eviction".
+
+**This module orders candidates by AGE, which is blind to that.** It is the right
+safety ordering (oldest content is the least likely to be missed) but it is not a
+value ordering, and on a library with tightly-encoded sources it will happily
+spend a deletion to reclaim very little. Worth fixing before anyone relies on this
+to free a meaningful amount of disk.
+
+The trade is only ever worth making for content nobody is going to touch, and
+only when the disk actually needs the room -- which is the whole shape of the
+policy below:
 
   * AGE decides what is ELIGIBLE. A series untouched for `idle_days` (or, if
     nothing in it has ever been played, `never_played_days` since it was
