@@ -18747,7 +18747,7 @@ function _npBindEvents() {
           lp.pi = i;
           lp.filePath = e.filePath;
           lp.itemId = (lp.playlistItems || [])[i] || lp.itemId;
-          lp.name = e.filePath.split(/[/\]/).pop();
+          lp.name = e.filePath.split(/[/\\]/).pop();
           lp._nextNative = null;
           try { _lpRenderNavButtons(); } catch (_) {}
           _lpWarmNextEp();
