@@ -3217,6 +3217,60 @@ the proxy is a bigger, deferred option).
 (The M1 ATS exception, scoped to loopback, only governs plain `http` cleartext loads
 — it's unrelated to this same-vs-cross-origin media behavior.)
 
+### A SUSPENDED app loses its loopback server — and on offline/proxied pages that server is serving the page itself
+
+iOS closes an app's sockets when it **suspends** the process, `NWListener`
+included, and nothing necessarily reports it: the listener can sit in `.ready`
+accepting nothing. For a plain single-bundle server that's harmless (playback is
+over anyway). For **player mode and proxied mode it is catastrophic and silent**,
+because the dead port is the page's own origin:
+
+- every `/api/*` call through the reverse proxy fails ⇒ the dashboard shows
+  *"Lost connection to host — reconnecting…"* and never recovers, the library
+  and its artwork don't load, and progress stops syncing;
+- the episode keeps playing **only as far as its buffer already reaches**, then
+  stalls — even though it is a local file on the device;
+- the one cure was ending playback, because `_appProxiedReturnHost()` navigates
+  off the loopback origin entirely (and the next play does a fresh `lms.start`).
+  "Stop and start again fixes it" is the signature of this bug, not of a network
+  one.
+
+Two halves keep it from happening (17.14.0), and you need both:
+
+1. **Don't get suspended.** An app playing audio through `NativePlayback`'s
+   AVPlayer stays alive under the `audio` background mode, which is why a
+   *streamed* episode never hit this. A **downloaded** one did, because
+   `_npOk()` requires `lp._nativeMaster` and the device path had none — see the
+   next gotcha. Background playback is also a user setting, so this alone is not
+   enough.
+2. **Come back if you are.** `HLSStaticServer` remembers `desiredPort` and, on
+   every `didBecomeActive` (plus on demand via the plugin's `ensureRunning()`,
+   which `_appLmsHeal` calls from `visibilitychange`), probes its own port with a
+   loopback connect and **rebinds the same number** if nothing answers. The port
+   must be identical — a fresh ephemeral one would leave the page's origin
+   pointing at nothing, which is the whole reason the server "never restarts
+   while serving the page". `.waiting` on the probe counts as dead: on loopback
+   that's a refused connection being retried, not a slow one.
+
+### `master-native.m3u8` is generated at serve time — so a downloaded bundle doesn't contain it
+
+`_native_master` / `_sub_wrapper_playlist` ([main.py](../main.py)) build
+`master-native.m3u8` and `sub_<n>.m3u8` **on read, never on disk**, deliberately:
+`master.m3u8` stays byte-identical for the web player and `OFFLINE_CACHE_VERSION`
+doesn't move. The consequence is easy to miss — a **device copy of the bundle is
+a copy of the files, so those two names aren't in it**, and in a proxied session
+a request for them falls through to the host, which has no idea what
+`/StreamLinkBundles/<sha>/…` means and 404s.
+
+That left `native_master_url` unset on the device path (`_appStartLocalPlayback`),
+so `_npOk()` was false, nothing ever armed, and **locking the phone during a
+downloaded episode suspended the app** — with the consequences in the gotcha
+above. `LocalMediaServer.derivedPlaylist` now synthesizes both names from the
+bundle's own `master.m3u8` + `meta.json`, mirroring the Python. If you change
+either generator, change both — and note the subtitle **number** comes from each
+meta entry's `file` (`sub_<n>.vtt`), never from its position in the array, or the
+playlist maps onto the wrong subtitle.
+
 ### Bundle downloads are durable, but only *completed files* survive a kill — partials resume
 `BundleDownloader` writes each finished file straight into the final
 `StreamLinkBundles/<sha>/` dir, then flips `complete` in `index.json` only once

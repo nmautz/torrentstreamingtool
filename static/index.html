@@ -18317,6 +18317,34 @@ function _appProxiedReturnHost() {
   window.location.replace(_appProxyHost);
   return true;
 }
+// Loopback-server repair after a suspension (17.14.0).
+//
+// iOS closes an app's sockets when it SUSPENDS the process, listener included —
+// and on the offline/proxied pages that listener is serving THIS PAGE. So a lock
+// long enough to suspend us left the dashboard alive but stranded on a dead
+// origin: every `/api/*` call through the reverse proxy failed (a "Lost
+// connection to host" banner that never cleared), and the episode played only as
+// far as its buffer reached. The single cure was ending playback, which
+// navigates off the loopback entirely.
+//
+// The native side rebinds the SAME port on every foreground (LocalMediaServer's
+// `heal`) — the port has to be identical or this page's origin points at
+// nothing. This asks it to, then nudges the two things left starved by the dead
+// socket. Inert in a browser, and on an app binary too old to know the method.
+let _appLmsHealing = false;
+async function _appLmsHeal() {
+  if (!(isApp && _cap.lms && _cap.lms.ensureRunning && (_appProxied || _appOffline))) return;
+  if (_appLmsHealing) return;
+  _appLmsHealing = true;
+  try {
+    const r = await _cap.lms.ensureRunning();
+    if (r && r.healed) {
+      if (lp.itemId) { try { _lpKickLoader(); } catch (_) {} }
+      _ensureSSEConnected();
+    }
+  } catch (_) {
+  } finally { _appLmsHealing = false; }
+}
 // Sentinel bundle key the player snapshot is stored under in BundleDownloader —
 // it must never surface in any downloads UI or the durable-queue resumer.
 const _APP_PLAYER_KEY = "__player__";
@@ -18857,6 +18885,14 @@ async function _appStartLocalPlayback(local) {
     local_ladder: (meta && meta.videos) || [],
     ready: true,
     master_url:   base + "master.m3u8",
+    // The native AVPlayer's view of the same bundle (subs declared as HLS
+    // renditions). The host generates this name at serve time and never writes
+    // it to the bundle, so the DEVICE copy has no such file — LocalMediaServer
+    // synthesizes it the same way (see its `derivedPlaylist`). Without it
+    // `_npOk()` is false, nothing arms, and locking the phone mid-episode
+    // suspends the whole app — which kills the loopback server that is serving
+    // this very page. See docs/GOTCHAS.md § a suspended app loses its server.
+    native_master_url: base + "master-native.m3u8",
     duration_sec: meta.duration_sec || 0,
     audios:       meta.audios || [],
     subtitles:    meta.subtitles || [],   // embedded sub_*.vtt renditions live in the bundle
@@ -26147,6 +26183,7 @@ let _sseDisconnectTimer = null;
 let _sse = null;                  // current EventSource instance
 let _sseReconnectTimer = null;    // pending backoff reconnect
 let _sseBackoff = 1000;           // current reconnect delay (ms), reset on open
+let _sseOutageToldUser = false;   // the "lost connection" toast is once per outage
 const _SSE_BACKOFF_MAX = 15000;
 const _SSE_STALE_MS = 50000;      // no ping/event for this long ⇒ assume dead
 function _noteSSEMsg(){ app._lastSSEMsg = Date.now(); }
@@ -26175,6 +26212,12 @@ function connectSSE(){
   // (each open EventSource holds a server-side queue).
   if(_sse){ try{ _sse.close(); }catch(_){} _sse = null; }
   if(_sseReconnectTimer){ clearTimeout(_sseReconnectTimer); _sseReconnectTimer = null; }
+  // Drop any pending grace timer from the connection we just replaced. It was
+  // armed 4 s before the phone locked, so on the FIRST foreground tick it fires
+  // overdue — flipping `_connected` false (and banner-ing) on top of a
+  // reconnect that is already under way. The `open` handler clears it too, but
+  // only once the round trip lands, and a frozen timer beats that every time.
+  if(_sseDisconnectTimer){ clearTimeout(_sseDisconnectTimer); _sseDisconnectTimer = null; }
   app._sseStarted = true;
   _noteSSEMsg();
   const es=new EventSource("/api/events");
@@ -26182,6 +26225,7 @@ function connectSSE(){
   es.addEventListener("open",()=>{
     if(_sseDisconnectTimer){ clearTimeout(_sseDisconnectTimer); _sseDisconnectTimer = null; }
     _sseBackoff = 1000;                       // healthy again — reset backoff
+    _sseOutageToldUser = false;               // next outage gets its own toast
     _noteSSEMsg();
     const wasOffline = !app._connected;
     app._connected = true;
@@ -26448,7 +26492,15 @@ function connectSSE(){
       _sseDisconnectTimer = setTimeout(()=>{
         app._connected = false;
         _sseDisconnectTimer = null;
-        showAlert("Lost connection to host — reconnecting…","warn");
+        // ONCE per outage, not once per retry. Each failed reconnect re-enters
+        // this handler, and the toast only lives 4 s — so a stream that can't
+        // come back (the loopback server died under a proxied session) painted
+        // a yellow banner every few seconds over the episode for the rest of
+        // the file. The red OFFLINE dot carries the state from here on.
+        if(!_sseOutageToldUser){
+          _sseOutageToldUser = true;
+          showAlert("Lost connection to host — reconnecting…","warn");
+        }
       }, 4000);
     }
     // The browser only auto-reconnects while readyState is CONNECTING. Once it's
@@ -26469,7 +26521,7 @@ setInterval(()=>{
 // High-value mobile path: the moment the user comes back to the tab (unlocks the
 // phone / switches back to the app) or the network returns, re-check the stream
 // and reconnect at once if it didn't survive the suspension.
-document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible"){ _ensureSSEConnected(); _appAutoSweep(); } });
+document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible"){ _appLmsHeal(); _ensureSSEConnected(); _appAutoSweep(); } });
 window.addEventListener("pageshow",()=>{ _ensureSSEConnected(); });   // bfcache restore
 window.addEventListener("focus",()=>{ _ensureSSEConnected(); });
 window.addEventListener("online",()=>{ _renderOnlineBadge(); _ensureSSEConnected(); _lpNetOnline(); });
@@ -26762,6 +26814,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.13.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.14.0</div>
 </body>
 </html>

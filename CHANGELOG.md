@@ -1,5 +1,36 @@
 # Changelog
 
+## [17.14.0] — 2026-09-19
+* **Fixed: a downloaded episode going "Lost connection to host" after the phone was
+  locked.** Lock the phone mid-episode with a downloaded copy playing and the app came
+  back stranded: a yellow *Lost connection to host — reconnecting…* banner every few
+  seconds for the rest of the file, the library and its artwork dead, and playback
+  itself stopping the moment it ran past what it had already buffered — all of it
+  cured only by ending playback and starting again. The cause ran deeper than the
+  banner. iOS **suspends** an app that isn't playing anything and closes its sockets,
+  and on a downloaded episode the app is serving its own page (and the bundle, and a
+  reverse proxy to the host) from a loopback server — so the suspension took the whole
+  session's plumbing with it. Three fixes, each of which would have been enough on its
+  own:
+  * **Downloaded episodes now keep playing when you lock the phone,** like streamed
+    ones always have. The background player needs the bundle's native-AVPlayer
+    playlist, which the host generates on the fly and never writes into the bundle, so
+    the device copy simply didn't have one and no handoff ever armed. The on-device
+    server now generates it (and the subtitle playlists it references) exactly as the
+    host does. With audio still playing, iOS never suspends the app in the first place.
+  * **The on-device server now comes back on its own.** It remembers its port and, on
+    every return to the foreground, proves the port still answers — rebinding the *same*
+    number if it doesn't, which is the only way the page's own origin survives. A
+    starved player and the event stream are both nudged once it's back.
+  * **The banner is told once, not forever.** A reconnect that can't succeed re-armed
+    the toast every few seconds; it now speaks once per outage and leaves the red
+    OFFLINE dot to carry the state. Also fixed: a grace timer armed before the phone
+    locked fired *after* the reconnect had already started, flagging a healthy
+    connection as offline — which is what made the rest of the app refuse to talk to
+    the host.
+
+  **📱 Needs an app rebuild from Xcode** (`LocalMediaServer.swift`).
+
 ## [17.13.0] — 2026-09-19
 * **New: a show opens on the episode you're up to.** Watched one to ten and the rest
   still to go? The episode page now opens scrolled to episode eleven instead of at the

@@ -1380,6 +1380,20 @@ from array position, because the serving route maps `sub_<n>.m3u8` straight onto
 URL from the additive `native_master_url` field on `/offline-prepare`,
 `/offline-job/{id}` and `/stream-ondemand`.
 
+**A DOWNLOADED bundle generates the same two names itself (17.14.0).** "On read, never
+on disk" has a consequence that is easy to miss: a device copy is a copy of the
+bundle's *files*, so neither name is in it, and in a proxied session a request for one
+falls through to the host, which doesn't recognise a `/StreamLinkBundles/<sha>/…` path.
+So `_appStartLocalPlayback` had no `native_master_url` to report, `_npOk()` was false,
+**nothing armed, and locking the phone during a downloaded episode suspended the whole
+app** — taking the loopback server (and with it the page's own origin) down with it;
+see [GOTCHAS.md](GOTCHAS.md) § a suspended app loses its loopback server.
+`LocalMediaServer.derivedPlaylist` now synthesizes both from the bundle's own
+`master.m3u8` + `meta.json`, a direct port of `_native_master` /
+`_sub_wrapper_playlist` — **change one, change both** — and the device prep reports
+`native_master_url: <base>/master-native.m3u8` like any streamed file. It is resolved
+*before* the proxy fallthrough, or the host would 404 it.
+
 **On-demand (JIT) is deliberately reduced**: its `master-native.m3u8` is identical to
 `master.m3u8` (video + audio only). OD segments are MPEG-TS, and AVPlayer needs an
 `X-TIMESTAMP-MAP` in the WebVTT to anchor cues to segment PTS — the JIT timeline isn't
@@ -2467,6 +2481,14 @@ player UI works with no host. The pieces:
   `origin + "/StreamLinkBundles/<sha>/"` instead of calling `lms.start`, and
   never sets `_lmsActive`, so nothing ever stops the page's own server). MIME
   map covers html/js/css/wasm — WKWebView won't render an octet-stream page.
+  **What *we* never do, iOS still does**: a suspended app has its sockets closed,
+  and this listener is serving the page itself, so it must be able to come back
+  on the **same port** — `heal()` probes its own `desiredPort` on every
+  `didBecomeActive` (and on the plugin's `ensureRunning()`, which `_appLmsHeal`
+  calls from `visibilitychange`) and rebinds that exact number if nothing
+  answers. A fresh ephemeral port would strand the page's origin, which is why
+  "never restarts" is still the rule for every other reason. See
+  [GOTCHAS.md](GOTCHAS.md) § a suspended app loses its loopback server.
 - **Offline boot mode** (`?offline=1&host=<url>` → `_appOfflineBoot`,
   static/index.html): Downloads-only — profile from `OfflineStore.getProfile()`
   (the loopback origin's localStorage is empty and its port is ephemeral), no
