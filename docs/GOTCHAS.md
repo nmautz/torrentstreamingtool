@@ -4506,3 +4506,19 @@ file never ends up badged Bundle Only.
 The same asymmetry argument applies to anything else that will make a bundle the
 sole copy: establish the claim first, destroy second.
 
+### A background chore triggered by a button cannot use `_machine_in_use` to decide whether to run
+
+`track_activity` stamps `state.last_activity` on every mutating request, and
+`_machine_in_use(window)` reports True for `window` seconds after one. So any
+admin-triggered job that also polls `_machine_in_use` to yield to viewers will
+see the box as busy **because of the request that started it**, and stop before
+doing anything. Source eviction shipped with exactly that bug in 18.1.0: Reclaim
+Now reclaimed nothing, every time, and the status line read "stopped early" with
+no explanation.
+
+The rule: an idle gate belongs on the *scheduled* path, not the *manual* one. A
+manual run should protect the specific resources it is about to touch (is this
+file playing right now, is it being compressed, is a prep job writing its bundle)
+rather than asking a global "is anyone around" question whose answer it just
+falsified itself.
+

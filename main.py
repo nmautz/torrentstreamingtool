@@ -31758,7 +31758,16 @@ async def _run_source_eviction(*, manual: bool = False) -> dict:
                 break
             # Never evict while someone is watching: this is a slow background
             # chore and a viewer's needs outrank it every time.
-            if await _machine_in_use(60):
+            #
+            # MANUAL runs skip this check, and must. `_machine_in_use` counts any
+            # recent mutating HTTP request as activity (`track_activity` stamps
+            # every POST), so the very request that started a manual sweep marks
+            # the box "in use" for the next 60 s — the button would abort on its
+            # own trigger and reclaim nothing, every time. The admin pressing it
+            # IS the intent, and the per-file re-checks in `_evict_one_source`
+            # (current VLC file, live JIT session, compression, prep) still
+            # protect anything actually in use. See docs/GOTCHAS.md.
+            if not manual and await _machine_in_use(60):
                 se["stopped"] = True
                 break
             path = row["path"]

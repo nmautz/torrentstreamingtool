@@ -1,5 +1,18 @@
 # Changelog
 
+## [18.1.1] — 2026-09-19
+* **Fixed: "Reclaim Now" could never reclaim anything — it aborted on its own
+  trigger.** `_run_source_eviction` checks `_machine_in_use(60)` before each file
+  so a sweep yields to a viewer, but `track_activity` stamps `last_activity` on
+  **every** POST — including the `POST /api/admin/source-eviction/run` that starts
+  the sweep. The box therefore read as "in use" for 60 s from the instant the
+  button was pressed, and the loop broke out before deleting a single file. Found
+  by trying to run it against the real library rather than reasoning about it.
+  Manual runs now skip that check: the admin pressing the button is the intent,
+  and the per-file re-checks in `_evict_one_source` (current VLC file, live JIT
+  session, compression, active prep) still protect anything genuinely in use. The
+  automatic loop keeps the idle gate.
+
 ## [18.1.0] — 2026-09-19
 * **The source-eviction sweep is now wired — it can delete.** 18.0.0 measured; this
   acts. `source_eviction_loop` checks free space every 5 minutes (one
