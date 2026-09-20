@@ -20400,14 +20400,44 @@ function _appOpenAppSettings() {
         `openSessions: ${(d.openSessions || []).join(", ") || "(none)"}`,
         "",
       ];
-      const b = (v) => (v ? "Y" : "-");
-      const rows = (d.trail || []).map((r) =>
+      // "?" for a field the native side never sent, so an un-rebuilt app is
+      // distinguishable from one reporting false. Conflating the two cost a run:
+      // scene=- read as "no scene" when it actually meant "old build".
+      const b = (v) => (v === undefined || v === null ? "?" : (v ? "Y" : "-"));
+      const trail = d.trail || [];
+      const rows = trail.map((r) =>
         `${String(r.at).padEnd(19)} ${String(r.t).padStart(6)}s  scr=${r.screens}` +
         ` ext=${b(r.extScreen)} scene=${b(r.extScene)} mir=${b(r.mirrored)}` +
         ` win=${b(r.extWindow)} winScene=${b(r.winScene)} extLyr=${b(r.extLayer)}` +
         ` mainLyr=${b(r.mainLayer)} extPlay=${b(r.extPlayback)} nat=${b(r.native)}` +
         (r.extBounds ? ` ${r.extBounds}` : ""));
-      out.textContent = head.concat(rows.length ? rows : ["(no trail — nothing has locked yet)"]).join("\n");
+
+      // Verdict up front. Two runs in a row were read without ever locking the
+      // phone, which makes every takeover column meaningless - say so loudly
+      // rather than leaving it to be spotted in the rows.
+      const locked = trail.filter((r) => String(r.at).indexOf("locked+") === 0);
+      const oldBuild = trail.length > 0 && trail.every((r) => r.extScene === undefined);
+      const verdict = [];
+      if (oldBuild) {
+        verdict.push("BUILD: OLD - this app has no scene= data, so it predates the fix.",
+                     "       Rebuild (./build-ipa.sh --fast) before any of this means anything.");
+      }
+      if (!locked.length) {
+        verdict.push("RESULT: NO LOCK IN THIS TRAIL - nothing was tested.",
+                     "        Play an episode with the monitor connected, press the power",
+                     "        button, wait 20s, then unlock and press Read.");
+      } else {
+        const L = locked[0];
+        verdict.push(L.winScene && !L.mirrored
+          ? "RESULT: TAKEOVER WORKED - window on the display, mirroring off."
+          : (L.winScene
+              ? "RESULT: window attached to the scene, but mirroring stayed up."
+              : (L.extWindow
+                  ? "RESULT: window built but attached to no scene."
+                  : "RESULT: no window was built - check scene= on the locked row.")));
+      }
+      verdict.push("");
+      out.textContent = head.concat(verdict, rows.length ? rows : ["(no trail yet)"]).join("\n");
     } catch (e) {
       out.textContent = "Failed: " + (e && e.message ? e.message : String(e));
     }
@@ -26873,6 +26903,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.2.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.2.2</div>
 </body>
 </html>

@@ -1,5 +1,19 @@
 # Changelog
 
+## [18.2.2] — 2026-09-20
+* **Fixed: the diagnostics readout couldn't tell "field absent" from "field false",
+  and didn't say when a run tested nothing.** `b()` mapped `undefined` and `false` both
+  to `-`, so an app that predates the `extScene` field looked identical to one reporting
+  no scene — which is exactly how run 2 was misread. Missing fields now print `?`, and
+  an all-`?` trail is called out as **BUILD: OLD**.
+* The readout now leads with a verdict rather than leaving it to be spotted in the rows.
+  Two runs in a row were read **without ever locking the phone**, which makes every
+  takeover column meaningless; that case now says `NO LOCK IN THIS TRAIL - nothing was
+  tested` with the steps to fix it. When a `locked+` row does exist it states the outcome
+  directly: takeover worked / mirroring stayed up / window attached to no scene / no
+  window built.
+* Page-only — no app rebuild needed for this one.
+
 ## [18.2.1] — 2026-09-20
 * **Fixed: Direct mode never attached its window to anything.** 18.2.0 predicted the
   app would have no external-display scene at all and called for a full scene
