@@ -45,6 +45,32 @@ the pool and the socket specifically. That is what `diagnostics.py` does.
 
 ---
 
+## Client logs from the iOS app
+
+`client_<device>.log` in `LOG_DIR` is **not** written by the server — it is uploaded by
+the app through `POST /api/diag/client-log` (☰ App → Settings → Playback → **Send log to
+server**). It is newline-delimited JSON with absolute timestamps, written on the device by
+`DiagLog` in `NativePlayback.swift`, and it survives app restarts, which is the whole
+point: the in-memory diagnostics trail is 40 rows that die with the process and timestamps
+in seconds-since-launch, so it can answer "what happened in this ten-minute test" and
+nothing longer.
+
+Read it like any other log (`/api/admin/logs/client_<device>.log`). Useful rows:
+
+| `ev` | Means |
+|---|---|
+| `launch` | app start — carries the build; use these to split a long log into sessions |
+| `snap` | a diagnostics trail row (every field the Monitor diagnostics panel shows) |
+| `startNative` | handoff began — `reason` (`early`/`background`/`manual`), `shouldPlay`, `extWindow` |
+| `stopNative` | handoff ended, with the position it ended at |
+| `advance` / `ended` | auto-advance to the next episode, or the end of the playlist |
+| `progress` | a progress POST **and its HTTP status** — the thing that was silent while nothing saved |
+| `progress-skipped` | a POST refused by a guard, naming which field was missing or zero |
+| `audio-session-failed` | `setActive` threw, with the app state at the time |
+
+**`progress-skipped` is the row to look for first** when positions are not being saved. A
+silent `guard` hid the duration-0 bug for a full day; that guard now says so.
+
 ## Log files
 
 All under `logs/`, all listed and downloadable from **Admin → System → Server
