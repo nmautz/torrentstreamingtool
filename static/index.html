@@ -20451,6 +20451,18 @@ function _appOpenAppSettings() {
         takeover worked; <b style="color:#c9c9cf;">mir=Y</b> means the monitor was still mirroring the
         lock screen.
       </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;">
+        <div style="font-size:14px;font-weight:700;">Send log to server</div>
+        <button id="appSetLogBtn" style="all:unset;cursor:pointer;min-width:74px;text-align:center;padding:8px 12px;
+          font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#f2f2f4;
+          border:1px solid #3a7afe;">Send</button>
+      </div>
+      <div style="font-size:12px;color:#8a8a92;margin-top:8px;line-height:1.45;">
+        The app keeps a rolling diagnostic log on the device that survives restarts. Send
+        it whenever something looks wrong and it lands in the server's own log list, where
+        it can be read without this phone. Safe to send repeatedly — each send replaces
+        this device's previous copy.
+      </div>
       <pre id="appSetDiagOut" style="display:none;font-size:10px;line-height:1.4;color:#c9c9cf;background:#0d0d10;
         border:1px solid #2a2a30;padding:10px;margin-top:10px;max-height:260px;overflow:auto;
         white-space:pre;user-select:text;-webkit-user-select:text;"></pre>
@@ -20704,6 +20716,28 @@ function _appOpenAppSettings() {
     } catch (e) {
       out.textContent = "Failed: " + (e && e.message ? e.message : String(e));
     }
+  };
+  ov.querySelector("#appSetLogBtn").onclick = async () => {
+    const b = ov.querySelector("#appSetLogBtn");
+    const out = ov.querySelector("#appSetDiagOut");
+    out.style.display = "block";
+    if (!(_cap && _cap.np && _cap.np.sendLog)) {
+      out.textContent = "Not available — rebuild the app to pick this up.";
+      return;
+    }
+    b.textContent = "Sending"; b.disabled = true;
+    try {
+      const r = await _cap.np.sendLog({
+        serverUrl: _npServerUrl(),
+        device: _pbDeviceName() || _pbDeviceId() || "ios",
+      });
+      out.textContent = "Log: " + ((r && r.result) || "?") +
+        "\nStored on the server as client_<device>.log (" + ((r && r.bytes) || 0) + " bytes on device).";
+    } catch (e) {
+      out.textContent = "Send failed: " + (e && e.message ? e.message : String(e)) +
+        "\nIf the server is unreachable, use Monitor diagnostics and copy the text instead.";
+    }
+    b.textContent = "Send"; b.disabled = false;
   };
   ov.querySelector("#appSetExtTgl").onclick = () => {
     const next = _EXT_NEXT[_appPlaybackPrefs().ext] || "early";
@@ -27221,6 +27255,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.6.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.7.0</div>
 </body>
 </html>

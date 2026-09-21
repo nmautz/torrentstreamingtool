@@ -1,5 +1,25 @@
 # Changelog
 
+## [18.7.0] — 2026-09-20
+* **The app now keeps a persistent diagnostic log, and can send it to the server.** The
+  in-memory trail was built for a ten-minute test read off the phone by hand: 40 rows,
+  dead on restart, timestamps in seconds-since-launch. It cannot answer "I used it for
+  three days, here is what happened". `DiagLog` writes newline-delimited JSON with
+  **absolute** timestamps to Caches, halves the file at 3 MB rather than dropping it, and
+  survives restarts. Every launch writes a `launch` row so days of log split into sessions.
+* **Progress POSTs are no longer silent.** Each one records its HTTP status and any error,
+  and — as importantly — a **refused** POST records *which guard* refused it. The
+  duration-0 bug that lost every save hid for a full day behind a silent `guard`.
+  Lifecycle milestones (`startNative` with its play decision, `stopNative`, `advance`,
+  `ended`, `audio-session-failed`) are logged in words rather than only as columns.
+* **`POST /api/diag/client-log`** (new, unauthenticated like `/progress` beside it) drops
+  the upload into `LOG_DIR` as `client_<device>.log`, so it appears in `/api/admin/logs`
+  and can be read without the phone. Body capped at 8 MB; the device string is slugged so
+  a client can never choose a path, and one file per device means a chatty client
+  overwrites itself rather than filling the disk.
+* **☰ App → Settings → Playback → Send log to server** does it in one tap, repeatable.
+  `readLog` returns the text for copying when the host is unreachable.
+
 ## [18.6.1] — 2026-09-20
 * **Fixed: nothing was saving progress at all while playing to the external screen.**
   Every progress POST is gated on `armed.duration > 0`, and duration came **only from the

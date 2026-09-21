@@ -25366,6 +25366,37 @@ def _build_logs_zip(files: list[Path]) -> str:
     return tmp_path
 
 
+@app.post("/api/diag/client-log")
+async def diag_client_log(request: Request) -> JSONResponse:
+    """Receive a diagnostic log from the iOS app and drop it in LOG_DIR.
+
+    Why this exists: the app's own trail lived in memory and had to be read off
+    the phone and pasted by hand, which is fine for a ten-minute test and useless
+    for "use it for a few days and report back". Landing it here makes it show up
+    in `/api/admin/logs` like any other log, so it can be read without the phone.
+
+    Unauthenticated, like `/api/library/{id}/progress` next door — this is a LAN
+    service and the body is inert text. The guards that matter are on SIZE and on
+    the filename: the device string is squeezed to a short safe slug so a client
+    can never choose a path, and one file per device means a chatty client
+    overwrites its own log rather than filling the disk.
+    """
+    raw = await request.body()
+    if len(raw) > 8 * 1024 * 1024:
+        raise HTTPException(413, "Log too large.")
+    text = raw.decode("utf-8", "replace")
+    dev = (request.query_params.get("device") or "unknown")[:40]
+    slug = re.sub(r"[^A-Za-z0-9_-]", "-", dev).strip("-") or "unknown"
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    path = LOG_DIR / f"client_{slug}.log"
+    try:
+        path.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(500, f"Could not write log: {exc}")
+    log.info("Client diagnostic log received: %s (%d bytes)", path.name, len(raw))
+    return JSONResponse({"ok": True, "name": path.name, "bytes": len(raw)})
+
+
 @app.get("/api/admin/logs")
 async def admin_list_logs(request: Request) -> JSONResponse:
     """List every file in LOG_DIR with size + mtime (newest first)."""

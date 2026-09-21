@@ -118,6 +118,9 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "extDiag",   returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setPaused", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "seekTo",    returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "sendLog",   returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "readLog",   returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "clearLog",  returnType: CAPPluginReturnPromise),
     ]
 
     private let mgr = NativePlaybackManager.shared
@@ -184,6 +187,130 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
         mgr.seekTo(call.getDouble("position") ?? 0)
         call.resolve(mgr.snapshot())
     }
+
+    /// Ship the on-disk log to the host, where it lands in `logs/` and can be
+    /// read through /api/admin/logs without touching the phone.
+    @objc func sendLog(_ call: CAPPluginCall) {
+        let server = call.getString("serverUrl") ?? ""
+        let device = call.getString("device") ?? "ios"
+        DiagLog.shared.write("sendLog", ["device": device])
+        DiagLog.shared.upload(serverUrl: server, device: device) { result in
+            call.resolve(["result": result, "bytes": DiagLog.shared.byteCount()])
+        }
+    }
+
+    /// Fallback for when the host is unreachable: hand the text to the page so
+    /// it can be copied or shared.
+    @objc func readLog(_ call: CAPPluginCall) {
+        call.resolve(["text": DiagLog.shared.contents(),
+                      "bytes": DiagLog.shared.byteCount()])
+    }
+
+    @objc func clearLog(_ call: CAPPluginCall) {
+        DiagLog.shared.clear()
+        DiagLog.shared.write("log-cleared", [:])
+        call.resolve(["ok": true])
+    }
+}
+
+// MARK: - Persistent diagnostic log
+
+/// An on-disk log that outlives the process.
+///
+/// The in-memory trail was built for a ten-minute test read off the phone by
+/// hand. It cannot answer "I used it for three days, here is what happened":
+/// it is capped at 40 rows, it dies with the process, and its timestamps are
+/// seconds-since-launch, which say nothing once there have been several
+/// launches. This writes newline-delimited JSON to Caches with ABSOLUTE
+/// timestamps, survives restarts, and is uploaded to the host on demand.
+///
+/// Caches rather than Documents deliberately: this is disposable, and iOS may
+/// reclaim it under storage pressure rather than failing a write.
+final class DiagLog {
+    static let shared = DiagLog()
+
+    private let q = DispatchQueue(label: "streamlink.diaglog", qos: .utility)
+    private let maxBytes = 3 * 1024 * 1024
+    private lazy var url: URL = {
+        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        return dir.appendingPathComponent("streamlink-diag.log")
+    }()
+    private lazy var iso: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    /// One JSON object per line. Never throws into the caller: a diagnostic that
+    /// can break playback is worse than no diagnostic.
+    func write(_ event: String, _ fields: [String: Any] = [:]) {
+        var row: [String: Any] = fields
+        row["t"] = iso.string(from: Date())
+        row["ev"] = event
+        q.async { [weak self] in
+            guard let self = self,
+                  let data = try? JSONSerialization.data(withJSONObject: row),
+                  var line = String(data: data, encoding: .utf8) else { return }
+            line += "\n"
+            self.append(line)
+        }
+    }
+
+    private func append(_ line: String) {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: url.path) {
+            try? line.data(using: .utf8)?.write(to: url)
+            return
+        }
+        guard let h = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? h.close() }
+        _ = try? h.seekToEnd()
+        try? h.write(contentsOf: Data(line.utf8))
+        // Halve the file when it gets large rather than deleting it: losing the
+        // oldest half beats losing the incident that is still being written.
+        if let size = try? fm.attributesOfItem(atPath: url.path)[.size] as? Int,
+           size > maxBytes {
+            try? h.close()
+            if let all = try? String(contentsOf: url, encoding: .utf8) {
+                let lines = all.split(separator: "\n", omittingEmptySubsequences: false)
+                let keep = lines.suffix(lines.count / 2).joined(separator: "\n")
+                try? keep.data(using: .utf8)?.write(to: url)
+            }
+        }
+    }
+
+    func contents() -> String {
+        q.sync { (try? String(contentsOf: url, encoding: .utf8)) ?? "" }
+    }
+
+    func clear() { q.sync { try? FileManager.default.removeItem(at: url) } }
+
+    func byteCount() -> Int {
+        q.sync {
+            (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) as? Int ?? 0
+        }
+    }
+
+    /// POST the whole log to the host so it lands in its `logs/` directory and
+    /// can be read without the phone.
+    func upload(serverUrl: String, device: String, completion: @escaping (String) -> Void) {
+        let body = contents()
+        guard !body.isEmpty else { completion("empty"); return }
+        guard var comps = URLComponents(string: serverUrl) else { completion("bad server url"); return }
+        comps.path = "/api/diag/client-log"
+        comps.queryItems = [URLQueryItem(name: "device", value: device)]
+        guard let url = comps.url else { completion("bad url"); return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("text/plain; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        req.httpBody = Data(body.utf8)
+        req.timeoutInterval = 30
+        URLSession.shared.dataTask(with: req) { _, resp, err in
+            if let err = err { completion("failed: \(err.localizedDescription)"); return }
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            completion(code == 200 ? "sent \(body.count) bytes" : "server said \(code)")
+        }.resume()
+    }
 }
 
 // MARK: - External player view
@@ -231,6 +358,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private var mainLayer: AVPlayerLayer?
     private var bgTask: UIBackgroundTaskIdentifier = .invalid
     private var lastProgressPost = Date.distantPast
+    private var lastProgressSkipLog = Date.distantPast
     /// Cross-device session heartbeat. 5 s rather than the web player's 2 s — the
     /// host reaps at 15 s, so three beats is still a comfortable margin, and this
     /// one runs with the screen off.
@@ -259,6 +387,11 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     // MARK: Lifecycle
 
     func bootstrap() {
+        DiagLog.shared.write("launch", [
+            "build": "18.7.0",
+            "ios": UIDevice.current.systemVersion,
+            "model": UIDevice.current.model,
+        ])
         PlaybackCommandBus.sink = self
         restoreStrandedBrightness()
         // Cold start: nothing is playing yet, so any playback activity still on
@@ -393,6 +526,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             audioEverActivated = true
         } catch {
             audioSessionError = "\(Self.stateName(UIApplication.shared.applicationState)): \(error.localizedDescription)"
+            DiagLog.shared.write("audio-session-failed", ["reason": audioSessionError])
         }
     }
 
@@ -518,6 +652,10 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             name: .AVPlayerItemDidPlayToEndTime, object: it)
 
         installTimeObserver(on: p)
+        DiagLog.shared.write("startNative", ["reason": reason, "at": startAt,
+                                            "shouldPlay": shouldPlay,
+                                            "title": armed.title,
+                                            "extWindow": extWindow != nil])
         emit("nativeStarted", ["reason": reason, "position": startAt,
                                "extMode": armed.extMode,
                                "extWindow": extWindow != nil,
@@ -651,7 +789,20 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     /// Mirrors saveProgress()'s endpoint and its near-zero guard.
     private func maybePostProgress(_ t: Double, force: Bool = false) {
         guard t >= 5, armed.duration > 0, !armed.itemId.isEmpty, !armed.filePath.isEmpty,
-              !armed.serverUrl.isEmpty else { return }
+              !armed.serverUrl.isEmpty else {
+            // The duration-0 bug was invisible for a day because this guard is
+            // silent. Log the refusal, throttled so a stopped player cannot flood.
+            if force || Date().timeIntervalSince(lastProgressSkipLog) >= 60 {
+                lastProgressSkipLog = Date()
+                DiagLog.shared.write("progress-skipped", [
+                    "pos": t, "dur": armed.duration,
+                    "item": armed.itemId.isEmpty ? "MISSING" : "ok",
+                    "file": armed.filePath.isEmpty ? "MISSING" : "ok",
+                    "server": armed.serverUrl.isEmpty ? "MISSING" : "ok",
+                ])
+            }
+            return
+        }
         guard force || Date().timeIntervalSince(lastProgressPost) >= 15 else { return }
         lastProgressPost = Date()
 
@@ -669,7 +820,14 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             "position_sec": t,
             "duration_sec": armed.duration,
         ])
-        URLSession.shared.dataTask(with: req).resume()   // best-effort
+        let logged: [String: Any] = ["pos": t, "dur": armed.duration,
+                                    "item": armed.itemId, "profile": armed.profileId]
+        URLSession.shared.dataTask(with: req) { _, resp, err in
+            var row = logged
+            row["status"] = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if let err = err { row["err"] = err.localizedDescription }
+            DiagLog.shared.write("progress", row)
+        }.resume()   // best-effort, but no longer silent
     }
 
     // MARK: Cross-device playback session
@@ -774,11 +932,14 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             if !armed.nextItemId.isEmpty { armed.itemId = armed.nextItemId }
             armed.url = next
             armed.nextUrl = nil
+            DiagLog.shared.write("advance", ["to": armed.filePath, "item": armed.itemId])
             emit("nativeAdvanced", ["filePath": armed.filePath, "url": next.absoluteString])
             replaceItem(with: next)
             return
         }
         endedFlag = true
+        DiagLog.shared.write("ended", ["file": armed.filePath, "dur": armed.duration,
+                                       "hadNext": false])
         emit("nativeEnded", ["filePath": armed.filePath])
         stopNative(endActivity: true)
     }
@@ -873,6 +1034,11 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     }
 
     private func stopNative(endActivity: Bool) {
+        if isNativeActive {
+            DiagLog.shared.write("stopNative", ["pos": armed.position,
+                                               "title": armed.title,
+                                               "ended": endedFlag])
+        }
         handBackDeadline?.cancel(); handBackDeadline = nil
         if let p = player, let obs = timeObserver { p.removeTimeObserver(obs) }
         timeObserver = nil
@@ -1460,6 +1626,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         ]
         if let b = ext?.bounds { row["extBounds"] = "\(Int(b.width))x\(Int(b.height))" }
         diagTrail.append(row)
+        DiagLog.shared.write("snap", row)
         // A lock/unlock cycle produces ~6 rows; keep a few cycles, drop the rest.
         if diagTrail.count > 40 { diagTrail.removeFirst(diagTrail.count - 40) }
     }
@@ -1517,7 +1684,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             // Bump with any change to this file. Two runs have already been
             // ambiguous about whether the app had been rebuilt, and the trail
             // should never leave that in doubt.
-            "build": "18.6.1",
+            "build": "18.7.0",
             "audioSession": sessionActivated ? "active now"
                              : (audioEverActivated ? "released (was active)" : "NEVER ACTIVATED"),
             "audioError": audioSessionError,
