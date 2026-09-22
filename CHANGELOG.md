@@ -1,5 +1,41 @@
 # Changelog
 
+## [18.7.1] — 2026-09-21
+* **Fixed: every episode lost its tail, and an episode advance lost more than that.**
+  `disarm()` reset `armed` as its **first** statement and only then called `stopNative()`,
+  which made it the one teardown path that saves nothing — the hand-back deadline and
+  `reclaim()` both post a final forced progress first. Because progress posts are
+  throttled to 15 s, everything watched since the last beat had nowhere to go; and
+  `lpUnloadCurrent` calls `disarm()` on a normal episode **advance**, so it fired on every
+  file change, not just at stop. The order is now flush → stop → wipe.
+  Found in `client_iPhone-app.log`: `stopNative` logged `title:"" pos:0`, and 13 ms later a
+  trailing observer tick offered a real position of **322.26 s** to an all-`MISSING` guard
+  that threw it away.
+* **A time-observer tick can no longer run after teardown.** `removeTimeObserver` does not
+  cancel blocks already queued on `.main`, so one more tick landed against a wiped `armed`
+  — which is what produced those all-`MISSING` rows and hid the bug above behind what
+  looked like ordinary teardown noise.
+* **The log can now tell teardowns apart.** `_npDisarm(reason)` threads a reason
+  (`unload`, `stop`, `yield`, `transport-next`/`-prev`, `bgplay-off`, `not-armable`)
+  through to a new `disarm` row carrying position, title and whether a flush happened.
+  Every teardown previously looked identical in the trail, so an episode advance and a
+  real stop were indistinguishable when reading back a day of playback.
+* **`progress-skipped` now names the guard that fired** (`why`: `near-start`,
+  `duration-0`, `no-item`, `no-file`, `no-server`) and records `native` and `final`. Three
+  different situations shared one row: a refusal while a player is up is a bug, one after
+  teardown is expected, and a sub-5 s position is correct behaviour.
+* **`progress` rows now carry `file` and `final`.** The forced flush at teardown is the
+  one post whose absence means a lost tail — it was previously indistinguishable from the
+  routine 15 s beats.
+* **The build stamp is one constant (`NP_BUILD`), not two literals.** It is the only
+  trustworthy version signal the app has (`CFBundleShortVersionString` is pinned at 1.0),
+  so a field that exists to answer "was this really rebuilt" must not disagree with itself.
+* **Fixed: "Send log to server" blamed a stale build for a stale WebView.** It said
+  *"rebuild the app to pick this up"* when the plugin method was missing. The binary was
+  current and self-reporting the right build; the bridge in a WebView session started
+  before the app was updated simply doesn't expose the new method. It now says to
+  force-quit and reopen first, and to suspect the build only if that doesn't fix it.
+
 ## [18.7.0] — 2026-09-20
 * **The app now keeps a persistent diagnostic log, and can send it to the server.** The
   in-memory trail was built for a ten-minute test read off the phone by hand: 40 rows,

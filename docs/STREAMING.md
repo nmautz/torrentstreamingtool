@@ -1698,6 +1698,16 @@ exit/transition:
 
 `lpStop` and `ended` flush via `saveProgress` directly.
 
+**In the app, the native player writes its own progress and has its own flush
+rule** (`maybePostProgress` in `NativePlayback.swift`) — the webview's JS timers
+are frozen while backgrounded, so none of the above runs once the phone is
+locked. Same endpoint, same 15 s throttle, and the same need for a forced flush
+at teardown. All four teardown paths must post `force: true` **before** tearing
+down, and `disarm()` must flush and stop **before** it resets `armed`: it reset
+first until 18.7.1, which silently dropped the tail of every episode and fired
+on every advance, not just at stop. See
+[GOTCHAS.md § The one teardown path that wiped its state before saving it](GOTCHAS.md).
+
 `update_progress` preserves the file's existing `audio_track` /
 `subtitle_track` (VLC ES IDs) **and** `local_audio_idx` /
 `local_subtitle_idx` / `subtitle_sel` / `audio_sel` / `audio_offset_ms` (HLS

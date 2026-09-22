@@ -53,6 +53,15 @@ import AVFoundation
 import MediaPlayer
 import UIKit
 
+/// The build stamp both the launch row and the external-display header carry.
+///
+/// Bump with any change to this file. It is the ONLY trustworthy version signal
+/// the app has — `CFBundleShortVersionString` is pinned at 1.0 and never moves,
+/// and the dashboard badge belongs to the host, not to the installed binary.
+/// It lived as two separate string literals until 18.7.1; a field that exists to
+/// answer "was this really rebuilt" must not be able to disagree with itself.
+let NP_BUILD = "18.7.1"
+
 // MARK: - Armed state
 
 /// What the web player last told us it was doing. Pure data — arming does no
@@ -145,7 +154,7 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func disarm(_ call: CAPPluginCall) {
-        mgr.disarm()
+        mgr.disarm(reason: call.getString("reason") ?? "unspecified")
         call.resolve()
     }
 
@@ -388,7 +397,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
 
     func bootstrap() {
         DiagLog.shared.write("launch", [
-            "build": "18.7.0",
+            "build": NP_BUILD,
             "ios": UIDevice.current.systemVersion,
             "model": UIDevice.current.model,
         ])
@@ -575,9 +584,29 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     /// touch its own element.
     var isHolding: Bool { isNativeActive && extWindow != nil }
 
-    func disarm() {
+    func disarm(reason: String = "unspecified") {
+        // ORDER IS LOAD-BEARING: flush, then stop, then wipe.
+        //
+        // This used to reset `armed` as its FIRST statement, which quietly made
+        // it the only teardown path that saves nothing. The hand-back deadline
+        // and reclaim() both post a final forced progress before stopNative();
+        // this one wiped itemId/filePath/serverUrl/duration first, so the last
+        // up-to-15 s of every episode — everything since the throttle last let a
+        // post through — had nowhere to go. Worse, `lpUnloadCurrent` calls it on
+        // a normal episode ADVANCE, so it fired on every file change.
+        //
+        // Measured on 2026-09-22 (client_iPhone-app.log): stopNative logged
+        // `title:"" pos:0`, and 13 ms later a trailing observer tick reported a
+        // real position of 322.26 s against an all-MISSING guard and dropped it.
+        let hadPlayer = isNativeActive
+        if hadPlayer { maybePostProgress(armed.position, force: true) }
+        DiagLog.shared.write("disarm", ["reason": reason,
+                                        "pos": armed.position,
+                                        "title": armed.title,
+                                        "native": hadPlayer,
+                                        "flushed": hadPlayer])
+        stopNative(endActivity: true)   // reads armed.title/position for its own row
         armed = ArmedPlayback()
-        stopNative(endActivity: true)
         // Deliberately does NOT exit TV Mode. The two are orthogonal: disarm
         // fires on every file teardown (including a normal episode advance,
         // which briefly has no armed URL), and dropping the blackout there would
@@ -747,6 +776,11 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             queue: .main
         ) { [weak self] time in
             guard let self = self else { return }
+            // removeTimeObserver does not cancel blocks already queued on .main,
+            // so one more tick can land AFTER teardown. Running it would report
+            // a live position against a wiped `armed` — which is exactly the
+            // all-MISSING progress-skipped row that hid the disarm bug.
+            guard self.isNativeActive else { return }
             let t = time.seconds
             guard t.isFinite else { return }
             self.armed.position = t
@@ -794,11 +828,28 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             // silent. Log the refusal, throttled so a stopped player cannot flood.
             if force || Date().timeIntervalSince(lastProgressSkipLog) >= 60 {
                 lastProgressSkipLog = Date()
+                // Name the guard that actually fired rather than making a reader
+                // re-derive it from five fields. `near-start` in particular is
+                // correct behaviour (it mirrors saveProgress's near-zero guard),
+                // so it must not read as a failure — which it did when the row
+                // only showed "everything else looks ok".
+                let why: String = t < 5 ? "near-start"
+                    : armed.duration <= 0 ? "duration-0"
+                    : armed.itemId.isEmpty ? "no-item"
+                    : armed.filePath.isEmpty ? "no-file"
+                    : "no-server"
                 DiagLog.shared.write("progress-skipped", [
+                    "why": why,
                     "pos": t, "dur": armed.duration,
                     "item": armed.itemId.isEmpty ? "MISSING" : "ok",
                     "file": armed.filePath.isEmpty ? "MISSING" : "ok",
                     "server": armed.serverUrl.isEmpty ? "MISSING" : "ok",
+                    // Whether a player was still up separates the two cases that
+                    // look identical in the log: a refusal during playback (a
+                    // bug, something never got armed) from one after teardown
+                    // (harmless, the state is meant to be gone).
+                    "native": isNativeActive,
+                    "final": force,
                 ])
             }
             return
@@ -820,8 +871,12 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             "position_sec": t,
             "duration_sec": armed.duration,
         ])
+        // `final` marks the one post that matters most when reading a log: the
+        // forced flush at teardown. The routine 15 s beats are interchangeable;
+        // if this one is missing or non-200, that episode lost its tail.
         let logged: [String: Any] = ["pos": t, "dur": armed.duration,
-                                    "item": armed.itemId, "profile": armed.profileId]
+                                    "item": armed.itemId, "profile": armed.profileId,
+                                    "file": armed.filePath, "final": force]
         URLSession.shared.dataTask(with: req) { _, resp, err in
             var row = logged
             row["status"] = (resp as? HTTPURLResponse)?.statusCode ?? 0
@@ -1681,10 +1736,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             "connectedScenes": roles,
             "openSessions": openRoles,
             "externalDisplayScene": roles.contains(where: { $0.contains("ExternalDisplay") }),
-            // Bump with any change to this file. Two runs have already been
-            // ambiguous about whether the app had been rebuilt, and the trail
-            // should never leave that in doubt.
-            "build": "18.7.0",
+            "build": NP_BUILD,
             "audioSession": sessionActivated ? "active now"
                              : (audioEverActivated ? "released (was active)" : "NEVER ACTIVATED"),
             "audioError": audioSessionError,

@@ -4612,3 +4612,69 @@ file playing right now, is it being compressed, is a prep job writing its bundle
 rather than asking a global "is anyone around" question whose answer it just
 falsified itself.
 
+
+## The one teardown path that wiped its state before saving it (18.7.1)
+
+`NativePlayback` has four ways to stop the native player, and three of them post
+a final forced progress before tearing down: the hand-back deadline in
+`appDidBecomeActive`, `reclaim()`, and `appWillTerminate`. `disarm()` did not —
+it reset `armed` as its **first** statement and only then called `stopNative()`:
+
+```swift
+func disarm() {
+    armed = ArmedPlayback()   // itemId, filePath, serverUrl, duration all gone
+    stopNative(endActivity: true)
+}
+```
+
+Two consequences, and the second is the expensive one:
+
+- **`stopNative`'s own log row reads its values off `armed`**, so every stop
+  logged `title:"" pos:0` — the teardown looked empty rather than wrong.
+- **Progress posts are throttled to 15 s**, so everything watched since the last
+  beat needed a forced flush that never came. And `lpUnloadCurrent` calls
+  `_npDisarm()` on a normal episode **advance** — deliberately, so a background
+  transition can't hand off to a torn-down source — so this fired on every file
+  change, not only at stop.
+
+What made it hard to see: `removeTimeObserver` does **not** cancel blocks already
+queued on `.main`. One more tick landed ~13 ms after teardown, offered a real
+position (measured: 322.26 s) to `maybePostProgress`, and was refused by a guard
+that then reported `item MISSING file MISSING server MISSING` — which reads like
+ordinary post-teardown noise, not like a save being dropped.
+
+The rule: **flush, then stop, then wipe** — and a guard that refuses a write
+should log enough to say whether the state it wanted was *supposed* to be gone.
+`progress-skipped` now carries `native` (was a player still up?) for exactly
+that, and `disarm` rows carry a `reason` threaded from JS so an advance, a stop
+and a yield are no longer indistinguishable in the trail.
+
+## A current binary behind a stale WebView bridge (18.7.1)
+
+18.7.0 added the `sendLog` plugin method. Pressing **☰ App → Settings → Send log
+to server** did nothing visible, and the UI said *"Not available — rebuild the
+app to pick this up"*. The app had **not** been rebuilt was the obvious reading,
+and it was wrong: every `launch` row in the log self-reported `build 18.7.0`,
+including the session where the tap failed. An app relaunch fixed it with no
+rebuild at all.
+
+Capacitor's JS bridge takes its method list from `pluginMethods` when the bridge
+initialises. A WebView session that has been alive since before the app was
+updated keeps the old list, so `_cap.np.sendLog` is `undefined` even though the
+running binary defines and registers it.
+
+So when a new plugin method appears to be missing, the order is **relaunch
+first, rebuild second** — and don't let a diagnostic's own error message assert
+the rarer cause. Two related traps:
+
+- **`CFBundleShortVersionString` cannot settle this.** It is
+  `$(MARKETING_VERSION)`, pinned at 1.0 and never bumped, so `build-ipa.sh`'s
+  closing `Version:` line proves nothing (see § stale builds). The trustworthy
+  signal is `NP_BUILD` in `NativePlayback.swift`, stamped onto every `launch`
+  row and the external-display diagnostic header — **bump it with any change to
+  that file**. It was two separate string literals until 18.7.1; a field whose
+  whole job is answering "was this really rebuilt" must not be able to disagree
+  with itself.
+- **The dashboard badge is the host's version, not the app's.** The box serves
+  `static/index.html`, so the button can appear the moment the *server* updates,
+  long before the phone has a binary that can answer it.

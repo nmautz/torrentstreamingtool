@@ -63,13 +63,49 @@ Read it like any other log (`/api/admin/logs/client_<device>.log`). Useful rows:
 | `snap` | a diagnostics trail row (every field the Monitor diagnostics panel shows) |
 | `startNative` | handoff began — `reason` (`early`/`background`/`manual`), `shouldPlay`, `extWindow` |
 | `stopNative` | handoff ended, with the position it ended at |
+| `disarm` | teardown, with the `reason` threaded from JS (`unload` = episode advance, `stop`, `yield`, `transport-next`/`-prev`, `bgplay-off`, `not-armable`), the position, and whether a final flush was posted |
 | `advance` / `ended` | auto-advance to the next episode, or the end of the playlist |
-| `progress` | a progress POST **and its HTTP status** — the thing that was silent while nothing saved |
-| `progress-skipped` | a POST refused by a guard, naming which field was missing or zero |
+| `progress` | a progress POST **and its HTTP status** — the thing that was silent while nothing saved. `final: true` marks the forced flush at teardown |
+| `progress-skipped` | a POST refused by a guard — `why` names the guard that fired (`near-start`, `duration-0`, `no-item`, `no-file`, `no-server`), plus `native` (was a player still up?) |
 | `audio-session-failed` | `setActive` threw, with the app state at the time |
 
 **`progress-skipped` is the row to look for first** when positions are not being saved. A
 silent `guard` hid the duration-0 bug for a full day; that guard now says so.
+
+Read `why` first, then `native`:
+
+- **`why: near-start`** — correct behaviour, not a failure. Positions under 5 s are not
+  saved (the native mirror of `saveProgress`'s near-zero guard).
+- **`why: no-item` / `no-file` / `no-server` with `native: true`** — a player was up and
+  a write was still refused, so something was never armed, or `armed` was cleared out
+  from under a live player. That is a bug.
+- **anything with `native: false`** — the player is already gone, so the state is *meant*
+  to be missing. Expected noise.
+- **`why: duration-0`** — the shape of the bug 18.6.1 fixed; worth a second look if it
+  reappears.
+
+That distinction is what 18.7.1 added, and it is the distinction that had been hiding the
+disarm-order bug: a real 322 s position was being dropped by a row that looked exactly
+like harmless post-teardown noise. See
+[GOTCHAS.md § The one teardown path that wiped its state before saving it](GOTCHAS.md).
+
+**Pair every `disarm` with the `progress` row before it.** A `disarm` with
+`flushed: true` should be immediately preceded by a `progress` row carrying
+`final: true` and a 200. If that row is missing or non-200, that episode lost its
+tail — which is precisely what could not be seen before these fields existed.
+
+### The build stamp
+
+Every `launch` row carries `build`, sourced from the single `NP_BUILD` constant in
+`NativePlayback.swift`. **This is the only trustworthy version signal the app has** —
+`CFBundleShortVersionString` is pinned at 1.0 and never bumped, and the dashboard badge
+belongs to the host, not to the installed binary. Bump `NP_BUILD` with any change to that
+file, or a log cannot answer whether a fix is actually on the phone.
+
+Note that a current `build` does **not** guarantee a current JS bridge: a WebView session
+started before the app was updated keeps the old plugin method list, so a newly added
+plugin method can be missing from a binary that defines it. Relaunch before concluding
+anything about the build (see GOTCHAS.md § A current binary behind a stale WebView bridge).
 
 ## Log files
 

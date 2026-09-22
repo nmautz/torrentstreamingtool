@@ -18627,7 +18627,7 @@ function _npPayload() {
 // Full state push. Cheap on the native side (a struct assignment), so it's fine
 // to call on every material change.
 function _npArm() {
-  if (!_npOk()) { _npDisarm(); return; }
+  if (!_npOk()) { _npDisarm("not-armable"); return; }
   try { _cap.np.arm(_npPayload()); _npArmed = true; } catch (_) {}
 }
 
@@ -18648,10 +18648,13 @@ function _npTick() {
   } catch (_) {}
 }
 
-function _npDisarm() {
+function _npDisarm(reason) {
   if (!isApp || !_cap.np || !_npArmed) return;
   _npArmed = false;
-  try { _cap.np.disarm(); } catch (_) {}
+  // The reason rides along purely for the diagnostic log: every teardown looked
+  // alike there, so an episode advance and a real stop could not be told apart
+  // when reading back a day of playback.
+  try { _cap.np.disarm({ reason: reason || "unspecified" }); } catch (_) {}
 }
 
 // Foreground hand-back. Adopts the native player's playhead and returns control
@@ -18734,8 +18737,8 @@ function _npBindEvents() {
       if (wasHolding && lp.itemId) _lpAdvanceOrEnd();
     });
     _cap.np.addListener("nativeAdvanced", (e) => {
-      if (e && e.request === "next") { _npDisarm(); lpNextEp(); }
-      else if (e && e.request === "prev") { _npDisarm(); lpPrevEp(); }
+      if (e && e.request === "next") { _npDisarm("transport-next"); lpNextEp(); }
+      else if (e && e.request === "prev") { _npDisarm("transport-prev"); lpPrevEp(); }
       else if (e && e.filePath) {
         lp._nativeAdvancedTo = e.filePath;
         // Native advanced in place. Follow it: move the playlist cursor, warm the
@@ -18772,7 +18775,7 @@ function _npBindEvents() {
       // moment the app comes back to the foreground — can't flush and stop a
       // second time against a session that is already gone.
       _pbYielding = true;
-      _npDisarm();
+      _npDisarm("yield");
       Promise.resolve(lpStop()).catch(() => {}).then(() => { _pbYielding = false; });
       showAlert(`Playback moved to ${to}.`, "info");
     });
@@ -20722,7 +20725,16 @@ function _appOpenAppSettings() {
     const out = ov.querySelector("#appSetDiagOut");
     out.style.display = "block";
     if (!(_cap && _cap.np && _cap.np.sendLog)) {
-      out.textContent = "Not available — rebuild the app to pick this up.";
+      // "Rebuild" was the wrong first guess and it cost an evening: the binary
+      // was already current and self-reporting the right build, but the bridge
+      // in a WebView session that predates the install does not expose the new
+      // plugin method. A relaunch fixes that; a rebuild is only the answer if it
+      // survives one.
+      out.textContent = "Not available in this session.\n\n"
+        + "Force-quit the app and reopen it, then try again — a WebView started "
+        + "before the app was updated keeps the old plugin list.\n\n"
+        + "If it still says this after a relaunch, the installed build really is "
+        + "older than 18.7.0 and needs rebuilding.";
       return;
     }
     b.textContent = "Sending"; b.disabled = true;
@@ -20750,7 +20762,7 @@ function _appOpenAppSettings() {
     try { localStorage.setItem(_APP_BGPLAY_KEY, next ? "1" : "0"); } catch (_) {}
     paintPlaybackTgls();
     // Take effect immediately for the file already playing.
-    if (next) _npArm(); else _npDisarm();
+    if (next) _npArm(); else _npDisarm("bgplay-off");
   };
   ov.querySelector("#appSetTvTgl").onclick = () => {
     const next = !_appPlaybackPrefs().tv;
@@ -25620,8 +25632,9 @@ async function lpUnloadCurrent() {
   const v = document.getElementById("lpVideo");
   // Disarm FIRST: past this point there's no valid file to hand off, and a
   // background transition landing mid-teardown would start the native player on
-  // a torn-down source.
-  _npDisarm();
+  // a torn-down source. Native flushes a final progress post before it wipes its
+  // state, so disarming first no longer costs the outgoing episode its tail.
+  _npDisarm("unload");
   try { v.pause(); } catch (_) {}
   _lpTeardownOctopus();   // drop any styled-sub libass overlay before the src changes
   _lpDestroyHls();
@@ -25646,7 +25659,7 @@ async function lpStop() {
   const wasHolding = _npHolding;
   // Playback is over: no handoff, and drop TV Mode so the phone's screen comes
   // back (setTvMode(false) is idempotent and restores brightness).
-  _npDisarm();
+  _npDisarm("stop");
   _npHolding = false; _npStopPoll();
   if (_npTvMode) _npSetTvMode(false);
   lp._nativeMaster = null; lp._nextNative = null;
@@ -27255,6 +27268,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.7.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.7.1</div>
 </body>
 </html>
