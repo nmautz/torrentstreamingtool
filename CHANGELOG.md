@@ -1,5 +1,43 @@
 # Changelog
 
+## [18.15.2] — 2026-09-23
+### The prefix must contain the bundle ID — and this app is sideloaded
+
+18.15.1 registered the exact identifier immediately before submitting it, as
+Apple DTS requires, and `cpt-register` still came back **`ok: false`** — which
+the SDK documents as meaning the identifier "isn't included in the
+`BGTaskSchedulerPermittedIdentifiers` Info.plist". It plainly is.
+
+The requirement that was being missed: *"the prefix of the identifier must at
+least contain the bundle ID of the submitting application"*. **This app is
+sideloaded**, so the bundle ID it actually runs under is whatever the re-signing
+tool wrote, which need not be the `com.streamlink.client` it was built with. A
+hardcoded prefix is then a prefix of nothing, and every registration is refused
+for an identifier that looks perfectly correct.
+
+`cptPrefix` is now derived from `Bundle.main.bundleIdentifier` at runtime. That
+is right whether or not the ID was rewritten, and costs nothing either way.
+
+If it was rewritten, the Info.plist's permitted wildcard is still the build-time
+literal and cannot match — nothing in the app can fix that, so the rows now say
+so outright rather than leaving it to be inferred:
+
+- `cpt-register` carries **`bundle`** (the ID actually in force) and **`plist`**
+  (the permitted list as the *installed* bundle presents it, read back at
+  runtime). Between them, a `false` is now self-explaining.
+- `launch` carries `bundle` too. Several iOS APIs key off it and none of them
+  were observable before.
+
+### `NP_BUILD` was stamped 18.15.0 on an 18.15.1 build
+
+The bump landed *after* the final build, so the shipped IPA carried the previous
+stamp with the current code — visible in the transcript as an 18.15.0 `launch`
+above rows only 18.15.1 could write (`conns: 0`, the per-request
+`cpt-register`). The stamp is the one trustworthy version signal on device, so
+it is worth more care than that: **bump, then build.**
+
+- `NP_BUILD` → **18.15.2**.
+
 ## [18.15.1] — 2026-09-23
 ### A wildcard you may permit but must not register, and a reload that reloads nothing
 

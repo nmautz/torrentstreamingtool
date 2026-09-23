@@ -60,7 +60,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "18.15.1"
+let NP_BUILD = "18.15.2"
 
 // MARK: - Armed state
 
@@ -828,6 +828,9 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             "build": NP_BUILD,
             "ios": UIDevice.current.systemVersion,
             "model": UIDevice.current.model,
+            // Sideloading can rewrite this, and several iOS APIs key off it —
+            // BGTaskScheduler's permitted-identifier prefix most of all.
+            "bundle": Bundle.main.bundleIdentifier ?? "?",
         ])
         PlaybackCommandBus.sink = self
         restoreStrandedBrightness()

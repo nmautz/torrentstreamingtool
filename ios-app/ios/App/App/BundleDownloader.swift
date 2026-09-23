@@ -284,8 +284,19 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     /// Registered as the wildcard; each request appends a unique suffix. The SDK
     /// header: "the prefix of the identifier must at least contain the bundle ID
     /// of the submitting application ... finally ending with `.*`".
-    static let cptWildcard = "com.streamlink.client.downloads.*"
-    static let cptPrefix = "com.streamlink.client.downloads."
+    // DERIVED AT RUNTIME, not hardcoded. The SDK requires that "the prefix of the
+    // identifier must at least contain the bundle ID of the submitting
+    // application" — and this app is SIDELOADED, so the bundle ID it actually
+    // runs under is whatever the re-signing tool wrote, which need not be the
+    // `com.streamlink.client` we built with. A hardcoded prefix is then a prefix
+    // of nothing and every registration is refused, which is exactly what
+    // 18.15.1 measured: `cpt-register ok:false` for an identifier that looked
+    // correct. Reading it back from the running bundle costs nothing and is right
+    // in both cases.
+    static var cptPrefix: String {
+        (Bundle.main.bundleIdentifier ?? "com.streamlink.client") + ".downloads."
+    }
+    static var cptWildcard: String { cptPrefix + "*" }
     /// The live task. Type-erased: this file compiles against a 15.0 target.
     private var cptTask: Any?
     /// True while the system is keeping us alive. Read on `queue`.
@@ -339,8 +350,19 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
                 forTaskWithIdentifier: id, using: .main) { [weak self] task in
                     self?.beginContinuedProcessing(task)
                 }
+            // WHAT THE RUNNING APP ACTUALLY BELIEVES. `register` returns false
+            // "if the identifier isn't included in the BGTaskSchedulerPermittedIdentifiers
+            // Info.plist" — so on a false, the two things worth knowing are the
+            // bundle ID it is really running under and the permitted list as the
+            // installed (re-signed) bundle presents it. Either can differ from
+            // what was built, and neither was observable before.
+            let permitted = (Bundle.main.object(
+                forInfoDictionaryKey: "BGTaskSchedulerPermittedIdentifiers") as? [String]) ?? []
             DiagLog.shared.write("cpt-register", [
-                "ok": reg, "id": id, "permits": BundleDownloadManager.cptWildcard,
+                "ok": reg, "id": id,
+                "permits": BundleDownloadManager.cptWildcard,
+                "plist": permitted.joined(separator: ","),
+                "bundle": Bundle.main.bundleIdentifier ?? "?",
             ], cat: "offline")
             guard reg else {
                 self.queue.async { self.cptSubmitted = false }
