@@ -1434,7 +1434,11 @@ locked**, `streamlink_app_extmode`, passed through `arm()` as `extMode`):
 > late — the scene is gone by then. `maybeClaimEarly()` claims it on `arm`, while
 > foreground, and `didBecomeActive` does **not** hand it back (doing so returns the
 > display to mirroring on every unlock, and the next lock kills it again).
-> `sceneDidConnect` reclaims if the scene returns mid-session.
+> `sceneDidConnect` reclaims if the scene returns mid-session — **by calling
+> `maybeClaimEarly()`, not by repeating it.** Claiming and handing off are one act:
+> until 18.11.0 that site did the claim alone, so a display plugged in mid-episode
+> got a window of ours with no player in it (mirroring replaced, glasses black,
+> episode still playing on the phone) until the user stopped and restarted.
 >
 > **3. The player must be started early too.** iOS lets a backgrounded app
 > *continue* audio; it does not let one *start* a fresh `AVPlayer`. The old model
@@ -1454,6 +1458,19 @@ locked**, `streamlink_app_extmode`, passed through `arm()` as `extMode`):
 > `setPaused` / `seekTo`; `_lpCtlSync` and `_lpCtlTick` read a 1 Hz mirror of the
 > native transport (`_npStartPoll`), because the element is parked at a stale
 > position; `_lpFlushProgress` and `lpStop` must never write that stale position.
+>
+> **6. …and the hold ends when the DISPLAY does (18.11.0).** `_npHolding` is only
+> true because native owns a window on the monitor, so unplugging the monitor ends
+> it: the window dies with its scene and the AVPlayer is left decoding into nothing
+> while the page still defers to it. `_npOnDisplayChange(false)` now hands back —
+> but **only while `document.visibilityState === "visible"`**, because handing back
+> to a suspended WKWebView stops playback outright; unplugged-while-locked is
+> repaired on the return to the foreground instead, which is why the
+> `visibilitychange` guard is `_npHolding && _npExternal` rather than `_npHolding`.
+> `_npHandBack()` clears the flag itself once `resume()` confirms native stopped.
+> Note that the unplug's audio-session interruption (`reason: 4`,
+> `.routeDisconnected`) gets **no `ended` event** — nothing will resume the native
+> player for you, and nothing should.
 >
 > **Measuring it:** ☰ App → Settings → Playback → **Monitor diagnostics** calls
 > `NativePlayback.extDiag()`. It prints the app build, page version, audio-session

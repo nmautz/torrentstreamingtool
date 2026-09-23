@@ -18735,6 +18735,11 @@ async function _npHandBack() {
   // Handing back here would stop the player feeding the display. Leave the web
   // element paused where it is; disarm/stop is what ends the session.
   if (r.holding) return;
+  // Native did stop, so the page is no longer a remote. Clearing this HERE
+  // rather than at each call site is what makes the display-lost hand-back
+  // below safe: while it stayed true, every control kept reading _npNativePos
+  // from a player that no longer exists and the element was left parked.
+  _npHolding = false; _npStopPoll();
   const v = _lpV(); if (!v) return;
 
   // Native auto-advanced into the next episode while we were away — resync the
@@ -18947,9 +18952,35 @@ function _npOnDisplayChange(connected) {
   if (!connected) {
     if (_npTvOfferTimer) { clearTimeout(_npTvOfferTimer); _npTvOfferTimer = null; }
     if (_npTvMode) _npSetTvMode(false);
+    // THE DISPLAY LEAVING ENDS THE HOLD.
+    //
+    // `_npHolding` means "the native player IS the presentation" — true only
+    // because it owns a window on the monitor. Unplug the monitor and that
+    // window dies with its scene, so native is left decoding into nothing while
+    // the page still defers to it: the element stays parked, every control
+    // reads a phantom playhead, and the visibilitychange hand-back refuses to
+    // run because it (correctly, for a display that is still there) skips while
+    // holding. Nothing cleared it short of relaunching the app, which is what
+    // "disconnecting mid playback needs an app restart" was.
+    //
+    // resume() is the existing handshake and does the whole job: native flushes
+    // its position, stops, and deactivates the audio session so WebKit can have
+    // it back, and we adopt the playhead into the element.
+    //
+    // Only while VISIBLE. Unplugging with the phone locked should leave the
+    // native player alone — handing back to a suspended WKWebView would kill
+    // playback outright. The event is still queued for the return to
+    // foreground, and the visibilitychange path below catches that case.
+    if (_npHolding && document.visibilityState === "visible") {
+      _npLog("display-lost-handback", { file: lp.filePath, at: _npNativePos }, "ext");
+      _npHandBack().catch(() => {});
+    }
     return;
   }
-  if (!lp.itemId || !_appPlaybackPrefs().tv || _npTvMode) return;
+  // No TV Mode offer while native holds the display: early mode has already
+  // REPLACED mirroring there, so blanking the phone feeds nothing — it just
+  // risks a stranded backlight for a screen nobody is looking at.
+  if (!lp.itemId || !_appPlaybackPrefs().tv || _npTvMode || _npHolding) return;
   if (_npTvOfferTimer) return;
 
   // Self-contained countdown chip — the player has no generic toast, and TV Mode
@@ -26395,7 +26426,14 @@ function _lpAttachVideoEvents() {
     // While native holds the display there is nothing to hand back and nothing
     // to recover: the element is deliberately parked. Probing it here is what
     // left the on-device player "loading" after an unlock.
-    if (_npHolding) return;
+    //
+    // …but only while the display is actually still THERE. Unplugged while we
+    // were backgrounded, `_npHolding` describes a player with no surface, and a
+    // bare `if (_npHolding) return` then refused the one hand-back that could
+    // repair it — on this return and every one after. `_npExternal` is set from
+    // the same displayChanged event, which may land either side of this
+    // handler; whichever arrives second does the hand-back.
+    if (_npHolding && _npExternal) return;
     _npHandBack().then(() => {
       setTimeout(_lpRecoverActiveSub, 400);
       setTimeout(_lpRecoverMediaPipeline, 600);
@@ -27492,6 +27530,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.10.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.11.0</div>
 </body>
 </html>

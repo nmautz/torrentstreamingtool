@@ -144,6 +144,8 @@ JS-written rows carry `src: "js"`.
 | `advance` | the page advancing — `holding`, `ext`, `nextArmed`, and `path` (`normal` vs `teardown-rebuild`) |
 | `native-advanced` | the **good** end-of-episode advance: native switched file without releasing the display |
 | `hold-start` | native took the display; `elementWasPlaying` says whether a second engine was running |
+| `display-handoff` | a display arrived **mid-episode** and the native player took it over on the spot (18.11.0). Follows a `sceneConnect` snap and its `earlyClaim`/`earlyHandoff` pair. Its absence after a `sceneConnect` with `native=false` is the pre-18.11.0 bug: window claimed, no player in it, glasses black |
+| `display-lost-handback` | the display went away while native held it, so the page took playback back into its own element (18.11.0). Foreground only — unplugging while locked deliberately leaves the native player alone |
 | `play-while-holding` | the web element tried to play while native held the display — always a bug, and it names the path |
 | `setPaused` | who paused/resumed, by `src` (`user-transport`, `remote-play`, `remote-pause`, `transport-toggle`) |
 | `transport` | a `timeControlStatus` change, with `requested`/`by` |
@@ -258,6 +260,42 @@ row if the session was taken, and an `interruption-resumed` row when we put it b
 `flushed: true` should be immediately preceded by a `progress` row carrying
 `final: true` and a 200. If that row is missing or non-200, that episode lost its
 tail — which is precisely what could not be seen before these fields existed.
+
+### Recipe: "I plugged the glasses in (or pulled them out) mid-episode"
+
+Plugging and unplugging during playback are two different failures with the same shape:
+the display and the player disagree about who is presenting, and nothing reconciles them.
+
+**Plugged in mid-episode.** Read forward from the `screenChange` snap that shows
+`screens=2`:
+
+- `sceneConnect` → `earlyClaim` → `earlyHandoff` → `startNative` → `hold-start` →
+  **`display-handoff`** is the whole correct sequence. The episode moves to the glasses
+  where the user is looking.
+- `sceneConnect` with `native=false` and **nothing after it** is the pre-18.11.0 bug.
+  `extWindow=True, winOnExt=True, extLayer=False` in the snap says it exactly: we claimed
+  the display (which replaces mirroring, so the glasses go black) and never put a player
+  in the window. Playback carried on down on the phone. Only a stop/start fixed it,
+  because only a fresh arm ran the claim-and-hand-off routine.
+
+**Unplugged mid-episode.** Read forward from `sceneDisconnect`:
+
+- With `native=True` in that snap, expect `route` (`old-device-gone`), an `interruption`
+  with `type: began`, and then **`display-lost-handback`**. The page takes the episode
+  back into its own element and plays on.
+- **There is no `interruption` with `type: "ended"` for this**, and there never will be:
+  a route-disconnect interruption (`reason: 4`) is not one iOS resolves. Do not go looking
+  for the `ended` that would have triggered `interruption-resumed`; handling the route
+  change is the app's job, which is what the hand-back is.
+- `display-lost-handback` missing, with `snap` rows still showing `native=True` and no
+  `extWindow`, is the pre-18.11.0 bug: the page stayed a remote for a player with no
+  surface. Its tell is a run of `setPaused` / `transport` pairs a second or two apart —
+  the user pressing play, seeing nothing, and pressing pause again — with the position
+  creeping forward the whole time. Nothing short of relaunching the app cleared it.
+
+Unplugging while the phone is **locked** is not this bug. The native player is left alone
+on purpose (handing back to a suspended WKWebView would stop playback outright), so the
+hand-back lands on the return to the foreground instead.
 
 ### The build stamp
 

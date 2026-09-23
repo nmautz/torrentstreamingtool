@@ -1,5 +1,45 @@
 # Changelog
 
+## [18.11.0] — 2026-09-22
+### Plugging the glasses in, and pulling them out, mid-episode
+
+Both were reported the same day and turned out to be the same mistake twice: the code
+treated a display appearing or vanishing as **housekeeping** — claim a window, clear a
+reference, tell the page — when it is the moment that decides which engine is showing the
+episode. The transcript for 2026-09-23 has both, six minutes apart.
+
+**Plug in mid-playback and the glasses went black while the phone kept playing.**
+`sceneDidConnect` had a copy of the first half of `maybeClaimEarly()` — claim the external
+scene, attach a layer — and stopped there. Claiming that scene *replaces mirroring*, so
+the monitor goes black, and with no native player yet the layer attach is a documented
+no-op. So we took the display away from mirroring and put nothing on it, while the episode
+carried on down on the phone. Stopping and restarting playback fixed it only because a
+fresh arm is the one other caller of the routine that claims **and** hands off. It now
+calls that routine instead of re-implementing half of it, and logs `display-handoff`.
+
+**Unplug mid-playback and only relaunching the app brought the picture back.**
+`_npHolding` means "the native player is the presentation" — true only because native owns
+a window on the monitor. Unplug the monitor and that window dies with its scene, leaving
+an AVPlayer decoding into nothing while the page still deferred to it: element parked by
+design, every control reading a playhead from a player with no surface, and the foreground
+hand-back declining to run because it skips while holding. The log shows what that felt
+like — play, pause, play, pause, a second apart, position creeping forward the whole time.
+Losing the display now ends the hold and hands the episode back to the page's own element
+(`display-lost-handback`), the `visibilitychange` guard asks whether the display is still
+*there* rather than just whether we are holding, and `_npHandBack()` clears the flag itself
+once the native side confirms it stopped.
+
+**Unplugging while the phone is locked deliberately does none of that.** Handing back to a
+suspended WKWebView would stop playback outright, so the native player is left alone and
+the hand-back waits for the return to the foreground. Worth knowing for the next reader:
+an HDMI unplug raises an audio-session interruption with `reason: 4` (`.routeDisconnected`)
+and **no `ended` ever arrives**, so nothing resumes that player on its own — handling the
+route change is the app's job, and the hand-back is how.
+
+Also: no TV Mode offer while native holds the display. Early mode has already replaced
+mirroring there, so blanking the phone screen feeds nothing and only risks a stranded
+backlight.
+
 ## [18.10.0] — 2026-09-22
 ### The log learns to report its own death
 

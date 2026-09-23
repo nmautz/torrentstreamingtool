@@ -60,7 +60,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "18.10.0"
+let NP_BUILD = "18.11.0"
 
 // MARK: - Armed state
 
@@ -2291,7 +2291,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         guard (note.object as? UIWindowScene) != nil else { return }
         onMain { [weak self] in
             guard let self = self else { return }
-            if (self.isNativeActive || self.earlyClaim), self.wantsOwnExternalWindow,
+            if self.isNativeActive, self.wantsOwnExternalWindow,
                self.extWindow == nil, self.armed.active {
                 // Drop the consolation prize first — two surfaces for one player
                 // would have AVFoundation's route and our window fighting over
@@ -2302,6 +2302,31 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             }
             self.diagSnap("sceneConnect")
             self.emit("displayChanged", self.displayInfo())
+
+            // PLUGGING IN MID-EPISODE IS AN ARM, NOT JUST A SCENE.
+            //
+            // This used to inline the CLAIM half of maybeClaimEarly() and stop
+            // there, so a display that arrived while the page was already playing
+            // got a window of ours with no player layer in it — the glasses went
+            // black (mirroring replaced) while the episode carried on down on the
+            // phone. Measured 2026-09-23: sceneConnect at 02:52:37 with
+            // native=false, and nothing changed until the user stopped and
+            // restarted playback, which is what "connecting mid playback needs a
+            // stop/start" was.
+            //
+            // Claiming and handing off are one act and always were; the copy was
+            // the bug. maybeClaimEarly() is idempotent and guards on
+            // `extWindow == nil`, so the branch above (native already running,
+            // its window died with an earlier scene) still wins and this is then
+            // a no-op. Called AFTER the snap so the transcript keeps a reading of
+            // the moment the scene landed, before the claim rewrites it.
+            let wasNative = self.isNativeActive
+            self.maybeClaimEarly()
+            if !wasNative, self.isNativeActive {
+                DiagLog.shared.write("display-handoff", [
+                    "at": self.armed.position, "title": self.armed.title,
+                ], cat: "ext")
+            }
         }
     }
 

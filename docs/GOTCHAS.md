@@ -4753,6 +4753,61 @@ that should have said so said `near-start` instead.
 dragged `armed.position` backwards once a second and a native seek was undone
 within a second of being made.
 
+## A display arriving or leaving mid-episode is a HANDOFF, not a notification (18.11.0)
+
+Both halves of this were the same mistake: the code treated a display change as
+housekeeping — claim a window, clear a reference, emit `displayChanged` — when it is the
+moment that decides *which engine presents the episode*. Measured 2026-09-23.
+
+**Plugged in mid-playback: `sceneDidConnect` inlined half of `maybeClaimEarly()`.** It
+did the claim (`detachFallbackLayer` / `ensureExternalWindow` / `attachExternalLayer`) and
+stopped there. Claiming the external scene *replaces mirroring*, so the glasses went
+black; with no player yet, `attachExternalLayer()` is a documented no-op ("no-op until
+startNative makes a player"), so nothing ever filled the window. The episode carried on
+down on the phone behind a black monitor. The transcript reads `sceneConnect` with
+`extWindow=True, winOnExt=True, extLayer=False, native=False` — and then nothing, for
+seven seconds, until the user stopped and restarted playback, because a fresh arm is the
+only other caller of the routine that claims **and** hands off.
+
+The fix is that `sceneDidConnect` calls `maybeClaimEarly()` rather than re-implementing
+its first half. It is idempotent and guards on `extWindow == nil`, so the pre-existing
+branch (native already running, its window died with an earlier scene) still wins.
+**If you ever find yourself copying the claim sequence to a third site, that is the bug.**
+
+**Unplugged mid-playback: `_npHolding` outlived the display it described.** It means "the
+native player IS the presentation", which is only true because native owns a window on the
+monitor. Unplug the monitor and the window dies with its scene, leaving an AVPlayer
+decoding into nothing — while the page still deferred to it. Every control read
+`_npNativePos` from a player with no surface, the element stayed parked by design, and
+the foreground hand-back refused to run because of
+
+```js
+if (_npHolding) return;   // in the visibilitychange handler
+```
+
+which is right while the display is still there and wrong the moment it is gone. Nothing
+cleared the flag short of relaunching the app — the reported "disconnecting mid playback
+needs an app restart". Three things fix it, and all three are needed:
+
+1. `_npOnDisplayChange(false)` hands back when `_npHolding` and the page is **visible**.
+2. That guard is now `if (_npHolding && _npExternal) return;`, so an unplug that happened
+   while backgrounded is repaired on the return to the foreground. `_npExternal` is set
+   from the same `displayChanged` event and may land either side of `visibilitychange` —
+   whichever runs second does the hand-back.
+3. `_npHandBack()` clears `_npHolding` itself, once `resume()` confirms native stopped.
+   Clearing it at the call sites is what left it set on this path in the first place.
+
+**Do not hand back while the phone is locked.** `document.visibilityState` is the guard:
+returning playback to a suspended WKWebView stops it outright. Unplugging while locked
+leaves the native player alone, which is also what the user wants (the alternative is the
+phone speaker taking over in their pocket).
+
+**And there is no `interruption ended` to wait for.** An HDMI unplug raises an
+audio-session interruption with `reason: 4` (`.routeDisconnected`), iOS pauses the player,
+and **no `ended` ever arrives** — so `audioInterruption`'s resume path, which is gated on
+`type == .ended`, never runs. That is not a bug in the handler; a route-disconnect
+interruption is the app's to resolve, and the hand-back is how.
+
 ## An async log queue cannot report the crash that killed it (18.10.0)
 
 `DiagLog.write` builds the row on the calling thread, hands it to a serial queue and
