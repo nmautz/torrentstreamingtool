@@ -369,6 +369,16 @@ The axis is **suspended vs not**, not foreground vs background — locked was
 `BGContinuedProcessingTask` keeps the app out of suspension and the penalty
 disappears: 621 files / 384.7 MB in 131 s, most of it backgrounded.
 
+**`la-progress` now carries the conditions, not just the bytes** (18.17.0):
+`tasks` (in-flight download tasks, capped at 24), `jobs`, `mem`
+(`os_proc_available_memory()` in MB — headroom before jetsam), `grant` (seconds the
+continued-processing task has been held, `-1` when none), `bg`, `cpt`. It runs on
+its own 30 s clock whenever jobs exist, so **silence now means the process stopped**,
+not "the bytes stopped" and not "the Island was suppressed" — both of which it used
+to mean. It also refreshes the run marker, so a `prev-launch-dirty` dates the death
+to within one beat and repeats `grant` / `tasks` / `mem` / `jobs` as they were at
+the end.
+
 **Window length is the confound; measure over a minute or not at all.** The UIKit
 assertion buys ~25–30 s of full speed before `dl-bgtask-expired`, so a short
 window looks healthy even with no continued-processing task: measured 29.5 s →

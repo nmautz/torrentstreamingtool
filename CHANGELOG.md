@@ -1,5 +1,58 @@
 # Changelog
 
+## [18.17.0] — 2026-09-23
+### 9,051 concurrent download tasks
+
+The overnight run queued twenty-one episodes — 8.23 GB — and `startDownload` gave
+**every pending file a live `URLSessionDownloadTask` the moment its job was
+created**, with no ceiling across jobs. The app was killed while backgrounded
+(`prev-launch-dirty was:"bg"`, and **no `cpt-expired`**, so the grant never expired:
+the process died underneath it). Five hours produced 477 files — **5.5% of the
+queue**, all of it on the first episode.
+
+One bundle is ~620 tasks and the 18.15.2 run proved that is fine. Twenty-one is
+fifteen times that, and nothing downloads faster for having been asked for all at
+once — the per-host connection limit means the surplus is pure standing cost, in
+this process and in `nsurlsessiond`.
+
+There is now a global working set of **24** in-flight tasks, refilled by `pump()`
+as files land, fail or are cancelled. `enqueue` has exactly two callers, `pump` and
+`migrateTasks`, and that is the invariant to preserve. Jobs are pumped in queue
+order via `jobOrder`, so bundles complete **one at a time** rather than twenty-one
+in parallel — one watchable episode beats twenty-one half-episodes. Files in retry
+backoff are tracked in `job.backoff` so the pump cannot jump the wait.
+
+Modelled over 80 randomised runs (21 jobs × 618 files, transient failures, fatal
+cancels, migrations): drains every time, peak in-flight exactly 24.
+
+### The heartbeat stopped when the Island did — my regression, and it cost the test
+
+`la-progress` was written inside `DownloadLiveActivity.sync()`, so 18.16.0's
+suppression under a grant suppressed **the byte counter along with the UI**. The
+result: ~452 MB landed somewhere inside a five-hour silence and nothing in the
+transcript can say whether that took two minutes or four hours. A byte counter is
+evidence, not decoration; the drawing may be turned off and the evidence may not.
+
+It now lives in `BundleDownloadManager.emitHeartbeat()` and runs whatever the UI is
+doing. It is also **on its own 30-second clock** rather than hanging off the
+progress callback — a heartbeat driven by arriving bytes says nothing when the
+bytes stop, which is the only reason anyone reads one.
+
+New fields on `la-progress`: `tasks` (in-flight), `jobs`, `mem`
+(`os_proc_available_memory()`, MB — the flood hypothesis is testable against
+nothing else), `grant` (seconds the continued-processing task has been held, `-1`
+when none), `bg`, `cpt`.
+
+### A death under a grant now leaves a mark
+
+`prev-launch-dirty since:` was the last foreground/background **transition**, which
+in an overnight run is five hours before anything interesting. The heartbeat now
+refreshes the run marker, so `since` becomes the time of death ± one beat, and the
+marker carries `grant` / `tasks` / `mem` / `jobs` — the conditions **at** death,
+which no row written before it can be. `prev-launch-dirty` reports them.
+
+- `NP_BUILD` → **18.17.0**.
+
 ## [18.16.0] — 2026-09-23
 ### One download, one progress bar
 

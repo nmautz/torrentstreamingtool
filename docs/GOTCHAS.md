@@ -3760,6 +3760,54 @@ Traps, all of which fail silently:
   shipped; one evening's transcript had 16 transient retries, so a night would
   have bled over a blip at a time with nothing naming it.
 
+### Enqueue every file at once and a big queue kills the app (fixed 18.17.0)
+`startDownload` created a live `URLSessionDownloadTask` for every pending file the
+moment a job was created, with **no ceiling across jobs**. One bundle is ~620 tasks
+and measurably fine. The 2026-09-23 overnight run queued twenty-one episodes:
+**9,051 concurrent tasks over 8.23 GB**, the app was killed while backgrounded, and
+five hours yielded 5.5% of the queue — all of it on the first episode.
+
+Two things make the surplus pure cost rather than merely untidy: a task is not free
+in this process *or* in `nsurlsessiond`, and the per-host connection limit means
+asking for 9,051 at once downloads nothing faster than asking for 24. There is now
+a global working set (`maxInFlight = 24`) refilled by `pump()`.
+
+**The invariant: `enqueue` has exactly two callers, `pump` and `migrateTasks`.**
+Anything that enqueues directly re-opens the hole. `migrateTasks` is exempt because
+it cancels and re-enqueues the same file, so the count is preserved. Every terminal
+event for a file must be followed by a `pump()` — a slot that frees with no pump
+behind it strands the entire queue — and files in retry backoff sit in
+`job.backoff` so the pump cannot jump the wait.
+
+Jobs are pumped in `jobOrder`, i.e. bundles finish **sequentially**. That is
+deliberate: one watchable episode beats twenty-one half-episodes, and it is also
+why the overnight failure only ever had one bundle's worth of progress to show.
+
+**A continued-processing grant does not protect against being killed.** The
+transcript is unambiguous — `prev-launch-dirty was:"bg"` with **no `cpt-expired`**,
+so the grant never expired and the expiry→migrate fallback never ran; the process
+died under it. CPT buys scheduling, not immunity.
+
+### A suppressed UI must not take the evidence with it (self-inflicted, 18.16.0 → 18.17.0)
+`la-progress` — the byte heartbeat — was written inside
+`DownloadLiveActivity.sync()`. 18.16.0 suppressed the Island under a grant by
+returning from `updateLiveActivity` before that call, and so suppressed **the
+measurement along with the drawing**. One night later ~452 MB had landed inside a
+five-hour silence with no way to tell two minutes from four hours apart.
+
+Two rules came out of it:
+- **A UI and its instrument are different concerns.** Only one of them may ever be
+  switched off. The heartbeat now lives with whoever owns the bytes
+  (`BundleDownloadManager.emitHeartbeat`), not with whoever draws them.
+- **A heartbeat driven by the progress callback is not a heartbeat.** It says
+  nothing when the bytes stop, which is the only case anybody reads one for. It
+  runs on its own 30 s clock while jobs exist.
+
+The same beat refreshes the run marker, so `prev-launch-dirty since:` means "last
+seen alive" rather than "last foreground/background transition", and the marker
+carries `grant` / `tasks` / `mem` / `jobs` — conditions **at** death, which no row
+written before it can be.
+
 ### A suspended app's transfers are ~100× slower — and that is the ONLY thing that costs (measured 18.14.2, cured 18.15.2)
 Same link, same device, same evening, 2026-09-23. The number that matters is not
 foreground-vs-background, it is **suspended-vs-not**:

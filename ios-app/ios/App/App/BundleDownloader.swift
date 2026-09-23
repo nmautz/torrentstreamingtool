@@ -48,6 +48,7 @@
 //          "bundleError"    { sha, itemId, filePath, message }
 //
 
+import os
 import Foundation
 import UIKit
 import Capacitor
@@ -657,6 +658,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         var pending: Set<String> = []           // file names still downloading
         var attempts: [String: Int] = [:]       // fileName -> transient-error retry count
         var tasks: [String: URLSessionDownloadTask] = [:]  // fileName -> live task (for synchronous fg/bg migration)
+        var backoff: Set<String> = []           // files waiting on a retry timer — the pump must not jump them
         var cancels: [String: Int] = [:]        // fileName -> cancels seen, ever (see didCompleteWithError)
         var cancelGen: [String: Int] = [:]      // fileName -> migration generation of its last cancel
         init(itemId: String, filePath: String, name: String, baseUrl: String, token: String?, files: [BundleFile]) {
@@ -666,6 +668,26 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         var totalBytes: Int64 { files.reduce(0) { $0 + max($1.size, 0) } }
     }
     private var jobs: [String: Job] = [:]
+    /// Insertion order for `jobs`, which is a Dictionary and has none. The pump
+    /// walks this, so bundles finish in the order they were queued — which is what
+    /// you want: one watchable episode beats twenty-one half-episodes.
+    private var jobOrder: [String] = []
+
+    /// THE FLOOD. `startDownload` gave every pending file a live
+    /// URLSessionDownloadTask the moment the job was created, with no ceiling
+    /// across jobs. One bundle is ~620 tasks and measurably fine. On 2026-09-23 a
+    /// twenty-one-episode queue made it **9,051 concurrent tasks** over 8.23 GB;
+    /// the app was killed while backgrounded (`prev-launch-dirty was:"bg"`, no
+    /// `cpt-expired` — so the grant never expired, the process died under it) and
+    /// five hours yielded 5.5% of the queue.
+    ///
+    /// A URLSession task is not free in this process or in `nsurlsessiond`, and
+    /// nothing downloads faster for having been asked for all at once: the
+    /// per-host connection limit means the surplus is pure standing cost. Hold a
+    /// working set and refill it as files land.
+    private static let maxInFlight = 24
+    /// Live tasks across every job. Cheap: `jobs` is tens of entries, not thousands.
+    private var inFlight: Int { jobs.values.reduce(0) { $0 + $1.tasks.count } }
 
     // MARK: storage layout
 
@@ -889,7 +911,9 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             // continued-processing request. Kept alongside the old assertion, not
             // instead of it: if the system refuses, everything below is unchanged.
             submitContinuedProcessing(name: name)
-            for f in toFetch { enqueue(sha: cacheKey, file: f, job: job) }
+            if !jobOrder.contains(cacheKey) { jobOrder.append(cacheKey) }
+            pump()
+            scheduleHeartbeat()
             result = StartResult(dir: dir.path, alreadyComplete: false)
         }
         if let e = thrown { throw e }
@@ -991,6 +1015,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
 
     private func cancelLocked(sha: String) {
         jobs[sha] = nil
+        jobOrder.removeAll { $0 == sha }
         endBgTaskIfIdle()
         // A file's task can be on either session (depending on app state when it was
         // enqueued / last migrated), so sweep both.
@@ -1001,6 +1026,8 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         }
         cancelMatching(session)
         cancelMatching(fgSession)
+        // This job's slots are gone; hand them to whatever is still queued.
+        pump()
     }
 
     private func enqueue(sha: String, file: BundleFile, job: Job, session sess: URLSession? = nil) {
@@ -1028,6 +1055,35 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         // synchronously on a fg/bg transition (no async getAllTasks round-trip).
         job.tasks[file.name] = task
         task.resume()
+    }
+
+    /// Top the working set back up to `maxInFlight`, in queue order. Assumes `queue`.
+    ///
+    /// Called after every terminal event for a file (landed, failed, cancelled) and
+    /// whenever a job is added. Idempotent and cheap, so over-calling is safe and
+    /// under-calling is the only real hazard — a file that leaves the working set
+    /// without a pump behind it strands the whole queue.
+    private func pump() {
+        var budget = Self.maxInFlight - inFlight
+        guard budget > 0 else { return }
+        for sha in jobOrder {
+            guard let job = jobs[sha] else { continue }
+            // `files` order, not `pending` — a Set has no order and segment order
+            // is the order a player would want them in anyway.
+            for f in job.files {
+                guard budget > 0 else { return }
+                // Re-checked every iteration, not once: `enqueue` can fail a bad
+                // URL straight into emitError + cancelLocked, which drops the job
+                // out from under this loop. (`jobOrder` itself is safe to mutate
+                // while iterating — Swift is iterating a copy.)
+                guard jobs[sha] != nil else { break }
+                guard job.pending.contains(f.name),
+                      job.tasks[f.name] == nil,
+                      !job.backoff.contains(f.name) else { continue }
+                enqueue(sha: sha, file: f, job: job)
+                budget -= 1
+            }
+        }
     }
 
     // Move every in-flight transfer for the active jobs onto `dst` on a
@@ -1093,11 +1149,18 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             job.attempts[fileName] = n
             job.liveBytes[fileName] = nil               // this attempt's bytes are gone
             job.tasks[fileName] = nil                   // no live task during backoff — migrate must skip it
+            job.backoff.insert(fileName)                // …and the pump must not jump the wait either
             let delay = Double(min(n * 3, 30))          // linear backoff, capped at 30 s
             queue.asyncAfter(deadline: .now() + delay) {
                 guard self.jobs[sha] != nil else { return }   // cancelled meanwhile
-                self.enqueue(sha: sha, file: f, job: job)
+                job.backoff.remove(fileName)
+                // Through the pump, not straight to enqueue: the wait is over, but
+                // that is no reason to exceed the ceiling. If the working set is
+                // full this file is simply next in line.
+                self.pump()
             }
+            // The backing-off file has vacated its slot; give it to another.
+            pump()
             return
         }
         emitError(sha: sha, job: job, message: message)
@@ -1113,6 +1176,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         var idx = readIndex()
         if var entry = idx[sha] { entry["complete"] = true; idx[sha] = entry; writeIndex(idx) }
         jobs[sha] = nil
+        jobOrder.removeAll { $0 == sha }
         endBgTaskIfIdle()
         emit("bundleComplete", ["sha": sha, "itemId": job.itemId, "filePath": job.filePath, "dir": bundleDir(sha).path])
         // End the Live Activity (terminal frame) when the last job finishes, else
@@ -1147,6 +1211,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             "bytesDone": job.doneBytes.values.reduce(0, +), "bytesTotal": job.totalBytes,
         ], cat: "offline")
         jobs[sha] = nil
+        jobOrder.removeAll { $0 == sha }
         endBgTaskIfIdle()
         emit("bundleError", ["sha": sha, "itemId": job.itemId, "filePath": job.filePath, "message": message])
         if jobs.isEmpty {
@@ -1285,6 +1350,14 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         }
         let title = jobs.count == 1 ? soleName : "\(jobs.count) downloads"
         let frac = total > 0 ? min(1.0, Double(done) / Double(total)) : 0
+        // THE HEARTBEAT RUNS WHETHER OR NOT ANYTHING IS DRAWN, and 18.16.0 got
+        // that wrong in the most expensive way available: `la-progress` was
+        // written inside DownloadLiveActivity.sync(), so suppressing the Island
+        // under a grant suppressed the byte counter with it. The 2026-09-23
+        // overnight run then died somewhere inside a five-hour silence with no way
+        // to date it, and ~452 MB of progress could have taken two minutes or four
+        // hours. The UI and the evidence are different concerns; only one of them
+        // may ever be turned off.
         // TWO PROGRESS BARS FOR ONE DOWNLOAD. A granted continued-processing task
         // brings the system's own progress UI — with a cancel button — and ours
         // duplicated it, which is worse than either alone: two readouts that can
@@ -1299,6 +1372,60 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         DownloadLiveActivity.shared.sync(title: title, bytesDone: done, bytesTotal: total,
                                          fraction: frac, filesDone: filesDone,
                                          fileCount: fileCount, force: force)
+    }
+
+    private var beatScheduled = false
+
+    /// ON ITS OWN CLOCK, and that is the entire point. The obvious place to hang
+    /// a progress heartbeat is the progress callback — and a heartbeat driven by
+    /// arriving bytes says nothing at all when the bytes stop, which is the one
+    /// case anybody ever reads it for. A download that has wedged and a download
+    /// that has finished quietly must not look the same.
+    ///
+    /// Runs only while there are jobs, so an idle app writes nothing. Assumes `queue`.
+    private func scheduleHeartbeat() {
+        guard !beatScheduled, !jobs.isEmpty else { return }
+        beatScheduled = true
+        queue.asyncAfter(deadline: .now() + 30) { [weak self] in
+            guard let self = self else { return }
+            self.beatScheduled = false
+            guard !self.jobs.isEmpty else { return }
+            self.emitHeartbeat()
+            self.scheduleHeartbeat()
+        }
+    }
+
+    /// `la-progress` plus the conditions that would explain a death. Also
+    /// refreshes the run marker, which is what turns `prev-launch-dirty since:`
+    /// from "when it went background" into "when it was last alive" — the
+    /// difference between a five-hour window and a thirty-second one. Assumes `queue`.
+    private func emitHeartbeat() {
+        var done: Int64 = 0, total: Int64 = 0, filesDone = 0, fileCount = 0
+        var soleName = ""
+        for (_, j) in jobs {
+            done += j.doneBytes.values.reduce(0, +) + j.liveBytes.values.reduce(0, +)
+            total += j.totalBytes
+            filesDone += j.doneBytes.count
+            fileCount += j.files.count
+            soleName = j.name
+        }
+        let title = jobs.count == 1 ? soleName : "\(jobs.count) downloads"
+        let live = inFlight
+        // Bytes this process may still allocate before jetsam. The flood
+        // hypothesis for the overnight kill is testable only against this number,
+        // and nothing else in the transcript carries it.
+        let mem = Int(os_proc_available_memory() / (1024 * 1024))
+        let grant = cptActive ? Int(Date().timeIntervalSince(cptStartedAt)) : -1
+        DiagLog.shared.write("la-progress", [
+            "kind": "download", "title": title, "done": done, "total": total,
+            "files": filesDone, "of": fileCount,
+            "pct": total > 0 ? Int(Double(done) / Double(total) * 100) : 0,
+            "tasks": live, "jobs": jobs.count, "mem": mem, "grant": grant,
+            "bg": !appActive, "cpt": cptActive,
+        ], cat: "offline")
+        DiagLog.shared.touchMarker([
+            "tasks": live, "jobs": jobs.count, "mem": mem, "grant": grant,
+        ])
     }
 
     private func decode(taskDescription: String?) -> (sha: String, file: String)? {
@@ -1371,6 +1498,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             job.pending.remove(fileName)
             self.emitProgress(sha: sha, job: job)
             if job.pending.isEmpty { self.markComplete(sha, job: job) }
+            self.pump()   // a slot just opened — refill it or the queue stalls
         }
     }
 

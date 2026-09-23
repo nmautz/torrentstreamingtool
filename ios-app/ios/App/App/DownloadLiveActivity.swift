@@ -24,9 +24,6 @@ final class DownloadLiveActivity {
 
     // Type-erased handle so this file compiles on the app's 15.0 deployment target.
     private var _activity: Any?
-    /// Throttle for the `la-progress` heartbeat — see sync(). Both are read and
-    /// written under `lock`, like `lastUpdate`.
-    private var lastBeat = Date.distantPast
     /// sync() runs per URLSession write callback, so the "activities are off"
     /// row has to be once per process, not once per packet.
     private var loggedDisabled = false
@@ -99,9 +96,6 @@ final class DownloadLiveActivity {
             lastUpdate = Date()
         }
         let existing = activity
-        // Decided under the lock, like the throttle above it.
-        let beat = Date().timeIntervalSince(lastBeat) >= 30
-        if beat { lastBeat = Date() }
         lock.unlock()
 
         let state = DownloadActivityAttributes.ContentState(
@@ -111,19 +105,12 @@ final class DownloadLiveActivity {
 
         if let act = existing {
             Task { await act.update(ActivityContent(state: state, staleDate: nil)) }
-            // A DOWNLOAD THAT IS NOT MOVING LOOKS EXACTLY LIKE ONE THAT IS NOT
-            // RUNNING, and the transcript could not tell them apart: the only
-            // download rows written were the verdicts (complete / failed /
-            // retry), so a transfer that simply stopped advancing while the app
-            // was backgrounded produced total silence. This heartbeat is the
-            // byte count over time — the one measurement that answers it.
-            if beat {
-                DiagLog.shared.write("la-progress", [
-                    "kind": "download", "title": title, "done": bytesDone,
-                    "total": bytesTotal, "files": filesDone, "of": fileCount,
-                    "pct": Int(fraction * 100),
-                ], cat: "offline")
-            }
+            // The `la-progress` heartbeat USED TO LIVE HERE, and that was a
+            // category error that cost an overnight test: a byte counter is
+            // evidence, not decoration, and it must not stop when the drawing
+            // does. It belongs to whoever owns the bytes, so it now lives in
+            // BundleDownloadManager.emitHeartbeat() and runs even while this
+            // activity is suppressed under a continued-processing grant.
         } else if !finished && !failed {
             do {
                 let act = try Activity.request(

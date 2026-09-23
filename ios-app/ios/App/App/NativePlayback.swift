@@ -60,7 +60,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "18.16.0"
+let NP_BUILD = "18.17.0"
 
 // MARK: - Armed state
 
@@ -486,13 +486,34 @@ final class DiagLog {
     /// bugs, so `state: "bg"` is noise and `state: "fg"` is a real defect.
     func noteAppState(_ state: String) {
         guard FileManager.default.fileExists(atPath: runMarker.path) else { return }
+        markerState = state
         writeMarker(state: state, build: NP_BUILD)
     }
 
-    private func writeMarker(state: String, build: String) {
-        let row: [String: Any] = ["at": iso.string(from: Date()),
+    /// THE MARKER'S `at` USED TO BE THE LAST TRANSITION, NOT THE LAST SIGN OF
+    /// LIFE, and on 2026-09-23 that cost the whole overnight test: the app was
+    /// killed somewhere inside a five-hour backgrounded window and
+    /// `prev-launch-dirty since:` could only name the moment it went background,
+    /// which was five hours before the last thing that could have happened.
+    /// Refreshing it from the download heartbeat turns `since` into the time of
+    /// death ± one beat. Cheap (one small atomic write per 30 s) and only while
+    /// there is something running to beat.
+    ///
+    /// `extra` rides along so a death can be described by whatever was true at
+    /// the time — today the age of a continued-processing grant, which otherwise
+    /// leaves no trace at all when the process dies underneath it.
+    func touchMarker(_ extra: [String: Any] = [:]) {
+        guard FileManager.default.fileExists(atPath: runMarker.path) else { return }
+        writeMarker(state: markerState, build: NP_BUILD, extra: extra)
+    }
+
+    private var markerState = "launching"
+
+    private func writeMarker(state: String, build: String, extra: [String: Any] = [:]) {
+        var row: [String: Any] = ["at": iso.string(from: Date()),
                                   "state": state, "build": build]
-        guard let d = try? JSONSerialization.data(withJSONObject: row) else { return }
+        for (k, v) in extra { row[k] = v }
+        guard let d = try? JSONSerialization.data(withJSONObject: Self.sanitize(row)) else { return }
         try? d.write(to: runMarker, options: .atomic)
     }
 
@@ -521,12 +542,17 @@ final class DiagLog {
         // Watchdog (a hung main thread), jetsam (memory), or the user swiping the
         // app away. `was` is what tells those apart.
         if let m = marker {
-            writeNow("prev-launch-dirty", [
+            var row: [String: Any] = [
                 "was": m["state"] as? String ?? "?",
                 "since": m["at"] as? String ?? "",
                 "build": m["build"] as? String ?? "?",
                 "last": String(cString: slLastEvent),
-            ], cat: "app")
+            ]
+            // Whatever the last heartbeat chose to describe itself with — the
+            // grant's age, the in-flight task count, the memory headroom. These
+            // are the conditions AT DEATH, which no row written before it can be.
+            for k in ["grant", "tasks", "mem", "jobs"] where m[k] != nil { row[k] = m[k] }
+            writeNow("prev-launch-dirty", row, cat: "app")
             try? fm.removeItem(at: runMarker)
         }
     }
