@@ -1185,7 +1185,14 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             self.armed.position = t
             self.armed.armedAt = Date()
             if let it = p.currentItem { self.adoptDuration(from: it) }
-            self.armed.paused = (p.timeControlStatus != .playing)
+            // `.waitingToPlayAtSpecifiedRate` is the player TRYING to play, not a
+            // pause — mirroring it as one made `armed.paused` flap true for a
+            // sample every time a bundle segment ran the buffer down. Harmless
+            // while it only fed a readout; not harmless now that an arm inherits
+            // it (`a.paused = armed.paused`) and a file switch starts the new item
+            // with `play: !a.paused`, because a skip is exactly when the player is
+            // most likely to be buffering. Only a real stop is a pause.
+            self.armed.paused = (p.timeControlStatus == .paused)
             self.updateNowPlaying()
             PlaybackLiveActivity.shared.update(state: self.liveActivityState(), force: false)
             // Push the transport to the page. While native holds the display the

@@ -37,6 +37,14 @@ exists to escape. It was also the default. Settings now offers Early (claim it w
 episode starts) and Mirrored (let iOS route the video), and any stored `"window"` reads
 as `"early"`.
 
+**Buffering is not pausing.** The 1 Hz mirror wrote `armed.paused` from
+`timeControlStatus != .playing`, so every time a bundle segment ran the buffer down the
+intent flag flapped true for a sample — visible in the log as `transport` rows carrying
+`armPaused: true` at `rate: 1`. Harmless while it only fed a readout, and not harmless
+now that an arm inherits it and a file switch starts the new item with `play: !paused`:
+a skip is precisely when the player is most likely to be waiting on data. Only
+`.paused` counts as paused.
+
 **Three new log rows, all for silent failures.** `native-swap` says the player really
 moved — a `rearm-swap` with no `native-swap` after it now means the old episode is still
 on screen. `swap-no-url` catches a file the native side cannot play. `arm-dropped-hold`
