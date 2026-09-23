@@ -3801,6 +3801,30 @@ transcript is unambiguous — `prev-launch-dirty was:"bg"` with **no `cpt-expire
 so the grant never expired and the expiry→migrate fallback never ran; the process
 died under it. CPT buys scheduling, not immunity.
 
+### A headless relaunch cannot start a Live Activity, and retrying costs you the log (fixed 18.19.2)
+iOS relaunches an app **in the background** to deliver background-session events.
+`Activity.request` throws `visibility` there, and that is a **state, not a blip** —
+only foregrounding changes it. Because `sync()` runs per progress tick, the catch
+re-requested every second: **27 failures in 55 seconds, measured.** Over a working
+day that is ~28,800 rows and ~7.8 MB against the **8 MB device log cap**, so the log
+overflows and halves itself, throwing away the oldest half — the hours you were
+measuring. A diagnostic that destroys the diagnostic is worse than none.
+
+Latch it (`requestBlocked`), log once per blocked stretch, clear on
+`didBecomeActive`. **General rule: a failure whose cause is a persistent state must
+never be retried on a per-packet timer.**
+
+### Testing a background relaunch: `exit(0)`, never the app switcher
+Force-quitting from the switcher **cancels every background URLSession transfer** —
+iOS reads it as "this app should do no more work" — so the relaunch never happens
+and the test is meaningless. The app must terminate **itself**, which the system does
+not treat as a force quit. This is also a live operational hazard: a user who
+habitually swipes apps closed kills their own downloads.
+
+Corollary for the CPT path: a granted continued-processing task keeps transfers on
+the **in-process** session, where they die with the app and no relaunch follows. To
+exercise the out-of-process path deliberately you must skip the grant as well.
+
 ### "Nearly matches optional requirement" means the delegate method is DEAD (fixed 18.19.1)
 `urlSessionDidFinishEvents(forBackgroundSession:)` — the real one is
 **`forBackgroundURLSession:`**. One word, so it satisfied nothing and iOS never

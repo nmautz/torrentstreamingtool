@@ -27,6 +27,20 @@ final class DownloadLiveActivity {
     /// sync() runs per URLSession write callback, so the "activities are off"
     /// row has to be once per process, not once per packet.
     private var loggedDisabled = false
+    /// SET WHEN `Activity.request` FAILS FOR A REASON RETRYING CANNOT FIX — today
+    /// that means `visibility`: you cannot start a Live Activity from the
+    /// background, and being in the background is not a transient condition.
+    ///
+    /// Measured 2026-09-23: iOS relaunched the app headless to deliver background
+    /// transfer events, `sync()` then ran on every progress tick, and each one
+    /// requested an activity and threw. **27 failures in 55 seconds.** Left alone
+    /// over a working day that is ~28,800 rows and ~7.8 MB, against an 8 MB device
+    /// log cap — the log would have overflowed and halved itself, discarding the
+    /// very hours the run existed to measure. A diagnostic that destroys the
+    /// diagnostic is worse than no diagnostic.
+    ///
+    /// Cleared on foreground, which is the only thing that can change the answer.
+    private var requestBlocked = false
 
     // FALLS BACK TO THE SYSTEM'S OWN LIST, as PlaybackLiveActivity's does and as
     // this one did not. ActivityKit activities outlive the process: a background
@@ -54,6 +68,12 @@ final class DownloadLiveActivity {
         ], cat: "offline")
         Task { for a in strays { await a.end(nil, dismissalPolicy: .immediate) } }
         _activity = nil
+    }
+
+    /// The app is foreground again, so a request that failed for `visibility` may
+    /// now succeed. Called from BundleDownloadManager's didBecomeActive.
+    func unblockRequests() {
+        lock.lock(); requestBlocked = false; lock.unlock()
     }
 
     /// Stand down: something else is drawing this download's progress. On iOS 26+
@@ -88,6 +108,9 @@ final class DownloadLiveActivity {
         }
 
         lock.lock()
+        // Nothing here can succeed until we are foreground again; don't spend a
+        // request (or a row) per packet finding that out.
+        if requestBlocked && activity == nil { lock.unlock(); return }
         if !force {
             let now = Date()
             if now.timeIntervalSince(lastUpdate) < minInterval { lock.unlock(); return }
@@ -126,10 +149,15 @@ final class DownloadLiveActivity {
                 // Activity start can throw (over the system limit, disabled, etc.) —
                 // downloads continue regardless. Silent until 18.14.0, which meant
                 // "the download Island never appears" had no evidence at all.
-                DiagLog.shared.write("la-failed", [
-                    "kind": "download", "op": "request",
-                    "err": String(describing: error),
-                ], cat: "offline")
+                // ONE row per blocked stretch, not one per packet — see
+                // `requestBlocked`.
+                lock.lock(); let first = !requestBlocked; requestBlocked = true; lock.unlock()
+                if first {
+                    DiagLog.shared.write("la-failed", [
+                        "kind": "download", "op": "request",
+                        "err": String(describing: error),
+                    ], cat: "offline")
+                }
             }
         }
     }

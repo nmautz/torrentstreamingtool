@@ -272,6 +272,8 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     }
 
     @objc private func appDidBecomeActive() {
+        // Foreground is the only thing that can un-fail a `visibility` rejection.
+        DownloadLiveActivity.shared.unblockRequests()
         queue.async {
             self.appActive = true
             guard !self.jobs.isEmpty else { return }
@@ -352,6 +354,10 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     /// report errors from any point in the submission. Assumes `queue`.
     private func submitContinuedProcessing(name: String) {
         guard #available(iOS 26.0, *) else { return }
+        guard !Self.killTest else {
+            DiagLog.shared.write("cpt-skipped", ["why": "killTest"], cat: "offline")
+            return
+        }
         guard !cptSubmitted, !cptActive, !jobs.isEmpty else { return }
         cptSubmitted = true
         let files = jobs.values.reduce(0) { $0 + $1.files.count }
@@ -545,6 +551,22 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             // the whole download) keeps us alive long enough to re-enqueue.
             let moved = self.migrateTasks(to: self.session)
             self.logTransition("dl-bg", moved: moved, readBudget: true)
+            // TEST BUILD ONLY — see `killTest`. Everything is now on the
+            // out-of-process session, so exiting leaves the transfers running and
+            // the system should relaunch us to deliver their events. exit(0) is
+            // deliberate: a swipe from the switcher would cancel the transfers
+            // instead, which is precisely why it cannot be used to test this.
+            if Self.killTest {
+                DiagLog.shared.write("kill-test", [
+                    "moved": moved, "jobs": self.jobs.count,
+                    "pending": self.jobs.values.reduce(0) { $0 + $1.pending.count },
+                ], cat: "app")
+                self.queue.asyncAfter(deadline: .now() + 15) {
+                    DiagLog.shared.write("kill-test-exit", [:], cat: "app")
+                    DiagLog.shared.closeRun()   // clean exit — not a crash to report
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { exit(0) }
+                }
+            }
         }
     }
 
@@ -729,6 +751,24 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     /// nothing downloads faster for having been asked for all at once: the
     /// per-host connection limit means the surplus is pure standing cost. Hold a
     /// working set and refill it as files land.
+    // ======================= TEMPORARY TEST BUILD ONLY =======================
+    // Set true ONLY in a throwaway build used to verify the background-relaunch
+    // flush path (18.19.1 fixed a delegate signature that meant
+    // `urlSessionDidFinishEvents` had NEVER been called). Apple's guidance: you
+    // cannot test relaunch by force-quitting, because the switcher cancels every
+    // background transfer; the app must terminate ITSELF, which the system does
+    // not treat as a force quit.
+    //
+    // Two things have to be true at once for the test to mean anything, so this
+    // flag does both: skip the continued-processing request (a granted task keeps
+    // transfers on the IN-PROCESS session, where they die with us and no relaunch
+    // ever happens), and exit shortly after backgrounding, once `migrateTasks` has
+    // handed everything to the out-of-process background session.
+    //
+    // MUST BE false IN ANY BUILD THAT RUNS UNATTENDED.
+    static let killTest = false
+    // =========================================================================
+
     private static let maxInFlight = 24
     /// Live tasks across every job. Cheap: `jobs` is tens of entries, not thousands.
     private var inFlight: Int { jobs.values.reduce(0) { $0 + $1.tasks.count } }
@@ -1294,7 +1334,12 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
                 // time `left` returned a real number at all.
                 DiagLog.shared.write("dl-bgtask-expired", [
                     "jobs": self.jobs.count, "active": self.appActive,
-                    "after": Int(Date().timeIntervalSince(self.bgAt) * 1000),
+                    // -1, not a number, when this process never went background:
+                    // iOS relaunches us HEADLESS to deliver transfer events, so
+                    // `bgAt` is still distantPast and the subtraction produced
+                    // `after: 63925948810544` — two thousand years, measured.
+                    "after": self.bgAt == .distantPast ? -1
+                             : Int(Date().timeIntervalSince(self.bgAt) * 1000),
                 ], cat: "offline")
                 if self.bgTask != .invalid { UIApplication.shared.endBackgroundTask(self.bgTask); self.bgTask = .invalid }
             }

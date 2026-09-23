@@ -1,5 +1,53 @@
 # Changelog
 
+## [18.19.2] — 2026-09-23
+### The relaunch flush is confirmed working — and the test that proved it found two more bugs
+
+18.19.1 fixed a delegate signature that meant `urlSessionDidFinishEvents` had never
+been called. Verified on device with a throwaway build that terminates itself via
+`exit(0)` — the only way to test this, because **force-quitting from the app
+switcher cancels every background transfer**, so the system never relaunches you:
+
+```
+15:58:53  kill-test-exit                    ← app terminates itself
+15:59:43  launch                            ← iOS relaunched it, headless
+15:59:43  dl-bg-events  ours: true          ← to deliver transfer events
+15:59:43  dl-bg-flushed completed:0 jobs:0  ← first time in the project's life
+```
+
+`bgEventsCompletion` is now actually invoked. That matters beyond a log row: Apple
+documents that failing to call it can get the app **terminated**.
+
+### A diagnostic that destroys the diagnostic
+
+That relaunch is **headless**, and you cannot start a Live Activity from the
+background. So the resume path requested one, caught `visibility`, logged it, and —
+because `sync()` runs on every progress tick — did it again a second later.
+**27 failures in 55 seconds, measured.**
+
+Left alone over a working day that is ~28,800 rows and ~7.8 MB against an **8 MB
+device log cap**: the log would have overflowed and halved itself, discarding
+exactly the hours the run existed to measure. The instrument would have eaten the
+evidence.
+
+`visibility` is not a transient condition — being in the background is a state, and
+only coming to the foreground changes it. `requestBlocked` now latches on a failed
+request, suppresses further attempts (one row per blocked stretch, not one per
+packet), and is cleared by `didBecomeActive`.
+
+### `dl-bgtask-expired after: 63925948810544`
+
+Two thousand years, measured. On a headless relaunch the process never goes through
+`appDidEnterBackground`, so `bgAt` is still `.distantPast` and the subtraction is
+nonsense. Emits `-1` now, like every other unknown in that row.
+
+### Also observed
+`cpt-done held: 458` — a grant survived **7.6 minutes backgrounded** and ended only
+because the queue drained, not because the system reclaimed it. The longest yet, and
+the first that ended on our terms.
+
+- `NP_BUILD` → **18.19.2**.
+
 ## [18.19.1] — 2026-09-23
 ### A delegate method that has never once been called
 
