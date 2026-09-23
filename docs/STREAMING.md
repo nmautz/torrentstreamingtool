@@ -1602,6 +1602,18 @@ controls. What stays is what proxies through: the transport row (`lpTogglePlay` 
 Changing audio track or subtitles means ending the handoff first — AVPlayer could switch
 `AVMediaSelectionOption`s mid-play, but nothing wires the menu to it yet.
 
+**Where the panel may draw (18.12.2).** The transport cluster (`.lp-ctl-center`) is pinned
+to the dead centre of the stage, so the remote panel is anchored to the edges and never
+puts content in the middle band: a full-bleed status strip flush under the header
+(`top: header height`), a now-playing row butted against the control strip
+(`bottom: 73px` = seek bar 28 + button row 44 + its 1px top border), and the poster blown
+up as a dimmed full-bleed backdrop so the band the buttons live in is filled rather than
+empty. Under `max-height: 520px` — a phone in landscape — the row sheds its poster tile
+and hint line to keep clear of the transport. The header's location line (`#lpWhere`)
+flips to "On Glasses" and back in the same function, since it runs at every `_npHolding`
+write in both directions; the control row's right side, which loses five buttons to
+`.lp-remote`, carries time remaining (`#lpTimeLeft`) instead of a gap.
+
 Native side: `ios-app/ios/App/App/NativePlayback.swift` (+ `PlaybackLiveActivity.swift`,
 `Shared/PlaybackIntents.swift`, `StreamLinkLiveActivities/PlaybackWidget.swift`).
 

@@ -596,6 +596,19 @@ Don't re-add the `controls` attribute. Pieces:
 - **Buffering** — `.lp-buffering` (set on `waiting`, cleared on `playing`)
   shows the square Metro spinner `#lpBuffSpin`, independent of overlay
   visibility.
+- **Glasses remote** — `.lp-remote` on `#localPlayer` (set by `_npSyncRemoteUi`
+  at every `_npHolding` write) hides the controls that address the parked
+  `<video>` — mute, fullscreen, orientation lock, TV Mode, the gear and the
+  whole options panel — and shows `#lpRemote`. That panel is **edge-anchored**:
+  `#lpRemoteBanner` is a full-bleed strip flush under the header,
+  `#lpRemoteNow` (poster tile + series + title + hint) butts against the
+  control strip, and `#lpRemoteBack` carries the poster as a dimmed full-bleed
+  backdrop. **The middle of the stage is reserved for `.lp-ctl-center`** — see
+  [GOTCHAS.md](GOTCHAS.md) § The overlay that is always centred owns the
+  centre. `#lpWhere` in the header flips "On Device" → "On Glasses", and
+  `#lpTimeLeft` fills the control row's right side where the hidden buttons
+  were. Everything else (transport, seek bar, skip tile) stays, because those
+  proxy through to the native player.
 
 The header (`#lpHeader`, `.lp-chrome`, hidden in tiny mode; on phones ≤480px
 the Min / To TV text labels collapse to icons via `.lp-btn-label` so the bar

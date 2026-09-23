@@ -4871,6 +4871,42 @@ The consequences of moving the actor are where the real work was:
   at and wrong with the glasses on and the phone in a pocket — it reads as the player
   dying mid-credits. Native declines and lets `itemDidEnd` own the real end.
 
+## The overlay that is always centred owns the centre (18.12.2)
+
+`.lp-ctl-center` — back-10, play, forward-10 — is `position: absolute; top: 50%; left: 50%`
+on a stage that is `inset: 0`. It is the one piece of player chrome whose position is not
+negotiable and not affected by anything else on screen. 18.12.0's remote panel was written
+as its own self-contained thing: a flex column, `align-items: center`, `justify-content:
+center`, inset 0. Both are correct in isolation and both put their content in the same
+place, so the poster rendered underneath the play button while the other ~500px of an
+844px screen stayed black. Nothing errored; it just looked like a mistake, and it was one.
+
+The rule, now stated in the stylesheet next to `.lp-remote`: **anything added to the stage
+is anchored to an edge, because the middle belongs to the transport.** In practice that
+means offsets expressed in the real heights of the chrome it butts against —
+`env(safe-area-inset-top) + 48px` for the header bar (`h-12`, border included: Tailwind's
+preflight is `border-box`) and `73px + env(safe-area-inset-bottom)` for the control strip
+(seek bar 28 + button row 44 + a 1px top border). Get those off by one and you ship a
+visible hairline of the wrong colour. `#lpTrackRow` says `72px` and gets away with it only
+because it floats above the strip rather than butting against it.
+
+Two consequences worth keeping:
+
+- **A dimmed full-bleed backdrop is how the reserved middle stops reading as waste.** The
+  band has to stay clear of content, but it does not have to stay empty. Same `src` as the
+  small tile, so it is a cache hit rather than a second download.
+- **Short screens are a different layout, not a smaller one.** At `max-height: 520px` — a
+  phone in landscape, ~390px of stage — the bottom row has to shed its poster tile and
+  hint line or it grows up into the transport. Measured after the change: 36px of
+  clearance in landscape, 209px in portrait.
+
+Verify layout claims like these headlessly rather than by eye: serve `static/index.html`
+plus `static/vendor/` from a temp dir, load it in an iframe at 390×844 and 844×390, force
+`lp-active lp-remote`, and compare `getBoundingClientRect()` on the panel against the
+transport. **Copying `index.html` alone is a trap** — Tailwind is vendored at
+`/vendor/tailwind.js`, and without it `h-12`, `flex-1` and the text sizes silently vanish,
+which is its own plausible-looking wrong answer.
+
 ## The page is a remote, so it must not look like a player (18.12.0)
 
 `_npHolding` has always meant "the native player IS the presentation", and every

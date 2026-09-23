@@ -824,6 +824,10 @@
       font-variant-numeric: tabular-nums;
     }
     .lp-ctl-dim { color: #6b7280; }
+    /* Time remaining — only ever drawn on the glasses remote, where the right
+       of the control row is otherwise empty (see #lpTimeLeft in the markup). */
+    .lp-ctl-left { display: none; padding-right: 6px; color: #9ca3af; letter-spacing: 0.08em; }
+    #localPlayer.lp-remote .lp-ctl-left { display: inline; }
     .lp-ctl-sm {
       width: 44px; height: 44px;
       display: flex;
@@ -888,19 +892,23 @@
        Everything hidden below addresses the PARKED <video>, not the glasses:
        leaving it on screen means four buttons and a whole options panel that
        silently do nothing. The transport row, the seek bar and the skip tile
-       stay, because those proxy through to the native player. */
+       stay, because those proxy through to the native player.
+
+       LAYOUT RULE, and the reason 18.12.2 exists: the transport cluster is
+       pinned to the dead centre of the stage, so the remote panel may never put
+       content there. The first cut centred a small column — banner, poster,
+       two lines — which put its poster directly UNDER the play button and left
+       the rest of the screen empty. Everything here is therefore anchored to an
+       edge: a full-bleed strip at the top, a now-playing row at the bottom, and
+       the artwork blown up as a dimmed backdrop so the middle band is filled by
+       something rather than being a void the buttons float in. */
     #lpRemote { display: none; }
     #localPlayer.lp-remote #lpRemote {
       position: absolute;
       inset: 0;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 14px;
-      padding: 0 16px;
-      text-align: center;
+      display: block;
       background: #05070d;
+      overflow: hidden;
     }
     #localPlayer.lp-remote #lpVideo,
     #localPlayer.lp-remote #lpBuffSpin,
@@ -915,24 +923,64 @@
     /* Tiny mode is a thumbnail of the video; with no video there is nothing to
        thumbnail, so the panel stays out of it entirely. */
     #localPlayer.lp-tiny #lpRemote { display: none !important; }
+    /* Backdrop: the poster at full bleed, dimmed hard enough that white text
+       and the transport tiles keep their contrast. Flat — no blur, no gradient
+       on the image itself; the scrim below is a solid wash, not a fade. */
+    #lpRemoteBack {
+      position: absolute;
+      inset: 0;
+      background: #05070d;
+    }
+    #lpRemoteBackImg {
+      width: 100%; height: 100%;
+      object-fit: cover;
+      opacity: 0.38;
+      display: none;
+    }
+    #lpRemoteScrim {
+      position: absolute;
+      inset: 0;
+      background: rgba(5,7,13,0.35);
+    }
+    /* Status strip — full bleed, flush under the header bar. */
     #lpRemoteBanner {
+      position: absolute;
+      /* 48px = the header's h-12 bar, border included (Tailwind preflight puts
+         everything in border-box), so the strip butts against it with no seam. */
+      top: calc(env(safe-area-inset-top, 0px) + 48px);
+      left: 0; right: 0;
+      height: 26px;
       display: flex;
       align-items: center;
       gap: 8px;
-      font-size: 10px;
+      padding: 0 12px;
+      font-size: 9px;
       font-weight: 900;
       text-transform: uppercase;
-      letter-spacing: 0.18em;
-      color: #a5b4fc;
-      background: rgba(49,46,129,0.45);
-      border: 1px solid #4338ca;
-      padding: 6px 12px;
+      letter-spacing: 0.2em;
+      color: #c7d2fe;
+      background: #312e81;
     }
-    .lp-rm-dot { width: 7px; height: 7px; background: #6366f1; flex: 0 0 auto; }
+    .lp-rm-dot { width: 7px; height: 7px; background: #a5b4fc; flex: 0 0 auto; }
+    /* Now-playing row — anchored to the bottom edge, directly above the
+       control strip (72px = seek bar 28 + button row 44), same as #lpTrackRow. */
+    #lpRemoteNow {
+      position: absolute;
+      left: 0; right: 0;
+      /* 73px = seek bar 28 + button row 44 + the strip's 1px top border.
+         (#lpTrackRow says 72 and floats, so its 1px overlap never shows.) */
+      bottom: calc(73px + env(safe-area-inset-bottom, 0px));
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px;
+      background: rgba(3,7,18,0.72);
+      border-top: 1px solid rgba(255,255,255,0.08);
+    }
     #lpRemoteArt {
       position: relative;
-      width: 116px;
-      height: 174px;
+      width: 54px;
+      height: 81px;
       background: #0b1120;
       border: 1px solid #1f2937;
       flex: 0 0 auto;
@@ -945,33 +993,47 @@
       align-items: center;
       justify-content: center;
       color: #374151;
-      font-size: 42px;
+      font-size: 26px;
       font-weight: 900;
     }
+    #lpRemoteMeta { min-width: 0; flex: 1 1 auto; }
     #lpRemoteSeries {
-      font-size: 10px;
+      font-size: 9px;
       font-weight: 900;
       text-transform: uppercase;
-      letter-spacing: 0.18em;
-      color: #6b7280;
-      max-width: 100%;
+      letter-spacing: 0.2em;
+      color: #818cf8;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
     #lpRemoteTitle {
-      font-size: 15px;
+      margin-top: 3px;
+      font-size: 14px;
       font-weight: 700;
       color: #e5e7eb;
-      max-width: 100%;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    /* Short/landscape phones: the poster is the first thing to go. */
-    @media (max-height: 420px) {
-      #lpRemoteArt { display: none; }
-      #localPlayer.lp-remote #lpRemote { gap: 10px; }
+    #lpRemoteHint {
+      margin-top: 4px;
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      color: #4b5563;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    /* Short/landscape phones: the stage is ~390px tall, so the now-playing row
+       has to shed height before it reaches up into the transport cluster. The
+       poster tile and the hint line go; the two text lines stay. */
+    @media (max-height: 520px) {
+      #lpRemoteNow { padding: 8px 12px; gap: 10px; }
+      #lpRemoteArt, #lpRemoteHint { display: none; }
+      #lpRemoteTitle { margin-top: 2px; font-size: 13px; }
     }
     #lpSkipOffer {
       position: absolute;
@@ -3675,7 +3737,11 @@
       </button>
       <div class="flex-1 min-w-0 text-center px-2 pointer-events-none">
         <div id="lpTitle" class="text-xs font-bold text-gray-200 truncate">—</div>
-        <div class="text-[10px] uppercase tracking-widest text-emerald-500 font-bold">On Device</div>
+        <!-- Where the picture actually IS. Flips to "On Glasses" (indigo) while
+             the native player holds an external display — _npSyncRemoteUi. A
+             header that still says "On Device" during glasses playback is the
+             one label the eye lands on, and it was wrong. -->
+        <div id="lpWhere" class="text-[10px] uppercase tracking-widest text-emerald-500 font-bold">On Device</div>
       </div>
       <button id="lpToTvBtn" onclick="lpHandoffToVlc(this)" title="Hand off to the TV (VLC) — resume there at the same time"
         class="h-full px-4 flex items-center gap-1.5 text-indigo-400 hover:text-indigo-200 hover:bg-indigo-950/40 active:bg-indigo-950/70 transition-colors text-xs font-bold uppercase tracking-wide">
@@ -3702,15 +3768,27 @@
          is parked on a frozen frame that reads as "stuck". This replaces the
          stage with artwork and what's playing, and .lp-remote hides every
          control that addresses the parked element instead of the glasses.
-         Toggled by _npSyncRemoteUi at each site that writes _npHolding. -->
+         Toggled by _npSyncRemoteUi at each site that writes _npHolding.
+         Three edge-anchored pieces — backdrop, top strip, bottom now-playing
+         row — because the middle of the stage belongs to the transport
+         cluster; see the LAYOUT RULE on .lp-remote in the stylesheet. -->
     <div id="lpRemote">
-      <div id="lpRemoteBanner"><span class="lp-rm-dot"></span>Playing on Glasses</div>
-      <div id="lpRemoteArt">
-        <img id="lpRemoteImg" alt=""/>
-        <div id="lpRemoteFallback"></div>
+      <div id="lpRemoteBack">
+        <img id="lpRemoteBackImg" alt="" aria-hidden="true"/>
+        <div id="lpRemoteScrim"></div>
       </div>
-      <div id="lpRemoteSeries"></div>
-      <div id="lpRemoteTitle"></div>
+      <div id="lpRemoteBanner"><span class="lp-rm-dot"></span><span>Playing on Glasses</span></div>
+      <div id="lpRemoteNow">
+        <div id="lpRemoteArt">
+          <img id="lpRemoteImg" alt=""/>
+          <div id="lpRemoteFallback"></div>
+        </div>
+        <div id="lpRemoteMeta">
+          <div id="lpRemoteSeries"></div>
+          <div id="lpRemoteTitle"></div>
+          <div id="lpRemoteHint">Transport controls the glasses</div>
+        </div>
+      </div>
     </div>
     <!-- Square Metro buffering spinner — shown via .lp-buffering on #localPlayer,
          independent of overlay visibility (like YouTube's). -->
@@ -3761,6 +3839,10 @@
           <span class="lp-ctl-time lp-ctl-dim">/</span>
           <span id="lpTimeDur" class="lp-ctl-time lp-ctl-dim">–:––</span>
           <div class="flex-1"></div>
+          <!-- Remote mode hides five buttons from the right of this row and left
+               a dead half-row behind. Time remaining is the readout a remote
+               actually wants, and it fills the gap with something true. -->
+          <span id="lpTimeLeft" class="lp-ctl-time lp-ctl-left">—</span>
           <button id="lpOptsBtn" class="lp-ctl-sm" onclick="lpToggleOpts()" title="Options — quality, audio, subtitles, clip">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
@@ -18688,12 +18770,22 @@ function _npSyncRemoteUi() {
   if (!c) return;
   const on = !!_npHolding;
   c.classList.toggle("lp-remote", on);
+  // The header's location line is the label the eye lands on first, so it has
+  // to name the screen that actually has the picture on it. Restored on the
+  // way out too — this runs at every _npHolding write, both directions.
+  const where = document.getElementById("lpWhere");
+  if (where) {
+    where.textContent = on ? "On Glasses" : "On Device";
+    where.classList.toggle("text-indigo-400", on);
+    where.classList.toggle("text-emerald-500", !on);
+  }
   if (!on) return;
   const series = _npSeriesName();
   document.getElementById("lpRemoteSeries").textContent = series || "On Glasses";
   document.getElementById("lpRemoteTitle").textContent = lp.name || "";
-  const img = document.getElementById("lpRemoteImg");
-  const fb  = document.getElementById("lpRemoteFallback");
+  const img  = document.getElementById("lpRemoteImg");
+  const back = document.getElementById("lpRemoteBackImg");
+  const fb   = document.getElementById("lpRemoteFallback");
   let src = "";
   try {
     const it = (window._libCache || []).find((x) => x && x.id === lp.itemId);
@@ -18702,10 +18794,14 @@ function _npSyncRemoteUi() {
   } catch (_) {}
   if (src) {
     img.src = src; img.style.display = "block"; fb.textContent = "";
+    // Same file, so the backdrop costs one cache hit, not a second download.
+    back.src = src; back.style.display = "block";
   } else {
     // No art is normal — an unmatched item, or an offline session with no host
-    // to proxy the image. An initial beats a broken-image icon.
+    // to proxy the image. An initial beats a broken-image icon, and the
+    // backdrop simply stays the flat panel colour.
     img.removeAttribute("src"); img.style.display = "none";
+    back.removeAttribute("src"); back.style.display = "none";
     fb.textContent = (series || lp.name || "?").trim().charAt(0).toUpperCase();
   }
 }
@@ -25909,6 +26005,10 @@ function _lpCtlTick() {
   const t = _lpScrub ? _lpScrub.t : _npUiTime(v);
   document.getElementById("lpTimeCur").textContent = fmtTimeSecs(t);
   document.getElementById("lpTimeDur").textContent = d ? fmtTimeSecs(d) : "–:––";
+  // Only visible on the glasses remote (.lp-ctl-left), but written always —
+  // one branch fewer than keeping it in sync with _npHolding.
+  document.getElementById("lpTimeLeft").textContent =
+    d && d > t ? "–" + fmtTimeSecs(d - t) + " LEFT" : "";
   const pct = d ? Math.min(t / d * 100, 100) : 0;
   document.getElementById("lpSeekFill").style.width = pct + "%";
   document.getElementById("lpSeekDot").style.left = pct + "%";
@@ -27883,6 +27983,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.12.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.12.2</div>
 </body>
 </html>

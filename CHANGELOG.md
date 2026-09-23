@@ -1,5 +1,39 @@
 # Changelog
 
+## [18.12.2] — 2026-09-22
+### The remote panel was a floating island under the play button
+
+18.12.0 gave the phone a proper remote panel while the glasses have the picture, and it
+worked — but it centred its content, and the transport cluster is pinned to the dead
+centre of the stage. So the poster sat *underneath* the play button while the rest of a
+844px screen stayed empty. Reported as "a ton of wasted space", which it was.
+
+Everything in the panel is now anchored to an edge, and the middle band belongs to the
+transport alone:
+
+- **A full-bleed status strip** flush under the header bar (`PLAYING ON GLASSES`), flat
+  indigo, square dot — a Metro strip instead of a centred pill floating in black.
+- **A now-playing row** on the bottom edge, butted against the control strip: poster tile,
+  series in small caps, episode title, and a line saying the transport drives the glasses.
+- **The artwork as a dimmed full-bleed backdrop**, so the band the buttons live in is
+  filled by something rather than being a void. Same image file as the tile, so it costs a
+  cache hit and not a second download.
+- **Short screens** (landscape, `max-height: 520px`) drop the poster tile and the hint
+  line; measured, the compact row still clears the transport by 36px.
+
+Two smaller things the same screen was getting wrong:
+
+- **The header said "On Device" while the picture was on the glasses.** It is the one
+  label the eye lands on. `_npSyncRemoteUi` now flips it to "On Glasses" in indigo, and
+  back on the way out — it already ran at every `_npHolding` write, in both directions.
+- **The control row had a dead half.** Remote mode hides five buttons from its right side
+  and left the gap behind; it now carries time remaining, which is the readout a remote
+  actually wants.
+
+Layout verified headlessly at 390×844 and 844×390 against the real vendored Tailwind:
+no overlap between the panel and the transport in either orientation, and no seam at the
+header or the control strip.
+
 ## [18.12.1] — 2026-09-22
 ### Resume was reading a cache nobody invalidated, and seeks left no trace at all
 
