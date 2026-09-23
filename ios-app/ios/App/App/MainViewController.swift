@@ -65,8 +65,8 @@ class MainViewController: CAPBridgeViewController {
 
     @objc private func checkWebContentAlive() {
         guard let wv = bridge?.webView else { return }
-        wv.evaluateJavaScript("1") { [weak self] _, err in
-            guard let self = self, let e = err as NSError?,
+        wv.evaluateJavaScript("1") { _, err in
+            guard let e = err as NSError?,
                   e.domain == WKError.errorDomain else { return }
             let code = WKError.Code(rawValue: e.code)
             guard code == .webContentProcessTerminated || code == .webViewInvalidated else { return }

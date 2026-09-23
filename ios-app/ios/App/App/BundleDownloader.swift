@@ -263,7 +263,12 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         // matters, so observe it rather than only sampling it.
         nc.addObserver(self, selector: #selector(powerStateChanged),
                        name: .NSProcessInfoPowerStateDidChange, object: nil)
-        UIDevice.current.isBatteryMonitoringEnabled = true
+        // UIDevice is main-thread-only. `.shared` is a lazy static and this init
+        // runs wherever the first toucher happens to be, so don't assume.
+        DispatchQueue.main.async {
+            UIDevice.current.isBatteryMonitoringEnabled = true
+            BundleDownloadManager.shared.cacheBattery()
+        }
     }
 
     @objc private func appDidBecomeActive() {
@@ -1184,7 +1189,9 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             "transient": transient, "attempt": (job.attempts[fileName] ?? 0) + 1,
             "name": job.name,
         ], cat: "offline")
-        if transient, let f = job.files.first(where: { $0.name == fileName }) {
+        // The file only has to EXIST in the manifest — the pump re-enqueues it by
+        // name once the backoff clears, so nothing here needs the value.
+        if transient, job.files.contains(where: { $0.name == fileName }) {
             let n = (job.attempts[fileName] ?? 0) + 1
             job.attempts[fileName] = n
             job.liveBytes[fileName] = nil               // this attempt's bytes are gone
@@ -1348,7 +1355,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         }
     }
 
-    func urlSessionDidFinishEvents(forBackgroundSession session: URLSession) {
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
         queue.async {
             // Files that finished while the app was suspended/killed were moved to
             // disk, but their in-memory `Job` was gone so markComplete never ran.
@@ -1490,28 +1497,43 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             "sess": sessionBytes, "disk": disk,
             "tasks": live, "jobs": jobs.count, "mem": mem, "memLow": memFloor,
             "warns": memWarnings, "grant": grant,
-            "batt": batteryPct, "low": lowPower,
+            "batt": battCache, "low": lowPower,
             "bg": !appActive, "cpt": cptActive,
         ], cat: "offline")
         DiagLog.shared.touchMarker([
             "tasks": live, "jobs": jobs.count, "mem": mem, "memLow": memFloor,
             "warns": memWarnings, "grant": grant, "sess": sessionBytes,
-            "batt": batteryPct, "low": lowPower,
+            "batt": battCache, "low": lowPower,
         ])
+        // Re-sample for the NEXT beat, off the main thread's own time.
+        DispatchQueue.main.async { self.cacheBattery() }
     }
 
-    /// Battery percent, or -1 when iOS will not say (simulator, monitoring off).
-    private var batteryPct: Int {
+    /// LAST BATTERY READING, SAMPLED ON MAIN. `UIDevice` is main-thread-only and
+    /// `emitHeartbeat` runs on `queue`, so reading it there is a threading
+    /// violation that returns something plausible right up until it doesn't.
+    /// Battery moves in percent over minutes; a value up to one beat (30 s) old is
+    /// exactly as useful and is safe to read from anywhere.
+    private var battCache = -1
+
+    /// Refresh `battCache`. MUST be called on the main thread.
+    fileprivate func cacheBattery() {
         let l = UIDevice.current.batteryLevel
-        return l < 0 ? -1 : Int((l * 100).rounded())
+        let pct = l < 0 ? -1 : Int((l * 100).rounded())
+        queue.async { self.battCache = pct }
     }
+
+    /// Safe from any thread — `ProcessInfo` is, unlike `UIDevice`.
     private var lowPower: Bool { ProcessInfo.processInfo.isLowPowerModeEnabled }
 
     @objc private func powerStateChanged() {
-        let low = lowPower, pct = batteryPct
+        // Delivered on the main thread, so sample the device here, not below.
+        let low = lowPower
+        cacheBattery()
+        let pct = battCache
         queue.async {
             DiagLog.shared.write("power-state", [
-                "low": low, "batt": pct, "jobs": self.jobs.count,
+                "low": low, "batt": max(pct, self.battCache), "jobs": self.jobs.count,
                 "tasks": self.inFlight, "bg": !self.appActive, "cpt": self.cptActive,
             ], cat: "app")
         }

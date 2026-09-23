@@ -1,5 +1,49 @@
 # Changelog
 
+## [18.19.1] — 2026-09-23
+### A delegate method that has never once been called
+
+```
+warning: instance method 'urlSessionDidFinishEvents(forBackgroundSession:)'
+nearly matches optional requirement
+'urlSessionDidFinishEvents(forBackgroundURLSession:)' of protocol 'URLSessionDelegate'
+```
+
+One word. `forBackgroundSession` instead of `forBackgroundURLSession`, so the method
+satisfies nothing, overrides nothing, and **iOS has never invoked it**. Proof from
+the transcript: `dl-bg-events` has fired twice and `dl-bg-flushed` **zero times in
+888 rows**.
+
+The body was right all along. What never ran:
+
+- **`bgEventsCompletion` is never called.** The system hands us a completion handler
+  in `handleEventsForBackgroundURLSession` and documents that failing to call it can
+  get the app **terminated**. We have been storing it and dropping it since the
+  feature shipped.
+- **`reconcileIndexLocked()` never ran on a background flush**, so bundles that
+  finished while the app was suspended or dead never had `index.json` repaired or a
+  `bundleComplete` emitted from that path.
+
+This is a live candidate for the 2026-09-23 overnight death — an app relaunched in
+the background to deliver transfer events, never calling the handler, terminated for
+it. Not proven, but it is the first hypothesis with a documented mechanism behind it
+rather than an inference from a task count.
+
+**The lesson is the warning itself.** "Nearly matches" is Swift telling you a
+delegate method is dead code. It had been in the build output the whole time,
+underneath two warnings about unused variables.
+
+### Battery read off the main thread
+
+`emitHeartbeat` runs on the state queue and 18.19.0 had it reading
+`UIDevice.current.batteryLevel` there — UIKit is main-thread-only. Now sampled on
+main into `battCache` and read from anywhere; battery moves in percent over minutes,
+so a value one beat old is exactly as useful. `isBatteryMonitoringEnabled` is set on
+main too, since `.shared` is a lazy static and init runs wherever the first caller
+happens to be.
+
+- `NP_BUILD` → **18.19.1**.
+
 ## [18.19.0] — 2026-09-23
 ### The progress we report to the scheduler could go backwards 50 times in a run
 

@@ -3801,6 +3801,25 @@ transcript is unambiguous — `prev-launch-dirty was:"bg"` with **no `cpt-expire
 so the grant never expired and the expiry→migrate fallback never ran; the process
 died under it. CPT buys scheduling, not immunity.
 
+### "Nearly matches optional requirement" means the delegate method is DEAD (fixed 18.19.1)
+`urlSessionDidFinishEvents(forBackgroundSession:)` — the real one is
+**`forBackgroundURLSession:`**. One word, so it satisfied nothing and iOS never
+called it. Evidence: `dl-bg-events` fired twice while `dl-bg-flushed` fired **zero
+times in 888 rows**.
+
+Two things silently never happened:
+- **The system's completion handler was never called.** `handleEventsForBackgroundURLSession`
+  hands one over and Apple documents that failing to call it can get the app
+  **terminated** — so this is a candidate cause for a background death, not just a
+  missing log row.
+- `reconcileIndexLocked()` never ran on a flush, so bundles that finished while the
+  app was suspended or dead never had `index.json` repaired from disk.
+
+Swift emits this as a **warning, not an error**, because the protocol requirement is
+optional. It sat in the build output for months under two unused-variable warnings.
+**Treat "nearly matches" as an error** — it is the compiler saying a method you
+believe is a delegate callback is ordinary dead code.
+
 ### The progress you report to a continued-processing task is what keeps it alive (fixed 18.19.0)
 `BGTask.h` is explicit: *"Tasks that appear stalled may be forcibly expired by the
 scheduler to preserve system resources"*, with WWDC25 putting the threshold around
