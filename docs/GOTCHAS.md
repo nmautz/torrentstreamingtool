@@ -3720,6 +3720,33 @@ divide by; `done` stays because it is what the Live Activity shows the user.
 General form: any counter that mixes settled and in-flight state is safe to
 *display* and unsafe to *differentiate*.
 
+### A continued-processing task is not a priority boost — it removes the need for the slow session (18.15.0)
+There is **no API to ask iOS for network priority**: `URLSessionTask.priority` is
+within-session ordering, `networkServiceType` is a hint, and no entitlement
+exists for third parties. What `BGContinuedProcessingTask` (iOS 26+) does instead
+is stop the app being suspended, and Apple DTS states the consequence plainly:
+*"background sessions are usually only relevant if your app is eligible for
+suspension."* If we are not suspended, the fast in-process session survives and
+`migrateTasks` never needs to run.
+
+Traps, all of which fail silently:
+- **A clean `submit` is not a grant.** DTS traced one report to `dasd` refusing
+  with "Foregrounded apps don't include expected identifier" while the API
+  reported success and the launch handler never ran. Always time out the wait for
+  the grant and fall back (`cpt-nogrant`).
+- **Submission needs the app to be genuinely `.active`.** A cold-start resume path
+  that fires while backgrounded burns the submission for nothing.
+- **Wildcard identifiers are the documented design** — the prefix must contain the
+  bundle ID and end with `.*`, with a unique suffix per request. Registering the
+  bare prefix is wrong.
+- **Registering one identifier twice kills the app.** Guard it.
+- **`appActive` is FALSE while a continued-processing task is running**, because
+  the app really is backgrounded — it just is not suspended. Anything that picks a
+  session from `appActive` alone (in our case `enqueue`, on every retry
+  re-enqueue) will quietly drift back onto the throttled session. This nearly
+  shipped; one evening's transcript had 16 transient retries, so a night would
+  have bled over a blip at a time with nothing naming it.
+
 ### Background transfers are ~72× slower than foreground — that is iOS, not a bug (measured 18.14.1)
 Same link, same device, 2026-09-23: **~3.3 MB/s foreground, ~46 KB/s locked.** A
 1.73 GB queue is ~8 minutes open and ~10 hours locked. So "the download didn't

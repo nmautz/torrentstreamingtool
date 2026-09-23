@@ -1,5 +1,80 @@
 # Changelog
 
+## [18.15.0] — 2026-09-23
+### Downloads keep the fast session when the phone is put down
+
+Measured 2026-09-23: **~3.3 MB/s foreground, ~46 KB/s locked — about 72x.** The
+hybrid below is why. A fast in-process `URLSession` runs while the app is
+foreground and a throttled out-of-process one takes over when it is suspended,
+because the fast one dies with the process.
+
+Apple DTS, asked about pairing a continued-processing task with a background
+session: *"The combination is not something you'd normally do because background
+sessions are usually only relevant if your app is eligible for suspension."*
+Read backwards, that is the fix. **If the app is not suspended, the slow session
+is unnecessary.**
+
+`BGContinuedProcessingTask` (iOS 26+) is the system committing to let
+user-initiated work finish after the app is backgrounded — including with the
+screen locked — with its own cancellable progress UI. So the app stays alive,
+`fgSession` keeps working, and `migrateTasks` does not run at all.
+
+**It is not a priority lever, and no such thing exists.**
+`URLSessionTask.priority` is within-session ordering and `networkServiceType` is
+a hint; there is no entitlement an app can request. This removes the reason we
+were on the slow path rather than asking for a faster one.
+
+**And it is unproven.** "In-process session + no suspension ⇒ fast" is a
+well-founded hypothesis, not a measurement — nobody in the available material has
+published a throughput figure for it. Every path falls back to today's hybrid, so
+the worst case is exactly current behaviour.
+
+Details that came out of the SDK headers rather than the write-ups about them:
+
+- **Wildcard identifiers are the intended design**, not a hazard: *"the prefix of
+  the identifier must at least contain the bundle ID... finally ending with
+  `.*`"*. Registered as `com.streamlink.client.downloads.*`; each request carries
+  a UUID suffix.
+- **A second registration of one identifier kills the app.** Guarded, because a
+  crash-on-launch loop is a poor way to discover a second caller appeared.
+- `submitTaskRequest:error:` maps to Swift's throwing `submit(_:)` in this SDK —
+  not the completion-handler form described in the forum write-ups.
+- `strategy = .fail` rather than the default `.queue`: if the system will not
+  take it now we want to fall back immediately, not sit in a queue while the
+  download runs on the slow path anyway.
+
+**A clean submit is not a grant.** Apple DTS on a report of exactly this: `dasd`
+refused with *"Foregrounded apps don't include expected identifier"* and nothing
+surfaced through the API — the launch handler simply never ran. Unattended
+overnight that is indistinguishable from success until morning, so a successful
+submit that has not been granted within 12 s logs `cpt-nogrant` and reverts to
+the hybrid. Submission is also refused outright unless the app is genuinely
+`.active`, which is what the durable queue's cold-start resume would otherwise
+trip over.
+
+**The hole this nearly shipped with:** under a continued-processing task the app
+is *backgrounded but not suspended*, so `appActive` is false while the fast
+session is very much alive. `enqueue` picked its session from `appActive` alone,
+so every **retry** re-enqueue would have taken the throttled one — and one
+evening's transcript carried 16 transient retries. A night would have bled onto
+the slow path a blip at a time with nothing naming it. `cptActive` now counts as
+foreground for that choice.
+
+New rows: `cpt-register`, `cpt-submit`, `cpt-nogrant`, `cpt-start`,
+`cpt-expired`, `cpt-done`, and **`cpt`** on every `dl-bg`/`dl-fg` so a transcript
+always says which path produced its numbers. `dl-bg` with `moved: 0, cpt: true`
+is the good case.
+
+Info.plist: `processing` added to `UIBackgroundModes`, plus
+`BGTaskSchedulerPermittedIdentifiers`.
+
+Deliberately **not** done tonight: the system shows its own progress UI, so on
+iOS 26+ it sits alongside our download Live Activity. Untangling that means
+touching `DownloadLiveActivity` on the same night a new API lands in the same
+subsystem — two changes, one unattended window. It can wait.
+
+- `NP_BUILD` → **18.15.0**.
+
 ## [18.14.2] — 2026-09-23
 ### The measurement was wrong, so the experiment couldn't be judged
 

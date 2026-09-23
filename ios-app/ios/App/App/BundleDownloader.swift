@@ -51,6 +51,7 @@
 import Foundation
 import UIKit
 import Capacitor
+import BackgroundTasks
 
 // MARK: - Plugin
 
@@ -252,11 +253,193 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             self.appActive = true
             guard !self.jobs.isEmpty else { return }
             // Pull any still-running suspended-mode transfers back onto the fast
-            // session so an open app always downloads at full speed.
-            let moved = self.migrateTasks(to: self.fgSession)
+            // session so an open app always downloads at full speed. A no-op when
+            // the continued-processing task kept them there the whole time.
+            let moved = self.cptActive ? 0 : self.migrateTasks(to: self.fgSession)
             self.logTransition("dl-fg", moved: moved, readBudget: false)
         }
     }
+    // MARK: - Continued processing (iOS 26+)
+    //
+    // WHY THIS EXISTS. The hybrid below runs a fast in-process session while
+    // foreground and a slow out-of-process one while suspended, because the fast
+    // one dies with the process. Measured 2026-09-23: ~3.3 MB/s foreground,
+    // ~46 KB/s locked — about 72x. Apple DTS, on combining a continued-processing
+    // task with a background session: "The combination is not something you'd
+    // normally do because background sessions are usually only relevant if your
+    // app is eligible for suspension."
+    //
+    // Read backwards, that is the whole point: if the app is NOT suspended, the
+    // slow session is unnecessary. A BGContinuedProcessingTask keeps us running
+    // after backgrounding — including with the screen locked — so `fgSession`
+    // survives and `migrateTasks` does not have to run at all.
+    //
+    // IT IS NOT A PRIORITY LEVER. No such API exists: `URLSessionTask.priority`
+    // is within-session ordering and `networkServiceType` is a hint. This removes
+    // the reason we are on the slow path; it does not ask for a faster one.
+    //
+    // AND IT IS UNPROVEN. "In-process session + no suspension ⇒ fast" is a
+    // well-founded hypothesis, not a measurement. Every path here falls back to
+    // the old hybrid, so the worst case is exactly today's behaviour.
+    /// Registered as the wildcard; each request appends a unique suffix. The SDK
+    /// header: "the prefix of the identifier must at least contain the bundle ID
+    /// of the submitting application ... finally ending with `.*`".
+    static let cptWildcard = "com.streamlink.client.downloads.*"
+    static let cptPrefix = "com.streamlink.client.downloads."
+    /// The live task. Type-erased: this file compiles against a 15.0 target.
+    private var cptTask: Any?
+    /// True while the system is keeping us alive. Read on `queue`.
+    private(set) var cptActive = false
+    /// Guards against submitting twice for one run of downloads.
+    private var cptSubmitted = false
+    /// "Register each task identifier only once. The system KILLS THE APP on the
+    /// second registration of the same task identifier." — BGTaskScheduler.h.
+    /// AppDelegate runs once per process, but a crash-on-launch loop is not the
+    /// way to discover that a second caller appeared.
+    private var cptRegistered = false
+
+    /// Called from AppDelegate. Continued-processing registrations are actually
+    /// exempt from the register-before-launch-completes rule, but doing it there
+    /// costs nothing and keeps every BGTaskScheduler registration in one place.
+    func registerContinuedProcessing() {
+        guard #available(iOS 26.0, *) else { return }
+        guard !cptRegistered else {
+            DiagLog.shared.write("cpt-register", ["ok": false, "why": "already"], cat: "offline")
+            return
+        }
+        cptRegistered = true
+        let ok = BGTaskScheduler.shared.register(
+            forTaskWithIdentifier: BundleDownloadManager.cptWildcard,
+            using: .main) { [weak self] task in
+                self?.beginContinuedProcessing(task)
+            }
+        // `false` means the identifier is missing from BGTaskSchedulerPermittedIdentifiers.
+        DiagLog.shared.write("cpt-register", [
+            "ok": ok, "id": BundleDownloadManager.cptWildcard,
+        ], cat: "offline")
+    }
+
+    /// Ask the system to keep us running. Only ever in response to the user
+    /// starting a download, and only while genuinely foreground: `dasd` rejects a
+    /// submission when "Foregrounded apps don't include expected identifier", and
+    /// that rejection does NOT surface through the deprecated `submit(_:)` — hence
+    /// `submitTaskRequest(_:completionHandler:)`, whose completion block can
+    /// report errors from any point in the submission. Assumes `queue`.
+    private func submitContinuedProcessing(name: String) {
+        guard #available(iOS 26.0, *) else { return }
+        guard !cptSubmitted, !cptActive, !jobs.isEmpty else { return }
+        cptSubmitted = true
+        let files = jobs.values.reduce(0) { $0 + $1.files.count }
+        let title = jobs.count == 1 ? name : "\(jobs.count) downloads"
+        DispatchQueue.main.async {
+            guard UIApplication.shared.applicationState == .active else {
+                // Not foreground ⇒ it would be refused, silently. The durable
+                // queue's own resume path lands here on a cold start, which is
+                // exactly the case that must not burn the one submission.
+                DiagLog.shared.write("cpt-submit", ["ok": false, "why": "not-active"], cat: "offline")
+                self.queue.async { self.cptSubmitted = false }
+                return
+            }
+            let id = BundleDownloadManager.cptPrefix + UUID().uuidString
+            let req = BGContinuedProcessingTaskRequest(
+                identifier: id, title: title, subtitle: "\(files) files")
+            // .fail rather than the default .queue: if the system will not take it
+            // now we want to know immediately and fall back, not sit in a queue
+            // while the download quietly runs on the slow path anyway. (A queued
+            // request is also cancelled if the app is swiped from the switcher.)
+            req.strategy = .fail
+            var err = ""
+            do { try BGTaskScheduler.shared.submit(req) }
+            catch { err = String(describing: error) }
+            DiagLog.shared.write("cpt-submit", [
+                "ok": err.isEmpty, "title": title, "files": files,
+                "id": id, "err": err,
+            ], cat: "offline")
+            self.queue.async {
+                if !err.isEmpty { self.cptSubmitted = false; return }
+                // A CLEAN SUBMIT IS NOT A GRANT. Apple DTS on a report of exactly
+                // this: `dasd` refused with "Foregrounded apps don't include
+                // expected identifier" and nothing surfaced through the API — the
+                // launch handler simply never ran. Unattended overnight that is
+                // indistinguishable from success until morning, so time it out and
+                // fall back to the old hybrid rather than trust the silence.
+                self.queue.asyncAfter(deadline: .now() + 12) {
+                    guard self.cptSubmitted, !self.cptActive else { return }
+                    self.cptSubmitted = false
+                    DiagLog.shared.write("cpt-nogrant", [
+                        "id": id, "jobs": self.jobs.count,
+                    ], cat: "offline")
+                }
+            }
+        }
+    }
+
+    @available(iOS 26.0, *)
+    private func beginContinuedProcessing(_ task: BGTask) {
+        guard let t = task as? BGContinuedProcessingTask else {
+            DiagLog.shared.write("cpt-start", ["ok": false, "why": "wrong-type"], cat: "offline")
+            task.setTaskCompleted(success: false)
+            return
+        }
+        // Expiry is the ONLY thing standing between a granted task and a night of
+        // nothing: when the system takes it back, the in-process session it was
+        // protecting dies with the process. Hand the transfers to the background
+        // session on the way out — i.e. fall back to exactly the old hybrid.
+        t.expirationHandler = { [weak self] in
+            guard let self = self else { return }
+            self.queue.async {
+                let moved = self.migrateTasks(to: self.session)
+                self.cptActive = false
+                self.cptTask = nil
+                self.cptSubmitted = false
+                DiagLog.shared.write("cpt-expired", [
+                    "moved": moved, "jobs": self.jobs.count,
+                    "active": self.appActive,
+                    "held": Int(Date().timeIntervalSince(self.cptStartedAt)),
+                ], cat: "offline")
+                DispatchQueue.main.async { t.setTaskCompleted(success: false) }
+            }
+        }
+        queue.async {
+            self.cptTask = t
+            self.cptActive = true
+            self.cptStartedAt = Date()
+            DiagLog.shared.write("cpt-start", [
+                "ok": true, "jobs": self.jobs.count,
+                "pending": self.jobs.values.reduce(0) { $0 + $1.pending.count },
+            ], cat: "offline")
+            self.updateContinuedProgress()
+        }
+    }
+
+    private var cptStartedAt = Date.distantPast
+
+    /// The system stops a continued-processing task that stops reporting, so this
+    /// runs off the same tick as the Live Activity. Assumes `queue`.
+    private func updateContinuedProgress() {
+        guard #available(iOS 26.0, *), let t = cptTask as? BGContinuedProcessingTask else { return }
+        var done = 0, total = 0
+        for (_, j) in jobs { done += j.doneBytes.count; total += j.files.count }
+        t.progress.totalUnitCount = Int64(max(total, 1))
+        t.progress.completedUnitCount = Int64(min(done, max(total, 1)))
+    }
+
+    /// Every download finished — release the system's hold and let its UI dismiss.
+    /// Assumes `queue`.
+    private func finishContinuedProcessing(_ why: String) {
+        guard #available(iOS 26.0, *), let t = cptTask as? BGContinuedProcessingTask else {
+            cptSubmitted = false
+            return
+        }
+        cptTask = nil
+        cptActive = false
+        cptSubmitted = false
+        DiagLog.shared.write("cpt-done", [
+            "why": why, "held": Int(Date().timeIntervalSince(cptStartedAt)),
+        ], cat: "offline")
+        DispatchQueue.main.async { t.setTaskCompleted(success: why == "complete") }
+    }
+
     /// When the app last went background, for the `after` on `dl-bgtask-expired`.
     /// The gap between that row and its `dl-bg` is the REAL grant, measured
     /// rather than asked for — see logTransition.
@@ -275,6 +458,14 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             // transfers in. Every `dl-bg` in that transcript after the first
             // reads `bgTask: false`. Re-take it here; it is idempotent.
             self.beginBgTaskIfNeeded()
+            // THE WHOLE POINT. With a continued-processing task granted we are not
+            // going to be suspended, so the fast in-process session keeps working
+            // and migrating to the throttled one would be giving away the only
+            // thing this buys us. `moved: 0` with `cpt: true` is the good case.
+            if self.cptActive {
+                self.logTransition("dl-bg", moved: 0, readBudget: true)
+                return
+            }
             // Hand in-flight foreground transfers to the background session so they
             // keep running while suspended. The job-keyed bgTask assertion (held for
             // the whole download) keeps us alive long enough to re-enqueue.
@@ -326,6 +517,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
                 "jobs": jobCount, "pending": pending, "moved": moved,
                 "disk": disk, "done": done, "total": total, "bgTask": held,
                 "left": secs, "conns": BundleDownloadManager.bgConnsPerHost,
+                "cpt": self.cptActive,
             ], cat: "offline")
         }
         guard readBudget else { emit(-1); return }
@@ -653,6 +845,10 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             job.pending = Set(toFetch.map { $0.name })
             jobs[cacheKey] = job
             beginBgTaskIfNeeded()
+            // The user tapped Download — the only thing that legitimises a
+            // continued-processing request. Kept alongside the old assertion, not
+            // instead of it: if the system refuses, everything below is unchanged.
+            submitContinuedProcessing(name: name)
             for f in toFetch { enqueue(sha: cacheKey, file: f, job: job) }
             result = StartResult(dir: dir.path, alreadyComplete: false)
         }
@@ -776,7 +972,16 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         if let tok = job.token, !tok.isEmpty { req.setValue("Bearer \(tok)", forHTTPHeaderField: "Authorization") }
         // Foreground ⇒ fast in-process default session; suspended ⇒ background
         // session that survives suspend. A migration passes the destination explicitly.
-        let chosen = sess ?? (appActive ? fgSession : session)
+        //
+        // `cptActive` counts as foreground for this choice, and it has to. Under a
+        // continued-processing task the app is BACKGROUNDED but not suspended, so
+        // `appActive` is false while the fast session is still perfectly alive.
+        // Without this, every retry re-enqueue — and there were 16 transient
+        // retries in one evening's transcript — would quietly pick the throttled
+        // session and bleed the whole night back onto the slow path, one blip at a
+        // time, with nothing in the log naming it. migrateTasks is unaffected
+        // either way: it always passes `sess` explicitly.
+        let chosen = sess ?? ((appActive || cptActive) ? fgSession : session)
         let task = chosen.downloadTask(with: req)
         task.taskDescription = sha + "\u{0000}" + file.name
         // Keep a reference so migrateTasks can hand this file to the other session
@@ -875,6 +1080,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     }
 
     private func emitProgress(sha: String, job: Job) {
+        updateContinuedProgress()
         let confirmed = job.doneBytes.values.reduce(0, +)
         let live = job.liveBytes.values.reduce(0, +)
         let total = max(job.totalBytes, 1)
@@ -936,7 +1142,11 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         }
     }
     private func endBgTaskIfIdle() {
-        guard jobs.isEmpty, bgTask != .invalid else { return }
+        guard jobs.isEmpty else { return }
+        // Nothing left to protect: hand the system's hold back so its progress UI
+        // dismisses itself rather than lingering as another stale panel.
+        finishContinuedProcessing("complete")
+        guard bgTask != .invalid else { return }
         let id = bgTask; bgTask = .invalid
         DispatchQueue.main.async { UIApplication.shared.endBackgroundTask(id) }
     }
