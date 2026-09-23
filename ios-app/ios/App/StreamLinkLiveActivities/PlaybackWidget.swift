@@ -126,7 +126,6 @@ private struct PlaybackLockScreenView: View {
     }
 
     private var headline: String {
-        if state.tvMode { return "PLAYING ON DISPLAY" }
         if state.external { return "PLAYING ON DISPLAY" }
         return "PLAYING ON THIS DEVICE"
     }

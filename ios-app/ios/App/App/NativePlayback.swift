@@ -37,8 +37,8 @@
 //    takeover()        -> {started}   hand off NOW (explicit button / spike test)
 //    resume()          -> { active, position, paused, ended, itemId, filePath }
 //    state()           -> { active, native, position, paused, external, extWindow,
-//                            tvMode }
-//    setTvMode({on})   -> { on }
+//                            awake }
+//    setAwake({on})    -> { on }
 //    displays()        -> { connected, name, externalPlayback, ownWindow }
 //  Events: nativeStarted, nativeEnded, nativeAdvanced, displayChanged,
 //          nativeYielded (another device pulled this playback over — see
@@ -60,7 +60,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "18.12.0"
+let NP_BUILD = "18.13.2"
 
 // MARK: - Armed state
 
@@ -151,7 +151,7 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "takeover",  returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "resume",    returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "state",     returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "setTvMode", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setAwake",  returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "displays",  returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "extDiag",   returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setPaused", returnType: CAPPluginReturnPromise),
@@ -202,10 +202,10 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
         call.resolve(mgr.snapshot())
     }
 
-    @objc func setTvMode(_ call: CAPPluginCall) {
+    @objc func setAwake(_ call: CAPPluginCall) {
         let on = call.getBool("on") ?? false
-        mgr.setTvMode(on)
-        call.resolve(["on": mgr.tvModeOn])
+        mgr.setAwake(on)
+        call.resolve(["on": mgr.awakeOn])
     }
 
     @objc func displays(_ call: CAPPluginCall) {
@@ -813,10 +813,8 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private var endedFlag = false
     private var handBackDeadline: DispatchWorkItem?
 
-    /// Brightness captured when TV Mode blanked the screen. Also mirrored into
-    /// the App Group so a crash can't strand the user at 0 brightness.
-    private var savedBrightness: CGFloat?
-    private(set) var tvModeOn = false
+    /// Whether we are currently holding the idle timer open. See setAwake.
+    private(set) var awakeOn = false
 
     var isNativeActive: Bool { player != nil }
 
@@ -1940,7 +1938,6 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // kill it again — which is the exact failure this mode exists to escape.
         // stopNative() still releases it when playback really ends.
         if !earlyClaim { detachExternalWindow() }
-        if tvModeOn { applyBlank(true) }   // re-dim after a transient interruption
         guard isNativeActive else { return }
 
         // HOLDING THE DISPLAY MEANS "active" IS NOT A HAND-BACK CUE.
@@ -2123,51 +2120,45 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     /// Blank the phone's own screen while keeping the app FOREGROUND, so
     /// mirroring keeps feeding the monitor with the full custom player and the
     /// libass subtitle overlay — neither of which can survive a real lock.
-    func setTvMode(_ on: Bool) {
-        if on {
-            if savedBrightness == nil {
-                savedBrightness = UIScreen.main.brightness
-                AppGroupConfig.strandedBrightness = Double(UIScreen.main.brightness)
-            }
-            tvModeOn = true
-            applyBlank(true)
-        } else {
-            tvModeOn = false
-            applyBlank(false)
-        }
+    /// Hold the idle timer open while the PHONE ITSELF is presenting the
+    /// picture, so screen mirroring is not killed by an auto-lock.
+    ///
+    /// This is all that survives of TV Mode (removed 18.13.2). That feature
+    /// bundled five behaviours behind one switch — backlight to 0, a
+    /// transparent tap-swallowing shield with double-tap to exit, force-hiding
+    /// the transport, a three-second countdown that engaged the lot by itself,
+    /// and this. The first four existed to make a MIRRORED phone pleasant, and
+    /// mirroring has been superseded by the real external-display handoff for
+    /// the glasses; worse, the countdown raced the handoff (it was armed on
+    /// display-connect, which precedes `isHolding` by ~60 ms, and never
+    /// re-checked) so it dimmed the phone and locked touch during glasses
+    /// playback, which is exactly what it was written not to do.
+    ///
+    /// Keeping the screen awake was the one piece with no replacement: a
+    /// `<video>` playing inline in WKWebView does not reliably hold iOS awake,
+    /// and if the phone sleeps while mirroring, the monitor goes with it. It is
+    /// now driven automatically from the page (`_npSyncAwake`) rather than
+    /// bundled behind a mode the user has to remember to engage, and it is NOT
+    /// wanted during a native handoff — there the AVPlayer owns the external
+    /// window and playback survives a lock by design.
+    func setAwake(_ on: Bool) {
+        guard on != awakeOn else { return }
+        awakeOn = on
+        DispatchQueue.main.async { UIApplication.shared.isIdleTimerDisabled = on }
     }
 
-    private func applyBlank(_ on: Bool) {
-        DispatchQueue.main.async {
-            if on {
-                UIScreen.main.brightness = 0.0
-                UIApplication.shared.isIdleTimerDisabled = true
-            } else {
-                if let b = self.savedBrightness { UIScreen.main.brightness = b }
-                UIApplication.shared.isIdleTimerDisabled = false
-                self.savedBrightness = nil
-                AppGroupConfig.strandedBrightness = nil
-            }
-        }
-    }
-
-    /// A crash or force-quit while dimmed leaves the screen at 0 — iOS does not
-    /// put it back. Recover on the next launch/foreground.
+    /// Upgrade safety net. Nothing dims the screen any more (see setAwake), but
+    /// a device that force-quit or crashed while TV Mode had it at 0 keeps that
+    /// brightness — iOS does not put it back, and neither does installing a new
+    /// build. Kept so the first launch of 18.13.2 un-strands anyone it caught,
+    /// and harmless forever after because the key is never written again.
     private func restoreStrandedBrightness() {
-        guard !tvModeOn, let b = AppGroupConfig.strandedBrightness else { return }
+        guard let b = AppGroupConfig.strandedBrightness else { return }
         AppGroupConfig.strandedBrightness = nil
-        savedBrightness = nil
-        DispatchQueue.main.async {
-            UIScreen.main.brightness = CGFloat(b)
-            UIApplication.shared.isIdleTimerDisabled = false
-        }
+        DispatchQueue.main.async { UIScreen.main.brightness = CGFloat(b) }
     }
 
     @objc private func appWillResignActive() {
-        // A call, Control Centre, or the power button. Put the brightness back
-        // immediately — `tvModeOn` is kept so didBecomeActive can re-dim.
-        if tvModeOn { applyBlank(false); tvModeOn = true }
-
         // Claim the external display NOW, while the app can still draw. A window
         // created inside didEnterBackground may never get its first composite
         // pass, and the monitor would sit on the mirrored lock screen for the rest
@@ -2183,11 +2174,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // The ONLY clean way out. Everything else leaves the marker behind and
         // is reported as `prev-launch-dirty` on the next launch.
         DiagLog.shared.closeRun()
-        if tvModeOn || savedBrightness != nil {
-            if let b = savedBrightness { UIScreen.main.brightness = b }
-            UIApplication.shared.isIdleTimerDisabled = false
-            AppGroupConfig.strandedBrightness = nil
-        }
+        if awakeOn { UIApplication.shared.isIdleTimerDisabled = false }
         maybePostProgress(armed.position, force: true)
     }
 
@@ -2708,7 +2695,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             "paused":   armed.paused,
             "external": player?.isExternalPlaybackActive ?? false,
             "extWindow": extWindow != nil,
-            "tvMode":   tvModeOn,
+            "awake":    awakeOn,
             "holding":  isHolding,
         ]
     }
@@ -2721,7 +2708,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             isPaused: armed.paused || (player.map { $0.timeControlStatus != .playing } ?? armed.paused),
             position: armed.position, duration: armed.duration,
             external: player?.isExternalPlaybackActive ?? false,
-            tvMode: tvModeOn, canPrev: armed.canPrev, canNext: armed.canNext)
+            canPrev: armed.canPrev, canNext: armed.canNext)
     }
 
     private func emit(_ name: String, _ payload: [String: Any]) {

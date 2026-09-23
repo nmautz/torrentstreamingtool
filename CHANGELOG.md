@@ -1,5 +1,57 @@
 # Changelog
 
+## [18.13.2] — 2026-09-22
+### TV Mode is gone; only the half that had no replacement stays
+
+Reported after the 18.13.0 remote landed: the glasses controls work well, but plugging
+in still dims the phone and locks its touch behind a double-tap. That was **TV Mode**,
+and the code already said it must not happen —
+
+```js
+// No TV Mode offer while native holds the display: early mode has already
+// REPLACED mirroring there, so blanking the phone feeds nothing.
+if (!lp.itemId || !_appPlaybackPrefs().tv || _npTvMode || _npHolding) return;
+```
+
+— but that guard is evaluated when the **offer is armed**, and the three-second
+countdown behind it re-checked nothing. Display-connect precedes `_npHolding` by about
+**60 ms** (measured on device: `display connected:1 holding:0` at `04:59:55.558`,
+`holding:1` at `.619`), so the guard passed every time and the timer fired every time.
+A guard evaluated at arm time is not a guard.
+
+TV Mode bundled five behaviours behind one switch. Four of them existed to make a
+**mirrored** phone pleasant, and mirroring is superseded by the real external-display
+handoff:
+
+- backlight pulled to 0 — **removed**
+- a transparent shield swallowing every tap, with double-tap to exit — **removed**
+- force-hiding the transport (`lp-idle`) — **removed**
+- the countdown that engaged the lot by itself — **removed**, with the `#lpTvBtn`
+  control and the whole `_npSetTvMode` / `_npTvVeil` / `_npTvHint` block
+
+The fifth had no replacement: **keeping the screen awake.** A `<video>` playing inline
+in WKWebView does not reliably hold iOS awake, and a phone that sleeps takes the
+mirrored monitor with it — so removing TV Mode wholesale would have made mirroring
+unusable rather than merely less comfortable.
+
+- **`setAwake(on)`** replaces `setTvMode` in `NativePlayback`, touching
+  `isIdleTimerDisabled` and nothing else. `_npSyncAwake()` drives it from the page on
+  play, pause, handoff changes and teardown: awake while the phone itself is playing,
+  **not** during a native handoff — there the `AVPlayer` owns the external window and
+  playback survives a lock by design, so holding the timer open would only light a
+  screen nobody is looking at.
+- **The Settings row is relabelled** "Keep the screen awake while playing" (was "Dim
+  the screen for TV playback"). The stored key and the `tvm` sync field keep their
+  historical spelling so upgrading doesn't silently reset anyone's choice.
+- `restoreStrandedBrightness` is **deliberately kept**. Nothing writes the key any more,
+  but a device that force-quit while dimmed under the old build is still at 0 brightness
+  — iOS doesn't put it back and neither does installing a new build. One-time net,
+  harmless forever after.
+- `tvMode` also left the Live Activity chain (attributes, state, widget). The widget's
+  branch was already dead: `if state.tvMode` and `if state.external` returned the same
+  string.
+- `NP_BUILD` → **18.13.2**, so the next transcript says which IPA is actually installed.
+
 ## [18.13.1] — 2026-09-22
 ### Curing the loader is not the same as keeping the playhead
 

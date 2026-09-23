@@ -37,7 +37,6 @@ struct PlaybackLiveState {
     var position: Double
     var duration: Double
     var external: Bool
-    var tvMode: Bool
     var canPrev: Bool
     var canNext: Bool
 }
@@ -127,7 +126,7 @@ final class PlaybackLiveActivity {
 
     /// Everything EXCEPT position — a moving playhead is not a reason to push.
     private func changeKey(_ s: PlaybackLiveState) -> String {
-        "\(s.title)|\(s.series)|\(s.isPaused)|\(s.external)|\(s.tvMode)|\(s.canPrev)|\(s.canNext)"
+        "\(s.title)|\(s.series)|\(s.isPaused)|\(s.external)|\(s.canPrev)|\(s.canNext)"
     }
 
     @available(iOS 16.1, *)
@@ -135,7 +134,7 @@ final class PlaybackLiveActivity {
         PlaybackAttributes.ContentState(
             title: s.title, series: s.series, isPaused: s.isPaused,
             position: s.position, duration: s.duration, stamp: Date(),
-            external: s.external, tvMode: s.tvMode,
+            external: s.external,
             canPrev: s.canPrev, canNext: s.canNext)
     }
 }

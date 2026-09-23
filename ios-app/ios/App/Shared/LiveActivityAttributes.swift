@@ -66,17 +66,16 @@ public struct PlaybackAttributes: ActivityAttributes {
         public var duration: Double     // seconds (0 ⇒ unknown)
         public var stamp: Date          // when `position` was sampled
         public var external: Bool       // video is going out to a monitor / AirPlay
-        public var tvMode: Bool         // phone screen blanked, app still foreground
         public var canPrev: Bool
         public var canNext: Bool
 
         public init(title: String, series: String, isPaused: Bool,
                     position: Double, duration: Double, stamp: Date = Date(),
-                    external: Bool = false, tvMode: Bool = false,
+                    external: Bool = false,
                     canPrev: Bool = false, canNext: Bool = false) {
             self.title = title; self.series = series; self.isPaused = isPaused
             self.position = position; self.duration = duration; self.stamp = stamp
-            self.external = external; self.tvMode = tvMode
+            self.external = external
             self.canPrev = canPrev; self.canNext = canNext
         }
 

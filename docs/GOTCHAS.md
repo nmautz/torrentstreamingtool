@@ -2426,9 +2426,10 @@ Eleven constraints, each of which independently breaks the feature. See
   plugin and just adding the plist key; it will look right and play nothing.
 - **A backgrounded app cannot draw — so libass on an external display is impossible.**
   No CADisplayLink ticks, no CoreAnimation commits, no *app-drawn* content on a second
-  `UIScreen`. Styled ASS therefore cannot survive a true lock by any route. TV Mode
-  (backlight down, app *foreground*, mirroring alive) is the answer, and is also the
-  fallback if wired external playback disappoints. **This does not extend to an
+  `UIScreen`. Styled ASS therefore cannot survive a true lock by any route. Keeping the
+  app foreground with mirroring alive was the answer — that was TV Mode's real job, and
+  from 18.13.2 only its keep-awake half remains (`setAwake`, automatic while the phone
+  itself is playing); the mirrored-phone comforts around it are gone. **This does not extend to an
   `AVPlayerLayer`**: its frames come from the media server, not the app's render loop,
   which is what lets the backgrounded handoff put video on an external window at all.
   Don't read this bullet as "nothing can appear on the monitor while locked".
@@ -2456,12 +2457,17 @@ Eleven constraints, each of which independently breaks the feature. See
   would make every WKWebView sound ignore the ringer switch from boot. It's set
   lazily, at the moment of handoff, and deactivated with
   `.notifyOthersOnDeactivation` on hand-back so WebKit gets its session back.
-- **TV Mode must restore brightness on every exit path, including a crash.** iOS does
-  **not** put brightness back after a force-quit, so a crash while dimmed leaves the
-  user with an apparently dead phone and no clue why. Covered: explicit exit,
-  `willResignActive` (call / Control Centre / power button), `willTerminate`, and a
-  `strandedBrightness` value in the App Group restored on the next `load()`. If you
-  add a new path into TV Mode, add its exit too.
+- **Anything that dims the screen must restore it on every exit path, including a crash
+  — which is part of why TV Mode was removed in 18.13.2.** iOS does **not** put
+  brightness back after a force-quit, so a crash while dimmed leaves the user with an
+  apparently dead phone and no clue why. That needed four exit paths kept in step
+  (explicit exit, `willResignActive` for a call / Control Centre / power button,
+  `willTerminate`, and a `strandedBrightness` value in the App Group replayed on the
+  next `load()`) for a comfort feature. `restoreStrandedBrightness` is deliberately
+  **kept** as a one-time upgrade net — nothing writes the key any more, but a device
+  that force-quit while dimmed under the old build is still at 0 until something puts
+  it back, and installing a new build does not. **If you ever reintroduce a screen
+  dimmer, reintroduce all four exits with it.**
 - **`AVMediaSelectionGroup` ordering is not guaranteed to match `meta.json`.** Match
   audio/subtitle options by `displayName` then `locale.languageCode` — never by index,
   or some bundles silently play the wrong language.
@@ -2545,15 +2551,23 @@ Eleven constraints, each of which independently breaks the feature. See
   `seekTo`, read the transport from a 1 Hz mirror, and never write the parked element's
   position to progress — that stale value would send Resume back to where the handoff
   began.
-- **TV Mode may not draw ANYTHING opaque — the monitor is mirroring that framebuffer**
-  (fixed 14.1.1). `#lpTvVeil` was a full-screen black `<div>`, so "blank the phone"
-  blanked the TV as well and the episode disappeared from both screens at once. The
-  only lever that darkens the phone without touching a mirrored pixel is the
-  **backlight** (`UIScreen.main.brightness = 0`), which the native side already pulls;
-  the veil is now a *transparent* touch shield that exists solely to swallow taps and
-  carry the double-tap exit. Anything else TV Mode puts on screen — the `#lpTvHint`
-  chip — must retire itself. Same rule for the transport bar, which is why entering TV
-  Mode adds `lp-idle`.
+- **Whatever you draw while mirroring, you draw on the monitor** (14.1.1; the feature
+  itself removed in 18.13.2). `#lpTvVeil` was a full-screen black `<div>`, so "blank the
+  phone" blanked the TV with it and the episode vanished from both screens at once. The
+  rule outlives TV Mode and applies to anything the page shows while a phone is
+  mirroring: the framebuffer *is* the monitor's picture, so the only lever that darkens
+  the phone alone is the backlight, and every chip, banner or control you put up is on
+  the TV too until it retires itself.
+
+- **A timer armed on a display-connect event cannot trust what it checked when it was
+  armed (18.13.2).** TV Mode's auto-engage guarded correctly — `if (… || _npHolding)
+  return;` with a comment saying blanking the phone during a native handoff feeds
+  nothing — and then started a 3-second countdown whose callback re-checked **nothing**.
+  Display-connect precedes `_npHolding` by about 60 ms (measured: `display connected:1
+  holding:0` at 04:59:55.558, `holding:1` at .619), so the guard passed every time and
+  the timer fired every time, dimming the phone and swallowing taps during exactly the
+  playback it was written to leave alone. **A guard evaluated at arm time is not a
+  guard; re-test it in the callback, or arm from the state change you actually mean.**
 
 Two more, on the JS side:
 
@@ -4924,7 +4938,7 @@ Three things that fall out of it:
   restore branch runs on **every** `_npHolding` write, both directions — there is no event
   for "the page stopped being a remote".
 - **Never ship a tile that cannot do anything.** `NativePlayback` exposes
-  `setPaused`/`seekTo`/`takeover`/`resume`/`state`/`setTvMode` and no volume method, and
+  `setPaused`/`seekTo`/`takeover`/`resume`/`state`/`setAwake` and no volume method, and
   switching audio or subtitles needs the native item reloaded. So the remote has no volume
   row and no track row, where the TV grid has both. A dead control is the same sin as an
   empty overlay, just louder — and the phone's hardware volume buttons already drive the

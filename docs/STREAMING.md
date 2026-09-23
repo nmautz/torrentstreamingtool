@@ -1372,15 +1372,25 @@ switchable off in ☰ App → Settings → Playback (`streamlink_app_bgplay`,
 
 | Path | Trigger | Monitor | Styled ASS | Phone screen |
 |---|---|---|---|---|
-| **TV Mode** | a display connects, app stays foreground | mirroring | **yes** (libass + custom UI) | backlight at minimum, never auto-locks |
-| **Native handoff** | app backgrounds (lock / app switch) | `AVPlayer` on a surface of its own | no — plain VTT | locked |
+| **Mirroring** | a display connects, app stays foreground | mirroring | **yes** (libass + custom UI) | normal, but **never auto-locks** (`setAwake`) |
+| **Native handoff** | app backgrounds (lock / app switch), or a display arrives in Early mode | `AVPlayer` on a surface of its own | no — plain VTT | locked; the page becomes a remote |
 
-They're orthogonal: TV Mode doesn't disable the handoff, it just prevents the
-*auto-lock* that would trigger it. Pressing the power button in TV Mode still hands
-off. TV Mode is also the **fallback** if wired external playback turns out not to
-survive lock, which is why it defaults on whenever a display is present.
+They're orthogonal: keep-awake doesn't disable the handoff, it just prevents the
+*auto-lock* that would trigger it. Pressing the power button still hands off.
 
-**Two rules follow from mirroring, and 14.1.1 fixed a violation of each.**
+**TV Mode was the old name for the mirroring row, and it is gone (18.13.2).** It
+bundled five behaviours behind one switch — backlight to 0, a transparent
+tap-swallowing shield with double-tap to exit, force-hiding the transport, a
+three-second countdown that engaged the lot by itself, and keeping the screen awake.
+The first four made a *mirrored* phone pleasant, and mirroring has been superseded by
+the real external-display handoff; the countdown also raced that handoff and dimmed the
+phone during glasses playback (see [GOTCHAS.md](GOTCHAS.md)). Only keep-awake had no
+replacement — a `<video>` playing inline in WKWebView does not reliably hold iOS awake,
+and a sleeping phone takes the mirrored monitor with it — so it became `setAwake`,
+driven automatically by `_npSyncAwake` whenever the phone itself is playing and **not**
+during a native handoff, where playback survives a lock by design.
+
+**One rule still follows from mirroring, and 14.1.1 fixed a violation of it.**
 
 *TV Mode may not draw anything opaque.* The monitor receives the phone's
 **framebuffer**, so a black curtain over the player blanks the monitor with it — which
@@ -1578,15 +1588,16 @@ playback — `AVVideoComposition` is unsupported for HLS assets — and renderin
 libass overlay to an external `UIScreen` while backgrounded, because a backgrounded
 app cannot **draw** at all. (That limit is about app-drawn content; an
 `AVPlayerLayer` is fed by the media server, which is why the Early mode above can
-still show video there.) TV Mode is the answer to both.
+still show video there.) Keeping the app foreground with mirroring alive is the answer
+to both.
 
 **Verification sequence** (on-device; each is a go/no-go gate): bare background audio
 → position fidelity across a lock/unlock → wired HDMI unlocked → **wired HDMI locked**
 (the load-bearing assumption — try **Early** first, then flip the setting to
 **Mirrored** and repeat; `nativeStarted` carries `extMode` / `extWindow` and
 `displays()` carries `ownWindow` / `externalPlayback` to say which path actually ran)
-→ TV Mode incl. brightness restore after a force-quit, **with the episode still visible
-on the monitor** →
+→ mirroring with the phone left alone for longer than its auto-lock interval, **with the
+episode still visible on the monitor** →
 Live Activity clock advancing between pushes → native subs in sync → progress written
 while locked → the same against an LMS-served bundle in Airplane Mode → no-regression
 in a desktop browser.
