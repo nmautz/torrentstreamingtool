@@ -2304,6 +2304,8 @@ hls.js's ABR bandwidth estimator is an EWMA whose samples are **weighted by down
 - **Fullscreen targets the whole `#localPlayer` container, not the `<video>`.** `lpToggleFullscreen` calls `requestFullscreen` on the container so the header, transport, and audio/sub/quality selectors stay visible and usable inside OS fullscreen. Fullscreening the `<video>` element summons the native controls and (on iOS) the system player — exactly what this feature removes.
 - **iPhone Safari has no element-fullscreen API** (only `<video>.webkitEnterFullscreen`, which is the native player). The FS button is hidden at init when `requestFullscreen`/`webkitRequestFullscreen` is missing on the container; nothing is lost because `#localPlayer` is already a `position:fixed; inset:0` overlay.
 - **Scrub commits the seek on pointer-release only.** While dragging, `_lpScrub.t` previews the position; `currentTime` is set once on `pointerup`. Seeking per `pointermove` would, in on-demand mode, restart the JIT ffmpeg on every pixel of drag (each cold seek tears down and re-launches the encoder — see § On-demand).
+- **`hls.attachMedia()` does not attach synchronously — never `play()` until MEDIA_ATTACHED (fixed 18.14.1).** `attachMedia(v)` emits MEDIA_ATTACHING and returns; the BufferController creates the MediaSource and assigns `media.src` in a **later task**, announcing it with MEDIA_ATTACHED. A `play()` issued in that gap is a play on a resource about to be replaced, and the spec's answer to a replaced resource is to reject the pending promise with **AbortError** and leave the element paused. Measured 2026-09-23 07:11:19.557: `play-start ok:0 err:"AbortError" ready:0 buffered:"none"`, then 240 s of video buffered behind an element that never played until the user pressed the transport 20.8 s later — the long-standing "it won't start until I press the button" bug, in full. **The race is only lost when the load path is FAST**: both successful starts in the same transcript were `ready: 3`, the failure was `ready: 0`, and the failing load was a re-play of an already-warm bundle that finished in 30 ms. That is why it presented as intermittent and never reproduced on a cold load. `lp._hlsAttached` is now a bounded barrier the play waits on — and re-check `lp.filePath` after awaiting it, because that await is a suspension point a newer load can win.
+
 - **`play()` resolving does not mean playback started, and its rejection must never be discarded (18.14.0).** The load path ended in `try { await v.play(); } catch (_) {}` for the life of the player. That swallows the two failures that are otherwise indistinguishable from a wedged pipeline: `NotAllowedError` (the autoplay policy — cured by a user gesture, which is exactly the transport press users had been making by hand) and `AbortError` (a newer load replaced this one). Both now write `play-start`, and so does success — a resolved promise is what narrows a picture that never appears to the pipeline rather than the start.
 
 - **A watchdog that declines to act must say why it declined (18.14.0).** `_lpColdStartKickTick` (the iOS/MMS cold-start nudge) has four guards — `paused`, `scrub`, `ready`, `resume-pending` — and used to return silently on all of them. Three are benign; **`paused` is the long-standing "it won't start until I press the button" bug**, because a nudge cannot start a parked element, so the watchdog is structurally powerless there and nothing else in the player will act either. The absence of a `cold-kick` row was being read as "the watchdog handled it" when it meant "the watchdog was never allowed to try". A `cold-stall` row now names the guard. Generally: for any recovery path, the branch where it does nothing is worth more evidence than the branch where it acts.
@@ -3663,6 +3665,51 @@ transcript could not tell "turned off in Settings" from "ours went stale". The
 which counts `Activity.activities` against what we believe is playing, because
 every other row records an intention and only that one records the lock screen.
 See [DIAGNOSTICS.md](DIAGNOSTICS.md) § Recipe: "the Dynamic Island went stale".
+
+### A failed file MOVE is a race, not a verdict — don't drop the bundle for it (fixed 18.14.1)
+`didFinishDownloadingTo` must move the temp file synchronously, and when that
+move throws the question is whether to retry the file or abandon the download.
+`errTransient` was only ever set for HTTP 408/429/5xx, so **every** move failure
+counted as permanent, routed to `emitError` + `cancelLocked`, and discarded the
+whole bundle. Measured 2026-09-23 07:07:33.557, during a foreground→background
+migration:
+
+```
+bundle-failed  S01E31  filesDone: 617/622  bytesDone: 535,879,989
+  "CFNetworkDownload_BKxxsm.tmp" couldn't be moved to "801b67c9…" because
+  either the former doesn't exist, or the folder containing the latter doesn't
+```
+
+`migrateTasks` cancels a task and re-enqueues the file on the other session. A
+task that had **just** finished still delivers `didFinishDownloadingTo`, but its
+temp file is already gone — so the move fails for a file that is merely late,
+not broken, and 99.2% of a download is thrown away over one segment a re-fetch
+would have replaced. Move failures are now transient; only a full disk
+(`NSFileWriteOutOfSpaceError`) or a read-only volume is permanent.
+
+### A background assertion that expires is never re-taken unless you re-take it (fixed 18.14.1)
+`beginBgTaskIfNeeded()` ran only from `startDownload`. The expiration handler
+sets `bgTask = .invalid`, so after the first expiry — measured five seconds
+after a `left: 9` grant — that download had **no** background execution window
+for the rest of its life, and every later `dl-bg` read `bgTask: false`. That
+window is what `migrateTasks` needs in order to hand transfers to the background
+session on a backgrounding, so losing it silently is how "downloads stop when I
+lock the phone" comes back after appearing fixed. Re-take it on every
+backgrounding; the call is idempotent.
+
+Related instrument trap: `UIApplication.backgroundTimeRemaining` is
+`.greatestFiniteMagnitude` until the app is actually background, so reading it
+after a `DispatchQueue.main.async` hop usually returns "infinite" and tells you
+nothing. Read it on the notification thread, in the handler itself.
+
+### Background transfers are ~72× slower than foreground — that is iOS, not a bug (measured 18.14.1)
+Same link, same device, 2026-09-23: **~3.3 MB/s foreground, ~46 KB/s locked.** A
+1.73 GB queue is ~8 minutes open and ~10 hours locked. So "the download didn't
+run overnight" and "the download is running" can both be true at once, and only
+the byte delta across a `dl-bg` → `dl-fg` pair distinguishes them (`la-progress`
+cannot — a suspended app receives no delegate callbacks to write rows from).
+Before treating a slow download as broken, measure it. `isDiscretionary` is
+already `false`; `httpMaximumConnectionsPerHost = 8` is an open experiment.
 
 ### The remote dashboard CANNOT load offline — `downloads.html` is the offline entry point
 The whole dashboard UI (`static/index.html`) is **served by the host**. The shell

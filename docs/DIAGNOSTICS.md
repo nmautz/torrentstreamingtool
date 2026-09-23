@@ -163,7 +163,8 @@ JS-written rows carry `src: "js"`.
 | `route` | audio route change — the glasses are a route as well as a screen |
 | `item-stalled` / `item-failed` | the native item ran dry or could not finish |
 | `video-error` / `video-stalled` | the same, from the web element |
-| `play-start` | the result of `v.play()` on a fresh file (18.14.0). `ok: false` carries `err` — **`NotAllowedError`** is the autoplay policy (a tap cures it), **`AbortError`** is a newer load having replaced this one. `ok: true` is just as useful: the promise resolved, so a picture that never appears is the pipeline's doing, not the start's |
+| `play-start` | the result of `v.play()` on a fresh file (18.14.0). `ok: false` carries `err` — **`NotAllowedError`** is the autoplay policy (a tap cures it), **`AbortError`** means the media resource was replaced under a pending play. `attach` (18.14.1) says whether hls.js's MediaSource barrier came back `attached`, timed out (`timeout`), or did not apply (`n/a`, the Safari-native path). `ok: true` is just as useful: the promise resolved, so a picture that never appears is the pipeline's doing, not the start's |
+| `play-retry` | the one retry after an `AbortError` (18.14.1). Should be rare now the attach barrier exists — a run of them means the barrier is timing out, and `attach: "timeout"` on the row above will say so |
 | `cold-stall` | the iOS cold-start watchdog **declined to act**, and `why` says which of its four guards stopped it: `paused`, `scrub`, `ready`, `resume-pending`. **`paused` is the important one** — the element is parked and no watchdog may touch it, which is the shape of "it won't start until I press the button". At most three per file, never before 2.5 s |
 | `cold-kick` | the watchdog nudging `currentTime` to make ManagedMediaSource start fetching. `stage: "nudge"` with a count, or `stage: "giveup"` after ~6 s of trying |
 | `cold-start` | the closing verdict, written **only when the start had to fight**: `nudges`, the `blocked` reasons seen, and `ms` to first frame. A clean start writes nothing |
@@ -173,11 +174,11 @@ JS-written rows carry `src: "js"`.
 | `progress-failed` | a web-player save that failed, and whether it was stashed offline or lost |
 | `bundle-start` | a download beginning — how many files were asked for, how many `resumed` straight off disk, total `bytes`, and whether the app was foreground |
 | `bundle-retry` / `bundle-complete` / `bundle-failed` | a download's course, not just its verdict |
-| `dl-bg` / `dl-fg` | the app crossed the foreground/background line with jobs running (18.14.0). `moved` is how many in-flight transfers `migrateTasks` handed to the other session; **`left`** is `backgroundTimeRemaining` in seconds, the budget the re-enqueue has to finish inside. A `dl-bg` with `moved: 0` and `pending > 0` means nothing migrated and the transfers die with the assertion |
+| `dl-bg` / `dl-fg` | the app crossed the foreground/background line with jobs running (18.14.0). `moved` is how many in-flight transfers `migrateTasks` handed to the other session; **`left`** is `backgroundTimeRemaining` in seconds on a `dl-bg` (`-1` on a `dl-fg`, where it has no meaning), the budget the re-enqueue has to finish inside; `conns` is the background session's per-host connection limit. A `dl-bg` with `moved: 0` and `pending > 0` means nothing migrated and the transfers die with the assertion. **`done` is only comparable between two rows carrying the same `jobs` and `total`** — the denominators move as bundles start and finish, so a throughput figure taken across a change in the job set is meaningless |
 | `dl-bgtask-expired` | iOS reclaimed the background assertion (~30 s). Expected mid-bundle and **not a bug on its own** — what decides it is whether the preceding `dl-bg` moved the transfers to the background session first |
 | `dl-bg-events` | the OS relaunched us to deliver finished background transfers. Its **absence** across a whole suspended stretch means the background session delivered nothing at all |
 | `dl-bg-flushed` | that batch finished flushing; `completed` is how many bundles the on-disk reconcile repaired |
-| `la-progress` | 30 s download heartbeat — bytes done vs total, files done vs count. **This is what separates "stalled" from "not running"**; without it a frozen transfer is indistinguishable from no transfer |
+| `la-progress` | 30 s download heartbeat — bytes done vs total, files done vs count. **This is what separates "stalled" from "not running"** while the app is RUNNING. It cannot fire while the app is suspended: a background `URLSession` delivers no delegate callbacks to a suspended process, so there is nothing to write a row from. For a locked-phone stretch, measure the `done` delta across the enclosing `dl-bg` → `dl-fg` pair instead |
 | `bundle-healed` | an index entry marked complete by **reconciliation** rather than by finishing — check for this first when offline playback breaks on a bundle |
 | `lms-start` / `lms-failed` / `lms-stop` | the loopback server, the middle link in the offline chain |
 | `offline-completed` | an offline watch crossed the completion line, **with the played-time inputs** — the one case the server cannot measure |
@@ -346,11 +347,34 @@ as a pair.
   the first press and the resting place, so `from`→`to` on the second row will show a jump
   of many multiples of 10).
 
+### Measured throughput, so a "slow" report has something to sit against
+
+From the 2026-09-23 07:00 transcript — same link, same device:
+
+| state | rate | source |
+|---|---|---|
+| foreground | **~3.3 MB/s** | three consecutive `la-progress` rows on one job (3341 / 3395 / 3329 KB/s) |
+| locked / suspended | **~46 KB/s** | `done` delta across one `dl-bg` → `dl-fg` pair, 24 min, job set unchanged |
+
+**~72×.** A 1.73 GB queue is ~8 minutes foreground and ~10 hours locked. So "the
+download didn't run overnight" and "the download is running" can both be true,
+and only the byte delta tells them apart. `isDiscretionary` is already `false`;
+18.14.1 raised `httpMaximumConnectionsPerHost` to 8 as an experiment — if that
+ratio does not move, the throttling is in `nsurlsessiond`'s byte scheduling
+rather than the socket count, and the setting should come back out.
+
 ### Recipe: "it won't start playing until I press the button"
 
 The oldest of the on-device complaints, and until 18.14.0 the transcript had
 literally nothing to say about it: the `play()` rejection was discarded, and the
 cold-start watchdog that exists for exactly this had never written a row.
+
+**Solved once already (18.14.1), so check the known cause first.** A `play-start`
+with `ok: 0, err: "AbortError", ready: 0` is hls.js's MediaSource attach landing
+under a `play()` issued too early, leaving the element paused with the whole
+episode buffering up behind it. 18.14.1 added the attach barrier; if it recurs,
+read `attach` on the row — `timeout` means the barrier gave up waiting, and the
+fix is its ceiling rather than the concept.
 
 1. Find the `loaded` row for the file, then the `play-start` immediately after
    it. **`ok: false` ends the search** — `err: "NotAllowedError"` is the autoplay

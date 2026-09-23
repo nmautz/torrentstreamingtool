@@ -2896,6 +2896,15 @@ panel's full-width twin is `_appDlWideHTML`, refreshed by the same
    [DIAGNOSTICS.md](DIAGNOSTICS.md) § Recipe: "the download stopped when I locked
    the phone".
 
+   **Measured 2026-09-23: ~3.3 MB/s foreground vs ~46 KB/s locked — about 72x.**
+   A 1.73 GB queue is ~8 minutes with the app open and ~10 hours with the phone
+   locked, so a download that looks dead overnight is usually just suspended-slow.
+   Two fixes came out of that same transcript: a temp-file move failure during a
+   fg/bg migration used to be classed as permanent and **discarded a bundle
+   617/622 files complete**, and the background-task assertion was never re-taken
+   after its first expiry, leaving later backgroundings with no window to migrate
+   transfers in. Both in [GOTCHAS.md](GOTCHAS.md).
+
 > **Single-rung downloads + the quality chooser.** A downloaded file is always
 > played at one resolution, so `files[]` is filtered server-side
 > (`_bundle_select_rung` in `main.py`) to **one** video rung; the others' playlist +

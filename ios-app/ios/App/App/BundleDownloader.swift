@@ -254,18 +254,31 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             // Pull any still-running suspended-mode transfers back onto the fast
             // session so an open app always downloads at full speed.
             let moved = self.migrateTasks(to: self.fgSession)
-            self.logTransition("dl-fg", moved: moved)
+            self.logTransition("dl-fg", moved: moved, left: nil)
         }
     }
     @objc private func appDidEnterBackground() {
+        // Read on the notification thread, BEFORE the hop: `backgroundTimeRemaining`
+        // only becomes a real number once the app is actually background, and
+        // reading it a beat late returned `.greatestFiniteMagnitude` — which is
+        // why every `dl-bg` after the first logged `left: -1` and told us nothing.
+        let left = UIApplication.shared.backgroundTimeRemaining
         queue.async {
             self.appActive = false
             guard !self.jobs.isEmpty else { return }
+            // THE ASSERTION IS NOT RE-TAKEN WHEN IT EXPIRES. beginBgTaskIfNeeded
+            // ran only from startDownload, so the first `dl-bgtask-expired`
+            // (measured 06:37:26, five seconds after a `left: 9` grant) left
+            // bgTask invalid for the rest of that download — and every later
+            // backgrounding then had NO execution window to migrate its
+            // transfers in. Every `dl-bg` in that transcript after the first
+            // reads `bgTask: false`. Re-take it here; it is idempotent.
+            self.beginBgTaskIfNeeded()
             // Hand in-flight foreground transfers to the background session so they
             // keep running while suspended. The job-keyed bgTask assertion (held for
             // the whole download) keeps us alive long enough to re-enqueue.
             let moved = self.migrateTasks(to: self.session)
-            self.logTransition("dl-bg", moved: moved)
+            self.logTransition("dl-bg", moved: moved, left: left)
         }
     }
 
@@ -277,25 +290,24 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     // transition wrote a row at all. `left` is the one to read on a `dl-bg`:
     // seconds of execution the OS is granting us, which is how long the
     // re-enqueue has to finish. Assumes `queue`.
-    private func logTransition(_ ev: String, moved: Int) {
+    private func logTransition(_ ev: String, moved: Int, left: TimeInterval?) {
         var pending = 0, done: Int64 = 0, total: Int64 = 0
         for (_, j) in jobs {
             pending += j.pending.count
             done += j.doneBytes.values.reduce(0, +) + j.liveBytes.values.reduce(0, +)
             total += j.totalBytes
         }
-        let held = bgTask != .invalid
-        // backgroundTimeRemaining is a UIApplication read; hop to main for it and
-        // write the row from there so the number belongs to the same instant.
-        DispatchQueue.main.async {
-            var left = UIApplication.shared.backgroundTimeRemaining
-            if !left.isFinite || left > 100000 { left = -1 }   // .greatestFiniteMagnitude == "foreground"
-            DiagLog.shared.write(ev, [
-                "jobs": self.jobs.count, "pending": pending, "moved": moved,
-                "done": done, "total": total, "bgTask": held,
-                "left": Int(left),
-            ], cat: "offline")
-        }
+        // `done` is only comparable between two rows with the SAME job set — the
+        // totals move as bundles start and finish, so a throughput figure taken
+        // across a change in `jobs`/`total` is meaningless. Both are on the row
+        // so the reader can check before dividing.
+        var secs = -1
+        if let l = left, l.isFinite, l < 100000 { secs = Int(l) }
+        DiagLog.shared.write(ev, [
+            "jobs": jobs.count, "pending": pending, "moved": moved,
+            "done": done, "total": total, "bgTask": bgTask != .invalid,
+            "left": secs, "conns": 8,
+        ], cat: "offline")
     }
 
     // HYBRID SESSIONS — speed while active, durability while suspended.
@@ -330,6 +342,19 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         cfg.allowsCellularAccess = true
         cfg.isDiscretionary = false
         cfg.sessionSendsLaunchEvents = true
+        // MEASURED, NOT GUESSED: 2026-09-23, phone locked for 24 minutes with
+        // three bundles queued, the byte count moved 58.5 MB -> 127.1 MB — about
+        // 46 KB/s, against ~3.3 MB/s foreground on the same link. Background
+        // transfers DO run; they run ~72x slower. A background session is also
+        // stingier with concurrent connections than the default one, and these
+        // bundles are 600+ segments of ~900 KB each, so per-host concurrency is
+        // the one lever we actually hold. Raised deliberately — if the ratio
+        // does not move in the next transcript, it is `nsurlsessiond` throttling
+        // the bytes rather than the socket count, and this should come back out
+        // instead of being raised again. Watch the done-delta across a
+        // `dl-bg` -> `dl-fg` pair; `la-progress` cannot answer it, since a
+        // suspended app receives no delegate callbacks to write rows from.
+        cfg.httpMaximumConnectionsPerHost = 8
         return URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
     }()
     // The fast, in-process default session used whenever the app is foreground.
@@ -999,7 +1024,32 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             // move fails without the intermediate dir. (No-op for flat bundles.)
             try? fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
             try? fm.removeItem(at: dest)
-            do { try fm.moveItem(at: location, to: dest) } catch { moveError = error.localizedDescription }
+            do { try fm.moveItem(at: location, to: dest) } catch {
+                // A MOVE FAILURE IS A RACE, NOT A VERDICT — and treating it as
+                // one cost a download five files from the finish. Measured
+                // 2026-09-23 07:07:33.557, during a foreground->background
+                // migration:
+                //
+                //   bundle-failed  S01E31  filesDone: 617/622
+                //   "CFNetworkDownload_BKxxsm.tmp" couldn't be moved ... because
+                //   either the former doesn't exist, or the folder containing
+                //   the latter doesn't exist
+                //
+                // migrateTasks cancels a task and re-enqueues the file on the
+                // other session. A task that had JUST finished still delivers
+                // didFinishDownloadingTo, but its temp file is already gone — so
+                // the move fails for a file that is merely late, not broken.
+                // errTransient stayed false here (it was only ever set for HTTP
+                // 408/429/5xx), which routes to emitError + cancelLocked and
+                // discards the WHOLE bundle. Re-fetching one segment is the
+                // entire cure. The two genuine "this will never work" cases are
+                // a full disk and a read-only volume; everything else retries.
+                let e = error as NSError
+                moveError = error.localizedDescription
+                errTransient = !(e.domain == NSCocoaErrorDomain
+                                 && (e.code == NSFileWriteOutOfSpaceError
+                                     || e.code == NSFileWriteVolumeReadOnlyError))
+            }
         } else {
             moveError = "HTTP \(code) for \(fileName)"
             // A flaky tunnel/proxy can return 5xx/429/408 mid-blip — retry those

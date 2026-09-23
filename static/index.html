@@ -22855,6 +22855,10 @@ function _lpDestroyHls() {
     try { lp.hls.destroy(); } catch (_) {}
     lp.hls = null;
   }
+  // A barrier belongs to the instance that armed it; a destroyed hls will never
+  // fire MEDIA_ATTACHED, so leaving it behind would make the next load wait out
+  // the full ceiling for an event that can no longer come.
+  lp._hlsAttached = null;
   lp.everPlayed = false;
   _lpStallSince = 0; _lpStallLastT = 0;
   _lpOdKeepAliveAt = 0;   // touch any new OD session promptly on the next tick
@@ -23195,6 +23199,8 @@ function _lpInstallIosPreroll(hls, video) {
 // cold start just works. See GOTCHAS.md § ManagedMediaSource.
 // How long one of the watchdog's guards must HOLD before it is worth a row.
 const LP_COLD_STALL_MS = 2500;
+// Ceiling on the wait for hls.js's MediaSource attach before we play anyway.
+const LP_ATTACH_WAIT_MS = 4000;
 let _lpColdKickTimer = null;
 let _lpColdKickStalls = 0;
 // Instrument state for the cold start (18.14.0). The watchdog above has existed
@@ -23648,6 +23654,26 @@ async function _lpLoadIndex(seekTo) {
       abrEwmaDefaultEstimate: _lpBwSeed(),
     });
     lp.hls = hls;
+    // THE ATTACH BARRIER. `hls.attachMedia(v)` below does NOT set the element's
+    // source synchronously — it emits MEDIA_ATTACHING, and the BufferController
+    // then creates the MediaSource and assigns `media.src` in a later task,
+    // announcing it with MEDIA_ATTACHED. A `play()` issued in that gap is a play
+    // on a source that is about to be REPLACED, and the spec's answer to a
+    // replaced resource is to reject the pending promise with AbortError and
+    // leave the element paused. Measured 2026-09-23 07:11:19.557:
+    // `play-start ok:0 err:"AbortError" ready:0 buffered:"none"`, then 240 s of
+    // video buffered up behind an element that never played until the user
+    // pressed the transport 20.8 s later. Both successful starts in the same
+    // transcript were `ready: 3` — the race is only lost when the load path is
+    // FAST, which is exactly a re-play of a file whose bundle is already warm.
+    // So: wait for the attach before playing. Bounded, because a barrier that
+    // can hang is worse than the bug it cures.
+    lp._hlsAttached = new Promise((resolve) => {
+      let done = false;
+      const settle = (how) => { if (!done) { done = true; resolve(how); } };
+      hls.once(window.Hls.Events.MEDIA_ATTACHED, () => settle("attached"));
+      setTimeout(() => settle("timeout"), LP_ATTACH_WAIT_MS);
+    });
     // iOS prerolls only ~30 s under ManagedMediaSource; force a larger forward
     // buffer there (no-op on every other platform).
     _lpInstallIosPreroll(hls, v);
@@ -23731,6 +23757,7 @@ async function _lpLoadIndex(seekTo) {
     // Safari (iOS + macOS) native HLS path. AudioTrackList / TextTrackList
     // exist for in-band tracks once the manifest is parsed.
     v.crossOrigin = "anonymous";
+    lp._hlsAttached = null;     // native HLS sets .src synchronously, right here
     v.src = masterUrl;
     const onMeta = () => {
       v.removeEventListener("loadedmetadata", onMeta);
@@ -23808,19 +23835,46 @@ async function _lpLoadIndex(seekTo) {
     _npArm();
     try { await _cap.np.takeover({ reason: "advance-holding" }); } catch (_) {}
   } else {
+    // Wait for the MediaSource attach before asking the element to play — see
+    // the barrier where `lp._hlsAttached` is armed. `attach` rides on the row so
+    // a future AbortError can be told apart from one that raced the ceiling.
+    let attach = "n/a";
+    if (lp._hlsAttached) { try { attach = await lp._hlsAttached; } catch (_) {} }
+    // That await is a suspension point, so a newer load may have taken over
+    // while we waited. Playing on from here would start the wrong episode.
+    if (lp.filePath !== filePath) return;
+
     // THE REJECTION USED TO GO IN THE BIN. `play()` rejecting is one of the two
     // ways a file can fail to start, and the only way it can fail SILENTLY —
     // NotAllowedError (the autoplay policy, benign, a tap cures it) and
-    // AbortError (a fresh load raced this play) look identical from outside the
-    // player, and neither left a single row. `ok: true` matters just as much:
-    // it proves the promise resolved, which narrows the wedge to the pipeline.
+    // AbortError (the media resource was replaced under a pending play) look
+    // identical from outside the player, and neither left a single row.
+    // `ok: true` matters just as much: it proves the promise resolved, which
+    // narrows the wedge to the pipeline.
     try {
       await v.play();
-      _npLog("play-start", { ok: true, ..._lpStartFacts(v) }, "play");
+      _npLog("play-start", { ok: true, attach: attach, ..._lpStartFacts(v) }, "play");
     } catch (e) {
-      _npLog("play-start", { ok: false, err: (e && e.name) || "?",
-                             msg: (e && e.message) || "",
-                             ..._lpStartFacts(v) }, "play");
+      const err = (e && e.name) || "?";
+      _npLog("play-start", { ok: false, err: err, msg: (e && e.message) || "",
+                             attach: attach, ..._lpStartFacts(v) }, "play");
+      // BELT AND BRACES. The barrier above should mean this never happens
+      // again, but an AbortError is by definition recoverable — the resource
+      // that replaced ours is the one we wanted — and the cost of NOT retrying
+      // is the 20-second dead stare this change exists to remove. Retry once,
+      // and only into the state that makes it safe: still our file, still
+      // paused, native not holding the display, and the user has not said stop.
+      if (err === "AbortError" && lp.filePath === filePath && v.paused
+          && !_npHolding && !_npPausedIntent(v)) {
+        try {
+          await v.play();
+          _npLog("play-retry", { ok: true, ..._lpStartFacts(v) }, "play");
+        } catch (e2) {
+          _npLog("play-retry", { ok: false, err: (e2 && e2.name) || "?",
+                                 msg: (e2 && e2.message) || "",
+                                 ..._lpStartFacts(v) }, "play");
+        }
+      }
     }
   }
   _lpArmColdStartKick();      // iOS/MMS may never start fetching until a real seek nudges it
@@ -28295,6 +28349,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.14.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.14.1</div>
 </body>
 </html>

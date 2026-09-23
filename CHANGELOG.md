@@ -1,5 +1,92 @@
 # Changelog
 
+## [18.14.1] — 2026-09-23
+### The start never happened, and the download died five files from the end
+
+18.14.0's instrument earned itself in one transcript. Both of these were read
+straight off rows that did not exist the day before.
+
+**"It won't start until I press the button" — diagnosed and fixed.**
+Measured at 07:11:19.557:
+
+```
+play-start         ok:0  err:"AbortError"  ready:0  buffered:"none"
+cold-stall         why:"paused"  ready:4  fwd:9.98
+transport-unwedge  paused:1  ready:4  fwd:240.32  since:20769
+cold-start         ok:1  nudges:0  blocked:"paused"  ms:21010
+```
+
+`v.play()` was **rejected**. The element sat paused with 240 s of video buffered
+behind it until the user pressed the transport 20.8 s later. Not an MMS wedge at
+all — `paused: 1` on `transport-unwedge` put it in the start path, exactly as
+that field was added to do.
+
+`hls.attachMedia(v)` does not set the element's source synchronously: the
+BufferController creates the MediaSource and assigns `media.src` in a later
+task. A `play()` issued in that gap is a play on a resource about to be
+replaced, and the spec's answer is AbortError plus a paused element. Both
+successful starts in the same transcript were `ready: 3`; the failure was
+`ready: 0`. **The race is only lost when the load path is fast** — a re-play of
+an already-warm bundle, which finished in 30 ms here. That is why it has always
+been intermittent.
+
+- `lp._hlsAttached` is a bounded barrier (`LP_ATTACH_WAIT_MS`, 4 s) resolved by
+  hls.js's `MEDIA_ATTACHED`; the play waits on it, and re-checks `lp.filePath`
+  afterwards because the await is a suspension point a newer load can win.
+- An AbortError is retried **once**, and only into a safe state: still our file,
+  still paused, native not holding the display, and no user stop. `NotAllowedError`
+  is deliberately not retried — a retry cannot supply a user gesture.
+- New `play-retry` row; `play-start` now carries `attach`
+  (`attached` / `timeout` / `n/a`).
+- Cleared in `_lpDestroyHls` — a destroyed instance never fires MEDIA_ATTACHED,
+  and a stale barrier would make the next load wait out the whole ceiling.
+
+**A bundle 617/622 files done was thrown away over a temp-file race.**
+At 07:07:33.557, during a foreground→background migration:
+
+```
+bundle-failed  S01E31  filesDone:617/622  bytesDone:535,879,989
+  "CFNetworkDownload_BKxxsm.tmp" couldn't be moved ... because either the
+  former doesn't exist, or the folder containing the latter doesn't exist
+```
+
+`migrateTasks` cancels a task and re-enqueues the file on the other session; a
+task that had *just* finished still delivers `didFinishDownloadingTo`, but its
+temp file is already gone. `errTransient` was only ever set for HTTP
+408/429/5xx, so a move failure counted as permanent and took `cancelLocked` —
+discarding the whole bundle over one late segment. A move failure is now
+transient (re-fetch the file) except for a full disk or a read-only volume.
+
+**Background downloads are not broken; they are ~72× slower.**
+One clean window — three jobs, same 1.73 GB total at both ends, phone locked:
+**58.5 MB → 127.1 MB over 24 minutes = 46 KB/s**, against ~3.3 MB/s foreground
+on the same link. The migration itself is healthy (`moved: 1379` of
+`pending: 1379`).
+
+- `httpMaximumConnectionsPerHost = 8` on the background session. These bundles
+  are 600+ segments of ~900 KB, so per-host concurrency is the one lever we
+  hold. An experiment, and labelled as one: if the ratio does not move in the
+  next transcript it is `nsurlsessiond` throttling bytes rather than sockets,
+  and this comes back out instead of being raised again.
+- **The background assertion was never re-taken.** `beginBgTaskIfNeeded` ran
+  only from `startDownload`, so the first `dl-bgtask-expired` (five seconds
+  after a `left: 9` grant) left it invalid for the rest of the download — every
+  later `dl-bg` in that transcript reads `bgTask: false`, i.e. no execution
+  window at all to migrate transfers in. Now re-taken on every backgrounding.
+- `left` was read after a `DispatchQueue.main.async` hop, by which time
+  `backgroundTimeRemaining` had usually settled back to `.greatestFiniteMagnitude`
+  — which is why every `dl-bg` after the first logged `left: -1`. Read on the
+  notification thread now, before the hop.
+- `dl-bg`/`dl-fg` carry `conns`, and the docs now say plainly that `done` is
+  only comparable between two rows with the **same** job set.
+
+Verified: 7 start-path scenarios against a model of the spec's abort behaviour —
+the warm re-play now plays, a barrier timeout is caught by the retry, a
+superseded load plays nothing, and autoplay-blocked / user-stopped / native-holding
+are all correctly left alone.
+
+- `NP_BUILD` → **18.14.1**.
+
 ## [18.14.0] — 2026-09-22
 ### Three old bugs, and the rows that were never written about them
 
