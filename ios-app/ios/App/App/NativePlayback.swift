@@ -828,11 +828,21 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // flush then writes that stale position as the episode's final one, and
         // a seek made through the native player is undone within a second.
         if !isNativeActive {
+            // `armedAt` is the timestamp OF `position` — extrapolatedPosition()
+            // multiplies the gap between them by the rate — so the two move
+            // together or not at all. Refreshing the stamp while holding the
+            // position would claim a fresh sample of a stale playhead.
             armed.position = position
             armed.paused = paused
+            armed.armedAt = Date()
         }
-        if duration > 0 { armed.duration = duration }
-        armed.armedAt = Date()
+        // The page may still contribute a duration, but never OVER a good one
+        // the item reported itself: the element's and the item's differ in the
+        // last decimal (measured: 690.147 vs 690.1477694), so an unguarded write
+        // made the value flap once a second for no reason. Only fill a gap.
+        if duration > 0, !isNativeActive || armed.duration <= 0 {
+            armed.duration = duration
+        }
         if !isNativeActive {
             PlaybackLiveActivity.shared.update(state: liveActivityState(), force: false)
         }

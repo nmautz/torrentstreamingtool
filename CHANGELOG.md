@@ -77,7 +77,10 @@ The outgoing file is now flushed before the swap, and the swap logs a `rearm-swa
 
 `tick()` had the same bug in its position field — the guard added for `paused` was never
 extended to `position`, so the parked element dragged `armed.position` back once a second
-and a native seek was undone within a second.
+and a native seek was undone within a second. `armedAt` now moves with `position` (it is
+that position's timestamp, and `extrapolatedPosition()` multiplies the gap between them),
+and the page can no longer overwrite a good duration the item reported itself — the
+element's and the item's differ in the last decimal, so the value flapped every second.
 
 ### Fixed: a failed progress POST was simply lost
 
