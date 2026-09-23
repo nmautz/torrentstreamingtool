@@ -47,15 +47,86 @@ the pool and the socket specifically. That is what `diagnostics.py` does.
 
 ## Client logs from the iOS app
 
-`client_<device>.log` in `LOG_DIR` is **not** written by the server — it is uploaded by
-the app through `POST /api/diag/client-log` (☰ App → Settings → Playback → **Send log to
+`logs/client/<device>.log` is **not** written by the server — it is uploaded by the app
+through `POST /api/diag/client-log` (☰ App → Settings → Playback → **Send log to
 server**). It is newline-delimited JSON with absolute timestamps, written on the device by
 `DiagLog` in `NativePlayback.swift`, and it survives app restarts, which is the whole
 point: the in-memory diagnostics trail is 40 rows that die with the process and timestamps
 in seconds-since-launch, so it can answer "what happened in this ten-minute test" and
 nothing longer.
 
-Read it like any other log (`/api/admin/logs/client_<device>.log`). Useful rows:
+### Retention — the part that is easy to get wrong
+
+**The device sends its WHOLE file every time and the server MERGES it.** Before 18.8.0 the
+upload was written straight over the previous one, which made the phone's rolling window
+the server's retention policy: send twice and the first send was gone. Now the server
+keeps an append-only transcript per device and takes only the rows it has never seen
+(`clientlog.merge`, keyed on the hashed line — see `clientlog.py` for why not on `t`).
+Sending often therefore costs nothing and loses nothing, and a phone that has been off the
+network for a week catches up in one tap.
+
+**Nothing deletes a client log except a reader.** They live in a *subdirectory*, and that
+is the mechanism, not an aesthetic choice: `_archive_old_logs()` at update time,
+`DELETE /api/admin/logs` and the `_bundle` download all iterate top-level **files**, so a
+directory is invisible to every sweep for free.
+
+The one thing that removes them is `DELETE /api/admin/client-logs` (optionally
+`?device=<slug>`). Because the server cannot reach a phone, that clear is finished by the
+**next upload**: the response carries `clear_local`, the app deletes its own copy and
+writes a `log-cleared-by-server` row so the gap in the next transcript is explained rather
+than mysterious.
+
+The clear also records a **high-water mark** — the newest timestamp the transcript held
+when it was deleted — and the next upload drops every row at or below it (`dropped_pre_clear`
+in the response). Without that the clear would achieve nothing: the device is still holding
+the rows the reader just finished with and sends them all again, and the merge would
+restore every one. It drops a *prefix* rather than discarding the whole body so that rows
+written **after** the clear, which the reader has not seen, still land. The mark is compared
+against the device's own timestamps, so no clock is compared to another clock.
+
+### Reading one
+
+```bash
+TOK=$(curl -sk -X POST https://<box>/api/admin/login \
+      -H 'Content-Type: application/json' -d '{"password":"<admin pass>"}' | jq -r .token)
+
+# Which devices, how much, and is the thing I care about even in here?
+curl -sk https://<box>/api/admin/client-logs -H "Authorization: Bearer $TOK" | jq
+
+# Everything, or a slice of it
+curl -sk "https://<box>/api/admin/client-logs/<device>" -H "Authorization: Bearer $TOK"
+curl -sk "https://<box>/api/admin/client-logs/<device>?cats=offline,ext&since=2026-09-22" \
+     -H "Authorization: Bearer $TOK"
+curl -sk "https://<box>/api/admin/client-logs/<device>?errors_only=true" \
+     -H "Authorization: Bearer $TOK"
+
+# Done with it
+curl -sk -X DELETE https://<box>/api/admin/client-logs -H "Authorization: Bearer $TOK"
+```
+
+The listing's per-event and per-category histograms exist because the first question asked
+of one of these files is always "is the thing I care about even in here?", and a long
+transcript is mostly `snap` rows. Filter server-side rather than downloading it all.
+
+### Categories
+
+Every row carries a `cat`. Rows written before 18.8.0 have none and read as `-`.
+
+| `cat` | Covers |
+|---|---|
+| `play` | the player's transport — what it was told, what it did, who asked |
+| `ext` | external display: screens, scenes, windows, layers, audio routes |
+| `offline` | downloaded bundles: fetch, verify, local server, offline play, sync |
+| `net` | anything crossing to the host (progress, session) |
+| `app` | lifecycle: launch, audio session, interruptions |
+
+Rows come from **both** engines. The web player writes through the `np.log` bridge
+(`_npLog` in `static/index.html`) into the same file on the same clock — before 18.8.0 the
+log was native-only, which made it a log of the wrong thing, since on-device playback is
+mostly the WKWebView's own `<video>` and the offline path barely touches the native player.
+JS-written rows carry `src: "js"`.
+
+### Useful rows
 
 | `ev` | Means |
 |---|---|
@@ -64,9 +135,27 @@ Read it like any other log (`/api/admin/logs/client_<device>.log`). Useful rows:
 | `startNative` | handoff began — `reason` (`early`/`background`/`manual`), `shouldPlay`, `extWindow` |
 | `stopNative` | handoff ended, with the position it ended at |
 | `disarm` | teardown, with the `reason` threaded from JS (`unload` = episode advance, `stop`, `yield`, `transport-next`/`-prev`, `bgplay-off`, `not-armable`), the position, and whether a final flush was posted |
-| `advance` / `ended` | auto-advance to the next episode, or the end of the playlist |
-| `progress` | a progress POST **and its HTTP status** — the thing that was silent while nothing saved. `final: true` marks the forced flush at teardown |
-| `progress-skipped` | a POST refused by a guard — `why` names the guard that fired (`near-start`, `duration-0`, `no-item`, `no-file`, `no-server`), plus `native` (was a player still up?) |
+| `rearm-swap` | an arm changed which FILE this is while a player was running; the outgoing file was flushed first. A run of these means the in-place advance path is not being taken |
+| `advance` | the page advancing — `holding`, `ext`, `nextArmed`, and `path` (`normal` vs `teardown-rebuild`) |
+| `native-advanced` | the **good** advance: native switched file without releasing the display |
+| `hold-start` | native took the display; `elementWasPlaying` says whether a second engine was running |
+| `play-while-holding` | the web element tried to play while native held the display — always a bug, and it names the path |
+| `setPaused` | who paused/resumed, by `src` (`user-transport`, `remote-play`, `remote-pause`, `transport-toggle`) |
+| `transport` | a `timeControlStatus` change, with `requested`/`by` |
+| `transport-stopped-itself` | the player stopped and **nobody asked** — carries `waitReason`, `itemErr`, `sess` and the audio route |
+| `interruption` | audio-session interruption (began/ended, `shouldResume`) |
+| `interruption-resumed` | we reactivated the session and resumed because our intent said "playing" |
+| `route` | audio route change — the glasses are a route as well as a screen |
+| `item-stalled` / `item-failed` | the native item ran dry or could not finish |
+| `video-error` / `video-stalled` | the same, from the web element |
+| `progress` | a progress POST **and its HTTP status**. `final: true` marks the forced flush at teardown; `try`/`retrying` show the retry |
+| `progress-skipped` | a POST refused by a guard — `why` names the guard (`near-start`, `duration-0`, `no-item`, `no-file`, `no-server`), plus `native` |
+| `progress-failed` | a web-player save that failed, and whether it was stashed offline or lost |
+| `bundle-retry` / `bundle-complete` / `bundle-failed` | a download's course, not just its verdict |
+| `bundle-healed` | an index entry marked complete by **reconciliation** rather than by finishing — check for this first when offline playback breaks on a bundle |
+| `lms-start` / `lms-failed` / `lms-stop` | the loopback server, the middle link in the offline chain |
+| `offline-completed` | an offline watch crossed the completion line, **with the played-time inputs** — the one case the server cannot measure |
+| `offline-pending` / `offline-synced` | the offline→online handover from the side that knows what it is holding |
 | `audio-session-failed` | `setActive` threw, with the app state at the time |
 
 **`progress-skipped` is the row to look for first** when positions are not being saved. A
@@ -88,6 +177,29 @@ That distinction is what 18.7.1 added, and it is the distinction that had been h
 disarm-order bug: a real 322 s position was being dropped by a row that looked exactly
 like harmless post-teardown noise. See
 [GOTCHAS.md § The one teardown path that wiped its state before saving it](GOTCHAS.md).
+
+### Recipe: "it advanced onto the phone instead of the glasses"
+
+With a display connected there are two advance paths and they look identical from outside.
+`advance`'s `path` field names which one ran:
+
+- **`path: "normal"` followed by `native-advanced`** — the native player switched file in
+  place. The display never changed hands. This is what should happen.
+- **`path: "teardown-rebuild"`** (i.e. `holding: true, nextArmed: false`) — the page tore
+  the native player down, which released the external window, loaded the next episode into
+  its own element, and re-claimed the display a beat later. The episode comes up on the
+  phone. `nextArmed: false` is the cause: `lp._nextNative` was never set, so `armed.nextUrl`
+  was empty and `itemDidEnd` had nothing to switch to.
+
+Then look for the second failure that usually rides along: a `hold-start` with
+`elementWasPlaying: true`, or any `play-while-holding` row. Two engines in one process means
+the web element takes the audio session and **interrupts** the AVPlayer feeding the display.
+The tell in the older logs was a `snap` showing `tcs: pause, rate: 0` a few seconds after a
+handoff that had been playing, with `armPaused` flipped to true and never coming back —
+because the 1 Hz time observer mirrors the transport into `armed.paused`, so a pause that
+happened *to* the app is adopted as if it were the user's wish. That now produces a
+`transport-stopped-itself` row naming the wait reason and the audio route, an `interruption`
+row if the session was taken, and an `interruption-resumed` row when we put it back.
 
 **Pair every `disarm` with the `progress` row before it.** A `disarm` with
 `flushed: true` should be immediately preceded by a `progress` row carrying

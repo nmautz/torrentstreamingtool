@@ -4678,3 +4678,114 @@ the rarer cause. Two related traps:
 - **The dashboard badge is the host's version, not the app's.** The box serves
   `static/index.html`, so the button can appear the moment the *server* updates,
   long before the phone has a binary that can answer it.
+
+## "Already prepped" is not "already armed" — the advance that walked off the display (18.8.0)
+
+Symptom, reported and reproduced: with the glasses connected, an episode ends,
+the next one starts — **on the phone's screen**, while the glasses go dark.
+
+`_lpWarmNextEp()` opened with
+
+```js
+if (cur === "ready" || cur === "prepping") return;   // already done / in flight
+```
+
+and **only the code after that early return ever set `lp._nextNative`**. Prep
+state and "the native player has a URL it can switch to" are different facts:
+the first says a bundle exists on the host, the second is what becomes
+`armed.nextUrl` and lets `itemDidEnd` advance in place. Conflating them meant
+that in any binge — where the *previous* episode already warmed the next one —
+the arm carried no `nextUrl`, so `itemDidEnd` found nothing, and the page fell
+back to tearing the native player down, which **releases the external window**,
+loading the next file into its own `<video>`, and re-claiming the display a beat
+later.
+
+Two things make this hard to see in a log:
+
+1. The failure is a **missing** row. There is no `advance` row from the native
+   side, because that path never ran. `advance` now records `nextArmed` and a
+   `path` of `normal` vs `teardown-rebuild` so the absence has a name.
+2. The rebuild *looks* like it worked — `earlyClaim`, `extWindow: true`,
+   `extLayer: true` all come back within seconds. What actually broke playback
+   was the **second engine**: the load path's `await v.play()` was unconditional,
+   so the web element started, took the audio session, and interrupted the
+   AVPlayer feeding the display.
+
+And the third trap, which is what made it stick: the 1 Hz time observer does
+`armed.paused = (p.timeControlStatus != .playing)`. A pause that happened **to**
+the app is therefore adopted as the user's intent within a second — and the
+page's own intent flag (`_npVisiblePaused`) only clears when its element is
+visible **and** playing, which in early mode it never is. So nothing ever
+resumed it. Measured 2026-09-23: E05 started on the glasses, played three
+seconds, was found paused at 5.1 s, and sat there for six minutes.
+
+Rules that fall out of this:
+
+- **Arming the next file is not a side effect of prepping it.** If you add an
+  early return to a warm path, ask what else that path was the only writer of.
+- **Never play the web element while `_npHolding`.** There is now a standing
+  guard on the element's `play` event that pauses it and logs
+  `play-while-holding` — because the load path was the case we knew about.
+- **A transport change nobody asked for is not intent.** `setPaused` records its
+  caller, and a `timeControlStatus` observer emits `transport-stopped-itself`
+  with the wait reason and audio route when the player stops unrequested.
+  Audio-session interruptions are now observed at all (they never were), and an
+  `ended` interruption reactivates the session and resumes if intent says play.
+
+## An arm can retire the episode that is still playing (18.8.0)
+
+`arm(from:)` replaces `armed` wholesale. That is right for a re-arm of the same
+file and wrong when the page has moved to a **different** file while our player
+is still running: `armed` is both the handoff's configuration and the only
+record of what the running player is playing, so the swap silently retires the
+outgoing episode with no final write.
+
+Measured 2026-09-23. E04 was playing natively on the glasses, last posted at
+651 s of 690. The page advanced; the arm for E05 landed while E04's player was
+still up. Twenty seconds later the teardown flushed — and flushed **E05's**
+identity at **E05's** position (2.2 s), which the near-start guard then
+correctly dropped. E04's last 39 seconds were written by nobody, and the row
+that should have said so said `near-start` instead.
+
+`arm()` now flushes the outgoing file before the swap and logs `rearm-swap`.
+`tick()` had the same bug in its **position** field — the guard added for
+`paused` in 18.5.x was never extended to `position`, so the parked element
+dragged `armed.position` backwards once a second and a native seek was undone
+within a second of being made.
+
+## A failed progress POST is a lost episode tail (18.8.0)
+
+`URLSession...resume()` with the result logged is better than silent, and the
+first day of logs showed it is not enough: three of twenty progress posts came
+back `The request timed out` or `The network connection was lost`, and two of
+those were the **final** flush. A routine 15 s beat that fails is replaced by
+the next one; a final flush has no successor, so the failure *is* that episode's
+tail going missing. Wi-Fi on a phone being locked, unlocked and plugged into a
+display drops constantly and returns in seconds, so forced posts now retry three
+times at 2 s / 6 s / 18 s. Routine beats deliberately do not — a stale beat
+arriving late is worse than one that never arrives.
+
+## A client log the server can wipe on its own is a log you cannot finish reading (18.8.0)
+
+The first version of the client-log upload wrote each send over the previous one.
+That is not "simple storage", it is a retention policy: the phone's 3 MB rolling
+window became the server's, and a second send destroyed the first. Worse, the
+file sat in `LOG_DIR` beside the server's own logs, where `_archive_old_logs()`
+(every update) and `DELETE /api/admin/logs` would collect it.
+
+Two fixes, and the second is the load-bearing one:
+
+- The upload **merges** (`clientlog.merge`, keyed on the hashed line — not on
+  `t`, because two rows shared a millisecond in the very log that prompted this,
+  and a device that clears and restarts sends *older* timestamps that must still
+  land).
+- The files live in `logs/client/`, a **subdirectory**. Every sweep in `main.py`
+  iterates top-level `is_file()` entries, so a directory is invisible to all of
+  them for free. Keep it that way: if you add a log-cleanup routine, do not make
+  it recursive.
+
+Clearing needs a handshake, because the server cannot reach a phone. `DELETE
+/api/admin/client-logs` deletes the server copy **and** flags the device; the
+next upload's response carries `clear_local`, the app deletes its own file and
+writes a `log-cleared-by-server` row. Skip the flag and the device restores
+every cleared row on its next send.

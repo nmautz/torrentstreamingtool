@@ -60,7 +60,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "18.7.1"
+let NP_BUILD = "18.8.0"
 
 // MARK: - Armed state
 
@@ -130,6 +130,8 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "sendLog",   returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "readLog",   returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "clearLog",  returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "log",       returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "logStats",  returnType: CAPPluginReturnPromise),
     ]
 
     private let mgr = NativePlaybackManager.shared
@@ -188,7 +190,8 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
     /// Transport control for the page while the NATIVE player owns playback.
     /// In early mode the phone is a remote, not a second engine.
     @objc func setPaused(_ call: CAPPluginCall) {
-        mgr.setPaused(call.getBool("paused") ?? false)
+        mgr.setPaused(call.getBool("paused") ?? false,
+                      source: call.getString("source") ?? "js")
         call.resolve(mgr.snapshot())
     }
 
@@ -202,7 +205,7 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
     @objc func sendLog(_ call: CAPPluginCall) {
         let server = call.getString("serverUrl") ?? ""
         let device = call.getString("device") ?? "ios"
-        DiagLog.shared.write("sendLog", ["device": device])
+        DiagLog.shared.write("sendLog", ["device": device], cat: "app")
         DiagLog.shared.upload(serverUrl: server, device: device) { result in
             call.resolve(["result": result, "bytes": DiagLog.shared.byteCount()])
         }
@@ -217,8 +220,33 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
 
     @objc func clearLog(_ call: CAPPluginCall) {
         DiagLog.shared.clear()
-        DiagLog.shared.write("log-cleared", [:])
+        DiagLog.shared.write("log-cleared", [:], cat: "app")
         call.resolve(["ok": true])
+    }
+
+    /// Let the WEB player write into the same transcript.
+    ///
+    /// Without this the log only knew what the NATIVE player did, which is a
+    /// small and unrepresentative slice: on-device playback is mostly the
+    /// WKWebView's own `<video>`, and the offline bundle path barely touches
+    /// the native player at all. Two logs in two places, neither of which can
+    /// be lined up against the other, is how "the picture froze when I plugged
+    /// the glasses in" stayed unanswerable. One file, one clock, every writer.
+    @objc func log(_ call: CAPPluginCall) {
+        let ev = call.getString("ev") ?? "js"
+        let cat = call.getString("cat") ?? "js"
+        // Rebuilt as [String: Any] rather than handed across as a JSObject: the
+        // bridge's value type is its own, and DiagLog's sanitizer is written
+        // against plain Foundation values.
+        var fields: [String: Any] = [:]
+        for (k, v) in (call.getObject("fields") ?? [:]) { fields[k] = v }
+        fields["src"] = "js"
+        DiagLog.shared.write(ev, fields, cat: cat)
+        call.resolve(["ok": true])
+    }
+
+    @objc func logStats(_ call: CAPPluginCall) {
+        call.resolve(DiagLog.shared.stats())
     }
 }
 
@@ -235,11 +263,26 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
 ///
 /// Caches rather than Documents deliberately: this is disposable, and iOS may
 /// reclaim it under storage pressure rather than failing a write.
+///
+/// Every row carries a `cat`. The categories are the three things this log is
+/// meant to explain, plus the two that explain them:
+///
+///   * `play`    — the native player's transport: what it was told, what it did.
+///   * `ext`     — external display: screens, scenes, windows, layers, routes.
+///   * `offline` — downloaded bundles: fetch, verify, local server, offline play.
+///   * `net`     — anything crossing to the host (progress, session, subtitles).
+///   * `app`     — lifecycle: launch, foreground, audio session, interruptions.
+///
+/// A category is not decoration. A day of use is mostly `snap` rows, and the
+/// server can filter on `cat` without shipping the rest — which is the
+/// difference between "read the log" and "download nine thousand rows".
 final class DiagLog {
     static let shared = DiagLog()
 
     private let q = DispatchQueue(label: "streamlink.diaglog", qos: .utility)
-    private let maxBytes = 3 * 1024 * 1024
+    // Raised from 3 MB with the categories: the log now covers the web player
+    // and the offline path too, so the same wall-clock span costs more rows.
+    private let maxBytes = 8 * 1024 * 1024
     private lazy var url: URL = {
         let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         return dir.appendingPathComponent("streamlink-diag.log")
@@ -249,20 +292,51 @@ final class DiagLog {
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f
     }()
+    /// Set by the last upload the host answered. Purely informational — shown in
+    /// Settings so "did my log actually land?" has an answer on the device.
+    private(set) var lastUpload = ""
+    private(set) var lastUploadResult = ""
 
     /// One JSON object per line. Never throws into the caller: a diagnostic that
     /// can break playback is worse than no diagnostic.
-    func write(_ event: String, _ fields: [String: Any] = [:]) {
+    func write(_ event: String, _ fields: [String: Any] = [:], cat: String = "play") {
         var row: [String: Any] = fields
         row["t"] = iso.string(from: Date())
         row["ev"] = event
+        row["cat"] = cat
         q.async { [weak self] in
-            guard let self = self,
-                  let data = try? JSONSerialization.data(withJSONObject: row),
+            guard let self = self else { return }
+            // A field the caller passed that JSON cannot represent (an NSNull, a
+            // non-finite Double from a CMTime that was indefinite) used to take
+            // the WHOLE ROW down silently, because serialization failed and the
+            // guard returned. Drop the offending field, keep the row: a row that
+            // says "pos: unrepresentable" is evidence; a missing row is not.
+            let safe = Self.sanitize(row)
+            guard let data = try? JSONSerialization.data(withJSONObject: safe),
                   var line = String(data: data, encoding: .utf8) else { return }
             line += "\n"
             self.append(line)
         }
+    }
+
+    /// JSON-safe copy of a row. Non-finite doubles become a marker string rather
+    /// than failing the encode — `CMTimeGetSeconds` returns NaN more often than
+    /// anyone expects, and that is exactly when you want the row.
+    private static func sanitize(_ row: [String: Any]) -> [String: Any] {
+        var out: [String: Any] = [:]
+        for (k, v) in row {
+            switch v {
+            case let d as Double:
+                out[k] = d.isFinite ? d : "nan"
+            case let f as Float:
+                out[k] = f.isFinite ? Double(f) : "nan"
+            case is String, is Int, is Bool:
+                out[k] = v
+            default:
+                out[k] = JSONSerialization.isValidJSONObject([k: v]) ? v : String(describing: v)
+            }
+        }
+        return out
     }
 
     private func append(_ line: String) {
@@ -277,6 +351,9 @@ final class DiagLog {
         try? h.write(contentsOf: Data(line.utf8))
         // Halve the file when it gets large rather than deleting it: losing the
         // oldest half beats losing the incident that is still being written.
+        // The SERVER keeps the rows this drops — it merges each upload into an
+        // append-only transcript — so this cap is now a device-storage limit
+        // rather than the retention policy it used to be.
         if let size = try? fm.attributesOfItem(atPath: url.path)[.size] as? Int,
            size > maxBytes {
             try? h.close()
@@ -300,11 +377,42 @@ final class DiagLog {
         }
     }
 
-    /// POST the whole log to the host so it lands in its `logs/` directory and
-    /// can be read without the phone.
+    /// What Settings shows without making the user read the log.
+    func stats() -> [String: Any] {
+        let text = contents()
+        let rows = text.split(separator: "\n", omittingEmptySubsequences: true)
+        return ["bytes": text.utf8.count,
+                "rows": rows.count,
+                "first": Self.firstTimestamp(in: rows),
+                "lastUpload": lastUpload,
+                "lastUploadResult": lastUploadResult]
+    }
+
+    private static func firstTimestamp(in rows: [Substring]) -> String {
+        guard let first = rows.first,
+              let d = first.data(using: .utf8),
+              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+              let t = o["t"] as? String else { return "" }
+        return t
+    }
+
+    /// POST the whole log to the host, which MERGES it into the transcript it
+    /// already holds for this device.
+    ///
+    /// Sending the whole file every time is deliberate: the alternative — the
+    /// device tracking what it has already sent — puts the bookkeeping on the
+    /// side that gets force-quit, runs out of storage and has its Caches
+    /// reclaimed. The server de-duplicates by exact row, so a re-send is free,
+    /// and a phone that has been off the network for a week catches up in one
+    /// tap.
+    ///
+    /// The response closes the clear handshake. A reader who is finished with a
+    /// device's transcript clears it on the server, which cannot reach the
+    /// phone; it parks the instruction and returns `clear_local` here, and we
+    /// delete our copy so the next upload does not restore every cleared row.
     func upload(serverUrl: String, device: String, completion: @escaping (String) -> Void) {
         let body = contents()
-        guard !body.isEmpty else { completion("empty"); return }
+        guard !body.isEmpty else { completion("nothing to send"); return }
         guard var comps = URLComponents(string: serverUrl) else { completion("bad server url"); return }
         comps.path = "/api/diag/client-log"
         comps.queryItems = [URLQueryItem(name: "device", value: device)]
@@ -314,10 +422,42 @@ final class DiagLog {
         req.setValue("text/plain; charset=utf-8", forHTTPHeaderField: "Content-Type")
         req.httpBody = Data(body.utf8)
         req.timeoutInterval = 30
-        URLSession.shared.dataTask(with: req) { _, resp, err in
-            if let err = err { completion("failed: \(err.localizedDescription)"); return }
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, err in
+            guard let self = self else { return }
+            let stamp = self.iso.string(from: Date())
+            if let err = err {
+                self.lastUpload = stamp
+                self.lastUploadResult = "failed: \(err.localizedDescription)"
+                completion(self.lastUploadResult)
+                return
+            }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            completion(code == 200 ? "sent \(body.count) bytes" : "server said \(code)")
+            guard code == 200 else {
+                self.lastUpload = stamp
+                self.lastUploadResult = "server said \(code)"
+                completion(self.lastUploadResult)
+                return
+            }
+            var added = -1, held = -1
+            var clearLocal = false
+            if let d = data,
+               let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+                added = (o["added"] as? Int) ?? -1
+                held = (o["rows"] as? Int) ?? -1
+                clearLocal = (o["clear_local"] as? Bool) ?? false
+            }
+            if clearLocal {
+                // The reader is done with these rows. Drop ours and start the
+                // next transcript with a row saying why it begins here — an
+                // unexplained gap in a log is worse than no gap.
+                self.clear()
+                self.write("log-cleared-by-server", ["device": device], cat: "app")
+            }
+            self.lastUpload = stamp
+            self.lastUploadResult = added >= 0
+                ? "sent; \(added) new row(s), \(held) on server" + (clearLocal ? "; device copy cleared" : "")
+                : "sent \(body.utf8.count) bytes"
+            completion(self.lastUploadResult)
         }.resume()
     }
 }
@@ -358,6 +498,14 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private var timeObserver: Any?
     private var statusObs: NSKeyValueObservation?
     private var externalObs: NSKeyValueObservation?
+    private var tcsObs: NSKeyValueObservation?
+    /// When this app last ASKED for a transport change, and who asked.
+    ///
+    /// Without it, a pause that the app requested and a pause that happened TO
+    /// the app are the same row. That distinction is the whole difference
+    /// between "the user paused it" and "something took the audio session and
+    /// nothing put it back", which is the 2026-09-23 stall.
+    private var lastTransportRequest = (src: "", at: Date.distantPast)
     /// Our own window on the external display, and the layer inside it. See
     /// "External display surface".
     private var extWindow: UIWindow?
@@ -432,6 +580,101 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
                        name: UIScene.willConnectNotification, object: nil)
         nc.addObserver(self, selector: #selector(sceneDidDisconnect),
                        name: UIScene.didDisconnectNotification, object: nil)
+
+        // NOBODY WAS WATCHING THE AUDIO SESSION. Measured 2026-09-23: the player
+        // was handed off to the glasses, played for three seconds, and was found
+        // paused at 5 s with `armPaused` flipped to true — and the log could not
+        // say who paused it, because the only writer of that flag that logged
+        // anything was the one that did not do it. An interruption (a call, Siri,
+        // another app taking the session, WebKit starting its own <video>) pauses
+        // an AVPlayer and tells the app through exactly this notification, which
+        // we never subscribed to. So it paused, nothing resumed it, and nothing
+        // recorded it.
+        nc.addObserver(self, selector: #selector(audioInterruption),
+                       name: AVAudioSession.interruptionNotification, object: nil)
+        // The glasses are an audio route as well as a screen, and plugging them
+        // in or out is a route change that can pause playback on its own
+        // (`.oldDeviceUnavailable` is the classic "unplugged the headphones").
+        nc.addObserver(self, selector: #selector(audioRouteChanged),
+                       name: AVAudioSession.routeChangeNotification, object: nil)
+        // The session being taken away outright — a second engine in this very
+        // process is the likely candidate, and it is silent without this.
+        nc.addObserver(self, selector: #selector(mediaServicesReset),
+                       name: AVAudioSession.mediaServicesWereResetNotification, object: nil)
+    }
+
+    // MARK: Audio session
+
+    @objc private func audioInterruption(_ note: Notification) {
+        let info = note.userInfo ?? [:]
+        let rawType = (info[AVAudioSessionInterruptionTypeKey] as? UInt) ?? 0
+        let type = AVAudioSession.InterruptionType(rawValue: rawType)
+        var row: [String: Any] = [
+            "type": type == .began ? "began" : (type == .ended ? "ended" : "?"),
+            "native": isNativeActive,
+            "pos": armed.position,
+            "armPaused": armed.paused,
+            "title": armed.title,
+        ]
+        if #available(iOS 14.5, *),
+           let r = info[AVAudioSessionInterruptionReasonKey] as? UInt {
+            row["reason"] = r
+        }
+        if let opts = info[AVAudioSessionInterruptionOptionKey] as? UInt {
+            row["shouldResume"] = AVAudioSession.InterruptionOptions(rawValue: opts)
+                .contains(.shouldResume)
+        }
+        DiagLog.shared.write("interruption", row, cat: "app")
+
+        guard type == .ended, isNativeActive else { return }
+        // RESUME IS OURS TO DO. iOS hands back an interrupted session but does not
+        // restart the player, and `shouldResume` is advisory — it is absent
+        // whenever the interrupter did not say. Our own intent is the better
+        // authority: if the user has not paused anything, we were playing, so
+        // play. Reactivating first is required; the session went inactive with the
+        // interruption and `play()` against a dead session does nothing silently.
+        sessionActivated = false
+        activateAudioSession()
+        if !armed.paused {
+            player?.play()
+            DiagLog.shared.write("interruption-resumed", ["pos": armed.position], cat: "play")
+        }
+    }
+
+    @objc private func audioRouteChanged(_ note: Notification) {
+        let info = note.userInfo ?? [:]
+        let rawReason = (info[AVAudioSessionRouteChangeReasonKey] as? UInt) ?? 0
+        let reason = AVAudioSession.RouteChangeReason(rawValue: rawReason)
+        let outs = AVAudioSession.sharedInstance().currentRoute.outputs
+            .map { "\($0.portType.rawValue):\($0.portName)" }
+            .joined(separator: ",")
+        DiagLog.shared.write("route", [
+            "reason": Self.routeReasonName(reason),
+            "outputs": outs,
+            "native": isNativeActive,
+            "rate": Double(player?.rate ?? 0),
+            "extScreen": externalScreen != nil,
+        ], cat: "ext")
+    }
+
+    @objc private func mediaServicesReset(_ note: Notification) {
+        DiagLog.shared.write("media-services-reset", ["native": isNativeActive], cat: "app")
+        sessionActivated = false
+        if isNativeActive { activateAudioSession() }
+    }
+
+    private static func routeReasonName(_ r: AVAudioSession.RouteChangeReason?) -> String {
+        switch r {
+        case .newDeviceAvailable:          return "new-device"
+        case .oldDeviceUnavailable:        return "old-device-gone"
+        case .categoryChange:              return "category-change"
+        case .override:                    return "override"
+        case .wakeFromSleep:               return "wake"
+        case .noSuitableRouteForCategory:  return "no-route"
+        case .routeConfigurationChange:    return "reconfigured"
+        case .unknown:                     return "unknown"
+        default:                           return "other"
+        }
     }
 
     // MARK: Arming
@@ -478,6 +721,42 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             // The item knows its own duration better than a page whose element is
             // parked; never let an arm overwrite a good value with 0.
             if a.duration <= 0 { a.duration = armed.duration }
+        }
+
+        // AN ARM CAN CHANGE WHICH FILE THIS IS, AND THAT IS A TEARDOWN.
+        //
+        // `armed` is both the handoff's configuration and the only record of what
+        // the running player is playing. Replacing it wholesale is right for a
+        // routine re-arm of the same file; when the page has moved to a DIFFERENT
+        // file while our player is still going, it silently retires the outgoing
+        // episode with no final write — every second since the 15 s throttle last
+        // let a post through simply has nowhere to go afterwards.
+        //
+        // Measured 2026-09-23 (client_iPhone-app.log). E04 was playing natively on
+        // the glasses, last posted at 651 s of 690. The page auto-advanced; the arm
+        // for E05 landed while E04's player was still up. Twenty seconds later the
+        // teardown flushed — and flushed E05's identity at E05's position (2.2 s),
+        // which the near-start guard then correctly dropped. E04's last 39 seconds
+        // were never written by anyone, and the row that should have said so said
+        // "near-start" instead.
+        //
+        // So flush the OUTGOING file first, while `armed` still describes it.
+        let switchingFile = isNativeActive
+            && !armed.filePath.isEmpty
+            && !a.filePath.isEmpty
+            && a.filePath != armed.filePath
+        if switchingFile {
+            let outgoing = armed.filePath
+            maybePostProgress(armed.position, force: true)
+            DiagLog.shared.write("rearm-swap", [
+                "from": outgoing, "to": a.filePath,
+                "flushedAt": armed.position, "dur": armed.duration,
+                // The native player is still on the OLD file at this point. If the
+                // page did this as an advance it should have come through
+                // nextUrl/`advance` instead, so a run of these rows is the tell
+                // that the in-place advance path is not being taken.
+                "nativePos": player.map { CMTimeGetSeconds($0.currentTime()) } ?? -1,
+            ], cat: "play")
         }
         armed = a
         // A fresh session can be yielded again. Without this, one takeover would
@@ -535,17 +814,23 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             audioEverActivated = true
         } catch {
             audioSessionError = "\(Self.stateName(UIApplication.shared.applicationState)): \(error.localizedDescription)"
-            DiagLog.shared.write("audio-session-failed", ["reason": audioSessionError])
+            DiagLog.shared.write("audio-session-failed", ["reason": audioSessionError], cat: "app")
         }
     }
 
     func tick(position: Double, paused: Bool, duration: Double) {
         guard armed.active else { return }
-        armed.position = position
-        // Same guard as arm(): while WE are the player, the page's `paused` is a
-        // stale echo of an element WebKit paused for us, not a command. This was
-        // the writer that still flipped armPaused to Y after the handoff.
-        if !isNativeActive { armed.paused = paused }
+        // Same guard as arm(), now extended to the POSITION — which was always
+        // the same mistake and was simply not noticed, because `paused` broke
+        // loudly and this breaks quietly. While native holds the display the
+        // page's <video> is parked at wherever the handoff left it, so a tick
+        // from it drags `armed.position` back there once a second; the teardown
+        // flush then writes that stale position as the episode's final one, and
+        // a seek made through the native player is undone within a second.
+        if !isNativeActive {
+            armed.position = position
+            armed.paused = paused
+        }
         if duration > 0 { armed.duration = duration }
         armed.armedAt = Date()
         if !isNativeActive {
@@ -555,8 +840,18 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
 
     /// Drive the native player directly. Only meaningful while it is the
     /// presentation; a no-op otherwise, so the page can call it unconditionally.
-    func setPaused(_ paused: Bool) {
+    func setPaused(_ paused: Bool, source: String = "unknown") {
         guard let p = player else { return }
+        // WHO ASKED. `armed.paused` is the flag the whole handoff reads, and for
+        // the life of the feature nothing recorded who set it — so a player found
+        // paused could not be told apart from a player the user paused. The
+        // 2026-09-23 stall is unexplainable for exactly this reason. Every caller
+        // now names itself.
+        lastTransportRequest = (src: source, at: Date())
+        DiagLog.shared.write("setPaused", [
+            "paused": paused, "src": source, "was": armed.paused,
+            "pos": armed.position, "title": armed.title,
+        ], cat: "play")
         armed.paused = paused
         if paused { p.pause() } else { p.play() }
         updateNowPlaying()
@@ -604,7 +899,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
                                         "pos": armed.position,
                                         "title": armed.title,
                                         "native": hadPlayer,
-                                        "flushed": hadPlayer])
+                                        "flushed": hadPlayer], cat: "play")
         stopNative(endActivity: true)   // reads armed.title/position for its own row
         armed = ArmedPlayback()
         // Deliberately does NOT exit TV Mode. The two are orthogonal: disarm
@@ -675,16 +970,60 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             self.emit("displayChanged", self.displayInfo())
             PlaybackLiveActivity.shared.update(state: self.liveActivityState(), force: true)
         }
+        // EVERY transport change, whether or not we asked for it.
+        //
+        // The 1 Hz time observer already mirrors the transport into
+        // `armed.paused`, which means a pause that happened TO us is adopted as
+        // if it were the user's wish — and once adopted, nothing ever resumes:
+        // the page's intent flag only clears when its own element is visible and
+        // playing, which in early mode it never is. Measured 2026-09-23: E05
+        // started on the glasses, played for three seconds, and was paused at
+        // ~5 s; twenty rows of `armPaused: true` later it was still sitting
+        // there. Nothing in the log named a cause because nothing watched this.
+        tcsObs = p.observe(\.timeControlStatus, options: [.new]) { [weak self] pl, _ in
+            guard let self = self else { return }
+            let requested = Date().timeIntervalSince(self.lastTransportRequest.at) < 1.5
+            var row: [String: Any] = [
+                "tcs": Self.tcsName(pl.timeControlStatus),
+                "rate": Double(pl.rate),
+                "pos": pl.currentTime().seconds,
+                "requested": requested,
+                "by": requested ? self.lastTransportRequest.src : "",
+                "armPaused": self.armed.paused,
+                "waitReason": (pl.reasonForWaitingToPlay?.rawValue as String?) ?? "",
+                "itemStatus": Self.itemStatusName(pl.currentItem?.status),
+                "itemErr": pl.currentItem?.error?.localizedDescription ?? "",
+                "sess": self.sessionActivated,
+                "extWindow": self.extWindow != nil,
+            ]
+            // The unrequested STOP is the interesting one and it deserves its own
+            // event name, so a reader can pull just these out of a day of rows.
+            let stalled = pl.timeControlStatus == .paused && !requested && !self.armed.paused
+            if stalled {
+                row["route"] = AVAudioSession.sharedInstance().currentRoute.outputs
+                    .map { $0.portType.rawValue }.joined(separator: ",")
+            }
+            DiagLog.shared.write(stalled ? "transport-stopped-itself" : "transport",
+                                 row, cat: "play")
+        }
 
         NotificationCenter.default.addObserver(
             self, selector: #selector(itemDidEnd(_:)),
             name: .AVPlayerItemDidPlayToEndTime, object: it)
+        // A file that cannot finish, and a file that keeps running dry, both look
+        // like "it froze" and neither said anything before.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(itemFailedToEnd(_:)),
+            name: .AVPlayerItemFailedToPlayToEndTime, object: it)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(itemStalled(_:)),
+            name: .AVPlayerItemPlaybackStalled, object: it)
 
         installTimeObserver(on: p)
         DiagLog.shared.write("startNative", ["reason": reason, "at": startAt,
                                             "shouldPlay": shouldPlay,
                                             "title": armed.title,
-                                            "extWindow": extWindow != nil])
+                                            "extWindow": extWindow != nil], cat: "play")
         emit("nativeStarted", ["reason": reason, "position": startAt,
                                "extMode": armed.extMode,
                                "extWindow": extWindow != nil,
@@ -850,7 +1189,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
                     // (harmless, the state is meant to be gone).
                     "native": isNativeActive,
                     "final": force,
-                ])
+                ], cat: "net")
             }
             return
         }
@@ -877,12 +1216,44 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         let logged: [String: Any] = ["pos": t, "dur": armed.duration,
                                     "item": armed.itemId, "profile": armed.profileId,
                                     "file": armed.filePath, "final": force]
-        URLSession.shared.dataTask(with: req) { _, resp, err in
+        send(req, logged: logged, retriesLeft: force ? 3 : 0, attempt: 1)
+    }
+
+    /// POST a progress write, retrying a FORCED one.
+    ///
+    /// "Best-effort, but no longer silent" was an improvement on silent, and the
+    /// log it produced promptly showed why it is not enough: of twenty progress
+    /// posts in one day, three came back `The request timed out` or `The network
+    /// connection was lost`, and two of those were the FINAL flush of an episode.
+    /// A routine beat that fails is replaced by the next one fifteen seconds
+    /// later; a final flush has no successor, so the failure is simply the tail
+    /// of that episode going missing.
+    ///
+    /// Wi-Fi on a phone that is being locked, unlocked and plugged into a pair of
+    /// glasses drops constantly, and it comes back within seconds — so the retry
+    /// is short and stubborn rather than clever. Only forced posts retry: a
+    /// stale routine beat arriving late would be worse than not arriving.
+    private func send(_ req: URLRequest, logged: [String: Any],
+                      retriesLeft: Int, attempt: Int) {
+        URLSession.shared.dataTask(with: req) { [weak self] _, resp, err in
             var row = logged
-            row["status"] = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            row["status"] = code
+            row["try"] = attempt
             if let err = err { row["err"] = err.localizedDescription }
-            DiagLog.shared.write("progress", row)
-        }.resume()   // best-effort, but no longer silent
+            let ok = (200...299).contains(code)
+            row["retrying"] = !ok && retriesLeft > 0
+            DiagLog.shared.write("progress", row, cat: "net")
+            guard !ok, retriesLeft > 0, let self = self else { return }
+            // 2 s, 6 s, 18 s. Long enough to outlast a lock/unlock or a route
+            // change, short enough that the app is still alive to finish it —
+            // the background task assertion the handoff holds covers the window.
+            let delay = pow(3.0, Double(attempt - 1)) * 2.0
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) {
+                self.send(req, logged: logged,
+                          retriesLeft: retriesLeft - 1, attempt: attempt + 1)
+            }
+        }.resume()
     }
 
     // MARK: Cross-device playback session
@@ -974,6 +1345,22 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
 
     // MARK: End of file / auto-advance
 
+    @objc private func itemFailedToEnd(_ note: Notification) {
+        let err = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+        DiagLog.shared.write("item-failed", [
+            "err": err?.localizedDescription ?? "unknown",
+            "file": armed.filePath, "pos": armed.position,
+        ], cat: "play")
+    }
+
+    @objc private func itemStalled(_ note: Notification) {
+        DiagLog.shared.write("item-stalled", [
+            "pos": armed.position, "file": armed.filePath,
+            "likely": player?.currentItem?.isPlaybackLikelyToKeepUp ?? false,
+            "waitReason": (player?.reasonForWaitingToPlay?.rawValue as String?) ?? "",
+        ], cat: "play")
+    }
+
     @objc private func itemDidEnd(_ note: Notification) {
         maybePostProgress(armed.duration, force: true)
 
@@ -987,14 +1374,14 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             if !armed.nextItemId.isEmpty { armed.itemId = armed.nextItemId }
             armed.url = next
             armed.nextUrl = nil
-            DiagLog.shared.write("advance", ["to": armed.filePath, "item": armed.itemId])
+            DiagLog.shared.write("advance", ["to": armed.filePath, "item": armed.itemId], cat: "play")
             emit("nativeAdvanced", ["filePath": armed.filePath, "url": next.absoluteString])
             replaceItem(with: next)
             return
         }
         endedFlag = true
         DiagLog.shared.write("ended", ["file": armed.filePath, "dur": armed.duration,
-                                       "hadNext": false])
+                                       "hadNext": false], cat: "play")
         emit("nativeEnded", ["filePath": armed.filePath])
         stopNative(endActivity: true)
     }
@@ -1002,8 +1389,11 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private func replaceItem(with url: URL) {
         guard let p = player else { return }
         if let old = item {
-            NotificationCenter.default.removeObserver(
-                self, name: .AVPlayerItemDidPlayToEndTime, object: old)
+            for n in [Notification.Name.AVPlayerItemDidPlayToEndTime,
+                      .AVPlayerItemFailedToPlayToEndTime,
+                      .AVPlayerItemPlaybackStalled] {
+                NotificationCenter.default.removeObserver(self, name: n, object: old)
+            }
         }
         statusObs?.invalidate()
         let it = AVPlayerItem(url: url)
@@ -1016,6 +1406,12 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         NotificationCenter.default.addObserver(
             self, selector: #selector(itemDidEnd(_:)),
             name: .AVPlayerItemDidPlayToEndTime, object: it)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(itemFailedToEnd(_:)),
+            name: .AVPlayerItemFailedToPlayToEndTime, object: it)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(itemStalled(_:)),
+            name: .AVPlayerItemPlaybackStalled, object: it)
         p.replaceCurrentItem(with: it)
         p.play()
         PlaybackLiveActivity.shared.update(state: liveActivityState(), force: true)
@@ -1092,16 +1488,20 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         if isNativeActive {
             DiagLog.shared.write("stopNative", ["pos": armed.position,
                                                "title": armed.title,
-                                               "ended": endedFlag])
+                                               "ended": endedFlag], cat: "play")
         }
         handBackDeadline?.cancel(); handBackDeadline = nil
         if let p = player, let obs = timeObserver { p.removeTimeObserver(obs) }
         timeObserver = nil
         statusObs?.invalidate(); statusObs = nil
         externalObs?.invalidate(); externalObs = nil
+        tcsObs?.invalidate(); tcsObs = nil
         if let old = item {
-            NotificationCenter.default.removeObserver(
-                self, name: .AVPlayerItemDidPlayToEndTime, object: old)
+            for n in [Notification.Name.AVPlayerItemDidPlayToEndTime,
+                      .AVPlayerItemFailedToPlayToEndTime,
+                      .AVPlayerItemPlaybackStalled] {
+                NotificationCenter.default.removeObserver(self, name: n, object: old)
+            }
         }
         detachExternalWindow()      // mirroring resumes; TV Mode gets its screen back
         detachFallbackLayer()
@@ -1125,10 +1525,13 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     func handlePlaybackCommand(_ cmd: PlaybackCommand) {
         switch cmd {
         case .playPause:
-            if let p = player {
-                if p.timeControlStatus == .playing { p.pause() } else { p.play() }
-                armed.paused = (p.timeControlStatus != .playing)
-            }
+            // Through setPaused rather than touching the player directly, so the
+            // flip is logged with its source like every other one. Reading
+            // timeControlStatus BEFORE deciding is still the right test: intent
+            // and transport can disagree after an interruption, and the user is
+            // pressing the button they can see, which reflects the transport.
+            if let p = player { setPaused(p.timeControlStatus == .playing,
+                                          source: "transport-toggle") }
         case .skipForward: skip(by: 15)
         case .skipBack:    skip(by: -15)
         case .next:        emit("nativeAdvanced", ["request": "next"])
@@ -1153,31 +1556,43 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         guard let raw = AppGroupConfig.pendingPlaybackCommand,
               let cmd = PlaybackCommand(rawValue: raw) else { return }
         AppGroupConfig.pendingPlaybackCommand = nil
+        DiagLog.shared.write("remote", ["cmd": raw, "src": "live-activity-pending"], cat: "play")
         handlePlaybackCommand(cmd)
     }
 
     private func installRemoteCommands() {
         let c = MPRemoteCommandCenter.shared()
+        // These arrive from the lock screen, the Island, CarPlay, a headset
+        // button — and from a pair of glasses with transport keys on the frame.
+        // They are the one way playback changes that leaves no trace anywhere
+        // else in the app, so each one says so. `playCommand`/`pauseCommand`
+        // also now move `armed.paused`: driving the player without recording the
+        // intent left the flag disagreeing with the transport, and the next
+        // handoff inherited the disagreement.
         _ = c.playCommand.addTarget { [weak self] _ in
-            self?.player?.play(); return .success
+            self?.setPaused(false, source: "remote-play"); return .success
         }
         _ = c.pauseCommand.addTarget { [weak self] _ in
-            self?.player?.pause(); return .success
+            self?.setPaused(true, source: "remote-pause"); return .success
         }
         _ = c.togglePlayPauseCommand.addTarget { [weak self] _ in
+            DiagLog.shared.write("remote", ["cmd": "togglePlayPause"], cat: "play")
             self?.handlePlaybackCommand(.playPause); return .success
         }
         c.skipForwardCommand.preferredIntervals = [15]
         _ = c.skipForwardCommand.addTarget { [weak self] _ in
+            DiagLog.shared.write("remote", ["cmd": "skipForward"], cat: "play")
             self?.handlePlaybackCommand(.skipForward); return .success
         }
         c.skipBackwardCommand.preferredIntervals = [15]
         _ = c.skipBackwardCommand.addTarget { [weak self] _ in
+            DiagLog.shared.write("remote", ["cmd": "skipBack"], cat: "play")
             self?.handlePlaybackCommand(.skipBack); return .success
         }
         _ = c.changePlaybackPositionCommand.addTarget { [weak self] ev in
             guard let self = self, let p = self.player,
                   let e = ev as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+            DiagLog.shared.write("remote", ["cmd": "seek", "to": e.positionTime], cat: "play")
             self.armed.position = e.positionTime
             self.armed.armedAt = Date()
             p.seek(to: CMTime(seconds: e.positionTime, preferredTimescale: 600),
@@ -1185,9 +1600,11 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             return .success
         }
         _ = c.nextTrackCommand.addTarget { [weak self] _ in
+            DiagLog.shared.write("remote", ["cmd": "next"], cat: "play")
             self?.handlePlaybackCommand(.next); return .success
         }
         _ = c.previousTrackCommand.addTarget { [weak self] _ in
+            DiagLog.shared.write("remote", ["cmd": "prev"], cat: "play")
             self?.handlePlaybackCommand(.prev); return .success
         }
     }
@@ -1681,7 +2098,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         ]
         if let b = ext?.bounds { row["extBounds"] = "\(Int(b.width))x\(Int(b.height))" }
         diagTrail.append(row)
-        DiagLog.shared.write("snap", row)
+        DiagLog.shared.write("snap", row, cat: "ext")
         // A lock/unlock cycle produces ~6 rows; keep a few cycles, drop the rest.
         if diagTrail.count > 40 { diagTrail.removeFirst(diagTrail.count - 40) }
     }

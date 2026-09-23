@@ -477,7 +477,16 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
                 healed.append(sha)
             }
         }
-        if !healed.isEmpty { writeIndex(idx) }
+        if !healed.isEmpty {
+            writeIndex(idx)
+            // A bundle marked complete by RECONCILIATION rather than by finishing
+            // its own download is worth knowing about: it means a job died
+            // without calling markComplete (killed app, expired background task)
+            // and the files only look right by size. If offline playback breaks
+            // on a bundle, this row is the first thing to check for it.
+            DiagLog.shared.write("bundle-healed", ["shas": healed.joined(separator: ",")],
+                                 cat: "offline")
+        }
         return healed
     }
 
@@ -712,6 +721,16 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     // failure (bad URL, 404, on-disk move error) surfaces an error + cancels — those
     // never fix themselves. Assumes `queue` and `job === jobs[sha]`.
     private func retryOrFail(sha: String, fileName: String, job: Job, message: String, transient: Bool) {
+        // A bundle that half-arrives is the offline path's signature failure: the
+        // files are there, the index says complete, and playback dies on the
+        // segment that never landed. The retries are silent by design — they
+        // usually work — but a log that only records the final verdict cannot
+        // tell a clean download from one that fought for every file.
+        DiagLog.shared.write("bundle-retry", [
+            "sha": sha, "file": fileName, "msg": message,
+            "transient": transient, "attempt": (job.attempts[fileName] ?? 0) + 1,
+            "name": job.name,
+        ], cat: "offline")
         if transient, let f = job.files.first(where: { $0.name == fileName }) {
             let n = (job.attempts[fileName] ?? 0) + 1
             job.attempts[fileName] = n
@@ -729,6 +748,11 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     }
 
     private func markComplete(_ sha: String, job: Job) {
+        DiagLog.shared.write("bundle-complete", [
+            "sha": sha, "name": job.name, "itemId": job.itemId,
+            "files": job.files.count, "bytes": job.totalBytes,
+            "retried": job.attempts.values.reduce(0, +),
+        ], cat: "offline")
         var idx = readIndex()
         if var entry = idx[sha] { entry["complete"] = true; idx[sha] = entry; writeIndex(idx) }
         jobs[sha] = nil
@@ -759,6 +783,11 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     }
 
     private func emitError(sha: String, job: Job, message: String) {
+        DiagLog.shared.write("bundle-failed", [
+            "sha": sha, "name": job.name, "itemId": job.itemId, "msg": message,
+            "filesDone": job.doneBytes.count, "fileCount": job.files.count,
+            "bytesDone": job.doneBytes.values.reduce(0, +), "bytesTotal": job.totalBytes,
+        ], cat: "offline")
         jobs[sha] = nil
         endBgTaskIfIdle()
         emit("bundleError", ["sha": sha, "itemId": job.itemId, "filePath": job.filePath, "message": message])

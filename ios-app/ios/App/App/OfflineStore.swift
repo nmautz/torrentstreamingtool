@@ -312,6 +312,22 @@ final class OfflineProgressStore {
             records[k] = rec
             obj["records"] = records
             write(obj)
+
+            // Offline play is the one case the SERVER cannot measure — it sees a
+            // single final position long after the fact, so if the completion
+            // verdict here is wrong nothing downstream can catch it. Log the
+            // inputs, not just the answer: `played` versus the two thresholds is
+            // what separates "watched it" from "scrubbed to the end", and it was
+            // previously visible nowhere at all. Only when the verdict FLIPS, so
+            // a two-hour offline session costs a handful of rows.
+            if (nowCompleted || prevCompleted) != prevCompleted {
+                DiagLog.shared.write("offline-completed", [
+                    "item": itemId, "pos": positionSec, "dur": durationSec,
+                    "played": played,
+                    "needTail": durationSec * Self.finishTailPct,
+                    "needPlayed": durationSec * Self.minPlayedPct,
+                ], cat: "offline")
+            }
         }
     }
 
@@ -407,11 +423,20 @@ final class OfflineProgressStore {
                 }
                 out.append(eventDict(rec))
             }
+            // The offline->online handover, from the side that knows what it is
+            // holding. A record that is `dirty` and never leaves is an episode
+            // the user watched on a plane that the library will never show as
+            // watched — and until now the only trace of it was its continued
+            // absence.
+            if !out.isEmpty {
+                DiagLog.shared.write("offline-pending", ["count": out.count], cat: "offline")
+            }
             return out
         }
     }
 
     func markSynced(_ applied: [[String: Any]]) {
+        DiagLog.shared.write("offline-synced", ["count": applied.count], cat: "offline")
         queue.sync {
             var obj = read()
             let active = activeProfileLocked(obj)

@@ -52,6 +52,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 import analyzer
 import animemap
 import bundlecheck
+import clientlog
 import refiner
 import dvprobe
 import episodes
@@ -86,6 +87,54 @@ winaccept_patch.apply()
 # app log + stderr (captured by launchd/the console into logs/streamlink.err).
 LOG_DIR = Path(__file__).parent / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+# Diagnostic transcripts uploaded by client devices (the iOS app). A SUBDIRECTORY
+# rather than `client_<device>.log` beside the server's own logs, and that is the
+# whole point: every sweep in this file — `_archive_old_logs()` at update time,
+# `DELETE /api/admin/logs`, the `_bundle` download — iterates top-level FILES, so
+# a directory is invisible to all of them for free.
+#
+# That invisibility is the retention policy. A client log is evidence someone is
+# expected to come back and read, possibly days later; it must not be collected
+# by a routine that exists to give the *server's* logs a clean slate after an
+# update. The only thing that removes one is a reader saying so, through
+# `DELETE /api/admin/client-logs`.
+CLIENT_LOG_DIR = LOG_DIR / "client"
+CLIENT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+# Devices whose stored transcript a reader has cleared. The server cannot reach a
+# phone, so the clear is finished by the NEXT upload: that response carries
+# `clear_local`, the app deletes its own copy, and the two sides agree the old
+# rows are gone. Without this the device would keep re-sending a log the reader
+# has already dealt with, and the merge would faithfully restore every row.
+_CLIENT_LOG_PENDING = CLIENT_LOG_DIR / ".pending_clear.json"
+
+
+def _migrate_client_logs() -> None:
+    """Move pre-18.8.0 `logs/client_<device>.log` into `logs/client/<device>.log`.
+
+    Runs once, at import, before `_init_logging()` can archive them away. The
+    logs that exist right now are the only record of what the app did on the
+    days before this feature grew retention — losing them to the very change
+    meant to stop losing them would be a poor joke.
+    """
+    try:
+        strays = [p for p in LOG_DIR.glob("client_*.log") if p.is_file()]
+    except OSError:
+        return
+    for src in strays:
+        dst = CLIENT_LOG_DIR / (src.name[len("client_"):])
+        try:
+            incoming = src.read_text(encoding="utf-8", errors="replace")
+            existing = dst.read_text(encoding="utf-8") if dst.is_file() else ""
+            merged, _, _ = clientlog.merge(existing, incoming)
+            dst.write_text(merged, encoding="utf-8")
+            src.unlink()
+        except OSError:
+            continue
+
+
+_migrate_client_logs()
 
 
 # When the auto-updater applies a new version it drops this marker in LOG_DIR.
@@ -25366,35 +25415,229 @@ def _build_logs_zip(files: list[Path]) -> str:
     return tmp_path
 
 
+def _client_slug(dev: str) -> str:
+    """A device name squeezed to something that can only ever be a filename.
+
+    A client picks this string, so it is never trusted as a path component:
+    everything outside `[A-Za-z0-9_-]` collapses to a dash. Two devices that
+    slug the same share a transcript, which is the right failure — merging is
+    de-duplicating, so the result is still readable, just shared.
+    """
+    return re.sub(r"[^A-Za-z0-9_-]", "-", (dev or "")[:40]).strip("-") or "unknown"
+
+
+def _client_log_path(slug: str) -> Path:
+    return CLIENT_LOG_DIR / f"{slug}.log"
+
+
+def _client_pending_read() -> dict:
+    try:
+        data = json.loads(_CLIENT_LOG_PENDING.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _client_pending_write(data: dict) -> None:
+    try:
+        _CLIENT_LOG_PENDING.write_text(json.dumps(data), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _client_devices() -> list:
+    """Every device with a stored transcript, newest upload first."""
+    out = []
+    pending = _client_pending_read()
+    if CLIENT_LOG_DIR.exists():
+        for p in sorted(CLIENT_LOG_DIR.glob("*.log")):
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            out.append({
+                "device":  p.stem,
+                "bytes":   st.st_size,
+                "mtime":   int(st.st_mtime),
+                "pending_clear": p.stem in pending,
+            })
+    out.sort(key=lambda e: e["mtime"], reverse=True)
+    return out
+
+
 @app.post("/api/diag/client-log")
 async def diag_client_log(request: Request) -> JSONResponse:
-    """Receive a diagnostic log from the iOS app and drop it in LOG_DIR.
+    """Receive a diagnostic transcript from a client device and MERGE it in.
 
-    Why this exists: the app's own trail lived in memory and had to be read off
-    the phone and pasted by hand, which is fine for a ten-minute test and useless
-    for "use it for a few days and report back". Landing it here makes it show up
-    in `/api/admin/logs` like any other log, so it can be read without the phone.
+    The first version wrote the upload straight over the previous one, which
+    made the phone's 3 MB rolling window the server's retention policy: send
+    twice and the first send was gone. The device still sends its whole file —
+    that is the simple thing for a client to get right, and it lets a phone
+    that was offline for a week catch up in one tap — but the server now keeps
+    its own append-only transcript and takes only the rows it has never seen.
+    See `clientlog.py` for why identity is the hashed line rather than `t`.
 
-    Unauthenticated, like `/api/library/{id}/progress` next door — this is a LAN
-    service and the body is inert text. The guards that matter are on SIZE and on
-    the filename: the device string is squeezed to a short safe slug so a client
-    can never choose a path, and one file per device means a chatty client
-    overwrites its own log rather than filling the disk.
+    Unauthenticated, like `/api/library/{id}/progress` next door: this is a LAN
+    service and the body is inert text. The guards that matter are on SIZE and
+    on the filename, which is slugged so a client can never choose a path.
+
+    The response closes the clear handshake. A reader who has finished with a
+    device's log clears it through `DELETE /api/admin/client-logs`; the server
+    cannot reach the phone, so it parks the instruction and hands it back on the
+    next upload as `clear_local`. Without that, the device would keep re-sending
+    rows the reader has dealt with and the merge would faithfully restore them.
     """
     raw = await request.body()
     if len(raw) > 8 * 1024 * 1024:
         raise HTTPException(413, "Log too large.")
-    text = raw.decode("utf-8", "replace")
-    dev = (request.query_params.get("device") or "unknown")[:40]
-    slug = re.sub(r"[^A-Za-z0-9_-]", "-", dev).strip("-") or "unknown"
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    path = LOG_DIR / f"client_{slug}.log"
-    try:
-        path.write_text(text, encoding="utf-8")
-    except OSError as exc:
-        raise HTTPException(500, f"Could not write log: {exc}")
-    log.info("Client diagnostic log received: %s (%d bytes)", path.name, len(raw))
-    return JSONResponse({"ok": True, "name": path.name, "bytes": len(raw)})
+    incoming = raw.decode("utf-8", "replace")
+    slug = _client_slug(request.query_params.get("device") or "unknown")
+    path = _client_log_path(slug)
+
+    # A clear that is still pending has to be applied to THIS upload before it is
+    # merged, or the clear achieves nothing: the device is holding the same rows
+    # the reader just finished with and is sending them right now, and the merge
+    # would faithfully restore every one of them. The mark is the newest
+    # timestamp the transcript held when it was cleared — taken from the device's
+    # own clock, so nothing is being compared across clocks — and rows written
+    # AFTER the clear are strictly newer and survive, which is why this drops a
+    # prefix instead of discarding the whole body.
+    pending = _client_pending_read()
+    entry = pending.get(slug) or {}
+    clear_local = bool(entry)
+    mark = str(entry.get("hwm") or "") if isinstance(entry, dict) else ""
+    if mark:
+        incoming, _dropped_pre = clientlog.drop_through(incoming, mark)
+    else:
+        _dropped_pre = 0
+
+    def _merge_to_disk() -> dict:
+        CLIENT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            existing = path.read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            existing = ""
+        merged, added, skipped = clientlog.merge(existing, incoming)
+        merged, dropped = clientlog.trim_to(merged)
+        try:
+            path.write_text(merged, encoding="utf-8")
+        except OSError as exc:
+            raise HTTPException(500, f"Could not write log: {exc}")
+        return {"added": added, "skipped": skipped, "dropped": dropped,
+                "rows": len(clientlog.split_rows(merged)),
+                "bytes": len(merged.encode("utf-8", "replace"))}
+
+    stats = await asyncio.to_thread(_merge_to_disk)
+
+    if clear_local:
+        pending.pop(slug, None)
+        _client_pending_write(pending)
+
+    log.info("Client log from %s: +%d new row(s), %d already held, %d pre-clear "
+             "dropped (%d total).",
+             slug, stats["added"], stats["skipped"], _dropped_pre, stats["rows"])
+    return JSONResponse({"ok": True, "device": slug, "name": path.name,
+                         "clear_local": clear_local, "dropped_pre_clear": _dropped_pre,
+                         **stats})
+
+
+@app.get("/api/admin/client-logs")
+async def admin_client_logs(request: Request) -> JSONResponse:
+    """List every device transcript with a summary of what is in it.
+
+    The histograms are the point. The first question asked of one of these is
+    always "is the thing I care about even in here?", and a per-event count
+    answers it without downloading nine thousand rows.
+    """
+    _require_admin(request)
+
+    def _read_all() -> list:
+        out = []
+        for d in _client_devices():
+            try:
+                text = _client_log_path(d["device"]).read_text(encoding="utf-8")
+            except OSError:
+                text = ""
+            out.append({**d, **clientlog.summarize(text)})
+        return out
+
+    return JSONResponse({"dir": str(CLIENT_LOG_DIR),
+                         "devices": await asyncio.to_thread(_read_all)})
+
+
+@app.get("/api/admin/client-logs/{device}")
+async def admin_client_log_read(
+    request: Request, device: str,
+    since: str = "", until: str = "", events: str = "", cats: str = "",
+    errors_only: bool = False, limit: int = 0, tail: bool = False,
+) -> Response:
+    """Read one device's transcript as NDJSON, filtered server-side.
+
+    Filtering here rather than in the reader is not an optimisation for its own
+    sake: a long transcript is mostly `snap` rows, and "show me the offline
+    events from Tuesday" is otherwise a multi-megabyte download to throw most of
+    away. `events`/`cats` are comma-separated; `since`/`until` are ISO-8601
+    prefixes compared as strings (see clientlog.select).
+    """
+    _require_admin(request)
+    slug = _client_slug(device)
+    path = _client_log_path(slug)
+    if not path.is_file():
+        raise HTTPException(404, f"No stored log for device {slug!r}.")
+
+    def _read() -> str:
+        text = path.read_text(encoding="utf-8")
+        rows = clientlog.select(
+            text,
+            since=since, until=until,
+            events=[e.strip() for e in events.split(",")] if events else (),
+            cats=[c.strip() for c in cats.split(",")] if cats else (),
+            errors_only=errors_only, limit=limit, tail=tail,
+        )
+        return ("\n".join(rows) + "\n") if rows else ""
+
+    return Response(await asyncio.to_thread(_read),
+                    media_type="application/x-ndjson; charset=utf-8")
+
+
+@app.delete("/api/admin/client-logs")
+async def admin_client_logs_clear(request: Request, device: str = "") -> JSONResponse:
+    """Clear stored client transcripts — the ONE thing that deletes them.
+
+    Nothing else does: not the update-time archive, not `DELETE /api/admin/logs`,
+    not the next upload. A client log is evidence a reader is expected to come
+    back to, so it survives until that reader says they are done with it.
+
+    Deleting the server's copy is only half of it. The device still holds the
+    same rows and would restore every one of them on its next upload, so each
+    cleared device is flagged; the next upload from it answers `clear_local` and
+    the app deletes its own copy too. Omit `device` to clear all of them.
+    """
+    _require_admin(request)
+    targets = [_client_slug(device)] if device else [d["device"] for d in _client_devices()]
+    cleared, errors = [], []
+    marks: dict = {}
+    for slug in targets:
+        p = _client_log_path(slug)
+        try:
+            # Record how far this transcript got BEFORE deleting it. The device
+            # still holds these rows and will re-send them; the mark is what lets
+            # the next upload drop exactly them and keep anything newer.
+            if p.is_file():
+                marks[slug] = clientlog.high_water(p.read_text(encoding="utf-8"))
+                p.unlink()
+            else:
+                marks[slug] = ""
+            cleared.append(slug)
+        except OSError as exc:
+            errors.append({"device": slug, "error": str(exc)})
+    pending = _client_pending_read()
+    for slug in cleared:
+        pending[slug] = {"at": int(time.time()), "hwm": marks.get(slug, "")}
+    _client_pending_write(pending)
+    log.info("Admin cleared client logs: %s", ", ".join(cleared) or "(none)")
+    return JSONResponse({"ok": True, "cleared": cleared, "errors": errors,
+                         "awaiting_device_clear": sorted(pending)})
 
 
 @app.get("/api/admin/logs")

@@ -1,5 +1,120 @@
 # Changelog
 
+## [18.8.0] — 2026-09-22
+### The log became a feature instead of a one-off
+
+**The server keeps every send.** `POST /api/diag/client-log` used to write the upload
+straight over the previous one, which quietly made the phone's 3 MB rolling window the
+server's retention policy: send twice and the first send was gone. The device still
+uploads its whole file — the simple thing for a client to get right, and a phone that has
+been off the network for a week catches up in one tap — but the server now merges it into
+an append-only transcript per device and takes only the rows it has never seen. Identity
+is the hashed line, not the timestamp: two rows shared a millisecond in the very log that
+prompted this (`disarm` and `stopNative`), and a device that clears its log and starts
+over sends older timestamps that must still land. New leaf module `clientlog.py` with 33
+tests in `tests/test_clientlog.py`.
+
+**Nothing deletes a client log except a reader.** They live in `logs/client/` — a
+subdirectory, which is the whole trick: `_archive_old_logs()` at update time,
+`DELETE /api/admin/logs` and the log-bundle download all iterate top-level *files*, so a
+directory is invisible to every sweep for free. The only thing that removes one is
+`DELETE /api/admin/client-logs`, and because the server cannot reach a phone, that clear
+is finished by the *next upload*: the response carries `clear_local` and the app deletes
+its own copy, then writes a `log-cleared-by-server` row so the gap is explained rather
+than mysterious. The clear records a **high-water mark** so that next upload — which the
+device sends before it has wiped anything — has exactly the cleared rows dropped and
+anything newer kept; without it the merge would faithfully restore everything and the
+clear would achieve nothing. Pre-18.8.0 `logs/client_<device>.log` files are migrated in
+on startup.
+
+**New admin surface.** `GET /api/admin/client-logs` lists each device with row count,
+time span, launch count, error count and per-event/per-category histograms — the first
+question asked of one of these is always "is the thing I care about even in here?".
+`GET /api/admin/client-logs/{device}` reads it back as NDJSON with server-side filtering
+(`since`, `until`, `events`, `cats`, `errors_only`, `limit`, `tail`), so "the offline
+events from Tuesday" is not a multi-megabyte download.
+
+**Every row now carries a category** — `play`, `ext`, `offline`, `net`, `app` — and the
+**web player writes to the same transcript** through a new `np.log` bridge. The log was
+native-only, which made it a log of the wrong thing: on-device playback is mostly the
+WKWebView's own `<video>` and the offline bundle path barely touches the native player,
+so an episode that froze in the web player produced a file full of `snap` rows describing
+an external display that was working fine. One file, one clock, every writer.
+
+### Fixed: episode advance on an external display played the next episode on the phone
+
+Three separate causes, all of which the old log could show the symptom of and none of
+which it could name.
+
+* **`_lpWarmNextEp` returned early when the next episode was already prepped** — and only
+  the code *after* that early return ever set `lp._nextNative`. Prep state and "the native
+  player has a URL to switch to" are different facts, and conflating them meant that in any
+  binge (where the previous episode warmed the next one) `armed.nextUrl` was empty,
+  `itemDidEnd` found no next file, and the in-place advance never happened. Instead the page
+  tore the native player down — releasing the external window — loaded the next episode into
+  its own element, and re-claimed the display a beat later. New `_lpArmNextNative()` arms the
+  already-prepped case.
+* **The post-load `await v.play()` was unconditional.** With the glasses connected the
+  AVPlayer is the presentation and the element is meant to stay parked; playing it starts a
+  second engine, which takes the audio session and interrupts the player feeding the display.
+  Now guarded on `_npHolding`, with a standing `play` handler that pauses and *names* any
+  other path that tries it.
+* **An interrupted player was recorded as a user pause and never resumed.** The 1 Hz time
+  observer mirrors the transport into `armed.paused`, so a pause that happened *to* the app
+  was adopted as intent — and the page's intent flag only clears when its own element is
+  visible and playing, which in early mode it never is. Measured 2026-09-23: E05 started on
+  the glasses, played three seconds, was found paused at 5 s, and sat there for six minutes.
+
+### Fixed: the arm that retired an episode without saving it
+
+`arm()` replaces `armed` wholesale, which is right for a re-arm of the same file and wrong
+when the page has moved to a **different** file while our player is still running: the
+outgoing episode was retired with no final write. Measured 2026-09-23 — E04 playing
+natively, last posted at 651 s of 690; the E05 arm landed while E04's player was still up;
+the teardown twenty seconds later flushed *E05's* identity at *E05's* position (2.2 s),
+which the near-start guard correctly dropped. E04's last 39 seconds were written by nobody.
+The outgoing file is now flushed before the swap, and the swap logs a `rearm-swap` row.
+
+`tick()` had the same bug in its position field — the guard added for `paused` was never
+extended to `position`, so the parked element dragged `armed.position` back once a second
+and a native seek was undone within a second.
+
+### Fixed: a failed progress POST was simply lost
+
+Of twenty progress posts in one day, three returned `The request timed out` or
+`The network connection was lost`, and two were the **final** flush of an episode — which
+has no successor, so the failure is that episode's tail going missing. Forced posts now
+retry three times at 2 s / 6 s / 18 s, long enough to outlast a lock or a route change.
+
+### New instrumentation
+
+* **Audio-session interruptions were never observed at all.** Now logged (began/ended,
+  reason, `shouldResume`) and, on `ended`, the session is reactivated and playback resumed
+  when our own intent says it was playing — iOS hands the session back but does not restart
+  the player.
+* **Audio route changes** (`route`) — the glasses are a route as well as a screen, and
+  `oldDeviceUnavailable` pauses playback on its own.
+* **`transport` / `transport-stopped-itself`** from a `timeControlStatus` observer, carrying
+  `reasonForWaitingToPlay`, item status, item error, session state and the current route. The
+  second event name fires only when the player stopped and *nobody asked* — the exact shape
+  of the 2026-09-23 stall, which previously produced no row of any kind.
+* **`setPaused` names its caller** (`user-transport`, `remote-play`, `remote-pause`,
+  `transport-toggle`, …), and every remote command logs. `armed.paused` is the flag the whole
+  handoff reads and nothing recorded who set it.
+* **Item failures**: `item-stalled`, `item-failed`, plus `video-error` / `video-stalled` from
+  the web element.
+* **Advance path**: `advance` records `holding`, `ext`, `nextArmed` and which of the two
+  paths was taken; `native-advanced` marks the good one, `hold-start` the handoff boundary.
+* **Offline**: `bundle-retry`, `bundle-complete`, `bundle-failed`, `bundle-healed` (an index
+  entry completed by *reconciliation* rather than by finishing — the first thing to check when
+  offline playback breaks on a bundle), `lms-start` / `lms-failed` / `lms-stop`,
+  `offline-completed` (with the played-time inputs, not just the verdict — the server cannot
+  measure this one), `offline-pending`, `offline-synced`.
+* **`progress-failed`** from the web player, including whether the write was stashed to the
+  offline store or genuinely lost.
+* The device log cap rose from 3 MB to 8 MB, and a field JSON cannot represent no longer
+  takes the whole row down silently.
+
 ## [18.7.1] — 2026-09-21
 * **Fixed: every episode lost its tail, and an episode advance lost more than that.**
   `disarm()` reset `armed` as its **first** statement and only then called `stopNative()`,

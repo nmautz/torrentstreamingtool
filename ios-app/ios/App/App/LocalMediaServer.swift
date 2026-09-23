@@ -104,15 +104,28 @@ public class LocalMediaServer: CAPPlugin, CAPBridgedPlugin {
             switch result {
             case .success(let port):
                 let url = "http://127.0.0.1:\(port)/"
+                // Offline playback is a chain — bundle on disk, loopback server
+                // up, page pointed at it — and a break anywhere in it reaches the
+                // user as one symptom: the episode does not play. The log knew
+                // about the first link and the last; this is the middle one.
+                DiagLog.shared.write("lms-start", [
+                    "port": Int(port), "root": root.path,
+                    "mode": bundlesMount != nil ? "player" : "bundle",
+                    "proxied": proxyURL != nil,
+                ], cat: "offline")
                 call.resolve(["url": url, "port": Int(port), "root": root.path])
             case .failure(let err):
                 self?.server = nil
+                DiagLog.shared.write("lms-failed", [
+                    "root": root.path, "err": err.localizedDescription,
+                ], cat: "offline")
                 call.reject("Failed to start localhost server: \(err.localizedDescription)")
             }
         }
     }
 
     @objc func stop(_ call: CAPPluginCall) {
+        DiagLog.shared.write("lms-stop", ["running": server != nil], cat: "offline")
         server?.stop()
         server = nil
         call.resolve()

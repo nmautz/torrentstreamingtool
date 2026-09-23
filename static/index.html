@@ -17847,6 +17847,7 @@ async function saveProgress(itemId, filePath, posSec, durSec, profileId) {
   // simply forgot where they were. The `_appOffline` branch above already spells
   // out this trap for its own 404 case; it applies to every non-OK status.
   let saved = false;
+  let _status = 0, _err = "";
   try {
     const r = await fetch(`/api/library/${itemId}/progress`, {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -17854,16 +17855,25 @@ async function saveProgress(itemId, filePath, posSec, durSec, profileId) {
                              position_sec: posSec, duration_sec: durSec }),
     });
     saved = r.ok;
-  } catch (_) { saved = false; }
+    if (!saved) _status = r.status;
+  } catch (e) { saved = false; _err = (e && e.message) || String(e); }
   if (!saved) {
     // Offline inside the app: stash to the native OfflineStore so it syncs back
     // on reconnect (M3). No-op in a plain browser or when the plugin is absent.
+    let stashed = false;
     if (isApp && _cap.os) {
       try {
         await _cap.os.saveProgress({ itemId, filePath,
           positionSec: posSec, durationSec: durSec, profileId: pid });
+        stashed = true;
       } catch (_) {}
     }
+    // A save that failed AND was not stashed is a lost resume position, and it
+    // reaches the user as "the app forgot where I was" days later with nothing
+    // to point at. Say so at the moment it happens.
+    _npLog("progress-failed", { item: itemId, pos: posSec, dur: durSec,
+                                status: _status, err: _err, stashed: stashed },
+           "net");
   }
   return saved;
 }
@@ -18624,6 +18634,40 @@ function _npPayload() {
   };
 }
 
+// Write a row into the app's on-device diagnostic transcript.
+//
+// The log was native-only, which made it a log of the wrong thing: on-device
+// playback is mostly the WKWebView's own <video>, and the offline bundle path
+// barely touches the native player at all. An episode that froze in the web
+// player produced a transcript full of `snap` rows describing an external
+// display that was working fine. One file, one clock, every writer — so the
+// native rows and the page's rows can finally be read against each other.
+//
+// Silent and free off-app: no plugin, no row, no throw. Never put anything on
+// the hot path through here — it is a bridge hop per call.
+function _npLog(ev, fields, cat) {
+  if (!isApp || !_cap || !_cap.np || !_cap.np.log) return;
+  // A Capacitor plugin proxy answers for ANY method name, so on a shell built
+  // before `log` existed this resolves to a function that REJECTS. An
+  // uncaught rejection per logged event would turn the diagnostic into its own
+  // source of noise, so swallow the promise as well as a synchronous throw.
+  try {
+    const r = _cap.np.log({ ev: ev, cat: cat || "play", fields: fields || {} });
+    if (r && r.catch) r.catch(() => {});
+  } catch (_) {}
+}
+
+// Throttled variant for events that can repeat many times a second (`waiting`
+// on a stalling stream fires on every buffer dip). One row per key per window
+// keeps a bad ten minutes from costing ten thousand rows.
+const _npLogLast = {};
+function _npLogThrottled(key, ms, ev, fields, cat) {
+  const now = Date.now();
+  if (now - (_npLogLast[key] || 0) < ms) return;
+  _npLogLast[key] = now;
+  _npLog(ev, fields, cat);
+}
+
 // Full state push. Cheap on the native side (a struct assignment), so it's fine
 // to call on every material change.
 function _npArm() {
@@ -18711,7 +18755,12 @@ function _npBindEvents() {
     _cap.np.addListener("nativeStarted", (e) => {
       if (!e || e.reason !== "early") return;
       const v = _lpV();
-      if (v && !v.paused) { try { v.pause(); } catch (_) {} }
+      const wasPlaying = !!(v && !v.paused);
+      if (wasPlaying) { try { v.pause(); } catch (_) {} }
+      _npLog("hold-start", { file: lp.filePath, at: (e && e.position) || 0,
+                             elementWasPlaying: wasPlaying,
+                             display: !!(e && e.display),
+                             extWindow: !!(e && e.extWindow) }, "ext");
       _npSetPausedIntent(false);
       _npHolding = true;
       _npNativePaused = false;
@@ -18724,7 +18773,9 @@ function _npBindEvents() {
       if (!e) return;
       _npApplyNativeTransport(e.position, e.paused, e.duration);
     });
-    _cap.np.addListener("nativeEnded", () => {
+    _cap.np.addListener("nativeEnded", (e) => {
+      _npLog("native-ended", { file: (e && e.filePath) || lp.filePath,
+                               holding: _npHolding }, "play");
       const wasHolding = _npHolding;
       _npHolding = false;
       _npStopPoll();
@@ -18740,6 +18791,10 @@ function _npBindEvents() {
       if (e && e.request === "next") { _npDisarm("transport-next"); lpNextEp(); }
       else if (e && e.request === "prev") { _npDisarm("transport-prev"); lpPrevEp(); }
       else if (e && e.filePath) {
+        // The GOOD advance: native switched file without letting go of the
+        // display. Logged so it can be told apart from the teardown path at a
+        // glance rather than inferred from what is missing.
+        _npLog("native-advanced", { to: e.filePath, holding: _npHolding }, "play");
         lp._nativeAdvancedTo = e.filePath;
         // Native advanced in place. Follow it: move the playlist cursor, warm the
         // episode AFTER this one, and re-arm so native learns the new nextUrl.
@@ -18864,6 +18919,9 @@ function _npSetTvMode(on) {
 // Offer TV Mode when a display appears mid-playback; withdraw it on unplug.
 let _npTvOfferTimer = null;
 function _npOnDisplayChange(connected) {
+  _npLog("display", { connected: !!connected, holding: _npHolding,
+                      tvMode: !!_npTvMode, playing: !!lp.itemId,
+                      extMode: _appPlaybackPrefs().ext }, "ext");
   const btn = document.getElementById("lpTvBtn");
   if (btn) btn.style.display = connected ? "" : "none";
   if (!connected) {
@@ -20461,10 +20519,12 @@ function _appOpenAppSettings() {
           border:1px solid #3a7afe;">Send</button>
       </div>
       <div style="font-size:12px;color:#8a8a92;margin-top:8px;line-height:1.45;">
-        The app keeps a rolling diagnostic log on the device that survives restarts. Send
-        it whenever something looks wrong and it lands in the server's own log list, where
-        it can be read without this phone. Safe to send repeatedly — each send replaces
-        this device's previous copy.
+        The app keeps a diagnostic log on the device that survives restarts and covers
+        <b style="color:#c9c9cf;">on-device playback, downloaded bundles and the external
+        display</b>. Send it whenever something looks wrong. The server <b style="color:#c9c9cf;">keeps
+        every send</b> — it merges each upload into one running transcript per device rather
+        than replacing the last one, so sending often costs nothing and loses nothing. The
+        log is only cleared when someone reading it says so.
       </div>
       <pre id="appSetDiagOut" style="display:none;font-size:10px;line-height:1.4;color:#c9c9cf;background:#0d0d10;
         border:1px solid #2a2a30;padding:10px;margin-top:10px;max-height:260px;overflow:auto;
@@ -20743,8 +20803,13 @@ function _appOpenAppSettings() {
         serverUrl: _npServerUrl(),
         device: _pbDeviceName() || _pbDeviceId() || "ios",
       });
-      out.textContent = "Log: " + ((r && r.result) || "?") +
-        "\nStored on the server as client_<device>.log (" + ((r && r.bytes) || 0) + " bytes on device).";
+      let st = null;
+      try { st = await _cap.np.logStats(); } catch (_) {}
+      out.textContent = "Log: " + ((r && r.result) || "?")
+        + "\nOn device: " + ((st && st.rows) || 0) + " rows, "
+        + ((r && r.bytes) || (st && st.bytes) || 0) + " bytes"
+        + ((st && st.first) ? "\nOldest row on device: " + st.first : "")
+        + "\nOn the server: logs/client/<device>.log — merged, not replaced.";
     } catch (e) {
       out.textContent = "Send failed: " + (e && e.message ? e.message : String(e)) +
         "\nIf the server is unreachable, use Monitor diagnostics and copy the text instead.";
@@ -23264,13 +23329,39 @@ async function _lpLoadIndex(seekTo) {
   v.addEventListener("loadeddata", reassertSub, { once: true });
   v.addEventListener("playing", reassertSub, { once: true });
 
-  try { await v.play(); } catch (_) { /* iOS may block autoplay until user gesture */ }
+  // NEVER START THE ELEMENT WHILE NATIVE HOLDS THE DISPLAY.
+  //
+  // This `play()` was unconditional, and it is the second half of the broken
+  // external-display advance. When the glasses are connected the AVPlayer is the
+  // presentation and this element is supposed to stay parked; playing it starts
+  // a SECOND engine in the same process, which takes the audio session and
+  // interrupts the player feeding the display. The user's experience is the
+  // episode continuing on the phone while the glasses sit on a frozen frame —
+  // and, because the 1 Hz time observer mirrors the transport into
+  // `armed.paused`, the interrupted player is then recorded as "paused by the
+  // user" and nothing ever resumes it.
+  //
+  // Arm first so the native side has this file, then let it take over. The
+  // element stays paused and the display never changes hands.
+  if (_npHolding) {
+    _npLog("load-while-holding", { file: lp.filePath, at: lp.resumeSec || 0 }, "ext");
+    _npArm();
+    try { await _cap.np.takeover({ reason: "advance-holding" }); } catch (_) {}
+  } else {
+    try { await v.play(); } catch (_) { /* iOS may block autoplay until user gesture */ }
+  }
   _lpArmColdStartKick();      // iOS/MMS may never start fetching until a real seek nudges it
   _lpCtlSync(); _lpCtlTick(); _lpCtlShow();   // fresh custom-controls state for the new file
   _lpStartSubUpgradePoll();   // watch for late-downloaded real subs to upgrade off AI
   // iOS: arm the background player for THIS file. From here on, locking the
   // phone hands off instead of stopping playback.
   _npArm();
+  _npLog("loaded", {
+    file: lp.filePath, item: lp.itemId, src: lp.source, mode: lp.mode,
+    at: lp.resumeSec || 0, dur: lp.duration || 0,
+    holding: _npHolding, nativeMaster: !!lp._nativeMaster,
+    nextArmed: !!lp._nextNative,
+  }, "play");
   try { if (_cap && _cap.np) _cap.np.displays().then((d) => {
     _npExternal = !!(d && d.connected);
     if (_npExternal) _npOnDisplayChange(true);
@@ -24742,7 +24833,7 @@ function lpTogglePlay() {
     const next = !_npNativePaused;
     _npNativePaused = next;
     _npSetPausedIntent(next);
-    try { _cap.np.setPaused({ paused: next }); } catch (_) {}
+    try { _cap.np.setPaused({ paused: next, source: "user-transport" }); } catch (_) {}
     _lpCtlShow();
     return;
   }
@@ -25849,6 +25940,18 @@ async function _lpAdvanceOrEnd() {
   const d = v.duration || lp.duration || 0;
   if (d > 0) saveProgress(lp.itemId, lp.filePath, d, d, _lpProfileId());
   const next = lp.pi + 1;
+  // WHICH ADVANCE PATH THIS IS. With the glasses connected there are two, and
+  // they look identical from outside: the native player switching file in place
+  // (display never changes hands) versus the page tearing it down and loading
+  // into its own element (display released, re-claimed a beat later, and the
+  // episode briefly on the phone instead). `nextArmed` is the whole difference,
+  // and nothing recorded it — so a report of "it advanced onto the phone" had no
+  // corresponding row anywhere in the log.
+  _npLog("advance", {
+    from: lp.filePath, toIndex: next, last: next >= lp.playlist.length,
+    holding: _npHolding, ext: _npExternal, nextArmed: !!lp._nextNative,
+    path: (_npHolding && !lp._nextNative) ? "teardown-rebuild" : "normal",
+  }, "play");
   if (next < lp.playlist.length) {
     lp.pi = next;
     await _lpLoadIndex(0);
@@ -25902,6 +26005,43 @@ function _lpRenderNavButtons() {
 // Interactive prep — like the VLC play-prep chain, it bypasses the bulk pause
 // gate and preempts bulk work, since the user is actively watching the series.
 // Fire-and-forget; updates prepFileState + the nav dot as it progresses.
+// Hand the ALREADY-PREPPED next episode's native master to the background
+// player, so it can advance in place instead of being torn down and rebuilt.
+//
+// `/offline-prepare` is idempotent and answers immediately for a bundle that
+// exists, so this is one cheap round-trip rather than a second prep. Offline or
+// on a host that can't prep, there is nothing to arm — the advance falls back to
+// the teardown path, which is the old behaviour and is logged as such.
+function _lpArmNextNative(itemId, nextPath) {
+  if (!isApp || !hlsAvailable || _appOffline) return;
+  if (lp._nextNative && lp._nextNative.filePath === nextPath) return;   // already armed
+  (async () => {
+    try {
+      const r = await fetch(`/api/library/${itemId}/offline-prepare`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file_path: nextPath, profile_id: _lpProfileId() }),
+      });
+      if (!r.ok) throw new Error("prepare failed");
+      const prep = await r.json();
+      // The playlist can move while we await — arming a file we have since left
+      // would make the native player advance into the wrong episode.
+      if (lp.playlist[lp.pi + 1] !== nextPath) return;
+      if (!prep.ready || !prep.native_master_url) {
+        _npLog("next-arm-skipped", { file: nextPath, ready: !!prep.ready,
+                                     hasMaster: !!prep.native_master_url }, "play");
+        return;
+      }
+      lp._nextNative = { url: prep.native_master_url, filePath: nextPath, itemId,
+                         title: nextPath.split(/[/\\]/).pop() };
+      _npArm();
+      _npLog("next-armed", { file: nextPath, via: "already-ready" }, "play");
+    } catch (e) {
+      _npLog("next-arm-failed", { file: nextPath,
+                                  err: (e && e.message) || String(e) }, "play");
+    }
+  })();
+}
+
 function _lpWarmNextEp() {
   const nextPath = lp.playlist[lp.pi + 1];
   // Merged-series: the next episode may live in a different item — warm it under
@@ -25911,7 +26051,29 @@ function _lpWarmNextEp() {
   if (!itemId || !nextPath) return;
   const k = offKey(itemId, nextPath);
   const cur = prepFileState.get(k);
-  if (cur === "ready" || cur === "prepping") return;   // already done / in flight
+  if (cur === "prepping") return;                      // in flight; it will arm on completion
+  if (cur === "ready") {
+    // ALREADY PREPPED IS NOT ALREADY ARMED, and conflating the two broke
+    // episode advance on an external display for the whole life of the feature.
+    //
+    // This used to return here. Prep state and `lp._nextNative` are different
+    // facts — one says the bundle exists on the host, the other hands the
+    // native player a URL it can switch to in place — and only the SECOND half
+    // of this function ever set the latter. So the moment the next episode was
+    // already prepped (i.e. any binge, where the previous episode warmed it),
+    // `armed.nextUrl` stayed empty, `itemDidEnd` found no next file, and the
+    // in-place advance never happened.
+    //
+    // What happened instead is the bug as experienced: the page tore the native
+    // player down, which released the external window, loaded the next episode
+    // into its OWN <video>, and re-claimed the display a moment later — so the
+    // next episode came up on the phone while the glasses went dark. Measured
+    // 2026-09-23 (client_iPhone-app.log, 00:38:03): an E04->E05 advance with no
+    // `advance` row anywhere, a disarm carrying E05's title, and a fresh
+    // earlyClaim seven seconds later.
+    _lpArmNextNative(itemId, nextPath);
+    return;
+  }
   (async () => {
     // iOS app: a fully-downloaded next episode plays instantly from the device
     // bundle — no host prep needed (and it works even when the host can't prep,
@@ -25959,6 +26121,7 @@ function _lpWarmNextEp() {
         lp._nextNative = { url: ready.native_master_url, filePath: nextPath, itemId,
                            title: nextPath.split(/[/\\]/).pop() };
         _npArm();
+        _npLog("next-armed", { file: nextPath, via: "warmed" }, "play");
       }
     } catch (_) {
       // Leave it un-prepped; the Next hold / auto-advance will prep on demand.
@@ -26087,8 +26250,37 @@ function _lpAttachVideoEvents() {
   // `play` is the closest thing to a user gesture the night-mode AudioContext
   // gets (a phone won't resume one outside of that window), so sync here as well
   // as from renderPlayer.
-  v.addEventListener("play",  () => { _lpCtlSync(); _lpCtlShow(); _lpOdKeepAlive(true); _npArm(); _lpNightSync(); });
+  v.addEventListener("play",  () => {
+    // STANDING GUARD, not a second copy of the load-path check. While native
+    // holds the external display this element must never run: a second engine
+    // takes the audio session and interrupts the player feeding the glasses.
+    // The load path is the case we know about; this catches the ones we do not
+    // — a stray tap on the parked element, a `play()` from a recovery path, an
+    // autoplay retry — and, just as importantly, NAMES them, so the next report
+    // arrives with the culprit already in the log rather than another evening
+    // of guessing.
+    if (_npHolding) {
+      try { v.pause(); } catch (_) {}
+      _npLogThrottled("play-while-holding", 5000, "play-while-holding",
+                      { file: lp.filePath, t: v.currentTime || 0 }, "ext");
+      return;
+    }
+    _lpCtlSync(); _lpCtlShow(); _lpOdKeepAlive(true); _npArm(); _lpNightSync();
+  });
   v.addEventListener("pause", () => { _lpCtlSync(); _lpCtlShow(); _lpFlushProgress(false); _npArm(); });
+  // The element's own failures. `error` is the one that used to reach the user
+  // as a blank player with no explanation anywhere.
+  v.addEventListener("error", () => {
+    const e = v.error || {};
+    _npLog("video-error", { code: e.code || 0, msg: e.message || "",
+                            file: lp.filePath, src: lp.source, mode: lp.mode,
+                            t: v.currentTime || 0 }, "play");
+  });
+  v.addEventListener("stalled", () => {
+    _npLogThrottled("stalled", 10000, "video-stalled",
+                    { t: v.currentTime || 0, ready: v.readyState,
+                      file: lp.filePath, src: lp.source }, "play");
+  });
   v.addEventListener("volumechange",   () => _lpCtlSync());
   v.addEventListener("durationchange", () => _lpCtlTick());
   v.addEventListener("progress",       () => _lpCtlTick());
@@ -26106,7 +26298,11 @@ function _lpAttachVideoEvents() {
   // the last frame with the controls up; Next or the scrub bar go from there.
   // (Whether it counts as watched is the server's call — see watchrule.py.)
   v.addEventListener("ended", () => {
-    if (Date.now() - (lp.lastSeekAt || 0) < LP_SEEK_END_GRACE_MS) { _lpCtlSync(); _lpCtlShow(); return; }
+    const grace = Date.now() - (lp.lastSeekAt || 0) < LP_SEEK_END_GRACE_MS;
+    _npLog("ended", { file: lp.filePath, t: v.currentTime || 0, dur: v.duration || 0,
+                      holding: _npHolding, seekGrace: grace,
+                      nextArmed: !!lp._nextNative }, "play");
+    if (grace) { _lpCtlSync(); _lpCtlShow(); return; }
     _lpAdvanceOrEnd();
   });
   // On-demand: when playback stalls waiting for data (initial start, or a seek
@@ -27268,6 +27464,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.7.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.8.0</div>
 </body>
 </html>

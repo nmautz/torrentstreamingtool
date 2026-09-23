@@ -18,6 +18,7 @@ test:
 	python3 tests/test_srcevict.py
 	python3 tests/test_subsearch.py
 	python3 tests/test_packslice.py
+	python3 tests/test_clientlog.py
 
 clean:
 	rm -rf .venv __pycache__ .env
