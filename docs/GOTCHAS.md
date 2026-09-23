@@ -3740,6 +3740,19 @@ Traps, all of which fail silently:
   bundle ID and end with `.*`, with a unique suffix per request. Registering the
   bare prefix is wrong.
 - **Registering one identifier twice kills the app.** Guard it.
+- **A sideloaded app does not know its own bundle ID at compile time**, and this
+  is the trap that cost two builds. 18.15.1 hardcoded the prefix; the re-signer
+  had rewritten the bundle ID to `com.streamlink.client.29829Y7Z67`, so the
+  prefix no longer contained it and every `submit` came back
+  `BGTaskSchedulerErrorDomain Code=3 "Unrecognized Identifier"`. Derive the
+  prefix from `Bundle.main.bundleIdentifier` at runtime (18.15.2). The saving
+  grace is that Sideloadly/ESign substitute the bundle ID **through
+  `BGTaskSchedulerPermittedIdentifiers` too** — the source literal reads
+  `com.streamlink.client.downloads.*` and the device reported
+  `com.streamlink.client.29829Y7Z67.downloads.*`. That is the signer's favour,
+  not a guarantee: `cpt-register` prints `bundle`, `plist` and `permits` side by
+  side precisely so a signer that *doesn't* substitute is one row to diagnose
+  rather than a silent no-op.
 - **`appActive` is FALSE while a continued-processing task is running**, because
   the app really is backgrounded — it just is not suspended. Anything that picks a
   session from `appActive` alone (in our case `enqueue`, on every retry
@@ -3747,14 +3760,45 @@ Traps, all of which fail silently:
   shipped; one evening's transcript had 16 transient retries, so a night would
   have bled over a blip at a time with nothing naming it.
 
-### Background transfers are ~72× slower than foreground — that is iOS, not a bug (measured 18.14.1)
-Same link, same device, 2026-09-23: **~3.3 MB/s foreground, ~46 KB/s locked.** A
-1.73 GB queue is ~8 minutes open and ~10 hours locked. So "the download didn't
-run overnight" and "the download is running" can both be true at once, and only
-the byte delta across a `dl-bg` → `dl-fg` pair distinguishes them (`la-progress`
-cannot — a suspended app receives no delegate callbacks to write rows from).
-Before treating a slow download as broken, measure it. `isDiscretionary` is
-already `false`; `httpMaximumConnectionsPerHost = 8` is an open experiment.
+### A suspended app's transfers are ~100× slower — and that is the ONLY thing that costs (measured 18.14.2, cured 18.15.2)
+Same link, same device, same evening, 2026-09-23. The number that matters is not
+foreground-vs-background, it is **suspended-vs-not**:
+
+| state | rate |
+|---|---|
+| foreground | ~3,300 KB/s |
+| backgrounded, screen **on**, app suspended | **31.9 KB/s** |
+| locked, app suspended | ~46 KB/s |
+| backgrounded under a continued-processing task | **3,204 KB/s** |
+
+The screen is irrelevant — locked is *faster* than unlocked-but-backgrounded, which
+is noise, not a trend. What costs the 100× is the app being suspended onto the
+out-of-process background session. A 1.73 GB queue is ~8 minutes open and ~10 hours
+suspended, so "the download didn't run overnight" and "the download is running" can
+both be true at once.
+
+Two corollaries that outlive the fix:
+- **`la-progress` cannot measure this.** A suspended app receives no delegate
+  callbacks, so it writes no rows; silence reads as "stopped" and is not. Only the
+  byte delta across a `dl-bg` → `dl-fg` pair distinguishes them, and only via
+  `disk` (see the in-flight-bytes gotcha above).
+- **Window length is the confound.** The UIKit assertion buys ~25–30 s of full
+  speed before expiry, so a *short* background window looks fine with no
+  continued-processing task at all: measured 29.5 s → 3,086 KB/s, 48 s → 1,268 KB/s,
+  120 s → 198 KB/s, 20 min → 32 KB/s. **Never conclude anything from a window
+  shorter than a minute.** The clean measurement is an interval that sits wholly
+  inside one background window *and* straddles a `dl-bgtask-expired`.
+- `httpMaximumConnectionsPerHost = 8` was that experiment and it **failed its own
+  pre-commitment** (31.9 KB/s against a 46 KB/s baseline). Reverted to 0. Throttled
+  bandwidth is not a concurrency problem.
+
+**Verified cured 2026-09-23 08:28–08:31 on 18.15.2.** Death Note S01E27, 621 files /
+384.7 MB, in **131 s** across four background windows (10 s, 37 s, 45 s, and the
+final 17 s in which it finished). The load-bearing interval is
+**08:29:52→08:30:22 — 30.1 s entirely backgrounded, containing the
+`dl-bgtask-expired after: 25395`, at 3,204 KB/s.** That is the exact condition that
+used to read 32 KB/s. Zero `bundle-retry`, zero `bundle-failed`, zero stray Live
+Activities, `cpt-done held: 130`.
 
 ### The remote dashboard CANNOT load offline — `downloads.html` is the offline entry point
 The whole dashboard UI (`static/index.html`) is **served by the host**. The shell

@@ -59,6 +59,23 @@ final class DownloadLiveActivity {
         _activity = nil
     }
 
+    /// Stand down: something else is drawing this download's progress. On iOS 26+
+    /// a granted `BGContinuedProcessingTask` comes with the system's OWN progress
+    /// UI, with a cancel button, and ours sat next to it saying the same thing
+    /// twice — observed on the 18.15.2 verification run. Ends immediately with no
+    /// terminal frame: nothing finished, the drawing just changed hands.
+    ///
+    /// NOT the same as end(): this is reversible. If the grant expires mid-download
+    /// the caller starts syncing again and a fresh activity is requested, because
+    /// at that point ours is the only progress UI there is.
+    func suppress(_ why: String) {
+        guard #available(iOS 16.2, *) else { return }
+        lock.lock(); let act = activity; _activity = nil; lock.unlock()
+        guard let act = act else { return }
+        DiagLog.shared.write("la-suppressed", ["kind": "download", "why": why], cat: "offline")
+        Task { await act.end(nil, dismissalPolicy: .immediate) }
+    }
+
     /// Push a fresh snapshot. Starts the activity if none is running.
     /// `force` bypasses the throttle (use on per-file completion / terminal states).
     func sync(title: String, bytesDone: Int64, bytesTotal: Int64, fraction: Double,

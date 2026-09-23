@@ -1,5 +1,45 @@
 # Changelog
 
+## [18.16.0] — 2026-09-23
+### One download, one progress bar
+
+The 18.15.2 verification run showed the grant working and, next to it, the thing
+nobody had thought about: a granted `BGContinuedProcessingTask` brings **the
+system's own progress UI**, with its own cancel button. Ours sat beside it saying
+the same thing twice — worse than either alone, because two readouts can disagree
+and only one of the two buttons does anything.
+
+`DownloadLiveActivity` now stands down while a grant holds, via a new
+`suppress(_:)` that ends immediately with no terminal frame — nothing finished,
+the drawing changed hands. The gate is **`cptActive`, not an availability check**,
+and that distinction is the whole point: if the grant is refused (`cpt-nogrant`)
+or taken back (`cpt-expired`), ours is the only progress UI on the phone and comes
+straight back. Both handovers fire on the transition rather than waiting for the
+next progress tick.
+
+- New row: `la-suppressed`.
+
+### A cancelled task is not nothing
+
+`didCompleteWithError` returns silently on `NSURLErrorCancelled` — correct, since
+a deliberate cancel drops the job first, and for the life of the feature the
+reason a whole class of failure was invisible. The "frozen download" of
+2026-09-23 (two files stuck ~2 minutes, `done` ticking *downwards*, cleared only
+by an app restart) is a restart loop, and every row of it came through that
+return.
+
+Counting cancels wouldn't say it either: a cancel is the normal cost of a
+migration, and a long night has many. What is abnormal is a file cancelled
+**twice without a migration in between**, which nothing of ours does. So each
+`migrateTasks` bumps a generation counter, and a cancel is only reported when it
+lands in the same generation as that file's last one.
+
+- New row: `dl-cancel-loop` (`file`, `n`, `gen`, `pending`, `live`, `cpt`).
+  Logged for the first three per file, then every tenth — a real loop announces
+  itself at once and still cannot flood the transcript.
+
+- `NP_BUILD` → **18.16.0**.
+
 ## [18.15.2] — 2026-09-23
 ### The prefix must contain the bundle ID — and this app is sideloaded
 
@@ -37,6 +77,26 @@ above rows only 18.15.1 could write (`conns: 0`, the per-request
 it is worth more care than that: **bump, then build.**
 
 - `NP_BUILD` → **18.15.2**.
+
+### Verified on device, 2026-09-23 08:28–08:31
+
+`cpt-register ok: true`. The bundle ID **had** been rewritten by the re-signer, to
+`com.streamlink.client.29829Y7Z67` — so the runtime derive is the only reason this
+build works. The branch that had no fix did not happen either: Sideloadly
+substitutes the new ID through `BGTaskSchedulerPermittedIdentifiers` as well, and
+the device read the permitted wildcard back as
+`com.streamlink.client.29829Y7Z67.downloads.*`.
+
+Death Note S01E27, 621 files / 384.7 MB, complete in **131 s** across four
+background windows, with no retries and no failures. The measurement that carries
+it is 08:29:52→08:30:22 — 30.1 s spent **entirely backgrounded**, containing the
+`dl-bgtask-expired after: 25395`, at **3,204 KB/s**. The same condition on 18.14.2
+read **32 KB/s**.
+
+Docs updated with the verified numbers and with the confound that nearly faked a
+result — the UIKit assertion buys ~25–30 s of full speed on *any* build, so a
+sub-minute window proves nothing (29.5 s → 3,086 KB/s, 48 s → 1,268, 120 s → 198,
+20 min → 32).
 
 ## [18.15.1] — 2026-09-23
 ### A wildcard you may permit but must not register, and a reload that reloads nothing

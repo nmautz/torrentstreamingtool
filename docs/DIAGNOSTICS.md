@@ -355,24 +355,33 @@ as a pair.
 
 ### Measured throughput, so a "slow" report has something to sit against
 
-From the 2026-09-23 07:00 transcript — same link, same device:
+All from 2026-09-23, same link, same device:
 
 | state | rate | source |
 |---|---|---|
-| foreground | **~3.3 MB/s** | three consecutive `la-progress` rows on one job (3341 / 3395 / 3329 KB/s) |
-| locked / suspended | **~46 KB/s** | byte delta across one `dl-bg` → `dl-fg` pair, 24 min, job set unchanged |
+| foreground | **~3,300 KB/s** | three consecutive `la-progress` rows on one job (3341 / 3395 / 3329) |
+| backgrounded, screen on, **suspended** | **31.9 KB/s** | `disk` delta across a `dl-bg` → `dl-fg` pair |
+| locked, **suspended** | **~46 KB/s** | `disk` delta across one pair, 24 min, job set unchanged |
+| backgrounded under **continued processing** | **3,204 KB/s** | `la-progress` pair 08:29:52→08:30:22, wholly inside one `dl-bg` window (18.15.2) |
 
-**Measure over 20+ minutes or not at all.** iOS throttles background transfers
-progressively, so the first minute after a backgrounding is not representative:
-the 2026-09-23 07:28 transcript produced 721 KB/s over 61 s and 0 KB/s over 38 s
-in the same session. Use `disk`, not `done` — see the row description.
+The axis is **suspended vs not**, not foreground vs background — locked was
+*faster* than unlocked-but-backgrounded. Since 18.15.2 a granted
+`BGContinuedProcessingTask` keeps the app out of suspension and the penalty
+disappears: 621 files / 384.7 MB in 131 s, most of it backgrounded.
 
-**~72×.** A 1.73 GB queue is ~8 minutes foreground and ~10 hours locked. So "the
-download didn't run overnight" and "the download is running" can both be true,
-and only the byte delta tells them apart. `isDiscretionary` is already `false`;
-18.14.1 raised `httpMaximumConnectionsPerHost` to 8 as an experiment — if that
-ratio does not move, the throttling is in `nsurlsessiond`'s byte scheduling
-rather than the socket count, and the setting should come back out.
+**Window length is the confound; measure over a minute or not at all.** The UIKit
+assertion buys ~25–30 s of full speed before `dl-bgtask-expired`, so a short
+window looks healthy even with no continued-processing task: measured 29.5 s →
+3,086 KB/s, 48 s → 1,268 KB/s, 120 s → 198 KB/s, 20 min → 32 KB/s. The clean
+reading is an interval **wholly inside one `dl-bg` window that straddles a
+`dl-bgtask-expired`** — that is where a grant either holds or doesn't. Use
+`disk`, never `done` — see the row description.
+
+`isDiscretionary` is already `false`. 18.14.1 raised
+`httpMaximumConnectionsPerHost` to 8 as an experiment; it **failed its own
+pre-commitment** (31.9 KB/s against the 46 KB/s baseline) and was reverted to 0 in
+18.15.0. The throttling was in `nsurlsessiond`'s byte scheduling, not the socket
+count.
 
 ### Recipe: "it won't start playing until I press the button"
 

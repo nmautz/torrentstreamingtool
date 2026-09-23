@@ -419,6 +419,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
                 self.cptActive = false
                 self.cptTask = nil
                 self.cptSubmitted = false
+                self.updateLiveActivity(force: true)   // ours is the only UI again
                 DiagLog.shared.write("cpt-expired", [
                     "moved": moved, "jobs": self.jobs.count,
                     "active": self.appActive,
@@ -436,6 +437,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
                 "pending": self.jobs.values.reduce(0) { $0 + $1.pending.count },
             ], cat: "offline")
             self.updateContinuedProgress()
+            self.updateLiveActivity(force: true)   // the system's UI takes over
         }
     }
 
@@ -655,6 +657,8 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         var pending: Set<String> = []           // file names still downloading
         var attempts: [String: Int] = [:]       // fileName -> transient-error retry count
         var tasks: [String: URLSessionDownloadTask] = [:]  // fileName -> live task (for synchronous fg/bg migration)
+        var cancels: [String: Int] = [:]        // fileName -> cancels seen, ever (see didCompleteWithError)
+        var cancelGen: [String: Int] = [:]      // fileName -> migration generation of its last cancel
         init(itemId: String, filePath: String, name: String, baseUrl: String, token: String?, files: [BundleFile]) {
             self.itemId = itemId; self.filePath = filePath; self.name = name
             self.baseUrl = baseUrl; self.token = token; self.files = files
@@ -1043,6 +1047,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     @discardableResult
     private func migrateTasks(to dst: URLSession) -> Int {
         var moved = 0
+        migGen += 1
         for (sha, job) in jobs {
             // Snapshot — enqueue() mutates job.tasks while we iterate.
             for (file, task) in Array(job.tasks) {
@@ -1056,6 +1061,12 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         }
         return moved
     }
+
+    /// Bumped once per `migrateTasks` call. A cancel is EXPECTED once per file per
+    /// generation (that is what a migration does); a second one in the same
+    /// generation is somebody else cancelling, and that is the signal — see
+    /// `didCompleteWithError`.
+    private var migGen = 0
 
     // One file's download failed. A **transient** failure (network/proxy blip)
     // never drops the bundle: we re-enqueue the file with a capped backoff and keep
@@ -1274,6 +1285,17 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         }
         let title = jobs.count == 1 ? soleName : "\(jobs.count) downloads"
         let frac = total > 0 ? min(1.0, Double(done) / Double(total)) : 0
+        // TWO PROGRESS BARS FOR ONE DOWNLOAD. A granted continued-processing task
+        // brings the system's own progress UI — with a cancel button — and ours
+        // duplicated it, which is worse than either alone: two readouts that can
+        // disagree, and only one of whose buttons does anything. Stand down while
+        // the grant holds. `cptActive` and not an availability check, deliberately:
+        // if the grant is refused (`cpt-nogrant`) or taken back (`cpt-expired`),
+        // ours is the only progress UI on the phone and must come straight back.
+        if cptActive {
+            DownloadLiveActivity.shared.suppress("cpt")
+            return
+        }
         DownloadLiveActivity.shared.sync(title: title, bytesDone: done, bytesTotal: total,
                                          fraction: frac, filesDone: filesDone,
                                          fileCount: fileCount, force: force)
@@ -1366,9 +1388,38 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let error = error else { return }   // success handled in didFinishDownloadingTo
         guard let (sha, fileName) = decode(taskDescription: task.taskDescription) else { return }
-        // A deliberate cancel (remove/cancel) drops the job first — don't surface it.
         let nsErr = error as NSError
-        if nsErr.code == NSURLErrorCancelled { return }
+        // A DELIBERATE CANCEL DROPS THE JOB FIRST, so this returns without
+        // surfacing an error — correct, and for two years the reason a whole class
+        // of failure was INVISIBLE. The "frozen download" of 2026-09-23 (two files
+        // stuck for ~2 minutes with `done` ticking *downwards*, cleared only by an
+        // app restart) is a restart loop: something cancels a task, the file is
+        // re-enqueued from zero, and around it goes. Every row of that loop came
+        // through here and was swallowed.
+        //
+        // The count alone can't say it, because a cancel is the NORMAL cost of a
+        // migration and a long night has many. What is abnormal is a file cancelled
+        // *twice without a migration in between* — nothing of ours does that. So
+        // compare against the migration generation and only speak when they
+        // disagree. Logged for the first three, then every tenth, per file: a real
+        // loop announces itself immediately and cannot flood the transcript.
+        if nsErr.code == NSURLErrorCancelled {
+            queue.async {
+                guard let job = self.jobs[sha] else { return }   // deliberate: job already gone
+                let n = (job.cancels[fileName] ?? 0) + 1
+                job.cancels[fileName] = n
+                let unexplained = job.cancelGen[fileName] == self.migGen
+                job.cancelGen[fileName] = self.migGen
+                guard unexplained, n <= 3 || n % 10 == 0 else { return }
+                DiagLog.shared.write("dl-cancel-loop", [
+                    "file": fileName, "n": n, "gen": self.migGen,
+                    "pending": job.pending.count, "of": job.files.count,
+                    "live": job.tasks[fileName] != nil, "cpt": self.cptActive,
+                    "active": self.appActive, "name": job.name,
+                ], cat: "offline")
+            }
+            return
+        }
         queue.async {
             guard let job = self.jobs[sha] else { return }
             // A brief connectivity loss mid-transfer must NOT drop the whole bundle.
