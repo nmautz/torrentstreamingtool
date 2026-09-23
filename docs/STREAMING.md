@@ -1359,6 +1359,47 @@ Two ways to populate the cache:
    Full detail in [FRONTEND.md](FRONTEND.md); the iOS/fullscreen footgun is
    in [GOTCHAS.md](GOTCHAS.md).
 
+### 2a-bis. Download power & data policy (iOS app only, 18.20.0)
+
+Downloading a library is expensive in exactly one currency, and it isn't time:
+the 2026-09-23 run cost **~3.0% of battery per gigabyte**, flat across every
+transfer rate sampled. So the app exposes **gates** — whether the queue may run —
+and deliberately **no speed setting**, because slowing a download pays the same
+per-byte energy bill over a longer radio-on window and costs *more*. The reasoning
+and the numbers are in [GOTCHAS.md](GOTCHAS.md); the rules themselves live in
+`DownloadGate` / `DownloadPolicy` in `BundleDownloader.swift`.
+
+**Where.** Downloads dashboard → **Power & data** (app only; hidden on any shell
+whose `BundleDownloader` has no `getPolicy`).
+
+| Setting | Default | Effect |
+|---|---|---|
+| Download over cellular | **off** | Gated on `NWPath.isExpensive`, so personal hotspots count too. |
+| Only while charging | off | Today's behaviour unless switched on. |
+| Pause below *N*% | **20%** | Matches where iOS itself starts offering Low Power Mode. |
+| *(no setting)* | — | **Low Power Mode always pauses downloads.** |
+
+**Precedence** (`currentGate()`): cellular is judged first and independently — 17 GB
+of mobile data is no cheaper on a charger. Then **plugged in ⇒ every power gate
+opens**, which is what stops iOS's own 20% Low Power prompt from keeping the queue
+stopped for the hour it takes to charge past 80%. Then charger-only, Low Power,
+battery floor.
+
+**Storage.** `UserDefaults`, not `library.json`. The policy is about *this* phone's
+battery and *this* phone's data plan, and the gate must work with the host
+unreachable — which rules out anything fetched over the network.
+
+**Closing a gate** cancels every in-flight transfer (keeping the jobs, so `pump`
+resumes them from disk), hands back the continued-processing grant, emits
+`dl-gated`, fires the `bundleGated` JS event and repaints the Live Activity into
+its **paused** state — orange, `pause.circle.fill`, with the reason in words.
+
+**The limitation.** A grant can only be requested while the app is foreground, so a
+gate that reopens while backgrounded falls to the slow out-of-process session until
+the app is next opened — and a *suspended* app is not woken by plugging in at all.
+That is why every pause string names its condition rather than just saying
+"paused".
+
 ### 2b. Native background playback (iOS app only)
 
 **The problem.** The player is a `<video>` inside a WKWebView. WebKit **pauses any

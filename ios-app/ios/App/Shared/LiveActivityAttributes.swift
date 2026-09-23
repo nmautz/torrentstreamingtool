@@ -33,13 +33,21 @@ public struct DownloadActivityAttributes: ActivityAttributes {
         public var fileCount: Int
         public var finished: Bool
         public var failed: Bool
+        /// WHY THE BYTES STOPPED, in the user's words — "" while running.
+        /// A download that has been gated off (battery floor, Low Power Mode,
+        /// charger-only, cellular) has stopped on purpose, and a progress bar
+        /// that simply freezes is indistinguishable from one that has wedged.
+        /// This is the only channel that can tell the difference on the lock
+        /// screen, so it carries the reason rather than a bare flag.
+        public var paused: String
 
         public init(title: String, bytesDone: Int64, bytesTotal: Int64,
                     fraction: Double, filesDone: Int, fileCount: Int,
-                    finished: Bool = false, failed: Bool = false) {
+                    finished: Bool = false, failed: Bool = false,
+                    paused: String = "") {
             self.title = title; self.bytesDone = bytesDone; self.bytesTotal = bytesTotal
             self.fraction = fraction; self.filesDone = filesDone; self.fileCount = fileCount
-            self.finished = finished; self.failed = failed
+            self.finished = finished; self.failed = failed; self.paused = paused
         }
     }
 

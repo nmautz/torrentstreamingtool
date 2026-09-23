@@ -21,10 +21,8 @@ struct DownloadActivityWidget: Widget {
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    Image(systemName: context.state.failed ? "exclamationmark.triangle.fill"
-                                    : context.state.finished ? "checkmark.circle.fill"
-                                    : "arrow.down.circle.fill")
-                        .foregroundColor(context.state.failed ? .red : .green)
+                    Image(systemName: statusIcon(context.state))
+                        .foregroundColor(statusColor(context.state))
                         .font(.title2)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
@@ -33,20 +31,22 @@ struct DownloadActivityWidget: Widget {
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(context.state.title).font(.caption).lineLimit(1)
+                        Text(context.state.paused.isEmpty ? context.state.title
+                                                          : context.state.paused)
+                            .font(.caption).lineLimit(1)
                         ProgressView(value: clampedFraction(context.state))
-                            .tint(context.state.failed ? .red : .green)
+                            .tint(statusColor(context.state))
                     }
                 }
             } compactLeading: {
-                Image(systemName: "arrow.down")
-                    .foregroundColor(.green)
+                Image(systemName: context.state.paused.isEmpty ? "arrow.down" : "pause.fill")
+                    .foregroundColor(statusColor(context.state))
             } compactTrailing: {
                 Text(percentText(context.state))
                     .font(.caption2).monospacedDigit()
             } minimal: {
-                Image(systemName: "arrow.down.circle.fill")
-                    .foregroundColor(.green)
+                Image(systemName: statusIcon(context.state))
+                    .foregroundColor(statusColor(context.state))
             }
             .widgetURL(URL(string: "streamlink://downloads"))
         }
@@ -59,23 +59,44 @@ private struct DownloadLockScreenView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Image(systemName: state.failed ? "exclamationmark.triangle.fill"
-                                : state.finished ? "checkmark.circle.fill"
-                                : "arrow.down.circle.fill")
-                    .foregroundColor(state.failed ? .red : .green)
+                Image(systemName: statusIcon(state))
+                    .foregroundColor(statusColor(state))
                 Text(state.failed ? "DOWNLOAD FAILED"
                    : state.finished ? "DOWNLOAD COMPLETE"
-                   : "DOWNLOADING")
+                   : state.paused.isEmpty ? "DOWNLOADING"
+                   : "DOWNLOADS PAUSED")
                     .font(.caption).bold()
                 Spacer()
                 Text("\(state.filesDone)/\(state.fileCount) files")
                     .font(.caption2).foregroundColor(.secondary)
             }
             Text(state.title).font(.subheadline).bold().lineLimit(1)
+            // A frozen bar with no explanation reads as a bug. Say which switch
+            // stopped it, so the fix is one tap away instead of a support round-trip.
+            if !state.paused.isEmpty {
+                Text(state.paused).font(.caption2).foregroundColor(.orange).lineLimit(2)
+            }
             ProgressView(value: clampedFraction(state))
-                .tint(state.failed ? .red : .green)
+                .tint(statusColor(state))
         }
     }
+}
+
+/// Paused is a THIRD state, not a flavour of running. It sorts below failure
+/// (a failed download is over; a paused one is waiting) and above success.
+@available(iOS 16.1, *)
+private func statusIcon(_ s: DownloadActivityAttributes.ContentState) -> String {
+    if s.failed { return "exclamationmark.triangle.fill" }
+    if s.finished { return "checkmark.circle.fill" }
+    if !s.paused.isEmpty { return "pause.circle.fill" }
+    return "arrow.down.circle.fill"
+}
+
+@available(iOS 16.1, *)
+private func statusColor(_ s: DownloadActivityAttributes.ContentState) -> Color {
+    if s.failed { return .red }
+    if !s.paused.isEmpty && !s.finished { return .orange }
+    return .green
 }
 
 @available(iOS 16.1, *)

@@ -456,6 +456,29 @@ fix is its ceiling rather than the concept.
 A clean start writes only `play-start ok:true`. Any of the other four rows means
 the file fought.
 
+### Recipe: "the download just stopped on its own" (18.20.0+)
+Check the **gate** before anything else — since 18.20.0 a stopped queue is more
+often policy than failure.
+
+1. `dl-gated` — the row that names it. `why` is one of `cellular` / `charger` /
+   `lowPower` / `battery`, and the row carries the full conditions at the moment
+   it closed: `batt`, `chg` (charging), `low` (Low Power Mode), `exp` (expensive
+   path), plus the policy itself (`floor`, `chgOnly`, `cell`).
+2. No `dl-gated`? Then it is not the policy — fall through to the recipes below.
+3. `gate` on every `la-progress` heartbeat says the same thing continuously, so a
+   long quiet stretch can be classified without finding the transition row.
+4. `dl-ungated` is the resume, with `by` naming what triggered it (`path`,
+   `battery`, `lowPower`, `policy`, `foreground`, `start`, `dataNotAllowed`).
+5. `dl-path` tracks the interface. `expensive: true` is cellular **or a personal
+   hotspot**; `status: "inferred"` means we learned it from an
+   `NSURLErrorDataNotAllowed` rather than from `NWPathMonitor`.
+6. `dl-policy` records a settings change, old values beside new.
+
+**Expect throughput to fall after a background resume.** A continued-processing
+grant can only be requested while the app is foreground, so a gate that reopens
+while backgrounded runs on the slow out-of-process session. `grant: -1` with
+`cpt: false` on the heartbeats after a `dl-ungated` is that, not a fault.
+
 ### Recipe: "the download stopped when I locked the phone"
 
 1. `bundle-start` — the download began at all, and `fetch` vs `resumed` says how

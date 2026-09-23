@@ -3953,6 +3953,100 @@ final 17 s in which it finished). The load-bearing interval is
 used to read 32 KB/s. Zero `bundle-retry`, zero `bundle-failed`, zero stray Live
 Activities, `cpt-done held: 130`.
 
+### Throttling a download to save battery costs MORE battery (18.20.0)
+The obvious battery setting — full speed / limited speed / off — is wrong in the
+middle, and the 2026-09-23 run measured it. Battery cost per gigabyte, by
+ten-minute bucket:
+
+| bucket | rate | %/GB |
+|---|---|---|
+| 16:30 | 2,822 KB/s | 3.0 |
+| 16:50 | 2,952 KB/s | 2.9 |
+| 17:00 | 3,119 KB/s | 2.7 |
+| 17:30 | 2,730 KB/s | 3.3 |
+| 17:50 | 2,293 KB/s | 3.7 |
+
+**~3.0%/GB overall, and flat.** (`UIDevice.batteryLevel` quantises to 5%, so
+individual buckets are noisy; the aggregate is 50 points over 16.5 GB.) The energy
+is spent **per byte** — radio time, the tunnel's per-byte decryption, 49,823 flash
+writes — not per second of downloading. Halving the rate pays the same per-byte
+bill while holding the radio out of its low-power state, and the app out of
+suspension under its grant, for twice as long. That is race-to-idle, and it means
+a "battery saver" speed limit burns *more* battery for the same library.
+
+So the controls are **gates, not throttles**: `DownloadGate` decides *whether* the
+queue runs, never how fast, and there is no speed setting anywhere in the app.
+The caveat on the measurement, since it bounds the claim: only 2,293–3,119 KB/s
+was sampled. Nothing in that band hints at a sweet spot and the fixed overheads
+only grow as you slow down — but if anyone ever wants a throttle, measure %/GB at
+~300 KB/s first, don't reason about it.
+
+Three consequences that are easy to get wrong:
+
+- **Plugged in ⇒ every POWER gate opens, but not the cellular one.** Without the
+  first half, iOS's own 20% Low Power Mode prompt keeps the queue stopped for the
+  hour it takes to charge past 80%, with the cable already in. Without the second
+  half, 17 GB of mobile data gets spent because the phone happens to be charging.
+- **A gate closing must end the continued-processing grant.** A task that stops
+  reporting progress is force-expired within ~30 s anyway (*"Tasks that appear
+  stalled may be forcibly expired by the scheduler"*, `BGTask.h`); holding one
+  open across a deliberate pause is exactly the abuse that rule exists to stop.
+- **Resuming while backgrounded cannot get the speed back.** A grant is only
+  obtainable with `applicationState == .active`, so a gate that reopens while the
+  app is backgrounded falls to the slow out-of-process session until the user next
+  opens the app — and if the app is *suspended*, plugging in does not wake it at
+  all. This is why the pause text names the condition ("Paused - waiting for a
+  charger") rather than just saying "paused". A `BGProcessingTaskRequest` with
+  `requiresExternalPower` is the API that would fix the charger case specifically;
+  it is deliberately not built yet, because it only covers one of the four gates.
+
+`NSURLErrorDataNotAllowed` deserves its own note: it was in
+`transientURLErrorCodes`, so with cellular disallowed a commute would have
+produced a 3–30 s retry loop and a `bundle-retry` row per segment for its whole
+duration. It now reads as evidence about the path — set `expensive`, close the
+gate, leave the file in `pending` with no live task — so the pump takes it back up
+when Wi-Fi returns.
+
+### The unattended ceiling, measured: 17.2 GB in 97 minutes, backgrounded, on one grant (2026-09-23)
+The full-scale run every earlier experiment was building towards, and it finished.
+79 bundles / **17.20 GB** / 49,823 files queued at 16:25Z on 18.19.2; the app was
+backgrounded at 16:28:44 and **never foregrounded again**; the last bundle landed
+at 18:02:22. Zero `bundle-retry`, zero `bundle-failed`, `retried: 0` on all 79.
+
+| what | measured |
+|---|---|
+| grant held | **`cpt-done held: 5798`** (1 h 36 m 38 s), `why: "complete"` |
+| backgrounded throughput | **2,798 KB/s mean** over 93 minutes (10-min buckets 2,337–3,080) |
+| foreground path ceiling, same evening | ~3,300 KB/s |
+| in-flight tasks | `24` on **every one of 192 heartbeats** |
+| memory | `mem` 3,310–3,358 MB free, `warns: 0`, Low Power never engaged |
+| heartbeat gaps > 45 s | **none** — 192 consecutive beats, 16:26:14 → 18:02:03 |
+| battery | **75% → 25%**, i.e. ~31 points/hour |
+
+Four things this settles that nothing smaller could:
+
+- **The grant did not expire — we released it.** `why: "complete"` means the queue
+  drained and `BundleDownloadManager` completed the task itself. The previous best
+  observation was `held: 458`; this is **12.6× longer** and still not the ceiling,
+  because we never found it. Treat "how long does a grant last" as **open**, and
+  treat the ~30 s stalled-task rule as the thing that actually governs it: keep
+  reporting byte-granular progress and the grant keeps living.
+- **Backgrounded costs ~15%, not 100×.** 2,798 vs ~3,300 KB/s against the same
+  path. The old "~100× penalty" was measured under the 9,051-task flood and must
+  never be quoted without that caveat.
+- **The app was not killed, and stayed alive long after the work ended.** No
+  `launch` row after 16:24:49 — the process that started the run was still the one
+  answering at 21:40Z, **5 h 16 m later**, 3 h 38 m of it idle, backgrounded and
+  *without* a grant. So jetsam is a real risk under a task flood (the overnight
+  run) and not a background tax in itself.
+- **Battery is now the binding constraint, not iOS.** Half the battery for 17 GB.
+  Any advice about unattended runs should lead with "put it on a charger", not
+  with anything about background execution.
+
+The safety net for "the grant dies with the process" was deliberately deferred
+pending this run's data. The data says **don't build it**: the grant never died,
+and the one time it did (overnight) the cause was the task flood, already fixed.
+
 ### The remote dashboard CANNOT load offline — `downloads.html` is the offline entry point
 The whole dashboard UI (`static/index.html`) is **served by the host**. The shell
 navigates the WKWebView to `https://<host>/`, so with no connection (Airplane Mode

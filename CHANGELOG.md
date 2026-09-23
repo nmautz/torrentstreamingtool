@@ -1,5 +1,72 @@
 # Changelog
 
+## [18.20.0] — 2026-09-23
+### Downloads now have a power and data policy — gates, never a throttle
+
+The 17.2 GB run finished at full speed, fully backgrounded, on one grant. It also
+cost **50% of the battery in 96 minutes**, which makes battery — not iOS — the
+binding constraint on an unattended run. This adds the controls for that.
+
+**The measurement that shaped the design.** Battery cost is **~3.0% per GB and
+flat** across every rate sampled in that run:
+
+| bucket | rate | %/GB |
+|---|---|---|
+| 16:30 | 2,822 KB/s | 3.0 |
+| 17:00 | 3,119 KB/s | 2.7 |
+| 17:30 | 2,730 KB/s | 3.3 |
+| 17:50 | 2,293 KB/s | 3.7 |
+
+Energy here is spent **per byte** — radio time, the tunnel's per-byte decryption,
+49,823 flash writes — not per second of downloading. So a "limited speed for
+battery efficiency" mode would pay the same per-byte bill while holding the radio
+out of its low-power state and the app out of suspension for twice as long: it
+would cost **more** battery for the same library. There is deliberately no speed
+setting, and `DownloadGate`'s header says why so nobody adds one later.
+
+**What you get instead** (Downloads → Power & data, app only):
+
+- **Download over cellular** — *defaults to **off***, and this is a behaviour
+  change. Through 18.19.x both URLSessions carried `allowsCellularAccess = true`
+  with no way to say no. Gated on `NWPath.isExpensive`, which covers personal
+  hotspots too, because a tethered laptop costs the same money.
+- **Only while charging** — off by default, so today's behaviour is unchanged.
+- **Pause below N%** — defaults to **20%**, matching the level at which iOS itself
+  starts offering Low Power Mode.
+- **Low Power Mode pauses downloads**, automatically and with no setting. It is
+  the conventional iOS behaviour and it makes Control Centre a one-tap stop button.
+
+**One rule ties the power gates together: plugged in ⇒ none of them apply.**
+Without it, iOS's own 20% Low Power prompt would keep the queue stopped for the
+hour it takes to charge past 80% — with the cable already in. The cellular gate is
+judged separately and still applies on a charger: 17 GB of mobile data is no
+cheaper for being plugged in.
+
+**A paused download says so.** The Live Activity gains a third state beside
+running and failed — orange, `pause.circle.fill`, and the reason in words
+("Paused - waiting for Wi-Fi"). A progress bar that simply freezes is
+indistinguishable from one that has wedged, and under a continued-processing grant
+the system draws the UI, so closing a gate hands ours back the job of explaining.
+
+**The limitation, stated plainly.** A grant can only be requested while the app is
+foreground, so a queue that resumes while backgrounded gets the slow
+out-of-process session until you next open the app. Plugging in does not wake a
+suspended app. The pause text therefore names the condition rather than just
+saying "paused".
+
+Also in this release:
+
+- `NSURLErrorDataNotAllowed` is no longer treated as a transient blip. It was in
+  the retry set, so a commute would have produced a 3–30 s retry loop and a
+  `bundle-retry` row per segment for its whole duration. It now reads as evidence
+  about the path and closes the gate instead.
+- New diagnostic rows `dl-gated`, `dl-ungated`, `dl-path`, `dl-policy`; `gate`,
+  `chg` and `exp` on every `la-progress` heartbeat and on the run marker — so a
+  gated run and a wedged one are no longer the same silence.
+- The settings live in `UserDefaults`, not `library.json`: they are about this
+  phone's battery and this phone's data plan, and the gate has to work with the
+  host unreachable.
+
 ## [18.19.2] — 2026-09-23
 ### The relaunch flush is confirmed working — and the test that proved it found two more bugs
 

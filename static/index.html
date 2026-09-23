@@ -20038,6 +20038,17 @@ async function _appInitOfflineBundles() {
       _appRefreshDlBtn(ev.itemId, ev.filePath);
       showAlert("Download failed: " + (ev.message || ""), "error");
     });
+    // The native gate opened or closed (battery floor, Low Power Mode,
+    // charger-only, cellular). Announce the CLOSE only: a run that stops on its
+    // own and says nothing is the failure mode this whole feature exists to
+    // avoid, while an automatic resume needs no interruption.
+    _cap.dl.addListener("bundleGated", (ev) => {
+      const wasGated = !!(_dlPolicy && _dlPolicy.gate && _dlPolicy.gate !== "go");
+      if (_dlPolicy) { _dlPolicy.gate = ev.reason; _dlPolicy.gateText = ev.text; }
+      _appRenderPolicy();
+      if (ev.reason && ev.reason !== "go") showAlert(ev.text || "Downloads paused", "warn");
+      else if (wasGated) showAlert("Downloads resumed", "ok");
+    });
     const { items } = await _cap.dl.list();
     for (const it of (items || [])) {
       if (it.itemId === _APP_PLAYER_KEY) continue;   // player snapshot — never UI state
@@ -20269,6 +20280,70 @@ function _appCloseDashboard() {
   _appDashSelectMode = false; _appDashSel.clear();
 }
 
+// --- Download policy: WHEN the phone may download (never how fast) ------------
+//
+// Gates, not a throttle. Measured on device 2026-09-23 over a 17.2 GB run: the
+// battery cost is ~3.0% per GB and FLAT across every rate sampled, because the
+// energy is spent per byte (radio time, tunnel decryption, 49,823 flash writes)
+// rather than per second of downloading. Halving the speed pays the same
+// per-byte bill while holding the radio out of its low-power state for twice as
+// long, so a "battery saver" speed limit would cost MORE battery for the same
+// library. The rules live natively (BundleDownloader/DownloadPolicy) because they
+// must work with the host unreachable; this only renders them.
+let _dlPolicy = null;
+// An older shell has no getPolicy — hide the whole section rather than showing
+// controls that silently do nothing.
+const _dlHasPolicy = !!(_cap && _cap.dl && _cap.dl.getPolicy);
+
+async function _appSetPolicy(patch) {
+  if (!_dlHasPolicy) return;
+  try { _dlPolicy = await _cap.dl.setPolicy(patch); } catch (_) {}
+  _appRenderPolicy();
+}
+
+// Paint both the settings and the "why it stopped" banner from one snapshot.
+// Called from the 1 s dashboard tick, so it re-reads the live conditions
+// (charging / expensive path / Low Power) without its own timer.
+function _appRenderPolicy() {
+  const ov = document.getElementById("appDash");
+  if (!ov) return;
+  const wrap = ov.querySelector("#appDashPolicy");
+  const banner = ov.querySelector("#appDashGate");
+  if (!wrap || !banner) return;
+  if (!_dlHasPolicy || !_dlPolicy) { wrap.style.display = "none"; banner.style.display = "none"; return; }
+  wrap.style.display = "block";
+
+  // Don't fight the user mid-interaction: only write a control they aren't in.
+  const cell = ov.querySelector("#appDashCell");
+  const chg  = ov.querySelector("#appDashChg");
+  const flr  = ov.querySelector("#appDashFloor");
+  if (document.activeElement !== cell) cell.checked = !!_dlPolicy.allowCellular;
+  if (document.activeElement !== chg)  chg.checked  = !!_dlPolicy.chargerOnly;
+  if (document.activeElement !== flr)  flr.value    = String(_dlPolicy.batteryFloor || 0);
+
+  // Price the queue rather than making the user do the arithmetic.
+  const perGB = _dlPolicy.percentPerGB || 3;
+  const gb = (_dlPolicy.queueRemaining || 0) / 1e9;
+  const cost = ov.querySelector("#appDashCost");
+  cost.textContent = gb > 0.05
+    ? `${gb.toFixed(1)} GB left to download — about ${Math.round(gb * perGB)}% of battery at ~${perGB}% per GB.`
+    : `Downloading costs about ${perGB}% of battery per GB. Speed does not change that, so there is no speed setting.`;
+
+  const gate = _dlPolicy.gate || "go";
+  if (gate === "go") { banner.style.display = "none"; return; }
+  banner.style.display = "block";
+  ov.querySelector("#appDashGateText").textContent = _dlPolicy.gateText || "Downloads paused";
+  // A resume that happens while the app is backgrounded can only use the slow
+  // out-of-process session — iOS refuses a continued-processing grant to
+  // anything but a foreground app — so say what actually un-pauses it.
+  const hint = gate === "cellular" ? "Join a Wi-Fi network, or allow cellular below."
+    : gate === "charger"  ? "Plug in, or turn off \u201cOnly while charging\u201d below."
+    : gate === "lowPower" ? "Turn off Low Power Mode in Control Centre, or plug in."
+    : gate === "battery"  ? "Plug in, or lower the pause threshold below."
+    : "";
+  ov.querySelector("#appDashGateHint").textContent = hint;
+}
+
 function _appBuildDashboard() {
   const ov = document.createElement("div");
   ov.id = "appDash";
@@ -20293,12 +20368,64 @@ function _appBuildDashboard() {
       <div id="appDashHost" style="font-size:12px;color:#8a8a92;margin-top:7px;word-break:break-all;"></div>
     </div>
 
+    <!-- WHY THE BYTES STOPPED. Only shown while the native gate is shut; a
+         frozen progress bar with no explanation reads as a bug, and the one
+         place the user can actually act on it is right below. -->
+    <div id="appDashGate" style="display:none;border:1px solid #6b4a12;background:#241b08;
+      padding:12px 14px;margin-bottom:18px;">
+      <div style="display:flex;align-items:center;gap:9px;">
+        <span style="width:10px;height:10px;background:#e0a23d;display:inline-block;flex:0 0 auto;"></span>
+        <span id="appDashGateText" style="font-size:13px;font-weight:700;color:#e0a23d;"></span>
+      </div>
+      <div id="appDashGateHint" style="font-size:11px;color:#a08a5d;margin-top:6px;"></div>
+    </div>
+
     <div style="display:flex;align-items:center;justify-content:space-between;margin:4px 0 8px;">
       <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;">Ongoing downloads</div>
       <button id="appDashResume" style="all:unset;cursor:pointer;display:none;color:#3a7afe;border:1px solid #2a4a7e;
         padding:5px 11px;font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;">Resume all</button>
     </div>
     <div id="appDashDownloads" style="margin-bottom:18px;"></div>
+
+    <!-- POWER & DATA. Gates, never a speed limit: the battery cost is ~3%/GB and
+         flat across every rate measured, because the energy goes per byte (radio
+         time, tunnel decryption, flash writes) and not per second. Slowing a
+         download holds the radio up twice as long for the same bytes, so a
+         "battery saver" speed would cost MORE. See docs/GOTCHAS.md. -->
+    <div id="appDashPolicy" style="display:none;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;margin:4px 0 8px;">Power &amp; data</div>
+      <div style="border:1px solid #2a2a30;background:#141417;padding:4px 14px 12px;margin-bottom:18px;">
+        <label style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 0;border-bottom:1px solid #26262c;cursor:pointer;">
+          <span>
+            <span style="font-size:13px;font-weight:700;display:block;">Download over cellular</span>
+            <span style="font-size:11px;color:#8a8a92;">Includes personal hotspots. A full library is many gigabytes.</span>
+          </span>
+          <input type="checkbox" id="appDashCell" style="flex:0 0 auto;width:20px;height:20px;accent-color:#3a7afe;">
+        </label>
+        <label style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 0;border-bottom:1px solid #26262c;cursor:pointer;">
+          <span>
+            <span style="font-size:13px;font-weight:700;display:block;">Only while charging</span>
+            <span style="font-size:11px;color:#8a8a92;">Resumes when you plug in and next open the app.</span>
+          </span>
+          <input type="checkbox" id="appDashChg" style="flex:0 0 auto;width:20px;height:20px;accent-color:#3a7afe;">
+        </label>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 0;">
+          <span>
+            <span style="font-size:13px;font-weight:700;display:block;">Pause below</span>
+            <span style="font-size:11px;color:#8a8a92;">Battery level at which downloads stop, unless charging.</span>
+          </span>
+          <select id="appDashFloor" style="all:unset;cursor:pointer;flex:0 0 auto;color:#f2f2f4;background:#0b0b0d;
+            border:1px solid #2a2a30;padding:6px 9px;font-size:12px;font-weight:700;">
+            <option value="0">Off</option>
+            <option value="10">10%</option>
+            <option value="20">20%</option>
+            <option value="30">30%</option>
+            <option value="50">50%</option>
+          </select>
+        </div>
+        <div id="appDashCost" style="font-size:11px;color:#8a8a92;border-top:1px solid #26262c;padding-top:10px;"></div>
+      </div>
+    </div>
 
     <div style="display:flex;align-items:center;justify-content:space-between;margin:4px 0 8px;gap:10px;">
       <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;">Downloaded on this device</div>
@@ -20326,6 +20453,12 @@ function _appBuildDashboard() {
   ov.querySelector("#appDashSelCancel").addEventListener("click", () => _appDashSetSelect(false));
   ov.querySelector("#appDashSelAll").addEventListener("click", _appDashSelectAll);
   ov.querySelector("#appDashRemoveSel").addEventListener("click", _appRemoveSelected);
+  ov.querySelector("#appDashCell").addEventListener("change", (e) =>
+    _appSetPolicy({ allowCellular: e.target.checked }));
+  ov.querySelector("#appDashChg").addEventListener("change", (e) =>
+    _appSetPolicy({ chargerOnly: e.target.checked }));
+  ov.querySelector("#appDashFloor").addEventListener("change", (e) =>
+    _appSetPolicy({ batteryFloor: parseInt(e.target.value, 10) || 0 }));
   return ov;
 }
 
@@ -20352,6 +20485,13 @@ async function _appRenderDashboard() {
     conn.textContent = online ? "Connected — live" : (navigator.onLine ? "Reconnecting…" : "Offline");
     conn.style.color = online ? "#3ec46d" : "#e0a23d";
     ov.querySelector("#appDashHost").textContent = (localStorage.getItem("streamlink_server_url") || window.location.origin);
+  }
+
+  // Policy + live power/network conditions, re-read each tick so the banner
+  // follows a cable going in without its own notification plumbing.
+  if (_dlHasPolicy) {
+    try { _dlPolicy = await _cap.dl.getPolicy(); } catch (_) {}
+    _appRenderPolicy();
   }
 
   // Pull the authoritative on-device index for names, sizes and completion.
@@ -28366,6 +28506,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.19.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.20.0</div>
 </body>
 </html>

@@ -97,7 +97,7 @@ final class DownloadLiveActivity {
     /// `force` bypasses the throttle (use on per-file completion / terminal states).
     func sync(title: String, bytesDone: Int64, bytesTotal: Int64, fraction: Double,
               filesDone: Int, fileCount: Int, finished: Bool = false,
-              failed: Bool = false, force: Bool = false) {
+              failed: Bool = false, paused: String = "", force: Bool = false) {
         guard #available(iOS 16.2, *) else { return }
         guard ActivityAuthorizationInfo().areActivitiesEnabled else {
             lock.lock(); let first = !loggedDisabled; loggedDisabled = true; lock.unlock()
@@ -124,7 +124,7 @@ final class DownloadLiveActivity {
         let state = DownloadActivityAttributes.ContentState(
             title: title, bytesDone: bytesDone, bytesTotal: bytesTotal,
             fraction: fraction, filesDone: filesDone, fileCount: fileCount,
-            finished: finished, failed: failed)
+            finished: finished, failed: failed, paused: paused)
 
         if let act = existing {
             Task { await act.update(ActivityContent(state: state, staleDate: nil)) }

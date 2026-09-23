@@ -53,6 +53,88 @@ import Foundation
 import UIKit
 import Capacitor
 import BackgroundTasks
+import Network
+
+// MARK: - The gate: WHEN background downloading may run
+//
+// A GATE, NOT A THROTTLE, and that distinction is the entire design.
+//
+// Measured on device 2026-09-23 over a 17.2 GB / 97-minute run: the battery cost
+// is **~3.0% per GB, and flat** across every sampled rate from 2,293 to
+// 3,119 KB/s. Energy here is spent per BYTE — radio time, the tunnel's per-byte
+// decryption, 49,823 flash writes — not per second of downloading. So halving the
+// rate does not halve the cost: it pays the same per-byte bill while holding the
+// radio out of its low-power state and the app out of suspension for twice as
+// long. A "battery saver" speed limit would burn MORE battery for the same
+// library. That is why there is no speed setting and must not be one; the only
+// lever that works is not starting.
+
+/// Why the queue is not running. `.go` is the only state in which bytes move.
+enum DownloadGate: String {
+    case go
+    case cellular   // an expensive path, and cellular is not allowed
+    case charger    // "only while charging", and we are not
+    case lowPower   // iOS Low Power Mode is on
+    case battery    // below the user's floor, on battery
+
+    /// Lock-screen wording. Always names the switch to flip — a frozen progress
+    /// bar with no explanation is indistinguishable from a wedged one.
+    var text: String {
+        switch self {
+        case .go:       return ""
+        case .cellular: return "Paused - waiting for Wi-Fi"
+        case .charger:  return "Paused - waiting for a charger"
+        case .lowPower: return "Paused - Low Power Mode is on"
+        case .battery:  return "Paused - battery low"
+        }
+    }
+}
+
+/// This device's download policy.
+///
+/// NOT a library setting. It is about THIS phone's battery and THIS phone's data
+/// plan, both of which differ per device and neither of which the host knows
+/// anything about — and the gate has to work with the host unreachable, which
+/// rules out anything fetched over the network. So: UserDefaults.
+struct DownloadPolicy: Equatable {
+    /// Pause below this percent while on battery. 0 disables the floor.
+    var batteryFloor: Int
+    /// Only download while plugged in.
+    var chargerOnly: Bool
+    /// Allow expensive paths (cellular *and* personal hotspot).
+    var allowCellular: Bool
+
+    static let floorKey    = "dl.batteryFloor"
+    static let chargerKey  = "dl.chargerOnly"
+    static let cellularKey = "dl.allowCellular"
+
+    static var current: DownloadPolicy {
+        let d = UserDefaults.standard
+        return DownloadPolicy(
+            // 20% matches the level at which iOS itself starts offering Low Power
+            // Mode, so the two gates tend to close together rather than leaving a
+            // confusing band where one is on and the other is not.
+            batteryFloor: (d.object(forKey: floorKey) as? Int) ?? 20,
+            chargerOnly: d.bool(forKey: chargerKey),
+            // DEFAULT OFF, and this IS a behaviour change: through 18.19.x both
+            // sessions carried `allowsCellularAccess = true` with no way to say
+            // no, so the 2026-09-23 run would have spent the commute on cellular
+            // had the drive overlapped it. A 17 GB queue is a 17 GB phone bill.
+            allowCellular: (d.object(forKey: cellularKey) as? Bool) ?? false)
+    }
+
+    func save() {
+        let d = UserDefaults.standard
+        d.set(batteryFloor, forKey: Self.floorKey)
+        d.set(chargerOnly, forKey: Self.chargerKey)
+        d.set(allowCellular, forKey: Self.cellularKey)
+    }
+
+    var asDictionary: [String: Any] {
+        ["batteryFloor": batteryFloor, "chargerOnly": chargerOnly,
+         "allowCellular": allowCellular]
+    }
+}
 
 // MARK: - Plugin
 
@@ -73,6 +155,8 @@ public class BundleDownloader: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "holdBackground",    returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "releaseBackground", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "openExternal",      returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getPolicy",         returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setPolicy",         returnType: CAPPluginReturnPromise),
     ]
 
     public override func load() {
@@ -209,6 +293,25 @@ public class BundleDownloader: CAPPlugin, CAPBridgedPlugin {
     // be delivered in-app. Opening the clip's host URL in Safari instead lets iOS
     // preview the MP4 with a native Save-to-Files/Photos + Share sheet. The clip URL
     // carries its own random capability token, so no pairing header is needed.
+    // MARK: download policy (device-local; see DownloadPolicy)
+
+    /// Current policy plus the live conditions, so the UI can explain *why* the
+    /// queue is paused without reimplementing the rules.
+    @objc func getPolicy(_ call: CAPPluginCall) {
+        call.resolve(BundleDownloadManager.shared.policySnapshot())
+    }
+
+    /// Partial update — only the keys present are changed, so the dashboard can
+    /// ship one toggle at a time without echoing the others back.
+    @objc func setPolicy(_ call: CAPPluginCall) {
+        var p = DownloadPolicy.current
+        if let f = call.getInt("batteryFloor") { p.batteryFloor = max(0, min(90, f)) }
+        if let c = call.getBool("chargerOnly") { p.chargerOnly = c }
+        if let c = call.getBool("allowCellular") { p.allowCellular = c }
+        BundleDownloadManager.shared.applyPolicy(p)
+        call.resolve(BundleDownloadManager.shared.policySnapshot())
+    }
+
     @objc func openExternal(_ call: CAPPluginCall) {
         guard let urlStr = call.getString("url"), !urlStr.isEmpty,
               let url = URL(string: urlStr) else {
@@ -263,12 +366,201 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         // matters, so observe it rather than only sampling it.
         nc.addObserver(self, selector: #selector(powerStateChanged),
                        name: .NSProcessInfoPowerStateDidChange, object: nil)
+        // PLUGGING IN IS THE SIGNAL THAT ENDS EVERY POWER GATE, so it has to be
+        // observed rather than sampled: `chargerOnly` would otherwise wait up to
+        // a whole 30 s heartbeat before noticing the cable, and while gated there
+        // may be no heartbeat at all.
+        nc.addObserver(self, selector: #selector(batteryChanged),
+                       name: UIDevice.batteryStateDidChangeNotification, object: nil)
+        nc.addObserver(self, selector: #selector(batteryChanged),
+                       name: UIDevice.batteryLevelDidChangeNotification, object: nil)
         // UIDevice is main-thread-only. `.shared` is a lazy static and this init
         // runs wherever the first toucher happens to be, so don't assume.
         DispatchQueue.main.async {
             UIDevice.current.isBatteryMonitoringEnabled = true
             BundleDownloadManager.shared.cacheBattery()
         }
+        startPathMonitor()
+    }
+
+    // MARK: - Gate (see DownloadGate / DownloadPolicy at the top of this file)
+
+    /// The policy as the gate sees it. Re-read only through `applyPolicy`, so the
+    /// gate never observes a half-applied change.
+    private var policy = DownloadPolicy.current
+    /// The gate's current verdict. Only `.go` lets `pump` enqueue anything.
+    private var gate: DownloadGate = .go
+    /// Plugged in (charging or full). Sampled on main with the battery level.
+    private var charging = false
+    /// On an `isExpensive` path — cellular OR personal hotspot. Deliberately
+    /// wider than `allowsCellularAccess`: a tethered laptop hotspot costs the
+    /// same money as the modem in the phone.
+    private var expensive = false
+    private var pathMonitor: NWPathMonitor?
+
+    /// Watch the interface type so the cellular gate opens and closes by itself.
+    /// Updates are delivered on `queue`, which is where the gate lives, so a path
+    /// change serialises against the download state like everything else.
+    private func startPathMonitor() {
+        let mon = NWPathMonitor()
+        mon.pathUpdateHandler = { [weak self] path in
+            guard let self = self else { return }
+            let exp = path.isExpensive
+            guard exp != self.expensive else { return }
+            self.expensive = exp
+            DiagLog.shared.write("dl-path", [
+                "expensive": exp, "status": "\(path.status)",
+                "jobs": self.jobs.count, "gate": self.gate.rawValue,
+            ], cat: "offline")
+            self.evaluateGate("path")
+        }
+        mon.start(queue: queue)
+        pathMonitor = mon
+    }
+
+    /// Everything the settings UI needs to render itself AND explain the current
+    /// state, in one round trip.
+    func policySnapshot() -> [String: Any] {
+        queue.sync {
+            var d = policy.asDictionary
+            d["gate"] = gate.rawValue
+            d["gateText"] = gate.text
+            d["battery"] = battCache
+            d["charging"] = charging
+            d["expensive"] = expensive
+            d["lowPower"] = lowPower
+            d["jobs"] = jobs.count
+            // What is left to fetch, so the UI can price the queue rather than
+            // making the user do the arithmetic.
+            var remaining: Int64 = 0
+            for (_, j) in jobs {
+                let got = j.doneBytes.values.reduce(0, +) + j.liveBytes.values.reduce(0, +)
+                remaining += max(0, j.totalBytes - got)
+            }
+            d["queueRemaining"] = remaining
+            // ~3.0%/GB, measured over the 17.2 GB / 97-minute run on 2026-09-23
+            // and flat across every rate sampled. The UI shows the cost of a
+            // queue up front; this is the constant it multiplies by.
+            d["percentPerGB"] = 3.0
+            return d
+        }
+    }
+
+    func applyPolicy(_ p: DownloadPolicy) {
+        queue.async {
+            guard p != self.policy else { return }
+            let was = self.policy
+            self.policy = p
+            p.save()
+            DiagLog.shared.write("dl-policy", [
+                "floor": p.batteryFloor, "chgOnly": p.chargerOnly,
+                "cell": p.allowCellular,
+                "wasFloor": was.batteryFloor, "wasChgOnly": was.chargerOnly,
+                "wasCell": was.allowCellular, "jobs": self.jobs.count,
+            ], cat: "offline")
+            self.evaluateGate("policy")
+        }
+    }
+
+    /// The rules, in priority order. Assumes `queue`.
+    private func currentGate() -> DownloadGate {
+        // Data cost is not a power question, so it is judged before — and
+        // independently of — the charger. Downloading 17 GB over cellular is no
+        // cheaper for being plugged in.
+        if !policy.allowCellular && expensive { return .cellular }
+        // ONE RULE FOR EVERY POWER GATE: plugged in ⇒ none of them apply.
+        // Without this, iOS's own 20% Low Power Mode prompt would keep the queue
+        // stopped for the hour it takes to charge back past 80% — with the cable
+        // already in, which is the exact moment the user expects it to resume.
+        if charging { return .go }
+        if policy.chargerOnly { return .charger }
+        if lowPower { return .lowPower }
+        // `battCache` is -1 on a device that has not reported a level yet (and in
+        // the simulator). Missing evidence is not permission to stop.
+        if policy.batteryFloor > 0, battCache >= 0, battCache < policy.batteryFloor {
+            return .battery
+        }
+        return .go
+    }
+
+    /// Re-read the conditions and open or close the gate. Idempotent: only a
+    /// CHANGE does anything, so it is safe to call from every signal that might
+    /// matter, and cheap enough to call from ones that usually don't.
+    /// Assumes `queue`.
+    private func evaluateGate(_ trigger: String) {
+        let now = currentGate()
+        guard now != gate else { return }
+        let was = gate
+        gate = now
+        if now == .go { openGate(from: was, trigger: trigger) }
+        else { closeGate(now, from: was, trigger: trigger) }
+    }
+
+    private func closeGate(_ g: DownloadGate, from was: DownloadGate, trigger: String) {
+        let killed = stopAllTasks()
+        DiagLog.shared.write("dl-gated", [
+            "why": g.rawValue, "was": was.rawValue, "by": trigger,
+            "killed": killed, "jobs": jobs.count,
+            "pending": jobs.values.reduce(0) { $0 + $1.pending.count },
+            "sess": sessionBytes, "batt": battCache, "chg": charging,
+            "low": lowPower, "exp": expensive, "floor": policy.batteryFloor,
+            "cell": policy.allowCellular, "chgOnly": policy.chargerOnly,
+            "bg": !appActive, "cpt": cptActive,
+        ], cat: "offline")
+        // Hand the grant straight back. A continued-processing task that stops
+        // reporting progress is force-expired within ~30 s anyway ("Tasks that
+        // appear stalled may be forcibly expired by the scheduler", BGTask.h),
+        // and holding one open across a deliberate pause is precisely the abuse
+        // that rule exists to stop.
+        finishContinuedProcessing("gated-" + g.rawValue)
+        emit("bundleGated", ["reason": g.rawValue, "text": g.text])
+        updateLiveActivity(force: true)
+    }
+
+    private func openGate(from was: DownloadGate, trigger: String) {
+        DiagLog.shared.write("dl-ungated", [
+            "was": was.rawValue, "by": trigger, "jobs": jobs.count,
+            "batt": battCache, "chg": charging, "low": lowPower,
+            "exp": expensive, "bg": !appActive,
+        ], cat: "offline")
+        emit("bundleGated", ["reason": DownloadGate.go.rawValue, "text": ""])
+        guard !jobs.isEmpty else { return }
+        beginBgTaskIfNeeded()
+        // FOREGROUND IS THE ONLY STATE IN WHICH A GRANT CAN BE ASKED FOR —
+        // `submitContinuedProcessing` is refused outright when the app is not
+        // active. So a resume that happens while backgrounded gets the slow
+        // out-of-process session and nothing better until the user next opens the
+        // app. That is a real limitation of the platform, not an oversight; it is
+        // also why the pause text names the condition rather than saying "paused".
+        if appActive { submitContinuedProcessing(name: jobs.values.first?.name ?? "Downloads") }
+        pump()
+        scheduleHeartbeat()
+        updateLiveActivity(force: true)
+    }
+
+    /// Cancel every in-flight transfer but KEEP the jobs, so `pump` can pick them
+    /// straight back up when the gate reopens. Assumes `queue`.
+    ///
+    /// The cancelled attempts' partial bytes are lost — at most `maxInFlight`
+    /// segments, ~21 MB, about 0.1% of a 17 GB queue. The alternative is letting
+    /// a "stop" keep spending for another minute, which is simply wrong for the
+    /// cellular gate. Everything already on disk survives: the resume scan in
+    /// `startDownload` works from file sizes, not from anything in memory.
+    @discardableResult
+    private func stopAllTasks() -> Int {
+        var n = 0
+        // These cancels are explained, so move the generation on and don't let
+        // `dl-cancel-loop` cry wolf over a gate closing.
+        migGen += 1
+        for (_, job) in jobs {
+            for (file, task) in Array(job.tasks) {
+                task.cancel()
+                job.tasks[file] = nil
+                job.liveBytes[file] = nil
+                n += 1
+            }
+        }
+        return n
     }
 
     @objc private func appDidBecomeActive() {
@@ -282,6 +574,12 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             // the continued-processing task kept them there the whole time.
             let moved = self.cptActive ? 0 : self.migrateTasks(to: self.fgSession)
             self.logTransition("dl-fg", moved: moved, readBudget: false)
+            // Foreground is the only place a grant can be asked for, so this is
+            // where a run gated while backgrounded gets its speed back. The gate
+            // may also simply have reopened while we were suspended and nothing
+            // was awake to notice.
+            self.evaluateGate("foreground")
+            if self.gate == .go { self.submitContinuedProcessing(name: self.jobs.values.first?.name ?? "Downloads") }
         }
     }
     // MARK: - Continued processing (iOS 26+)
@@ -358,7 +656,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             DiagLog.shared.write("cpt-skipped", ["why": "killTest"], cat: "offline")
             return
         }
-        guard !cptSubmitted, !cptActive, !jobs.isEmpty else { return }
+        guard !cptSubmitted, !cptActive, !jobs.isEmpty, gate == .go else { return }
         cptSubmitted = true
         let files = jobs.values.reduce(0) { $0 + $1.files.count }
         let title = jobs.count == 1 ? name : "\(jobs.count) downloads"
@@ -991,14 +1289,24 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             job.pending = Set(toFetch.map { $0.name })
             jobs[cacheKey] = job
             beginBgTaskIfNeeded()
+            if !jobOrder.contains(cacheKey) { jobOrder.append(cacheKey) }
+            sessionTotal += job.totalBytes
+            // Re-read the conditions BEFORE spending the submission: a run gets
+            // exactly one grant (it can only be asked for while foreground), so a
+            // queue added while the gate is shut must not burn it on work that
+            // will not start.
+            evaluateGate("start")
             // The user tapped Download — the only thing that legitimises a
             // continued-processing request. Kept alongside the old assertion, not
             // instead of it: if the system refuses, everything below is unchanged.
             submitContinuedProcessing(name: name)
-            if !jobOrder.contains(cacheKey) { jobOrder.append(cacheKey) }
-            sessionTotal += job.totalBytes
             pump()
             scheduleHeartbeat()
+            // Queued straight into a shut gate: say so now, while we are still
+            // foreground and a Live Activity can actually be started. Backgrounded
+            // it would be refused with `visibility` and the user would see a
+            // download that simply never begins.
+            if gate != .go { updateLiveActivity(force: true) }
             result = StartResult(dir: dir.path, alreadyComplete: false)
         }
         if let e = thrown { throw e }
@@ -1122,6 +1430,14 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         }
         var req = URLRequest(url: url)
         if let tok = job.token, !tok.isEmpty { req.setValue("Bearer \(tok)", forHTTPHeaderField: "Authorization") }
+        // PER-REQUEST, NOT PER-SESSION. A background session's configuration is
+        // frozen at creation and its identifier is fixed, so a session-level flag
+        // could only be changed by tearing down a session with live tasks in it.
+        // `URLRequest` carries its own copy and it wins, so the switch takes
+        // effect on the very next segment. Belt and braces with the gate: the
+        // gate stops us choosing to use cellular, this stops us doing it by
+        // accident in the window before a path change is delivered.
+        req.allowsCellularAccess = policy.allowCellular
         // Foreground ⇒ fast in-process default session; suspended ⇒ background
         // session that survives suspend. A migration passes the destination explicitly.
         //
@@ -1149,6 +1465,10 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     /// under-calling is the only real hazard — a file that leaves the working set
     /// without a pump behind it strands the whole queue.
     private func pump() {
+        // THE ONE CHOKE POINT. Every path that starts a transfer goes through
+        // here (the only other caller of `enqueue` is `migrateTasks`, which moves
+        // transfers that are already running), so gating it gates everything.
+        guard gate == .go else { return }
         var budget = Self.maxInFlight - inFlight
         guard budget > 0 else { return }
         for sha in jobOrder {
@@ -1461,9 +1781,14 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             DownloadLiveActivity.shared.suppress("cpt")
             return
         }
+        // A GATED RUN MUST NOT LOOK LIKE A RUNNING ONE. Under a grant the system
+        // draws its own progress UI and ours stands down — but a gate closing
+        // ends the grant, so from here on ours is the only thing on the phone
+        // that can explain why the bytes stopped.
         DownloadLiveActivity.shared.sync(title: title, bytesDone: done, bytesTotal: total,
                                          fraction: frac, filesDone: filesDone,
-                                         fileCount: fileCount, force: force)
+                                         fileCount: fileCount, paused: gate.text,
+                                         force: force)
     }
 
     private var beatScheduled = false
@@ -1544,11 +1869,14 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             "warns": memWarnings, "grant": grant,
             "batt": battCache, "low": lowPower,
             "bg": !appActive, "cpt": cptActive,
+            // Without this a gated run and a wedged one are the same silence.
+            "gate": gate.rawValue, "chg": charging, "exp": expensive,
         ], cat: "offline")
         DiagLog.shared.touchMarker([
             "tasks": live, "jobs": jobs.count, "mem": mem, "memLow": memFloor,
             "warns": memWarnings, "grant": grant, "sess": sessionBytes,
-            "batt": battCache, "low": lowPower,
+            "batt": battCache, "low": lowPower, "gate": gate.rawValue,
+            "chg": charging,
         ])
         // Re-sample for the NEXT beat, off the main thread's own time.
         DispatchQueue.main.async { self.cacheBattery() }
@@ -1565,8 +1893,20 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     fileprivate func cacheBattery() {
         let l = UIDevice.current.batteryLevel
         let pct = l < 0 ? -1 : Int((l * 100).rounded())
-        queue.async { self.battCache = pct }
+        // `.full` is a charger too — a phone sitting at 100% on the cable must
+        // not read as "on battery" and trip the charger-only gate.
+        let st = UIDevice.current.batteryState
+        let plugged = (st == .charging || st == .full)
+        queue.async {
+            self.battCache = pct
+            self.charging = plugged
+            self.evaluateGate("battery")
+        }
     }
+
+    /// Battery level or plug state moved. Delivered on the main thread by
+    /// UIDevice, so sample there and let `cacheBattery` hop to `queue`.
+    @objc private func batteryChanged() { cacheBattery() }
 
     /// Safe from any thread — `ProcessInfo` is, unlike `UIDevice`.
     private var lowPower: Bool { ProcessInfo.processInfo.isLowPowerModeEnabled }
@@ -1580,7 +1920,14 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             DiagLog.shared.write("power-state", [
                 "low": low, "batt": max(pct, self.battCache), "jobs": self.jobs.count,
                 "tasks": self.inFlight, "bg": !self.appActive, "cpt": self.cptActive,
+                "gate": self.gate.rawValue,
             ], cat: "app")
+            // LOW POWER MODE IS THE ONE-TAP STOP BUTTON. iOS itself offers it at
+            // 20%, and a long download on battery is precisely how a phone gets
+            // there — so honouring it is both the conventional behaviour and the
+            // most discoverable control we have. Charging overrides it (see
+            // currentGate), because the cable settles the question it asks.
+            self.evaluateGate("lowPower")
         }
     }
 
@@ -1726,6 +2073,27 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         }
         queue.async {
             guard let job = self.jobs[sha] else { return }
+            // "Cellular data is not allowed" is the gate WORKING, not a blip to
+            // retry. It is in `transientURLErrorCodes` because a roaming toggle
+            // can produce it transiently — but once we are deliberately refusing
+            // an expensive path, retrying on a 3–30 s backoff would spin for the
+            // whole commute and write a `bundle-retry` row every time. Treat it
+            // as evidence about the path instead, and let the gate stop the
+            // queue: the file keeps its place in `pending` with no live task, so
+            // the pump takes it straight back up when Wi-Fi returns.
+            if nsErr.domain == NSURLErrorDomain, nsErr.code == NSURLErrorDataNotAllowed {
+                job.tasks[fileName] = nil
+                job.liveBytes[fileName] = nil
+                if !self.expensive {
+                    self.expensive = true
+                    DiagLog.shared.write("dl-path", [
+                        "expensive": true, "status": "inferred",
+                        "jobs": self.jobs.count, "gate": self.gate.rawValue,
+                    ], cat: "offline")
+                }
+                self.evaluateGate("dataNotAllowed")
+                return
+            }
             // A brief connectivity loss mid-transfer must NOT drop the whole bundle.
             let isTransient = nsErr.domain == NSURLErrorDomain
                 && Self.transientURLErrorCodes.contains(nsErr.code)
