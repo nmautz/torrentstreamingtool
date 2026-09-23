@@ -1,5 +1,47 @@
 # Changelog
 
+## [18.12.0] — 2026-09-22
+### Smart Skip on the glasses, and a phone that admits it is a remote
+
+**Intro/credits skip never ran during external-display playback** — not because anything
+about skip was wrong, but because nothing was calling it. `lpEvaluateSkipOffer` has one
+caller, `_lpClockTick`, and that has two drivers: the `<video>` element's `timeupdate`,
+and a pump whose first line returns on `v.paused`. While the native player holds the
+display the page's element is parked and paused by design, so both were silent. No tile,
+no countdown, no auto-skip, and no error anywhere — a feature simply not being invoked.
+
+**Auto-skip now belongs to the native player**, because it is the only actor still running
+once the phone locks, which is most of what glasses playback is. `maybeAutoSkip` fires off
+the same 1 Hz observer that already drives the seek bar and progress writes. The windows
+and the profile's two toggles travel with the arm, and so do the **next** episode's — an
+advance that happens with the phone in a pocket has nothing awake to fetch them, so
+without that a binge would skip exactly one intro and then carry stale windows into every
+episode after it. The page keeps the visible tile and its countdown, and deliberately does
+not fire: two actors seeking the same skip is a double jump.
+
+Four smaller rules fell out of moving the actor, all of them the kind that only show up on
+a locked phone: skip-done flags OR rather than assign (the page's copy is older than ours
+whenever it was asleep); "Hide" re-arms, or it would be overruled seconds later by the
+timer that survives a lock; an in-place advance refetches the incoming episode's windows
+instead of inheriting the outgoing one's; and credits with nothing armed to advance into
+now lets the episode play out rather than ending the session, because on glasses that
+reads as the player dying mid-credits.
+
+**The phone looks like a remote now.** Every *control* was already routed correctly during
+a handoff — play/pause, scrub and ±10 all drive the native player — but the page still
+rendered its parked `<video>`, frozen on whatever frame it stopped at, under a chrome
+whose mute, fullscreen, rotate and entire Options panel addressed that dead element. A
+frozen frame reads as "stuck" and four controls that silently do nothing read as broken.
+`.lp-remote` swaps the stage for a banner, poster art, series and episode, and hides
+exactly the controls that cannot reach the glasses. What stays is what proxies through.
+
+- `NativePlayback.swift`: `NP_BUILD` 18.12.0; skip windows + toggles + done flags on
+  `ArmedPlayback`; `maybeAutoSkip`; `advanceToNext(reason:)` factored out of `itemDidEnd`
+  and shared with the credits skip; `nativeSkipped` event; `advance` rows carry `reason`.
+- `static/index.html`: `_lpFetchSkipData` / `_lpAttachNextSkip`; skip fields in
+  `_npPayload`; `lpEvaluateSkipOffer` draws-but-does-not-fire while holding;
+  `_npSyncRemoteUi` + `#lpRemote`.
+
 ## [18.11.1] — 2026-09-22
 ### Verified on device, plus one bug the log caught before it bit
 

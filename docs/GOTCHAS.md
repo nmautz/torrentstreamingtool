@@ -4753,6 +4753,76 @@ that should have said so said `near-start` instead.
 dragged `armed.position` backwards once a second and a native seek was undone
 within a second of being made.
 
+## The skip evaluator had no clock during a handoff (18.12.0)
+
+Smart Skip was dead for the entire life of external-display playback, and not because
+anything about skip was wrong. `lpEvaluateSkipOffer()` has exactly one caller —
+`_lpClockTick()` — and `_lpClockTick` has exactly two drivers: the `<video>` element's
+`timeupdate`, and `_lpClockPump`, whose first line is
+
+```js
+if (!v || !lp.itemId || v.paused || v.ended) return;
+```
+
+While native holds the display the page's element is **parked and paused by design**
+(`_npHolding` — a second engine playing would seize the audio session out from under the
+player feeding the glasses). So `timeupdate` never fires and the pump returns on its first
+condition, every time. No tile, no countdown, no auto-skip — with no error anywhere,
+because nothing failed. Something simply was not being called.
+
+Two rules came out of it, and they are the general ones:
+
+1. **A feature that reads the playhead needs a clock per playhead.** There are two here —
+   the element's and the native player's — and the page had wired the evaluator to the
+   one that stops. `_npApplyNativeTransport` (the 1 Hz push native already sends for the
+   seek bar) is now the second clock.
+2. **Auto-skip belongs to whoever owns the transport.** Even with a clock, the page cannot
+   be the actor: once the phone locks, its timers are frozen outright, and glasses
+   playback is mostly done with the phone in a pocket. `maybeAutoSkip` in
+   `NativePlayback.swift` fires; the page draws the tile and its countdown and explicitly
+   does **not** fire (`const remote = _npHolding` in `lpEvaluateSkipOffer`). Two actors
+   seeking the same skip is a double jump.
+
+The consequences of moving the actor are where the real work was:
+
+- **Skip windows have to travel with the arm** (`introStart` / `introEnd` /
+  `creditsStart` / the two profile toggles), because native cannot fetch them.
+- **So do the NEXT episode's** (`nextIntroStart` / …, hung off `lp._nextNative` by
+  `_lpAttachNextSkip`). An advance that happens with the phone locked has nothing awake
+  to fetch them afterwards, so without this a binge on the glasses skips exactly one
+  intro — the first — and then carries stale windows into every episode after it.
+  `advanceToNext` promotes them and clears the rest.
+- **`skipDone` flags OR rather than assign.** The page sends its `skipDoneFor` on every
+  arm, but while the phone was locked its copy is older than what we did — the arm landing
+  on wake still says `introDone: false` for an intro skipped two episodes ago. Within one
+  file they only ever go true; only a file switch earns a clean slate.
+- **A dismissal has to reach native.** "Hide" that stopped at the page would be overruled
+  seconds later by the timer that survives a locked phone: tile gone, seek happening
+  anyway. `lpDismissSkipOffer` re-arms.
+- **Credits with nothing armed to advance into is not a reason to stop.** The page's
+  `_lpAdvanceOrEnd` ends the session there, which is fine on a screen someone is looking
+  at and wrong with the glasses on and the phone in a pocket — it reads as the player
+  dying mid-credits. Native declines and lets `itemDidEnd` own the real end.
+
+## The page is a remote, so it must not look like a player (18.12.0)
+
+`_npHolding` has always meant "the native player IS the presentation", and every
+*control* was carefully routed for it — `lpTogglePlay`, `_lpCommitSeek` and
+`_lpCtlSync` all read or drive the native transport. What was never done is the part the
+user actually sees: the page kept rendering its **parked `<video>`**, frozen on whatever
+frame it stopped at, under a full player chrome whose mute, fullscreen, rotate and entire
+Options panel (quality / audio / subtitles / sync) still addressed that dead element.
+
+A frozen frame reads as "stuck", and four controls that silently do nothing read as
+broken. `.lp-remote` on `#localPlayer` (set by `_npSyncRemoteUi` at every site that writes
+`_npHolding`) swaps the stage for `#lpRemote` — banner, poster, series, episode — and
+hides exactly the controls that cannot reach the glasses. What stays is what proxies:
+transport, seek bar, skip tile.
+
+`_npSyncRemoteUi` is **called**, never derived later. There is no event for "the page
+stopped being the player", and a remote panel left up over a `<video>` that has resumed is
+worse than never having shown one.
+
 ## A player that hasn't loaded its item yet is not a player the user paused (18.11.1)
 
 `armed.paused` is intent — "what the user left it doing" — and everything downstream

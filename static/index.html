@@ -884,6 +884,95 @@
       cursor: pointer;
     }
     #localPlayer.lp-tiny .lp-tiny-close:hover { color: #f87171; background: #111827; }
+    /* ── Glasses remote (.lp-remote on #localPlayer, see _npSyncRemoteUi) ──
+       Everything hidden below addresses the PARKED <video>, not the glasses:
+       leaving it on screen means four buttons and a whole options panel that
+       silently do nothing. The transport row, the seek bar and the skip tile
+       stay, because those proxy through to the native player. */
+    #lpRemote { display: none; }
+    #localPlayer.lp-remote #lpRemote {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      padding: 0 16px;
+      text-align: center;
+      background: #05070d;
+    }
+    #localPlayer.lp-remote #lpVideo,
+    #localPlayer.lp-remote #lpBuffSpin,
+    #localPlayer.lp-remote #lpDevHud,
+    #localPlayer.lp-remote #lpVolPill,
+    #localPlayer.lp-remote #lpOptsBtn,
+    #localPlayer.lp-remote #lpRotBtn,
+    #localPlayer.lp-remote #lpMuteBtn,
+    #localPlayer.lp-remote #lpFsBtn,
+    #localPlayer.lp-remote #lpTvBtn,
+    #localPlayer.lp-remote #lpTrackRow { display: none !important; }
+    /* Tiny mode is a thumbnail of the video; with no video there is nothing to
+       thumbnail, so the panel stays out of it entirely. */
+    #localPlayer.lp-tiny #lpRemote { display: none !important; }
+    #lpRemoteBanner {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 10px;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      color: #a5b4fc;
+      background: rgba(49,46,129,0.45);
+      border: 1px solid #4338ca;
+      padding: 6px 12px;
+    }
+    .lp-rm-dot { width: 7px; height: 7px; background: #6366f1; flex: 0 0 auto; }
+    #lpRemoteArt {
+      position: relative;
+      width: 116px;
+      height: 174px;
+      background: #0b1120;
+      border: 1px solid #1f2937;
+      flex: 0 0 auto;
+    }
+    #lpRemoteImg { width: 100%; height: 100%; object-fit: cover; display: none; }
+    #lpRemoteFallback {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #374151;
+      font-size: 42px;
+      font-weight: 900;
+    }
+    #lpRemoteSeries {
+      font-size: 10px;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      color: #6b7280;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #lpRemoteTitle {
+      font-size: 15px;
+      font-weight: 700;
+      color: #e5e7eb;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    /* Short/landscape phones: the poster is the first thing to go. */
+    @media (max-height: 420px) {
+      #lpRemoteArt { display: none; }
+      #localPlayer.lp-remote #lpRemote { gap: 10px; }
+    }
     #lpSkipOffer {
       position: absolute;
       bottom: calc(env(safe-area-inset-bottom, 0px) + 132px);
@@ -3608,6 +3697,21 @@
        see lpStageTap / _lpCtlShow / _lpCtlTick. Don't re-add `controls`. -->
   <div id="lpStage">
     <video id="lpVideo" playsinline crossorigin="anonymous" preload="auto"></video>
+    <!-- Glasses remote. While the native player owns an external display this
+         page is not a player, it is a REMOTE (see _npHolding) — and its <video>
+         is parked on a frozen frame that reads as "stuck". This replaces the
+         stage with artwork and what's playing, and .lp-remote hides every
+         control that addresses the parked element instead of the glasses.
+         Toggled by _npSyncRemoteUi at each site that writes _npHolding. -->
+    <div id="lpRemote">
+      <div id="lpRemoteBanner"><span class="lp-rm-dot"></span>Playing on Glasses</div>
+      <div id="lpRemoteArt">
+        <img id="lpRemoteImg" alt=""/>
+        <div id="lpRemoteFallback"></div>
+      </div>
+      <div id="lpRemoteSeries"></div>
+      <div id="lpRemoteTitle"></div>
+    </div>
     <!-- Square Metro buffering spinner — shown via .lp-buffering on #localPlayer,
          independent of overlay visibility (like YouTube's). -->
     <div id="lpBuffSpin"></div>
@@ -6545,6 +6649,9 @@ async function saveAutoSkip(){
     if(profile){ profile.auto_skip_intro=intro; profile.auto_skip_credits=credits; }
     const f = Array.isArray(allProfiles) ? allProfiles.find(p=>p.id===profile.id) : null;
     if(f){ f.auto_skip_intro=intro; f.auto_skip_credits=credits; }
+    // The native player carries its own copy of these (it does the firing while
+    // it holds a display), and nothing else would ever push the new value down.
+    try { if(_npArmed) _npArm(); } catch(_){}
   }
   const s = document.getElementById("psStatus");
   if(s){
@@ -18526,7 +18633,7 @@ function _npStartPoll() {
     if (!_npHolding || Date.now() - _npLastProgressAt < 4000) return;
     let st = null;
     try { st = await _cap.np.state(); } catch (_) { return; }
-    if (!st || !st.native) { _npStopPoll(); _npHolding = false; return; }
+    if (!st || !st.native) { _npStopPoll(); _npHolding = false; _npSyncRemoteUi(); return; }
     _npApplyNativeTransport(st.position, st.paused, _npNativeDur);
   }, 2000);
 }
@@ -18541,9 +18648,48 @@ function _npApplyNativeTransport(pos, paused, dur) {
   _npNativePaused = !!paused;
   if (!_npHolding) return;
   try { _lpCtlTick(); _lpCtlSync(); } catch (_) {}
+  // THE SKIP OFFER HAS NO OTHER CLOCK HERE. lpEvaluateSkipOffer is called only
+  // from _lpClockTick, which rides the parked element's `timeupdate` and a pump
+  // that returns early on `v.paused` — permanently true while native holds. So
+  // for the whole life of external-display playback the tile was never once
+  // evaluated: no Skip Intro, no countdown, nothing. Native's 1 Hz transport
+  // push is the clock now. It only DRAWS — native fires (see maybeAutoSkip).
+  try { lpEvaluateSkipOffer(_npNativePos); } catch (_) {}
 }
 // Position the UI should show: native's while it holds, the element's otherwise.
 function _npUiTime(v) { return _npHolding ? _npNativePos : ((v && v.currentTime) || 0); }
+
+// Put the phone into (or out of) remote mode.
+//
+// Called at every site that writes _npHolding rather than derived later: there
+// is no event for "the page stopped being the player", and a remote panel left
+// up over a <video> that has resumed is worse than never having shown one.
+function _npSyncRemoteUi() {
+  const c = document.getElementById("localPlayer");
+  if (!c) return;
+  const on = !!_npHolding;
+  c.classList.toggle("lp-remote", on);
+  if (!on) return;
+  const series = _npSeriesName();
+  document.getElementById("lpRemoteSeries").textContent = series || "On Glasses";
+  document.getElementById("lpRemoteTitle").textContent = lp.name || "";
+  const img = document.getElementById("lpRemoteImg");
+  const fb  = document.getElementById("lpRemoteFallback");
+  let src = "";
+  try {
+    const it = (window._libCache || []).find((x) => x && x.id === lp.itemId);
+    if (it) src = it.poster_url
+                || (it.poster_path ? `${libGroupsImgBase}/w342${it.poster_path}` : "");
+  } catch (_) {}
+  if (src) {
+    img.src = src; img.style.display = "block"; fb.textContent = "";
+  } else {
+    // No art is normal — an unmatched item, or an offline session with no host
+    // to proxy the image. An initial beats a broken-image icon.
+    img.removeAttribute("src"); img.style.display = "none";
+    fb.textContent = (series || lp.name || "?").trim().charAt(0).toUpperCase();
+  }
+}
 let _npExternal = false;     // an external display / AirPlay route is present
 let _npArmed = false;        // we've told native a session is live
 let _npLastTick = 0;
@@ -18601,6 +18747,9 @@ function _npPayload() {
   const aud = lp.audios && lp.audios[lp.pendingAudioIdx || 0];
   const sMeta = (sub >= 0 && lp.subtitles) ? lp.subtitles[sub] : null;
   const nx = lp._nextNative || null;
+  const sk = lp.skipData || null;
+  const nsk = (nx && nx.skip) || null;
+  const asp = _lpAutoSkipPrefs();
   return {
     active: true,
     url: _npAbs(lp._nativeMaster),
@@ -18637,6 +18786,24 @@ function _npPayload() {
     nextItemId: nx ? (nx.itemId || "") : "",
     handoffEnabled: true,
     extMode: _appPlaybackPrefs().ext,
+    // SMART SKIP TRAVELS WITH THE ARM, because auto-skip belongs to whoever owns
+    // the transport and during a handoff that is native. Our own evaluator is
+    // driven by the parked <video> (see _npApplyNativeTransport) and is frozen
+    // outright once the phone locks, so it draws the tile and nothing more.
+    // -1 = no window. Offline bundles have no host to ask, so they send -1 too.
+    introStart: (sk && sk.intro && sk.intro.start != null) ? sk.intro.start : -1,
+    introEnd:   (sk && sk.intro && sk.intro.end   != null) ? sk.intro.end   : -1,
+    creditsStart: (sk && sk.credits_start != null) ? sk.credits_start : -1,
+    autoSkipIntro: !!asp.intro,
+    autoSkipCredits: !!asp.credits,
+    introDone:   lp.skipDoneFor.has((lp.filePath || "") + "#intro"),
+    creditsDone: lp.skipDoneFor.has((lp.filePath || "") + "#credits"),
+    // The NEXT episode's windows, sent now because after the advance we may be
+    // asleep. Without these, a binge on the glasses with the phone in a pocket
+    // skips exactly one intro — the first — and then carries stale windows.
+    nextIntroStart: (nsk && nsk.intro && nsk.intro.start != null) ? nsk.intro.start : -1,
+    nextIntroEnd:   (nsk && nsk.intro && nsk.intro.end   != null) ? nsk.intro.end   : -1,
+    nextCreditsStart: (nsk && nsk.credits_start != null) ? nsk.credits_start : -1,
   };
 }
 
@@ -18739,7 +18906,7 @@ async function _npHandBack() {
   // rather than at each call site is what makes the display-lost hand-back
   // below safe: while it stayed true, every control kept reading _npNativePos
   // from a player that no longer exists and the element was left parked.
-  _npHolding = false; _npStopPoll();
+  _npHolding = false; _npStopPoll(); _npSyncRemoteUi();
   const v = _lpV(); if (!v) return;
 
   // Native auto-advanced into the next episode while we were away — resync the
@@ -18788,6 +18955,7 @@ function _npBindEvents() {
                              extWindow: !!(e && e.extWindow) }, "ext");
       _npSetPausedIntent(false);
       _npHolding = true;
+      _npSyncRemoteUi();
       _npNativePaused = false;
       _npNativeDur = lp.duration || 0;
       _npStartPoll();
@@ -18798,11 +18966,24 @@ function _npBindEvents() {
       if (!e) return;
       _npApplyNativeTransport(e.position, e.paused, e.duration);
     });
+    // Native fired an auto-skip. Record it on our side too: our evaluator is
+    // still drawing the tile off the same windows, and without this it re-offers
+    // a skip the viewer has already been carried past — and the next arm would
+    // hand native back a cleared `introDone`.
+    _cap.np.addListener("nativeSkipped", (e) => {
+      if (!e || !e.type) return;
+      if (e.filePath) lp.skipDoneFor.add(e.filePath + "#" + e.type);
+      if (e.type === "intro" && typeof e.position === "number") _npNativePos = e.position;
+      _lpHideSkipOffer();
+      _npLog("native-skipped", { type: e.type, at: e.position || 0,
+                                 file: e.filePath || "" }, "play");
+    });
     _cap.np.addListener("nativeEnded", (e) => {
       _npLog("native-ended", { file: (e && e.filePath) || lp.filePath,
                                holding: _npHolding }, "play");
       const wasHolding = _npHolding;
       _npHolding = false;
+      _npSyncRemoteUi();
       _npStopPoll();
       // Only meaningful if we're still backgrounded; on return _npHandBack's
       // `ended` branch handles it. Harmless to record either way.
@@ -18832,6 +19013,13 @@ function _npBindEvents() {
           lp.itemId = (lp.playlistItems || [])[i] || lp.itemId;
           lp.name = e.filePath.split(/[/\\]/).pop();
           lp._nextNative = null;
+          // The skip windows we hold belong to the episode that just finished.
+          // Native promoted the ones we armed alongside nextUrl and is already
+          // running on those; drop ours and refetch, or the next arm would push
+          // the OLD intro back over the new one.
+          lp.skipData = null;
+          _lpFetchSkipData(lp.itemId, e.filePath);
+          _npSyncRemoteUi();          // the panel names the episode; it just changed
           try { _lpRenderNavButtons(); } catch (_) {}
           _lpWarmNextEp();
           _npArm();
@@ -23082,14 +23270,7 @@ async function _lpLoadIndex(seekTo) {
 
   // Fetch skip-data in parallel — fire-and-forget; skip-offer logic just runs
   // off `lp.skipData` once it lands. Offline: no host, no skip markers.
-  if (!_appOffline) (async () => {
-    try {
-      const r = await fetch(`/api/library/${lp.itemId}/skip-data?file_path=${encodeURIComponent(filePath)}`);
-      if (!r.ok) return;
-      const fresh = await r.json();
-      if (lp.filePath === filePath) lp.skipData = fresh || null;
-    } catch (_) {}
-  })();
+  _lpFetchSkipData(lp.itemId, filePath);
 
   lp.audios     = prep.audios || [];
   lp.subtitles  = prep.subtitles || [];
@@ -25810,7 +25991,7 @@ async function lpStop() {
   // Playback is over: no handoff, and drop TV Mode so the phone's screen comes
   // back (setTvMode(false) is idempotent and restores brightness).
   _npDisarm("stop");
-  _npHolding = false; _npStopPoll();
+  _npHolding = false; _npStopPoll(); _npSyncRemoteUi();
   if (_npTvMode) _npSetTvMode(false);
   lp._nativeMaster = null; lp._nextNative = null;
   const t = wasHolding ? heldPos : (v.currentTime || 0);
@@ -25849,7 +26030,8 @@ async function lpStop() {
   _lpCancelSeekVerify();
   const c = document.getElementById("localPlayer");
   _lpClearOrientLock();
-  c.classList.remove("lp-active", "lp-tiny", "lp-idle", "lp-buffering", "lp-scrub", "lp-opts");
+  c.classList.remove("lp-active", "lp-tiny", "lp-idle", "lp-buffering", "lp-scrub",
+                     "lp-opts", "lp-remote");
   document.getElementById("lpSkipOffer").classList.add("hidden");
   _lpHidePreparing();
   _lpDevHudStop();
@@ -25863,6 +26045,45 @@ async function lpStop() {
   // Proxied playback session: playback is done, so leave the loopback player and
   // return to the direct host dashboard (no-op in a normal/offline session).
   _appProxiedReturnHost();
+}
+
+// Load this file's Smart Skip windows into `lp.skipData`, then re-arm so the
+// native player learns them too — it is the one that fires auto-skip while it
+// holds a display, and it cannot ask for them itself.
+//
+// Its own function because the native in-place advance also needs it: that path
+// never runs _lpLoadIndex, so for the life of the feature an advanced-into
+// episode inherited the PREVIOUS episode's windows.
+function _lpFetchSkipData(itemId, filePath) {
+  if (_appOffline || !itemId || !filePath) return;
+  (async () => {
+    try {
+      const r = await fetch(`/api/library/${itemId}/skip-data?file_path=${encodeURIComponent(filePath)}`);
+      if (!r.ok) return;
+      const fresh = await r.json();
+      if (lp.filePath !== filePath) return;     // playlist moved while we awaited
+      lp.skipData = fresh || null;
+      if (_npArmed) _npArm();
+    } catch (_) {}
+  })();
+}
+
+// The NEXT episode's windows, hung off lp._nextNative so _npPayload can ship
+// them with the arm. Fetched now because the moment they are needed — a native
+// advance with the phone locked — nothing here is running to fetch them.
+function _lpAttachNextSkip(itemId, nextPath) {
+  if (_appOffline || !itemId || !nextPath) return;
+  (async () => {
+    try {
+      const r = await fetch(`/api/library/${itemId}/skip-data?file_path=${encodeURIComponent(nextPath)}`);
+      if (!r.ok) return;
+      const fresh = await r.json();
+      const nx = lp._nextNative;
+      if (!nx || nx.filePath !== nextPath) return;   // armed something else meanwhile
+      nx.skip = fresh || null;
+      if (_npArmed) _npArm();
+    } catch (_) {}
+  })();
 }
 
 // Lead seconds for the auto-skip countdown — mirror the VLC marquee leads
@@ -25898,6 +26119,10 @@ function lpEvaluateSkipOffer(t) {
   // No skip points (yet) for this file — clear any leftover tile from a prior
   // file rather than returning with it still on screen.
   if (!lp.skipData) { _lpHideSkipOffer(); return; }
+  // While native holds the display it owns the firing — it is the only actor
+  // still running once the phone locks, and two actors seeking the same skip is
+  // a double jump. Here we draw the tile and the countdown, and stop there.
+  const remote = _npHolding;
   const intro = lp.skipData.intro;
   const creditsStart = lp.skipData.credits_start;
   const fileKey = lp.filePath;
@@ -25913,7 +26138,12 @@ function lpEvaluateSkipOffer(t) {
     if (prefs.intro && (intro.end - t) > 1) {
       if (t >= introAt - LP_SKIP_LEAD_INTRO) {
         lp.skipOfferType = "intro"; lp.skipOfferEnd = intro.end;
-        if (t >= introAt) { lpAcceptSkipOffer(); return; }
+        if (t >= introAt) {
+          if (!remote) { lpAcceptSkipOffer(); return; }
+          // Native's tick may be a beat behind ours; leave a tappable button
+          // rather than a countdown stuck at 1.
+          _lpShowSkipOffer("Skip Intro"); return;
+        }
         const n = Math.min(LP_SKIP_LEAD_INTRO, Math.max(1, Math.ceil(introAt - t)));
         _lpShowSkipOffer("Skipping Intro in " + n); return;
       }
@@ -25927,7 +26157,13 @@ function lpEvaluateSkipOffer(t) {
     if (prefs.credits) {
       if (t >= creditsStart - LP_SKIP_LEAD_CREDITS) {
         lp.skipOfferType = "credits"; lp.skipOfferEnd = 0;
-        if (t >= creditsStart) { lpAcceptSkipOffer(); return; }
+        if (t >= creditsStart) {
+          if (!remote) { lpAcceptSkipOffer(); return; }
+          // Native declines to advance with nothing armed to advance into, so
+          // this button is also the only way out of the credits on a downloaded
+          // bundle — a tap runs the page's own _lpAdvanceOrEnd.
+          _lpShowSkipOffer(hasNext ? "Skip Credits" : "End"); return;
+        }
         const n = Math.min(LP_SKIP_LEAD_CREDITS, Math.max(1, Math.ceil(creditsStart - t)));
         _lpShowSkipOffer((hasNext ? "Next Episode in " : "Ending in ") + n); return;
       }
@@ -25991,6 +26227,10 @@ function lpAcceptSkipOffer() {
 function lpDismissSkipOffer() {
   if (lp.skipOfferType) lp.skipDoneFor.add(lp.filePath + "#" + lp.skipOfferType);
   _lpHideSkipOffer();
+  // Hide means hide. Native holds the only auto-skip timer that survives a
+  // locked phone, so a dismissal that stopped at the page would be overruled by
+  // it seconds later — the tile gone and the seek happening anyway.
+  if (_npArmed) _npArm();
 }
 
 const LP_SEEK_END_GRACE_MS = 2500;   // see the `ended` listener in _lpAttachVideoEvents
@@ -26091,8 +26331,9 @@ function _lpArmNextNative(itemId, nextPath) {
         return;
       }
       lp._nextNative = { url: prep.native_master_url, filePath: nextPath, itemId,
-                         title: nextPath.split(/[/\\]/).pop() };
+                         title: nextPath.split(/[/\\]/).pop(), skip: null };
       _npArm();
+      _lpAttachNextSkip(itemId, nextPath);
       _npLog("next-armed", { file: nextPath, via: "already-ready" }, "play");
     } catch (e) {
       _npLog("next-arm-failed", { file: nextPath,
@@ -26178,8 +26419,9 @@ function _lpWarmNextEp() {
       // having moved under us while we awaited.
       if (ready.native_master_url && lp.playlist[lp.pi + 1] === nextPath) {
         lp._nextNative = { url: ready.native_master_url, filePath: nextPath, itemId,
-                           title: nextPath.split(/[/\\]/).pop() };
+                           title: nextPath.split(/[/\\]/).pop(), skip: null };
         _npArm();
+        _lpAttachNextSkip(itemId, nextPath);
         _npLog("next-armed", { file: nextPath, via: "warmed" }, "play");
       }
     } catch (_) {
@@ -27530,6 +27772,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.11.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.12.0</div>
 </body>
 </html>

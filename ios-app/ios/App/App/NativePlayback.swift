@@ -60,7 +60,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "18.11.1"
+let NP_BUILD = "18.12.0"
 
 // MARK: - Armed state
 
@@ -109,6 +109,31 @@ struct ArmedPlayback {
     // locks — is gone: mirroring has already collapsed by then, so it only ever
     // delivered the lock screen. Anything unrecognised reads as "early".
     var extMode = "early"
+    /// Smart Skip windows for THIS file, and the profile's auto-skip toggles.
+    ///
+    /// These ride along because auto-skip belongs to whoever owns the transport,
+    /// and while we hold a display that is us. The page's evaluator runs off
+    /// `_lpClockTick`, which is driven by the parked <video>'s `timeupdate` and a
+    /// pump that returns early on `v.paused` — permanently true during a handoff —
+    /// so it never fires here at all, and once the phone locks its timers are
+    /// frozen outright. -1 means "no window" (and is what a file with no skip
+    /// data, or an offline bundle with no host to ask, sends).
+    var introStart: Double = -1
+    var introEnd: Double = -1
+    var creditsStart: Double = -1
+    var autoSkipIntro = false
+    var autoSkipCredits = false
+    /// Fired or dismissed. Ours to keep: the page re-arms with its own copy, and
+    /// while the phone was locked its copy is older than what we did.
+    var introDone = false
+    var creditsDone = false
+    /// The NEXT episode's windows, so an advance that happens with the phone
+    /// locked still lands on a file that can skip its own intro. The page cannot
+    /// supply them after the fact — its timers are frozen — so it supplies them
+    /// before, alongside `nextUrl`. See advanceToNext.
+    var nextIntroStart: Double = -1
+    var nextIntroEnd: Double = -1
+    var nextCreditsStart: Double = -1
     /// When `position` was sampled. Handoff extrapolates from this.
     var armedAt = Date()
 }
@@ -967,6 +992,16 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         a.nextItemId     = call.getString("nextItemId") ?? ""
         a.handoffEnabled = call.getBool("handoffEnabled") ?? true
         a.extMode        = call.getString("extMode") ?? "early"
+        a.introStart       = call.getDouble("introStart") ?? -1
+        a.introEnd         = call.getDouble("introEnd") ?? -1
+        a.creditsStart     = call.getDouble("creditsStart") ?? -1
+        a.autoSkipIntro    = call.getBool("autoSkipIntro") ?? false
+        a.autoSkipCredits  = call.getBool("autoSkipCredits") ?? false
+        a.introDone        = call.getBool("introDone") ?? false
+        a.creditsDone      = call.getBool("creditsDone") ?? false
+        a.nextIntroStart   = call.getDouble("nextIntroStart") ?? -1
+        a.nextIntroEnd     = call.getDouble("nextIntroEnd") ?? -1
+        a.nextCreditsStart = call.getDouble("nextCreditsStart") ?? -1
         a.armedAt        = Date()
 
         let wasActive = armed.active
@@ -978,6 +1013,20 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             && !armed.filePath.isEmpty
             && !a.filePath.isEmpty
             && a.filePath != armed.filePath
+
+        // WHAT WE ALREADY SKIPPED, WE DO NOT OFFER TO SKIP AGAIN.
+        //
+        // The page keeps its own `skipDoneFor` and sends it on every arm, but
+        // while the phone is locked its timers are frozen — so the arm that
+        // lands the moment it wakes still says `introDone: false` for an intro we
+        // skipped ten minutes and two episodes ago. Taking it at face value
+        // re-arms a window the viewer has already been carried past. Within one
+        // file the flags only ever go true, so OR them; a file switch is the one
+        // thing that earns a clean slate, and it gets one below.
+        if isNativeActive, !switchingFile, a.filePath == armed.filePath {
+            a.introDone   = a.introDone   || armed.introDone
+            a.creditsDone = a.creditsDone || armed.creditsDone
+        }
 
         // While WE are the player, the page's `paused` is a stale echo of a web
         // element WebKit paused on our behalf — never a command. Taking it would
@@ -1485,6 +1534,10 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
                                          "paused": p.timeControlStatus != .playing])
             self.maybePostProgress(t)
             self.maybePostSession(t)
+            // LAST, and deliberately after the progress write: a credits skip
+            // re-points `armed` at the next episode, and a post issued after
+            // that would file this episode's position under the next one's path.
+            self.maybeAutoSkip(t)
         }
     }
 
@@ -1713,24 +1766,113 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
 
         // Advance in place if the web player armed a next episode — it already
         // preps it (_lpWarmNextEp), so this costs no extra host round-trip.
-        if let next = armed.nextUrl {
-            armed.position = 0
-            armed.armedAt = Date()
-            armed.title = armed.nextTitle
-            armed.filePath = armed.nextFilePath
-            if !armed.nextItemId.isEmpty { armed.itemId = armed.nextItemId }
-            armed.url = next
-            armed.nextUrl = nil
-            DiagLog.shared.write("advance", ["to": armed.filePath, "item": armed.itemId], cat: "play")
-            emit("nativeAdvanced", ["filePath": armed.filePath, "url": next.absoluteString])
-            replaceItem(with: next)
-            return
-        }
+        if advanceToNext(reason: "ended") { return }
         endedFlag = true
         DiagLog.shared.write("ended", ["file": armed.filePath, "dur": armed.duration,
                                        "hadNext": false], cat: "play")
         emit("nativeEnded", ["filePath": armed.filePath])
         stopNative(endActivity: true)
+    }
+
+    /// Move to the armed next episode without letting go of anything.
+    ///
+    /// Two callers reach this and they differ only in how they got here: the
+    /// natural end of an item, and a credits auto-skip. Returns false when
+    /// nothing is armed to advance into, which is a real and common state — a
+    /// fully downloaded local bundle still cannot be armed (see
+    /// `next-arm-skipped` in the log), and the last episode of a run never has a
+    /// next at all.
+    @discardableResult
+    private func advanceToNext(reason: String) -> Bool {
+        guard let next = armed.nextUrl else { return false }
+        armed.position = 0
+        armed.armedAt = Date()
+        armed.title = armed.nextTitle
+        armed.filePath = armed.nextFilePath
+        if !armed.nextItemId.isEmpty { armed.itemId = armed.nextItemId }
+        armed.url = next
+        armed.nextUrl = nil
+        // A NEW FILE GETS THE NEW FILE'S WINDOWS. The page armed them alongside
+        // nextUrl precisely so this moment doesn't need it — it may be frozen,
+        // and an episode advanced into with the phone locked would otherwise
+        // carry the PREVIOUS episode's intro window and seek into the middle of
+        // a cold open. Promote, then clear, then let the page correct us when it
+        // next wakes.
+        armed.introStart   = armed.nextIntroStart
+        armed.introEnd     = armed.nextIntroEnd
+        armed.creditsStart = armed.nextCreditsStart
+        armed.nextIntroStart = -1
+        armed.nextIntroEnd = -1
+        armed.nextCreditsStart = -1
+        armed.introDone = false
+        armed.creditsDone = false
+        DiagLog.shared.write("advance", ["to": armed.filePath, "item": armed.itemId,
+                                         "reason": reason,
+                                         "introEnd": armed.introEnd,
+                                         "creditsAt": armed.creditsStart], cat: "play")
+        emit("nativeAdvanced", ["filePath": armed.filePath, "url": next.absoluteString])
+        replaceItem(with: next)
+        return true
+    }
+
+    // MARK: Auto-skip
+
+    /// Mirrors LP_SKIP_INTRO_START_PAD / LP_SKIP_INTRO_PAD in static/index.html
+    /// and SKIP_INTRO_START_PAD_SEC / SKIP_INTRO_PAD_SEC in main.py. Three copies
+    /// of two numbers now; change one, change all three.
+    private static let skipIntroStartPad = 1.5
+    private static let skipIntroPad = 0.25
+
+    /// Fire the profile's auto-skip while WE are the player.
+    ///
+    /// The page keeps the visible offer tile and its countdown — it is the only
+    /// surface that has one — but it must not also fire, or the same skip is
+    /// seeked twice. See `remote` in lpEvaluateSkipOffer.
+    private func maybeAutoSkip(_ t: Double) {
+        // Not before the item is ready, and not while paused. The first is the
+        // 18.11.1 rule applied to a second reader of the transport: before
+        // `.readyToPlay` the position is not yet the position. The second is
+        // manners — someone who paused inside the intro did not ask to be moved.
+        guard isNativeActive, !armed.paused,
+              player?.currentItem?.status == .readyToPlay else { return }
+
+        if armed.autoSkipIntro, !armed.introDone,
+           armed.introStart >= 0, armed.introEnd > armed.introStart {
+            // Fire a beat AFTER the detected start, like the page and VLC: late
+            // costs a moment of theme, early cuts real content. And only while
+            // there is more than a second of intro left — past that a "skip" is
+            // just a jolt.
+            let at = min(armed.introStart + Self.skipIntroStartPad, armed.introEnd)
+            if t >= at, armed.introEnd - t > 1 {
+                armed.introDone = true
+                let to = armed.introEnd + Self.skipIntroPad
+                DiagLog.shared.write("auto-skip", ["type": "intro", "from": t, "to": to,
+                                                   "file": armed.filePath], cat: "play")
+                emit("nativeSkipped", ["type": "intro", "position": to,
+                                       "filePath": armed.filePath])
+                seekTo(to)
+                return
+            }
+        }
+
+        if armed.autoSkipCredits, !armed.creditsDone,
+           armed.creditsStart > 0, t >= armed.creditsStart {
+            // NOTHING TO ADVANCE INTO IS NOT A REASON TO STOP. The page's
+            // equivalent ends the session here, which is fine on a screen
+            // someone is looking at and wrong with the phone in a pocket: the
+            // glasses would simply go dark mid-credits with no way to ask why.
+            // Let it play out — itemDidEnd owns the real end.
+            guard armed.nextUrl != nil else { return }
+            armed.creditsDone = true
+            // Credits reached counts as watched, exactly as the page's
+            // _lpAdvanceOrEnd writes duration/duration before it moves on.
+            maybePostProgress(armed.duration, force: true)
+            DiagLog.shared.write("auto-skip", ["type": "credits", "from": t,
+                                               "file": armed.filePath], cat: "play")
+            emit("nativeSkipped", ["type": "credits", "position": 0,
+                                   "filePath": armed.filePath])
+            advanceToNext(reason: "credits")
+        }
     }
 
     /// Move the RUNNING player onto a different file without letting go of

@@ -141,8 +141,11 @@ JS-written rows carry `src: "js"`.
 | `native-swap` | the running player really moved onto the new file (same player, same layer, same external window). This is what makes a skip land on the monitor |
 | `swap-no-url` | the page armed a file the native side cannot play, so the swap could not happen and the player is still on the old episode |
 | `arm-dropped-hold` | `_npArm()` turned into a teardown while native held the display, because the new file has no native master. The display is about to go back to the phone |
-| `advance` | the page advancing — `holding`, `ext`, `nextArmed`, and `path` (`normal` vs `teardown-rebuild`) |
+| `advance` | an advance. From the page: `holding`, `ext`, `nextArmed`, `path` (`normal` vs `teardown-rebuild`). From native: `reason` (`ended` vs `credits`) plus the `introEnd`/`creditsAt` it promoted for the incoming episode (18.12.0) |
 | `native-advanced` | the **good** end-of-episode advance: native switched file without releasing the display |
+| `auto-skip` | the **native** player fired a Smart Skip while it held the display (18.12.0) — `type` (`intro`/`credits`), `from`, and for an intro `to`. This is the only skip actor during a handoff; the page draws the tile but never fires |
+| `native-skipped` | the page's record of the same event, written when native's `nativeSkipped` reaches it. Its absence under an `auto-skip` means the page was asleep at the time — normal, and the flag is reconciled on the next arm |
+| `next-armed` | the next episode was handed to native (`via`: `already-ready` / `warmed`). From 18.12.0 the arm also carries that episode's skip windows |
 | `hold-start` | native took the display; `elementWasPlaying` says whether a second engine was running |
 | `display-handoff` | a display arrived **mid-episode** and the native player took it over on the spot (18.11.0). Follows a `sceneConnect` snap and its `earlyClaim`/`earlyHandoff` pair. Its absence after a `sceneConnect` with `native=false` is the pre-18.11.0 bug: window claimed, no player in it, glasses black |
 | `display-lost-handback` | the display went away while native held it, so the page took playback back into its own element (18.11.0). Foreground only — unplugging while locked deliberately leaves the native player alone |
@@ -296,6 +299,32 @@ the display and the player disagree about who is presenting, and nothing reconci
 Unplugging while the phone is **locked** is not this bug. The native player is left alone
 on purpose (handing back to a suspended WKWebView would stop playback outright), so the
 hand-back lands on the return to the foreground instead.
+
+### Recipe: "the intro didn't skip on the glasses"
+
+During a handoff the **native** player fires auto-skip and the page only draws the tile
+(18.12.0), so read the native rows first.
+
+- **`auto-skip` present** → it fired. An intro carries `from`/`to`; check `to` against the
+  `seekTo` that follows.
+- **No `auto-skip`, and the arm never carried the windows.** The page fetches skip data
+  from the host, so an **offline session has none at all** — `_lpFetchSkipData` returns
+  early on `_appOffline` and every window arms as `-1`. That is a limitation, not a bug.
+- **No `auto-skip` on an episode native advanced into.** Look at that `advance` row's
+  `introEnd` / `creditsAt`: `-1` means the page never armed the next episode's windows
+  (`_lpAttachNextSkip` couldn't run, or `next-arm-skipped` says the episode was never
+  armed at all — a fully downloaded local bundle still cannot be). Native will not skip
+  what it was not told.
+- **No `auto-skip`, windows present, position past the point.** Check `armed.paused` — a
+  player paused inside the intro is deliberately left alone — and remember the guard on
+  `.readyToPlay`: nothing fires until the item has loaded, which on a host-streamed bundle
+  has been measured at six seconds after the handoff.
+- **A `native-skipped` with no `auto-skip` above it** cannot happen; the reverse (an
+  `auto-skip` the page never acknowledged) is normal and just means the phone was asleep.
+
+If the tile never *appeared* while you were watching the phone, that is the page side:
+it draws off `_npApplyNativeTransport`, so a stalled `nativeProgress` stream takes the
+seek bar with it — check whether the clock was moving at all.
 
 ### `locked+3s` / `handoff+10s` name a SCHEDULE, not an elapsed time
 

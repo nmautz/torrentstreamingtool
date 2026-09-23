@@ -1591,6 +1591,17 @@ Live Activity clock advancing between pushes → native subs in sync → progres
 while locked → the same against an LMS-served bundle in Airplane Mode → no-regression
 in a desktop browser.
 
+**The phone is a remote, and looks like one (18.12.0).** While `_npHolding` is true the
+page's `<video>` is parked on a frozen frame, and the controls that address it — mute,
+fullscreen, orientation lock, and the whole Options panel (quality / audio / subtitles /
+sync) — reach nothing. `.lp-remote` on `#localPlayer`, set by `_npSyncRemoteUi` at every
+site that writes `_npHolding`, replaces the stage with `#lpRemote` (a "Playing on Glasses"
+banner, poster art from `window._libCache`, series and episode) and hides exactly those
+controls. What stays is what proxies through: the transport row (`lpTogglePlay` →
+`np.setPaused`), the seek bar and ±10 (`_lpCommitSeek` → `np.seekTo`), and the skip tile.
+Changing audio track or subtitles means ending the handoff first — AVPlayer could switch
+`AVMediaSelectionOption`s mid-play, but nothing wires the menu to it yet.
+
 Native side: `ios-app/ios/App/App/NativePlayback.swift` (+ `PlaybackLiveActivity.swift`,
 `Shared/PlaybackIntents.swift`, `StreamLinkLiveActivities/PlaybackWidget.swift`).
 
@@ -1697,7 +1708,32 @@ re-fetch). Behaviour per window:
   **Hide** to cancel. Intro auto-skip only engages while there's still >1 s of
   intro left to skip (matching VLC).
 - Dismissed offers add `<filePath>#intro` / `#credits` to `lp.skipDoneFor`
-  (suppresses both the manual button and the auto countdown for that file).
+  (suppresses both the manual button and the auto countdown for that file), and
+  **re-arm the native player** — while it holds a display it owns the firing, and a
+  "Hide" that stopped at the page would be overruled by it seconds later.
+
+**While the native player holds an external display, the page does not fire.** It is not
+the player and it is not even reliably running: `_lpClockTick`'s two drivers are the
+parked element's `timeupdate` and a pump that returns early on `v.paused`, so during a
+handoff the evaluator has no clock at all, and once the phone locks its timers are frozen
+outright. From 18.12.0 the split is:
+
+- **Native fires** (`maybeAutoSkip`, off the same 1 Hz observer that drives the seek bar
+  and progress). The windows and the two profile toggles travel with the arm
+  (`introStart` / `introEnd` / `creditsStart` / `autoSkipIntro` / `autoSkipCredits`), as
+  do the NEXT episode's (`nextIntroStart` / …, fetched by `_lpAttachNextSkip` and
+  promoted by `advanceToNext`) — an advance that happens with the phone locked has
+  nothing awake to fetch them afterwards.
+- **The page draws**, off `_npApplyNativeTransport`'s native position:
+  `lpEvaluateSkipOffer` still shows the tile and its countdown, but `const remote =
+  _npHolding` stops it calling `lpAcceptSkipOffer` itself. Two actors seeking the same
+  skip is a double jump.
+- **`skipDone` flags OR, never assign** (`arm(from:)`): the page's copy is older than
+  ours whenever it was asleep. Only a file switch clears them.
+- **Credits with nothing armed to advance into does nothing.** The page's
+  `_lpAdvanceOrEnd` would end the session; with the glasses on and the phone in a pocket
+  that reads as the player dying mid-credits, so native lets it play out and `itemDidEnd`
+  owns the real end. The tile stays tappable for anyone who wants out early.
 
 The offer (`#lpSkipOffer`) renders only when the player is in full overlay
 (`.lp-active`) — hidden by CSS in tiny mode. The same CSS rule hides
