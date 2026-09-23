@@ -3769,7 +3769,20 @@ five hours yielded 5.5% of the queue — all of it on the first episode.
 
 Two things make the surplus pure cost rather than merely untidy: a task is not free
 in this process *or* in `nsurlsessiond`, and the per-host connection limit means
-asking for 9,051 at once downloads nothing faster than asking for 24. There is now
+asking for 9,051 at once downloads nothing faster than asking for 24. **A task count
+is not a socket count** — `URLSessionConfiguration.default` caps at 6 per host, so
+even the flood only ever opened ~6 connections and nothing upstream was being
+hammered. Capping therefore buys memory, **not speed**; do not expect a throughput
+change from it.
+
+**And the grant costs us the resurrection path.** Under the old hybrid, transfers
+live in `nsurlsessiond` out of process: iOS keeps them going after a kill and
+*relaunches the app* to deliver them (`handleEventsForBackgroundURLSession`). Under
+a grant everything is deliberately on the in-process session, so **a kill is
+terminal** until the user opens the app by hand — which is exactly the five-hour
+silence above. Expiry has a fallback (`expirationHandler` migrates); death cannot,
+because you cannot run code once you are killed. CPT trades a better best case for
+a worse worst case, and that trade should be made knowingly. There is now
 a global working set (`maxInFlight = 24`) refilled by `pump()`.
 
 **The invariant: `enqueue` has exactly two callers, `pump` and `migrateTasks`.**
@@ -3824,6 +3837,11 @@ is noise, not a trend. What costs the 100× is the app being suspended onto the
 out-of-process background session. A 1.73 GB queue is ~8 minutes open and ~10 hours
 suspended, so "the download didn't run overnight" and "the download is running" can
 both be true at once.
+
+**Read those as PATH numbers.** All of it was measured away from home over
+Tailscale through a Raspberry Pi subnet router on WiFi, over HTTP. ~3,300 KB/s is
+≈26 Mbit/s — the Pi's wireless leg, not the phone's limit. The ratios hold (same
+path both sides); the absolutes describe one network.
 
 Two corollaries that outlive the fix:
 - **`la-progress` cannot measure this.** A suspended app receives no delegate

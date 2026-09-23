@@ -355,6 +355,20 @@ as a pair.
 
 ### Measured throughput, so a "slow" report has something to sit against
 
+**These are PATH numbers, not platform numbers.** Every measurement below was taken
+away from home over **Tailscale**, through a Raspberry Pi subnet router on **WiFi**
+(not ethernet), to the box — and the app talks **HTTP**, not HTTPS. ~3,300 KB/s is
+≈26 Mbit/s, which is a thoroughly plausible ceiling for that Pi's wireless leg. So
+the foreground figure characterises *this network*, not what an iPhone can do. The
+**ratios** survive that caveat, because both sides of each comparison were measured
+on the same path; the absolute numbers do not. (No LAN control exists — and remote
+is the real use case here, so the path is the thing worth optimising anyway.)
+
+Also: a task count is not a socket count. `URLSessionConfiguration.default` caps at
+**6 connections per host**, so even the 9,051-task flood of 2026-09-23 only ever
+opened ~6 sockets. Nothing upstream was being hammered, and capping in-flight tasks
+does not change throughput — it removes standing memory cost and nothing else.
+
 All from 2026-09-23, same link, same device:
 
 | state | rate | source |
