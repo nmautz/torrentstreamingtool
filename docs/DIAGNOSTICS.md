@@ -131,8 +131,10 @@ JS-written rows carry `src: "js"`.
 | `ev` | Means |
 |---|---|
 | `launch` | app start — carries the build; use these to split a long log into sessions |
+| `crash` | **the previous run died and said so.** `kind` is `exception` (with `name`/`reason`) or `signal` (with `sig`); `last` is the final event `DiagLog.write` was handed, `stack` the first 24 frames, `was` whether the app was foreground or background, `since` when that was last true. Written at the NEXT launch, immediately above its `launch` row |
+| `prev-launch-dirty` | the previous run never reached `applicationWillTerminate` and left **no** signal record: a watchdog kill, a memory kill, or the user swiping the app away. `was: "fg"` is a defect; `was: "bg"` is usually iOS reclaiming a backgrounded app and is expected |
 | `snap` | a diagnostics trail row (every field the Monitor diagnostics panel shows) |
-| `startNative` | handoff began — `reason` (`early`/`background`/`manual`), `shouldPlay`, `extWindow` |
+| `startNative` | handoff began — `reason` (`early`/`background`/`manual`), `shouldPlay`, `extWindow`. Written as soon as the player exists and its surface is attached, so it means "we got this far", not "it all worked" |
 | `stopNative` | handoff ended, with the position it ended at |
 | `disarm` | teardown, with the `reason` threaded from JS (`unload` = episode advance, `stop`, `yield`, `transport-next`/`-prev`, `bgplay-off`, `not-armable`), the position, and whether a final flush was posted |
 | `rearm-swap` | an arm changed which FILE this is while a player was running; the outgoing file was flushed first. **Must be followed by `native-swap`** — see below |
@@ -180,6 +182,31 @@ That distinction is what 18.7.1 added, and it is the distinction that had been h
 disarm-order bug: a real 322 s position was being dropped by a row that looked exactly
 like harmless post-teardown noise. See
 [GOTCHAS.md § The one teardown path that wiped its state before saving it](GOTCHAS.md).
+
+### Recipe: "the app crashed"
+
+Since 18.10.0 a crash is a row, not a gap. Find the `launch` row for the run **after** the
+one that died and read upwards from it — the report is written immediately above its own
+`launch`.
+
+1. **`crash` with `kind: "exception"`** — the best case. `name` and `reason` are UIKit's
+   or AVFoundation's own words for what was wrong, and `stack` names the frames. This is
+   the shape an `NSInternalInconsistencyException` or a bad KVO/observer teardown takes.
+2. **`crash` with `kind: "signal"`** — a Swift runtime trap (nil force-unwrap, array
+   bounds, a failed `as!`) arrives as `SIGTRAP`/`SIGILL`; a memory fault as `SIGSEGV`;
+   `SIGABRT` without a preceding exception record is usually an assertion inside a system
+   framework. Read `stack` for the first frame inside `StreamLink`.
+3. **`prev-launch-dirty`** — nothing caught it. Check `was`: `"bg"` is almost always iOS
+   reclaiming a backgrounded app and is not a bug; `"fg"` with an episode playing means a
+   watchdog kill (the main thread was blocked) or a memory kill.
+4. **`last` on either row is the breadcrumb.** `DiagLog.write` hands rows to a queue and
+   returns, so the final rows of a crashing run are lost; `last` is the event name the
+   queue never flushed, captured before it was queued. When `last` names a row you cannot
+   find in the transcript, that is the queue's loss, not the app failing to reach it.
+
+The handlers re-raise with the default disposition, so the device still writes its own
+`.ips` report — Settings → Privacy & Security → Analytics & Improvements → Analytics
+Data, named `StreamLink-<date>`. That is the symbolicated version of the same crash.
 
 ### Recipe: "I pressed Next and the monitor kept playing the old episode"
 

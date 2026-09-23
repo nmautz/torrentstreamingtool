@@ -4753,6 +4753,48 @@ that should have said so said `near-start` instead.
 dragged `armed.position` backwards once a second and a native seek was undone
 within a second of being made.
 
+## An async log queue cannot report the crash that killed it (18.10.0)
+
+`DiagLog.write` builds the row on the calling thread, hands it to a serial queue and
+returns. That is the right shape for a 1 Hz instrument in a media path — and it means the
+rows still queued when the process dies are gone.
+
+Measured 2026-09-23. The app died while re-taking the external display after the glasses
+were unplugged and plugged back in. Its final row was `snap at:"background/attached"`, the
+point inside `startNative` where the player has just been created and its surface
+attached. The very next statement writes `startNative`, a fraction of a millisecond later,
+and that row is not in the transcript. **Two readings, no way to choose between them:**
+the crash was in the ten lines between those two writes, or the crash was later and the
+queue simply never flushed. A diagnostic that cannot tell "it died here" from "it stopped
+writing here" cannot investigate a death.
+
+Three things fixed it, and none of them is a crash reporter:
+
+* **A run marker.** Created at launch, deleted at `applicationWillTerminate`. Finding one
+  at the next launch means the last run did not exit — and that covers the deaths no
+  handler can catch at all: the watchdog kill and the memory kill. It carries `fg`/`bg`,
+  because iOS reclaiming a *backgrounded* app is not a bug and a foreground death always
+  is.
+* **A signal record.** Appended by the handler itself, re-raising afterwards so the device
+  still gets its `.ips`. An uncaught `NSException` writes its name and reason the same
+  way — that path is the only one that can say why in words, and it is the likeliest
+  shape of a UIKit or AVFoundation crash.
+* **A last-event breadcrumb.** A fixed C buffer overwritten by every `write` *before* the
+  row is queued, so the row the queue lost is still named in the record.
+
+**The handler may not allocate, may not lock and may not format a date.** So everything it
+touches is made at install time: the file descriptor is pre-opened, the per-signal message
+strings pre-rendered with `strdup`, the frame buffer pre-allocated, and the signal→message
+lookup is a flat C array rather than a Swift `Dictionary` (a `[Int32: …]` subscript hashes
+and retains — all three of the forbidden things). `backtrace_symbols_fd` is used precisely
+because it is the one symbol dumper documented as async-signal-safe. The record is plain
+text; parsing it into NDJSON is the *next* launch's job, where formatting a timestamp is
+legal again.
+
+The same reading cost a second fix: `startNative` wrote its row as the **last** statement
+of the function, which made it a report that the entire handoff had succeeded rather than
+a mark of how far it got. It now goes in as soon as the player and surface exist.
+
 ## Swapping `armed` is not swapping the episode (18.9.0)
 
 18.8.0 made a mid-playback file change **flush** the outgoing episode. It still

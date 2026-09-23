@@ -1,5 +1,58 @@
 # Changelog
 
+## [18.10.0] — 2026-09-22
+### The log learns to report its own death
+
+**18.9.0's fixes held.** The device transcript for the first run on the new build shows
+three skips, each one `load-while-holding` → `rearm-swap` → **`native-swap`**, and the
+progress rows after each name the new file from a position near zero. Two episodes and a
+resume played through the glasses with no `transport-stopped-itself`, no `interruption`
+and no `play-while-holding`. The paperwork and the player move together now.
+
+**But the app crashed once, and the log could not say why.** It died 2.2 s after a
+`snap at:"background/attached"` — the moment the native player is created and its surface
+attached — while re-taking the display after the glasses had been unplugged and plugged
+back in. The next row, `startNative`, is written a fraction of a millisecond later and is
+not in the transcript. That is as far as the instrument could go, and it is not far
+enough, because it left two readings open and no way to choose between them: the fault was
+either in the ten lines between those rows, or in a row the log's own write queue never
+got to flush. A diagnostic that cannot distinguish "it crashed here" from "it stopped
+writing here" cannot investigate a crash.
+
+**So a death now writes itself down.** Three facts, each recorded where a dying process
+can still record it:
+
+* **A run marker**, created at launch and deleted at `applicationWillTerminate`. Finding
+  one at the next launch means the last run did not exit — including the deaths no
+  handler can catch, the watchdog kill and the memory kill. It carries whether the app
+  was in the **foreground** or **background** when it was last seen, which is the
+  difference between a real defect and iOS reclaiming a backgrounded app as designed.
+* **A signal record**, appended by the signal handler itself for SIGSEGV / SIGABRT /
+  SIGBUS / SIGILL / SIGFPE / SIGTRAP, with a raw `backtrace_symbols_fd` dump. An uncaught
+  ObjC exception — the likeliest shape of a UIKit or AVFoundation crash, and the only one
+  that can say why in words — writes its name, its reason and its stack the same way.
+  Both re-raise with the default disposition afterwards, so the device still gets its own
+  crash report.
+* **A last-event breadcrumb**, a fixed C buffer overwritten by every `DiagLog.write`
+  *before* the row is queued. The row the queue never flushed is still named in the crash
+  record.
+
+Everything the signal handler touches — the file descriptor, the per-signal message
+strings, the frame buffer, the signal table — is allocated and rendered at install time,
+because a handler may not allocate, may not take a lock and may not format a date. The
+record is plain text; the *next* launch parses it and turns it into a proper `crash` or
+`prev-launch-dirty` row, written synchronously and placed above the `launch` row it was
+found at.
+
+**And `startNative` stopped being a victory lap.** It was the last statement of the
+function, so it reported that the whole handoff had succeeded — which is exactly why its
+absence today could not be read. It now goes in as soon as the player exists and the
+surface is attached, and means "we got this far". Everything after it is separately
+visible through the observers it installs.
+
+New rows: `crash` (`kind` exception/signal, `name`/`reason` or `sig`, `last`, `stack`,
+`was`, `since`), `prev-launch-dirty` (`was`, `since`, `last`).
+
 ## [18.9.0] — 2026-09-22
 ### Pressing Next moved the paperwork, not the player
 

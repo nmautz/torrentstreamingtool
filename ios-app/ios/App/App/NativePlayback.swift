@@ -60,7 +60,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "18.9.0"
+let NP_BUILD = "18.10.0"
 
 // MARK: - Armed state
 
@@ -265,6 +265,87 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
 /// launches. This writes newline-delimited JSON to Caches with ABSOLUTE
 /// timestamps, survives restarts, and is uploaded to the host on demand.
 ///
+// MARK: - Crash forensics
+
+// WHY THE LOG COULD NOT NAME A CRASH
+// Measured 2026-09-23: the app died 2.2 s after `snap at:"background/attached"`
+// and the very next row — `startNative`, called sub-millisecond later — is not
+// in the transcript. Two separate blindnesses, both fixed here:
+//
+//   1. NOTHING RECORDED THE DEATH. A crash leaves no row at all, so a reader
+//      cannot tell a crash from a user force-quit from an ordinary gap.
+//   2. THE LAST ROWS ARE LOST. `DiagLog.write` hands the row to a serial queue
+//      and returns; rows still queued when the process dies are gone. The
+//      absence of `startNative` therefore proves nothing on its own.
+//
+// The pieces below are deliberately NOT a crash reporter — they are three
+// cheap facts written where a dying process can still write them:
+//
+//   * a RUN MARKER, created at launch and deleted on a clean terminate, so the
+//     next launch knows the last one ended badly even when no signal fired
+//     (watchdog, jetsam, OOM — none of which are catchable);
+//   * a PENDING-CRASH file, appended from the signal handler itself, carrying
+//     the signal and a raw `backtrace_symbols_fd` dump;
+//   * a LAST-EVENT breadcrumb, a fixed C buffer overwritten by every
+//     `DiagLog.write` BEFORE it queues, so the row the queue never flushed is
+//     still named in the crash file.
+//
+// Both handlers re-raise with the default disposition afterwards, so iOS still
+// writes its own .ips report on the device.
+//
+// EVERYTHING THE SIGNAL HANDLER TOUCHES IS PRE-ALLOCATED. A handler may not
+// malloc, may not take a lock and may not format a date — so the file
+// descriptor is opened, the per-signal message strings rendered, and the frame
+// buffer allocated at install time. `backtrace_symbols_fd` is the one symbol
+// dumper that is documented async-signal-safe (it writes, it does not allocate).
+// The pending file is plain text, parsed and turned into a proper NDJSON row by
+// the NEXT launch, where formatting a timestamp is legal again.
+
+private let SL_CRASH_FRAMES = 48
+
+private var slCrashFD: Int32 = -1
+private var slCrashFrames: UnsafeMutablePointer<UnsafeMutableRawPointer?>?
+/// A flat C table indexed by signal number, NOT a Swift Dictionary: a handler
+/// may not hash, retain or release, and a `[Int32: …]` subscript does all three.
+private let SL_SIG_MAX: Int32 = 32
+private var slCrashMsgs: UnsafeMutablePointer<UnsafePointer<CChar>?>?
+/// `sig_atomic_t`, read and written from the handler. Guards against the second
+/// report: an uncaught ObjC exception writes its own record and THEN aborts,
+/// which arrives here as SIGABRT.
+private var slCrashHandled: sig_atomic_t = 0
+/// Last event name handed to `DiagLog.write`, in a fixed buffer so the signal
+/// handler can `write(2)` it without formatting anything.
+private let slLastEvent = UnsafeMutablePointer<CChar>.allocate(capacity: 64)
+
+private func slNoteEvent(_ name: String) {
+    name.withCString { src in
+        _ = strlcpy(slLastEvent, src, 64)
+    }
+}
+
+private func slCrashSignalHandler(_ sig: Int32) {
+    if slCrashHandled == 0 {
+        slCrashHandled = 1
+        let fd = slCrashFD
+        if fd >= 0 {
+            if sig > 0, sig < SL_SIG_MAX, let tbl = slCrashMsgs, let msg = tbl[Int(sig)] {
+                _ = write(fd, msg, strlen(msg))
+            }
+            _ = write(fd, "last=", 5)
+            _ = write(fd, slLastEvent, strlen(slLastEvent))
+            _ = write(fd, "\n", 1)
+            if let frames = slCrashFrames {
+                let n = backtrace(frames, Int32(SL_CRASH_FRAMES))
+                backtrace_symbols_fd(frames, n, fd)
+            }
+            _ = write(fd, "---\n", 4)
+        }
+    }
+    // Hand the corpse back to the system so the device still gets its .ips.
+    signal(sig, SIG_DFL)
+    raise(sig)
+}
+
 /// Caches rather than Documents deliberately: this is disposable, and iOS may
 /// reclaim it under storage pressure rather than failing a write.
 ///
@@ -287,10 +368,15 @@ final class DiagLog {
     // Raised from 3 MB with the categories: the log now covers the web player
     // and the offline path too, so the same wall-clock span costs more rows.
     private let maxBytes = 8 * 1024 * 1024
-    private lazy var url: URL = {
-        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        return dir.appendingPathComponent("streamlink-diag.log")
+    private lazy var dir: URL = {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
     }()
+    private lazy var url: URL = dir.appendingPathComponent("streamlink-diag.log")
+    /// Exists for exactly as long as a run does. Present at launch = the last run
+    /// did not reach `applicationWillTerminate`.
+    private lazy var runMarker: URL = dir.appendingPathComponent("streamlink-run.marker")
+    /// Written BY the dying process, read by the next one. See "Crash forensics".
+    private lazy var crashPending: URL = dir.appendingPathComponent("streamlink-crash.pending")
     private lazy var iso: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -308,6 +394,9 @@ final class DiagLog {
         row["t"] = iso.string(from: Date())
         row["ev"] = event
         row["cat"] = cat
+        // Breadcrumb first, queue second. A row that is still queued when the
+        // process dies is lost, and the one we most want is always the last one.
+        slNoteEvent(event)
         q.async { [weak self] in
             guard let self = self else { return }
             // A field the caller passed that JSON cannot represent (an NSNull, a
@@ -320,6 +409,159 @@ final class DiagLog {
                   var line = String(data: data, encoding: .utf8) else { return }
             line += "\n"
             self.append(line)
+        }
+    }
+
+    // MARK: Run lifecycle (see "Crash forensics" above)
+
+    /// Call ONCE, before the `launch` row: it is what turns the previous run's
+    /// death into rows, and the order matters — the report belongs above the
+    /// launch it was found at, not below it.
+    func openRun(build: String) {
+        reportPreviousDeath(build: build)
+        writeMarker(state: "launching", build: build)
+        installCrashHandlers()
+    }
+
+    /// The app reached `applicationWillTerminate`: an ORDINARY exit. Anything
+    /// that skips this — a crash, a watchdog kill, a jetsam, a force-quit from
+    /// the switcher — leaves the marker behind and is reported next launch.
+    func closeRun() {
+        try? FileManager.default.removeItem(at: runMarker)
+    }
+
+    /// Foreground/background is the single most useful qualifier on a dirty
+    /// marker: iOS kills BACKGROUND apps routinely and for reasons that are not
+    /// bugs, so `state: "bg"` is noise and `state: "fg"` is a real defect.
+    func noteAppState(_ state: String) {
+        guard FileManager.default.fileExists(atPath: runMarker.path) else { return }
+        writeMarker(state: state, build: NP_BUILD)
+    }
+
+    private func writeMarker(state: String, build: String) {
+        let row: [String: Any] = ["at": iso.string(from: Date()),
+                                  "state": state, "build": build]
+        guard let d = try? JSONSerialization.data(withJSONObject: row) else { return }
+        try? d.write(to: runMarker, options: .atomic)
+    }
+
+    private func reportPreviousDeath(build: String) {
+        let fm = FileManager.default
+        let marker = (try? Data(contentsOf: runMarker))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? nil
+
+        // The signal/exception record, if the process got far enough to write one.
+        var reported = 0
+        if let text = try? String(contentsOf: crashPending, encoding: .utf8), !text.isEmpty {
+            for record in text.components(separatedBy: "---\n") where !record.isEmpty {
+                guard let row = Self.parseCrashRecord(record) else { continue }
+                var r = row
+                r["build"] = marker?["build"] as? String ?? build
+                r["was"] = marker?["state"] as? String ?? "?"
+                r["since"] = marker?["at"] as? String ?? ""
+                writeNow("crash", r, cat: "app")
+                reported += 1
+            }
+            try? fm.removeItem(at: crashPending)
+        }
+        if reported > 0 { try? fm.removeItem(at: runMarker); return }
+
+        // No record, but the marker survived: killed without a catchable signal.
+        // Watchdog (a hung main thread), jetsam (memory), or the user swiping the
+        // app away. `was` is what tells those apart.
+        if let m = marker {
+            writeNow("prev-launch-dirty", [
+                "was": m["state"] as? String ?? "?",
+                "since": m["at"] as? String ?? "",
+                "build": m["build"] as? String ?? "?",
+                "last": String(cString: slLastEvent),
+            ], cat: "app")
+            try? fm.removeItem(at: runMarker)
+        }
+    }
+
+    /// The pending file is line-oriented plain text because a signal handler can
+    /// write nothing more structured. `key=value` lines up front, raw
+    /// `backtrace_symbols_fd` output after them.
+    private static func parseCrashRecord(_ record: String) -> [String: Any]? {
+        var out: [String: Any] = [:]
+        var stack: [String] = []
+        for line in record.components(separatedBy: "\n") {
+            let l = line.trimmingCharacters(in: .whitespaces)
+            if l.isEmpty { continue }
+            if let eq = l.firstIndex(of: "="), l.hasPrefix("kind=") || l.hasPrefix("sig=")
+                || l.hasPrefix("name=") || l.hasPrefix("reason=") || l.hasPrefix("last=") {
+                out[String(l[l.startIndex..<eq])] = String(l[l.index(after: eq)...])
+            } else {
+                stack.append(l)
+            }
+        }
+        guard out["kind"] != nil else { return nil }
+        // Frame 0 is always this handler; the interesting ones are shallow. Capped
+        // because the whole transcript is uploaded over the LAN on every send.
+        out["stack"] = String(stack.prefix(24).joined(separator: " | ").prefix(2400))
+        return out
+    }
+
+    /// Like `write`, but the row is on disk before this returns. Only for the
+    /// handful of rows that must survive whatever happens next.
+    func writeNow(_ event: String, _ fields: [String: Any] = [:], cat: String = "play") {
+        var row: [String: Any] = fields
+        row["t"] = iso.string(from: Date())
+        row["ev"] = event
+        row["cat"] = cat
+        slNoteEvent(event)
+        q.sync {
+            let safe = Self.sanitize(row)
+            guard let data = try? JSONSerialization.data(withJSONObject: safe),
+                  let line = String(data: data, encoding: .utf8) else { return }
+            self.append(line + "\n")
+        }
+    }
+
+    private func installCrashHandlers() {
+        guard slCrashFD < 0 else { return }
+        slCrashFD = open(crashPending.path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+        guard slCrashFD >= 0 else { return }
+        slCrashFrames = UnsafeMutablePointer<UnsafeMutableRawPointer?>
+            .allocate(capacity: SL_CRASH_FRAMES)
+        let msgs = UnsafeMutablePointer<UnsafePointer<CChar>?>
+            .allocate(capacity: Int(SL_SIG_MAX))
+        msgs.initialize(repeating: nil, count: Int(SL_SIG_MAX))
+        slCrashMsgs = msgs
+        slNoteEvent("launch")
+
+        // An uncaught ObjC exception is the likeliest shape of a UIKit or
+        // AVFoundation crash, and it is the only one that can say WHY in words.
+        // This runs as ordinary code — the abort() comes after — so it may
+        // allocate, and it writes the same text format the signal path does.
+        let pending = crashPending
+        NSSetUncaughtExceptionHandler { e in
+            slCrashHandled = 1
+            var text = "kind=exception\n"
+            text += "name=\(e.name.rawValue)\n"
+            text += "reason=\((e.reason ?? "").replacingOccurrences(of: "\n", with: " "))\n"
+            text += "last=\(String(cString: slLastEvent))\n"
+            text += e.callStackSymbols.prefix(24).joined(separator: "\n")
+            text += "\n---\n"
+            if let d = text.data(using: .utf8),
+               let h = try? FileHandle(forWritingTo: pending) {
+                _ = try? h.seekToEnd()
+                try? h.write(contentsOf: d)
+                try? h.close()
+            }
+        }
+
+        // A Swift runtime trap (nil force-unwrap, array bounds, a failed `as!`)
+        // is a SIGTRAP/SIGILL and never becomes an NSException, so these are not
+        // redundant with the handler above.
+        for (sig, label) in [(SIGSEGV, "SIGSEGV"), (SIGABRT, "SIGABRT"),
+                             (SIGBUS, "SIGBUS"), (SIGILL, "SIGILL"),
+                             (SIGFPE, "SIGFPE"), (SIGTRAP, "SIGTRAP")] {
+            if let rendered = strdup("kind=signal\nsig=\(label)\n") {
+                msgs[Int(sig)] = UnsafePointer(rendered)
+            }
+            signal(sig, slCrashSignalHandler)
         }
     }
 
@@ -548,6 +790,9 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     // MARK: Lifecycle
 
     func bootstrap() {
+        // Before the launch row, so the previous run's death is reported ABOVE
+        // the launch that found it. See "Crash forensics".
+        DiagLog.shared.openRun(build: NP_BUILD)
         DiagLog.shared.write("launch", [
             "build": NP_BUILD,
             "ios": UIDevice.current.systemVersion,
@@ -972,6 +1217,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     // MARK: Handoff in
 
     @objc private func appDidEnterBackground() {
+        DiagLog.shared.noteAppState("bg")
         if isNativeActive { diagSnap("background"); scheduleBackgroundSnaps() }
         guard armed.active, armed.handoffEnabled, armed.url != nil else { return }
         guard !isNativeActive else { return }
@@ -1018,6 +1264,20 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // lands after the surface work.
         onMain { [weak self] in self?.diagSnap("background/attached") }
         scheduleLockedSnaps()
+
+        // WRITTEN HERE, NOT AT THE END OF THIS FUNCTION. It used to be the last
+        // statement, which made it a report that the whole handoff succeeded —
+        // and therefore useless for the one question a transcript most needs to
+        // answer, "how far did we get?". Measured 2026-09-23: the app died with
+        // `snap at:"background/attached"` as its final row and no `startNative`,
+        // which narrowed the fault to the ten lines below but could not say
+        // whether it was those lines or a row the queue never flushed. The row
+        // now means "the player exists and the surface is attached"; everything
+        // after it is separately visible through the observers it installs.
+        DiagLog.shared.write("startNative", ["reason": reason, "at": startAt,
+                                             "shouldPlay": shouldPlay,
+                                             "title": armed.title,
+                                             "extWindow": extWindow != nil], cat: "play")
 
         statusObs = it.observe(\.status, options: [.new]) { [weak self] obs, _ in
             guard let self = self, obs.status == .readyToPlay else { return }
@@ -1080,10 +1340,6 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             name: .AVPlayerItemPlaybackStalled, object: it)
 
         installTimeObserver(on: p)
-        DiagLog.shared.write("startNative", ["reason": reason, "at": startAt,
-                                            "shouldPlay": shouldPlay,
-                                            "title": armed.title,
-                                            "extWindow": extWindow != nil], cat: "play")
         emit("nativeStarted", ["reason": reason, "position": startAt,
                                "extMode": armed.extMode,
                                "extWindow": extWindow != nil,
@@ -1506,6 +1762,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     // MARK: Hand back
 
     @objc private func appDidBecomeActive() {
+        DiagLog.shared.noteAppState("fg")
         restoreStrandedBrightness()
         drainPendingCommand()
         // Hand the external display back to mirroring: the web player is about to
@@ -1757,6 +2014,9 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     }
 
     @objc private func appWillTerminate() {
+        // The ONLY clean way out. Everything else leaves the marker behind and
+        // is reported as `prev-launch-dirty` on the next launch.
+        DiagLog.shared.closeRun()
         if tvModeOn || savedBrightness != nil {
             if let b = savedBrightness { UIScreen.main.brightness = b }
             UIApplication.shared.isIdleTimerDisabled = false
