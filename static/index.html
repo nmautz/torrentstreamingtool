@@ -23193,10 +23193,30 @@ function _lpInstallIosPreroll(hls, video) {
 // it's armed only AFTER the first `playing` (lp.everPlayed), i.e. after the very
 // stall we're breaking here. iOS-only (the MMS quirk); on every other platform a
 // cold start just works. See GOTCHAS.md § ManagedMediaSource.
+// How long one of the watchdog's guards must HOLD before it is worth a row.
+const LP_COLD_STALL_MS = 2500;
 let _lpColdKickTimer = null;
 let _lpColdKickStalls = 0;
+// Instrument state for the cold start (18.14.0). The watchdog above has existed
+// for versions and has never written a single row, so "it wouldn't start until I
+// pressed the button" has been reported for months against a log that could not
+// say whether the watchdog ran, whether it nudged, or why it declined to.
+let _lpColdKickNudges = 0;
+let _lpColdArmedAt = 0;
+let _lpColdBlockSeen = [];
+let _lpColdBlockWhy = "", _lpColdBlockSince = 0;
+function _lpStartFacts(v) {
+  return {
+    paused: !!v.paused, ready: v.readyState, net: v.networkState,
+    t: v.currentTime || 0, fwd: +(_lpFwdBuffer(v).toFixed(2)),
+    buffered: _lpBufferedDesc(v),
+    engine: lp.hls ? "hls.js" : "native-hls", mode: lp.mode || "",
+    src: lp.source || "", file: lp.filePath || "",
+  };
+}
 function _lpArmColdStartKick() {
   _lpDisarmColdStartKick();
+  _lpColdArmedAt = Date.now();        // set even off-iOS: lpTogglePlay reads it
   if (!_isIOSDevice()) return;
   _lpColdKickStalls = 0;
   _lpColdKickTimer = setInterval(_lpColdStartKickTick, 900);
@@ -23204,6 +23224,9 @@ function _lpArmColdStartKick() {
 function _lpDisarmColdStartKick() {
   if (_lpColdKickTimer) { clearInterval(_lpColdKickTimer); _lpColdKickTimer = null; }
   _lpColdKickStalls = 0;
+  _lpColdKickNudges = 0;
+  _lpColdBlockSeen = [];
+  _lpColdBlockWhy = ""; _lpColdBlockSince = 0;
 }
 function _lpColdStartKickTick() {
   const v = document.getElementById("lpVideo");
@@ -23214,15 +23237,53 @@ function _lpColdStartKickTick() {
   // (readyState ≥ HAVE_FUTURE_DATA, `playing` imminent), or the loadedmetadata
   // resume-seek hasn't landed yet. Reset the streak so we only act on a genuine,
   // sustained stall.
-  if (v.paused || _lpScrub || v.readyState >= 3 || !lp.resumeApplied) {
+  //
+  // WHY IT DECLINED IS THE DIAGNOSIS, NOT AN ASIDE. Each of these four branches
+  // makes the watchdog do nothing, and one of them — `paused` — is the exact
+  // shape of the long-standing complaint: the element is parked, no watchdog in
+  // the player is allowed to touch it, and the only cure is the transport press
+  // the user has been making by hand. One row per distinct reason per file
+  // (capped at three), and only after ~2.5 s, so a healthy start stays silent.
+  const why = v.paused ? "paused"
+            : _lpScrub ? "scrub"
+            : v.readyState >= 3 ? "ready"
+            : !lp.resumeApplied ? "resume-pending" : "";
+  if (why) {
     _lpColdKickStalls = 0;
+    // THE STATE HAS TO HAVE STUCK, not merely been true once. `ready` in
+    // particular is what a HEALTHY start looks like for the tick or two between
+    // data arriving and `playing` firing — logging it on sight would put a row
+    // on every episode and bury the one that matters. Requiring the same reason
+    // to hold for LP_COLD_STALL_MS says "this is where it stopped", which is the
+    // only claim worth making. Distinct reasons only, at most three per file.
+    const now = Date.now();
+    if (why !== _lpColdBlockWhy) { _lpColdBlockWhy = why; _lpColdBlockSince = now; }
+    if (_lpColdBlockSeen.indexOf(why) < 0 && _lpColdBlockSeen.length < 3
+        && now - _lpColdBlockSince >= LP_COLD_STALL_MS
+        && now - _lpColdArmedAt > LP_COLD_STALL_MS) {
+      _lpColdBlockSeen.push(why);
+      _npLog("cold-stall", { why: why, nudges: _lpColdKickNudges,
+                             held: now - _lpColdBlockSince,
+                             since: now - _lpColdArmedAt,
+                             ..._lpStartFacts(v) }, "play");
+    }
     return;
   }
+  _lpColdBlockWhy = ""; _lpColdBlockSince = 0;
   // Give the natural start ~1.8 s before intervening; then nudge each tick.
   if (++_lpColdKickStalls < 2) return;
-  if (_lpColdKickStalls > 8) { _lpDisarmColdStartKick(); return; }  // ~6 s of trying, then give up
+  if (_lpColdKickStalls > 8) {                                     // ~6 s of trying
+    _npLog("cold-kick", { stage: "giveup", nudges: _lpColdKickNudges,
+                          since: Date.now() - _lpColdArmedAt,
+                          ..._lpStartFacts(v) }, "play");
+    _lpDisarmColdStartKick(); return;
+  }
   // The manual fix, automated: a real seek to a fresh position makes MMS start
   // fetching. Relative nudge stays near the start; accumulates ≤ ~2 s worst case.
+  _lpColdKickNudges++;
+  _npLog("cold-kick", { stage: "nudge", n: _lpColdKickNudges,
+                        since: Date.now() - _lpColdArmedAt,
+                        ..._lpStartFacts(v) }, "play");
   try { v.currentTime = (v.currentTime || 0) + 0.35; } catch (_) {}
 }
 
@@ -23747,7 +23808,20 @@ async function _lpLoadIndex(seekTo) {
     _npArm();
     try { await _cap.np.takeover({ reason: "advance-holding" }); } catch (_) {}
   } else {
-    try { await v.play(); } catch (_) { /* iOS may block autoplay until user gesture */ }
+    // THE REJECTION USED TO GO IN THE BIN. `play()` rejecting is one of the two
+    // ways a file can fail to start, and the only way it can fail SILENTLY —
+    // NotAllowedError (the autoplay policy, benign, a tap cures it) and
+    // AbortError (a fresh load raced this play) look identical from outside the
+    // player, and neither left a single row. `ok: true` matters just as much:
+    // it proves the promise resolved, which narrows the wedge to the pipeline.
+    try {
+      await v.play();
+      _npLog("play-start", { ok: true, ..._lpStartFacts(v) }, "play");
+    } catch (e) {
+      _npLog("play-start", { ok: false, err: (e && e.name) || "?",
+                             msg: (e && e.message) || "",
+                             ..._lpStartFacts(v) }, "play");
+    }
   }
   _lpArmColdStartKick();      // iOS/MMS may never start fetching until a real seek nudges it
   _lpCtlSync(); _lpCtlTick(); _lpCtlShow();   // fresh custom-controls state for the new file
@@ -25225,6 +25299,20 @@ function lpStageTap(e) {
 
 function lpTogglePlay() {
   const v = _lpV();
+  // THE MANUAL CURE, RECORDED. A transport press before this file has ever
+  // reached `playing` IS the bug happening — it is the user doing by hand what
+  // nothing in the player managed — and the press itself was never an event, so
+  // every report of it arrived with the one instant that matters missing. What
+  // this row settles first: whether the element was `paused` at the press. If it
+  // was, the cold-start watchdog was structurally powerless (it declines on
+  // `paused`) and the fix belongs in the start path; if it was NOT, the press is
+  // a pause+play cycle unwedging a decode pipeline and the fix belongs there.
+  if (v && lp.itemId && !lp.everPlayed) {
+    _npLog("transport-unwedge", { nudges: _lpColdKickNudges,
+                                  resumeApplied: !!lp.resumeApplied,
+                                  since: Date.now() - _lpColdArmedAt,
+                                  holding: _npHolding, ..._lpStartFacts(v) }, "play");
+  }
   // Native owns playback: drive IT, and leave our element alone. Playing the
   // element here would start a second engine, take the audio session, and
   // interrupt the player feeding the display.
@@ -27052,6 +27140,15 @@ function _lpAttachVideoEvents() {
     // Safari-native recovery success lands here (hls.js recovery is detected
     // on FRAG_LOADED instead — buffered playback also fires `playing`).
     if (!lp.hls && lp.netDown) _lpNetReset();
+    // A start that FOUGHT is the one worth a row — it closes the loop on every
+    // cold-kick/cold-stall above it and gives the time-to-first-frame that says
+    // how bad it was. A clean start writes nothing.
+    if (!lp.everPlayed && (_lpColdKickNudges > 0 || _lpColdBlockSeen.length > 0)) {
+      _npLog("cold-start", { ok: true, nudges: _lpColdKickNudges,
+                             blocked: _lpColdBlockSeen.join(","),
+                             ms: Date.now() - _lpColdArmedAt,
+                             ..._lpStartFacts(v) }, "play");
+    }
     lp.everPlayed = true; _lpStallSince = 0;   // arm + clear the stall watchdog
     _lpDisarmColdStartKick();                  // cold start succeeded — stop nudging
     document.getElementById("localPlayer").classList.remove("lp-buffering");
@@ -28198,6 +28295,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.13.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.14.0</div>
 </body>
 </html>

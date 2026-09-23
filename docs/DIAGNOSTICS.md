@@ -163,15 +163,32 @@ JS-written rows carry `src: "js"`.
 | `route` | audio route change — the glasses are a route as well as a screen |
 | `item-stalled` / `item-failed` | the native item ran dry or could not finish |
 | `video-error` / `video-stalled` | the same, from the web element |
+| `play-start` | the result of `v.play()` on a fresh file (18.14.0). `ok: false` carries `err` — **`NotAllowedError`** is the autoplay policy (a tap cures it), **`AbortError`** is a newer load having replaced this one. `ok: true` is just as useful: the promise resolved, so a picture that never appears is the pipeline's doing, not the start's |
+| `cold-stall` | the iOS cold-start watchdog **declined to act**, and `why` says which of its four guards stopped it: `paused`, `scrub`, `ready`, `resume-pending`. **`paused` is the important one** — the element is parked and no watchdog may touch it, which is the shape of "it won't start until I press the button". At most three per file, never before 2.5 s |
+| `cold-kick` | the watchdog nudging `currentTime` to make ManagedMediaSource start fetching. `stage: "nudge"` with a count, or `stage: "giveup"` after ~6 s of trying |
+| `cold-start` | the closing verdict, written **only when the start had to fight**: `nudges`, the `blocked` reasons seen, and `ms` to first frame. A clean start writes nothing |
+| `transport-unwedge` | **the user pressing the transport before this file ever reached `playing`** — i.e. the manual cure for the bug above, at last an event. Read `paused` first: paused at the press means the watchdog was structurally powerless; not paused means the press was a pause/play cycle unwedging the decode pipeline |
 | `progress` | a progress POST **and its HTTP status**. `final: true` marks the forced flush at teardown; `try`/`retrying` show the retry |
 | `progress-skipped` | a POST refused by a guard — `why` names the guard (`near-start`, `duration-0`, `no-item`, `no-file`, `no-server`), plus `native` |
 | `progress-failed` | a web-player save that failed, and whether it was stashed offline or lost |
+| `bundle-start` | a download beginning — how many files were asked for, how many `resumed` straight off disk, total `bytes`, and whether the app was foreground |
 | `bundle-retry` / `bundle-complete` / `bundle-failed` | a download's course, not just its verdict |
+| `dl-bg` / `dl-fg` | the app crossed the foreground/background line with jobs running (18.14.0). `moved` is how many in-flight transfers `migrateTasks` handed to the other session; **`left`** is `backgroundTimeRemaining` in seconds, the budget the re-enqueue has to finish inside. A `dl-bg` with `moved: 0` and `pending > 0` means nothing migrated and the transfers die with the assertion |
+| `dl-bgtask-expired` | iOS reclaimed the background assertion (~30 s). Expected mid-bundle and **not a bug on its own** — what decides it is whether the preceding `dl-bg` moved the transfers to the background session first |
+| `dl-bg-events` | the OS relaunched us to deliver finished background transfers. Its **absence** across a whole suspended stretch means the background session delivered nothing at all |
+| `dl-bg-flushed` | that batch finished flushing; `completed` is how many bundles the on-disk reconcile repaired |
+| `la-progress` | 30 s download heartbeat — bytes done vs total, files done vs count. **This is what separates "stalled" from "not running"**; without it a frozen transfer is indistinguishable from no transfer |
 | `bundle-healed` | an index entry marked complete by **reconciliation** rather than by finishing — check for this first when offline playback breaks on a bundle |
 | `lms-start` / `lms-failed` / `lms-stop` | the loopback server, the middle link in the offline chain |
 | `offline-completed` | an offline watch crossed the completion line, **with the played-time inputs** — the one case the server cannot measure |
 | `offline-pending` / `offline-synced` | the offline→online handover from the side that knows what it is holding |
 | `audio-session-failed` | `setActive` threw, with the app state at the time |
+| `la-reap` | a Live Activity was found **at cold start** and ended. Nothing is playing or downloading yet in a fresh process, so one found here is stale by definition — it is the leftover of a session that was force-quit, jetsammed or crashed. `kind` is `playback` or `download` |
+| `la-start` | an activity began. `how: "requested"` is a new one, `how: "adopted"` is one already on screen being taken over. `skipped: "disabled"` means **Live Activities are off in iOS Settings** — which looks exactly like "ours went stale" from the outside, and this row is the only thing that tells them apart |
+| `la-failed` | `Activity.request` threw — the system activity limit, a non-foreground caller, a disallowed target. Swallowed in both files until 18.14.0 |
+| `la-end` | we ended it, with `why`. `live: 0` is the interesting one: we ended an activity the system says was not there, so a stale one after this point was requested again |
+| `la-missing` | `update()` had no handle **and** the system's list was empty: we believe we are driving an Island that does not exist. Throttled to one a minute |
+| `la-audit` | on every foreground, what the system actually has against what we believe is playing. **`live: 1, playing: false` is a stale activity caught in the act** — every other row here describes an intention; this one describes the lock screen |
 
 **`progress-skipped` is the row to look for first** when positions are not being saved. A
 silent `guard` hid the duration-0 bug for a full day; that guard now says so.
@@ -328,6 +345,73 @@ as a pair.
   presses were **coalesced** (18.12.3 — a continuous burst of ±10 writes exactly two rows,
   the first press and the resting place, so `from`→`to` on the second row will show a jump
   of many multiples of 10).
+
+### Recipe: "it won't start playing until I press the button"
+
+The oldest of the on-device complaints, and until 18.14.0 the transcript had
+literally nothing to say about it: the `play()` rejection was discarded, and the
+cold-start watchdog that exists for exactly this had never written a row.
+
+1. Find the `loaded` row for the file, then the `play-start` immediately after
+   it. **`ok: false` ends the search** — `err: "NotAllowedError"` is the autoplay
+   policy and the cure is a user gesture, which is precisely what the user was
+   supplying by hand.
+2. `ok: true` means the promise resolved and the element agreed to play. Now look
+   for `cold-stall`. Its `why` is the diagnosis:
+   - **`paused`** — the element is parked despite `play()` resolving. The
+     watchdog declines here on purpose (a nudge cannot start a paused element),
+     so nothing in the player was ever going to fix it. This is the one that
+     matches the report.
+   - **`resume-pending`** — `loadedmetadata` never fired, so the resume seek
+     never landed and the watchdog stayed disarmed. A manifest/first-segment
+     problem, not a start problem.
+   - **`ready`** — data is flowing and `playing` is imminent; not this bug.
+3. `cold-kick` rows mean the watchdog **did** act. A `stage: "giveup"` after
+   eight nudges is a genuine ManagedMediaSource wedge that the nudge could not
+   break. A `cold-start` row below them means it eventually worked, and `ms` is
+   how long the user stared at a spinner.
+4. **`transport-unwedge` is the fingerprint of the user's own fix.** Its
+   `paused` field settles which half of the bug this was, and `since` says how
+   long they waited before giving up on the player.
+
+A clean start writes only `play-start ok:true`. Any of the other four rows means
+the file fought.
+
+### Recipe: "the download stopped when I locked the phone"
+
+1. `bundle-start` — the download began at all, and `fetch` vs `resumed` says how
+   much was left to do.
+2. `dl-bg` at the moment of lock. **Read `moved` and `left` together.** `moved`
+   is how many in-flight transfers were handed to the background session; `left`
+   is how many seconds of execution iOS was granting. `moved: 0` with
+   `pending > 0` means nothing migrated — the transfers were still on the
+   foreground session and died with the process.
+3. `la-progress` every 30 s is the proof of life. Bytes climbing across the lock
+   means background transfer is working and the complaint is speed, not
+   stoppage — a background `URLSession` runs at background QoS through
+   `nsurlsessiond` and is genuinely slower (see STREAMING.md § hybrid sessions).
+   Bytes frozen at the `dl-bg` value means it really stopped.
+4. `dl-bgtask-expired` ~30 s after the `dl-bg` is **normal**. It only matters if
+   the `dl-bg` above it shows the transfers had not migrated.
+5. On the next unlock or relaunch: `dl-bg-events` means the OS woke us to deliver
+   finished transfers, and `dl-bg-flushed` says how many bundles that repaired.
+   Neither row appearing, with `la-progress` frozen, is the real failure.
+
+### Recipe: "the Dynamic Island went stale"
+
+1. `la-audit` at the last foreground. **`live: 1` with `playing: false` is the
+   bug, observed.** `tracked: false` on top of that means the activity outlived
+   the process that made it and no handle points at it.
+2. Walk back for the `la-end` that should have removed it. No `la-end` at all
+   means the session died without reaching teardown — pair it with the
+   `prev-launch-dirty` / `crash` row at the next launch.
+3. `la-reap` at launch is the **cure** firing, not the disease: it says a stale
+   activity was found and ended. Repeated `la-reap` rows across launches mean
+   sessions keep dying without teardown, which is the thing to chase.
+4. `la-start skipped: "disabled"` means there is no Island because iOS Settings
+   turned them off. Nothing else here applies.
+5. `la-failed` on `request` is the system activity limit or a background caller.
+   `la-missing` means the opposite — we kept pushing at an Island that was gone.
 
 ### Recipe: "the picture is frozen but the seek bar moves"
 

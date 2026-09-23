@@ -2880,6 +2880,22 @@ panel's full-width twin is `_appDlWideHTML`, refreshed by the same
    Progress + completion are pushed to JS via `bundleProgress` / `bundleComplete`
    events.
 
+   **Diagnosing a download that stops when the phone locks (18.14.0).** Two
+   sessions run side by side — a default one in-process while the app is
+   foreground, and the background session that survives suspension — and every
+   foreground/background transition **migrates** the in-flight transfers between
+   them (`migrateTasks`). That transition is the whole bug surface, and until
+   18.14.0 neither side of it wrote a row, so "background downloads don't work"
+   could be any of four unrelated things. The transcript now carries `dl-bg` /
+   `dl-fg` (jobs, pending files, transfers actually moved, and `left` — the
+   seconds of execution iOS is granting), `dl-bgtask-expired` (the assertion
+   being reclaimed, which is normal *if* the migration already happened),
+   `dl-bg-events` / `dl-bg-flushed` (the OS relaunching us to deliver finished
+   transfers), and a 30 s `la-progress` byte heartbeat — the one measurement that
+   separates "stalled" from "not running". See
+   [DIAGNOSTICS.md](DIAGNOSTICS.md) § Recipe: "the download stopped when I locked
+   the phone".
+
 > **Single-rung downloads + the quality chooser.** A downloaded file is always
 > played at one resolution, so `files[]` is filtered server-side
 > (`_bundle_select_rung` in `main.py`) to **one** video rung; the others' playlist +

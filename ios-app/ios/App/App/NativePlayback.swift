@@ -60,7 +60,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "18.13.2"
+let NP_BUILD = "18.14.0"
 
 // MARK: - Armed state
 
@@ -1123,7 +1123,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         } else if a.active {
             PlaybackLiveActivity.shared.update(state: liveActivityState(), force: false)
         } else if wasActive {
-            PlaybackLiveActivity.shared.end()
+            PlaybackLiveActivity.shared.end("disarm")
         }
 
         // Claim the audio session while we are still FOREGROUND. This is the fix
@@ -1927,6 +1927,11 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
 
     @objc private func appDidBecomeActive() {
         DiagLog.shared.noteAppState("fg")
+        // Coming back to the foreground is when the user LOOKS at the Island, so
+        // it is the right moment to record what is actually on it against what we
+        // think is playing. `live: 1, playing: false` is the stale-activity
+        // report, observed rather than described.
+        PlaybackLiveActivity.shared.audit("becomeActive", playing: isNativeActive || armed.active)
         restoreStrandedBrightness()
         drainPendingCommand()
         // Hand the external display back to mirroring: the web player is about to
@@ -2023,7 +2028,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             sessionActivated = false
         }
         endBgTask()
-        if endActivity { PlaybackLiveActivity.shared.end() }
+        if endActivity { PlaybackLiveActivity.shared.end("teardown") }
     }
 
     // MARK: Transport (remote commands + Live Activity intents share this)

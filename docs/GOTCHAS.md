@@ -2304,6 +2304,10 @@ hls.js's ABR bandwidth estimator is an EWMA whose samples are **weighted by down
 - **Fullscreen targets the whole `#localPlayer` container, not the `<video>`.** `lpToggleFullscreen` calls `requestFullscreen` on the container so the header, transport, and audio/sub/quality selectors stay visible and usable inside OS fullscreen. Fullscreening the `<video>` element summons the native controls and (on iOS) the system player — exactly what this feature removes.
 - **iPhone Safari has no element-fullscreen API** (only `<video>.webkitEnterFullscreen`, which is the native player). The FS button is hidden at init when `requestFullscreen`/`webkitRequestFullscreen` is missing on the container; nothing is lost because `#localPlayer` is already a `position:fixed; inset:0` overlay.
 - **Scrub commits the seek on pointer-release only.** While dragging, `_lpScrub.t` previews the position; `currentTime` is set once on `pointerup`. Seeking per `pointermove` would, in on-demand mode, restart the JIT ffmpeg on every pixel of drag (each cold seek tears down and re-launches the encoder — see § On-demand).
+- **`play()` resolving does not mean playback started, and its rejection must never be discarded (18.14.0).** The load path ended in `try { await v.play(); } catch (_) {}` for the life of the player. That swallows the two failures that are otherwise indistinguishable from a wedged pipeline: `NotAllowedError` (the autoplay policy — cured by a user gesture, which is exactly the transport press users had been making by hand) and `AbortError` (a newer load replaced this one). Both now write `play-start`, and so does success — a resolved promise is what narrows a picture that never appears to the pipeline rather than the start.
+
+- **A watchdog that declines to act must say why it declined (18.14.0).** `_lpColdStartKickTick` (the iOS/MMS cold-start nudge) has four guards — `paused`, `scrub`, `ready`, `resume-pending` — and used to return silently on all of them. Three are benign; **`paused` is the long-standing "it won't start until I press the button" bug**, because a nudge cannot start a parked element, so the watchdog is structurally powerless there and nothing else in the player will act either. The absence of a `cold-kick` row was being read as "the watchdog handled it" when it meant "the watchdog was never allowed to try". A `cold-stall` row now names the guard. Generally: for any recovery path, the branch where it does nothing is worth more evidence than the branch where it acts.
+
 - **Never drive clock-dependent UI from `timeupdate` alone (fixed 10.8.2).** On iOS, HLS ManagedMediaSource routinely gaps `timeupdate` for many seconds — or stops it outright — while `currentTime` keeps advancing (the same quirk behind the libass clock pump, § "finished cue can linger" below). Everything on the playback clock used to hang off the `timeupdate` listener, so mid-episode the seek bar froze, drags looked ignored (the seek *committed* but nothing repainted; a drag into an unbuffered region stalled playback until dragged back into buffer), skip-intro/credits offers never appeared or auto-fired, and progress saves stopped. The handler body is now `_lpClockTick(v)` (bar repaint + `lpEvaluateSkipOffer` + `lp.lastKnownT` + throttled save), driven by `timeupdate` **and** a 500 ms `_lpClockPump` interval that no-ops unless the player is actively playing; `seeked` also repaints the bar immediately. If you add new time-driven player UI, put it in `_lpClockTick`, not a bare `timeupdate` listener.
 - **A wedged loader looks exactly like a swallowed seek, is far more common, and `readyState` will lie to you about it (fixed 18.12.3).** This is what the long-running "±10 doesn't really go back" report turned out to be, measured 2026-09-23 with 18.12.1's `seek` rows. A burst of backward ±10 presses past the buffered edge leaves hls.js's fragment loaders wedged: the buffered set froze at `192.0-372.0,378.0-384.0,390.0-414.0` and stayed **byte-identical across the next 22 seeks over 37.5 s** — no appends, no removals — including *forward* seeks to 604 / 765 / 991 s. The element then has media in exactly one place and presents from there, so `requestVideoFrameCallback` reported frames at **204 s while `currentTime` read 991 s**. **Nothing already in the player could see it:** `_lpStallWatch` and `_lpKickIfStalled` both bail on `readyState >= 3`, and readyState was **4 for every row** — there were 180 s of media buffered *ahead* of the playhead, just not *at* it, so the element honestly reported HAVE_ENOUGH_DATA; and `_lpStallWatch` additionally resets whenever `currentTime` advances, so **the viewer's own seeking hid the stall from the stall detector**. The fix judges the **loader**, not the picture: `_lpWatchBufferFreeze` requires a seek whose target is outside the buffer to make the buffered set change within 2.2 s, else `_lpKickLoader(target)` (`stopLoad` + `startLoad(target)`), else `_lpPipelineRebuild` 4 s later. **The general rule: `readyState` answers "do I have data", never "do I have data *here*" — for anything that cares about the playhead, compare `buffered` against `currentTime` yourself (`_lpBufferedHas`).**
 
@@ -3630,6 +3634,35 @@ truth, not the cached handle —
 
 Rule of thumb for any future ActivityKit usage: an in-memory `Activity` reference is a
 convenience cache, never the authority — always be able to recover from `.activities`.
+
+**And the rule was broken the very next time it applied (fixed 18.14.0).**
+`PlaybackLiveActivity` followed all four points; `DownloadLiveActivity`, written
+first and never revisited, followed none of them — its `activity` getter read
+`_activity` with **no fallback**, it had no cold-launch reap, and its
+`Activity.request` `catch` was empty. A background `URLSession` transfer that
+finishes after the app is killed is exactly the case that produces an orphan, so
+the download Island would sit frozen at the percentage it died on, and the next
+`sync()` requested a *second* one beside it. When you write the rule down, also
+grep for the other implementations of it.
+
+**Adopting an activity must reset the update-dedupe state too (fixed 18.14.0).**
+`start()`'s adopt branch pushed a fresh `ActivityContent` but left `lastKey` and
+`lastPush` describing the activity it did *not* adopt (after a relaunch: nothing
+at all). The next `update()` therefore saw a changed key **and** an overdue
+heartbeat and pushed unconditionally. ActivityKit budgets updates and silently
+drops them once a session overspends — and a dropped update is precisely the
+frozen Island the adopt branch exists to prevent.
+
+**A Live Activity failure is invisible unless you log it.** Every ActivityKit
+failure mode — `areActivitiesEnabled == false`, `Activity.request` throwing on
+the system limit or from a background caller, an update being dropped, an
+orphan nobody holds — presents to the user as one symptom: an Island that is
+missing or not moving. Both files swallowed `request`'s throw entirely, so the
+transcript could not tell "turned off in Settings" from "ours went stale". The
+`la-*` rows (18.14.0) exist for this; the load-bearing one is **`la-audit`**,
+which counts `Activity.activities` against what we believe is playing, because
+every other row records an intention and only that one records the lock screen.
+See [DIAGNOSTICS.md](DIAGNOSTICS.md) § Recipe: "the Dynamic Island went stale".
 
 ### The remote dashboard CANNOT load offline — `downloads.html` is the offline entry point
 The whole dashboard UI (`static/index.html`) is **served by the host**. The shell

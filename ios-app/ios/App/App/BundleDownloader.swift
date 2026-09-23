@@ -79,6 +79,11 @@ public class BundleDownloader: CAPPlugin, CAPBridgedPlugin {
         BundleDownloadManager.shared.onEvent = { [weak self] name, payload in
             self?.notifyListeners(name, data: payload)
         }
+        // Cold start: no job exists in this process yet, so a download Live
+        // Activity on screen is a leftover frozen at whatever percentage the
+        // previous process died on. NativePlayback does the same for the
+        // playback one; this side had no equivalent.
+        DownloadLiveActivity.shared.reapStrays()
     }
 
     @objc func download(_ call: CAPPluginCall) {
@@ -248,7 +253,8 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             guard !self.jobs.isEmpty else { return }
             // Pull any still-running suspended-mode transfers back onto the fast
             // session so an open app always downloads at full speed.
-            self.migrateTasks(to: self.fgSession)
+            let moved = self.migrateTasks(to: self.fgSession)
+            self.logTransition("dl-fg", moved: moved)
         }
     }
     @objc private func appDidEnterBackground() {
@@ -258,7 +264,37 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             // Hand in-flight foreground transfers to the background session so they
             // keep running while suspended. The job-keyed bgTask assertion (held for
             // the whole download) keeps us alive long enough to re-enqueue.
-            self.migrateTasks(to: self.session)
+            let moved = self.migrateTasks(to: self.session)
+            self.logTransition("dl-bg", moved: moved)
+        }
+    }
+
+    // THE TRANSITION IS THE WHOLE BUG SURFACE. "Downloads don't run in the
+    // background" can be any of four different things — the migration never ran,
+    // it ran but moved nothing, the OS killed the background assertion, or the
+    // transfers migrated fine and `nsurlsessiond` simply throttled them — and
+    // until 18.14.0 the transcript could not distinguish them, because neither
+    // transition wrote a row at all. `left` is the one to read on a `dl-bg`:
+    // seconds of execution the OS is granting us, which is how long the
+    // re-enqueue has to finish. Assumes `queue`.
+    private func logTransition(_ ev: String, moved: Int) {
+        var pending = 0, done: Int64 = 0, total: Int64 = 0
+        for (_, j) in jobs {
+            pending += j.pending.count
+            done += j.doneBytes.values.reduce(0, +) + j.liveBytes.values.reduce(0, +)
+            total += j.totalBytes
+        }
+        let held = bgTask != .invalid
+        // backgroundTimeRemaining is a UIApplication read; hop to main for it and
+        // write the row from there so the number belongs to the same instant.
+        DispatchQueue.main.async {
+            var left = UIApplication.shared.backgroundTimeRemaining
+            if !left.isFinite || left > 100000 { left = -1 }   // .greatestFiniteMagnitude == "foreground"
+            DiagLog.shared.write(ev, [
+                "jobs": self.jobs.count, "pending": pending, "moved": moved,
+                "done": done, "total": total, "bgTask": held,
+                "left": Int(left),
+            ], cat: "offline")
         }
     }
 
@@ -544,11 +580,22 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             }
 
             if toFetch.isEmpty {
+                DiagLog.shared.write("bundle-start", [
+                    "sha": cacheKey, "name": name, "itemId": itemId,
+                    "files": files.count, "fetch": 0, "resumed": files.count,
+                    "bytes": job.totalBytes, "active": appActive,
+                ], cat: "offline")
                 markComplete(cacheKey, job: job)
                 result = StartResult(dir: dir.path, alreadyComplete: true)
                 return
             }
 
+            DiagLog.shared.write("bundle-start", [
+                "sha": cacheKey, "name": name, "itemId": itemId,
+                "files": files.count, "fetch": toFetch.count,
+                "resumed": files.count - toFetch.count,
+                "bytes": job.totalBytes, "active": appActive,
+            ], cat: "offline")
             job.pending = Set(toFetch.map { $0.name })
             jobs[cacheKey] = job
             beginBgTaskIfNeeded()
@@ -698,7 +745,9 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     // correct session itself (appActive is already flipped before migrate runs) —
     // moving them here too would race the backoff into a duplicate task. Segments
     // are small, so restart-from-scratch on the destination is cheap. Assumes `queue`.
-    private func migrateTasks(to dst: URLSession) {
+    @discardableResult
+    private func migrateTasks(to dst: URLSession) -> Int {
+        var moved = 0
         for (sha, job) in jobs {
             // Snapshot — enqueue() mutates job.tasks while we iterate.
             for (file, task) in Array(job.tasks) {
@@ -707,8 +756,10 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
                 task.cancel()
                 job.liveBytes[file] = nil   // this attempt's bytes are gone; the new task re-counts
                 enqueue(sha: sha, file: f, job: job, session: dst)
+                moved += 1
             }
         }
+        return moved
     }
 
     // One file's download failed. A **transient** failure (network/proxy blip)
@@ -810,7 +861,17 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         guard bgTask == .invalid else { return }
         DispatchQueue.main.async {
             self.bgTask = UIApplication.shared.beginBackgroundTask(withName: "StreamLinkBundleDownload") {
-                // Expiration: end the assertion (downloads will pause until foreground).
+                // EXPIRATION IS THE PRIME SUSPECT for "background downloads stop",
+                // and it was the quietest thing in the app: the assertion simply
+                // ended, foreground-session transfers went with it, and no row
+                // anywhere recorded that the OS had pulled the rug. iOS grants
+                // roughly 30 s, so an expiry mid-bundle is expected and NOT a
+                // bug on its own — what matters is whether the transfers had
+                // already migrated to the background session by then, which the
+                // preceding `dl-bg` row says.
+                DiagLog.shared.write("dl-bgtask-expired", [
+                    "jobs": self.jobs.count, "active": self.appActive,
+                ], cat: "offline")
                 if self.bgTask != .invalid { UIApplication.shared.endBackgroundTask(self.bgTask); self.bgTask = .invalid }
             }
         }
@@ -851,7 +912,15 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     // our lazy session to exist (so it re-attaches to the running tasks) and stash
     // the handler; we fire it from urlSessionDidFinishEvents once events flush.
     func handleBackgroundEvents(identifier: String, completionHandler: @escaping () -> Void) {
-        guard identifier == BundleDownloadManager.bgSessionIdentifier else { completionHandler(); return }
+        guard identifier == BundleDownloadManager.bgSessionIdentifier else {
+            DiagLog.shared.write("dl-bg-events", ["id": identifier, "ours": false], cat: "offline")
+            completionHandler(); return
+        }
+        // PROOF THE OS WOKE US FOR FINISHED TRANSFERS. Its absence across a whole
+        // suspended stretch means the background session delivered nothing —
+        // which is a different failure from "it delivered and we mishandled it",
+        // and the two were indistinguishable before this row existed.
+        DiagLog.shared.write("dl-bg-events", ["id": identifier, "ours": true], cat: "offline")
         queue.async {
             self.bgEventsCompletion = completionHandler
             _ = self.session   // ensure the session is recreated and reconnected
@@ -864,7 +933,11 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             // disk, but their in-memory `Job` was gone so markComplete never ran.
             // Now that the batch has flushed, repair index.json from disk and tell
             // any live listener about the bundles that just became complete.
-            for sha in self.reconcileIndexLocked() {
+            let repaired = self.reconcileIndexLocked()
+            DiagLog.shared.write("dl-bg-flushed", [
+                "completed": repaired.count, "jobs": self.jobs.count,
+            ], cat: "offline")
+            for sha in repaired {
                 let entry = self.readIndex()[sha] ?? [:]
                 self.emit("bundleComplete", [
                     "sha": sha,

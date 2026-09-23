@@ -1,5 +1,74 @@
 # Changelog
 
+## [18.14.0] — 2026-09-22
+### Three old bugs, and the rows that were never written about them
+
+Instrumentation only — no behaviour change to playback, downloads or the UI —
+plus two small ActivityKit corrections found while wiring it up. All three of
+these have been reported repeatedly and none of them could be read out of a
+transcript, because the code paths that decide them wrote nothing at all.
+
+**"It won't start playing until I press the button."**
+- `play-start` — `v.play()`'s rejection was caught and discarded for the life of
+  the player. `NotAllowedError` (autoplay policy) and `AbortError` (a load racing
+  the play) are the two silent ways a start fails, and neither left a row.
+  Success is logged too: a resolved promise narrows the wedge to the pipeline.
+- `cold-stall` — `_lpColdStartKickTick` declines to act on four conditions
+  (`paused`, `scrub`, `ready`, `resume-pending`) and used to decline in silence.
+  **Why it declined is the diagnosis**: `paused` means the cold-start watchdog is
+  structurally powerless there and the fix belongs in the start path. Capped at
+  three rows per file, and only after 2.5 s, so a healthy start stays quiet.
+- `cold-kick` — every MMS nudge the watchdog performs (`stage: "nudge"`), and its
+  `giveup` after ~6 s. This watchdog has existed for versions without ever saying
+  whether it ran.
+- `cold-start` — the closing verdict, written only when the start had to fight:
+  nudges, which branches blocked, and the time to first frame.
+- `transport-unwedge` — **the manual cure, recorded**. A transport press before
+  this file has ever reached `playing` is the bug happening, and the press was
+  never an event. The field to read is `paused`: if the element was paused at the
+  press the watchdog could never have helped; if it was not, the press is a
+  pause/play cycle unwedging a decode pipeline.
+
+**Stale Live Activities.**
+- `la-reap` — an activity found at cold start is stale by definition; reaping
+  already worked, saying so did not.
+- `la-start` — `adopted` vs `requested`, plus `skipped: "disabled"`, which is how
+  "Live Activities are off in Settings" stops looking like "ours went stale".
+- `la-failed` — `Activity.request` throws on the system activity limit and from a
+  non-foreground caller. Both files swallowed it whole.
+- `la-end` / `la-missing` / `la-audit` — `la-audit` runs on every foreground and
+  counts what the system actually has against what we believe is playing;
+  `live: 1, playing: false` is the report, observed instead of described.
+- **Fixed:** `DownloadLiveActivity`'s handle had no fallback to the system's own
+  list, so an Island surviving the app's death was never adopted — the next sync
+  requested a *second* one and left the first frozen at whatever percentage it
+  died on. It now adopts, and is reaped at launch like the playback one.
+- **Fixed:** adopting a playback activity left `lastKey`/`lastPush` describing
+  the activity that was *not* adopted, so the next update pushed unconditionally.
+  ActivityKit budgets updates and drops them once a session overspends — and a
+  dropped update is exactly a frozen Island.
+
+**Background downloads that stop.**
+- `dl-bg` / `dl-fg` — the foreground/background transition is the whole bug
+  surface and neither side wrote a row. Carries jobs, pending files, how many
+  transfers `migrateTasks` actually moved, bytes so far, and `left`: the seconds
+  of execution the OS is granting, which is the budget the re-enqueue has to
+  finish inside.
+- `dl-bgtask-expired` — the background assertion expiring was the quietest event
+  in the app and is the prime suspect. Expiry mid-bundle is normal; what matters
+  is whether the transfers had migrated first, which the `dl-bg` above it says.
+- `dl-bg-events` / `dl-bg-flushed` — the OS relaunching us to deliver finished
+  background transfers, and how many bundles the reconcile repaired. Absence
+  across a suspended stretch means the background session delivered nothing,
+  which is a different failure from delivering and mishandling it.
+- `la-progress` — a 30 s byte-count heartbeat. Only verdicts were logged before,
+  so a transfer that simply stopped advancing produced total silence, and
+  "stalled" and "not running" were indistinguishable.
+- `bundle-start` — what was asked for, how much resumed from disk, and whether
+  the app was foreground when it began.
+
+- `NP_BUILD` → **18.14.0**.
+
 ## [18.13.2] — 2026-09-22
 ### TV Mode is gone; only the half that had no replacement stays
 
