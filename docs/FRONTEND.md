@@ -555,7 +555,13 @@ desync that two synchronized videos would create. iOS-friendly: `playsinline`,
 fullscreen hijack), so a custom overlay guarantees the identical UI everywhere.
 Don't re-add the `controls` attribute. Pieces:
 - **Transport** — center cluster: ±10 s tiles (`lpSeekBy`) around a play/pause
-  tile (`lpTogglePlay`, icons synced by `_lpCtlSync`).
+  tile (`lpTogglePlay`, icons synced by `_lpCtlSync`). `lpSeekBy` **coalesces**
+  (18.12.3): an isolated press commits at once, but a continuous burst produces
+  exactly two `_lpCommitSeek` calls — the first press and the resting place —
+  so fifteen taps don't retarget the fragment loaders fifteen times. The bar
+  still follows every tap because `_npUiTime` reports the pending target
+  (`_lpSeekPendTarget`); keep that accessor on intent-side callers only, never
+  progress saving.
 - **Seek bar** (`#lpSeekBar`) — bottom strip; played fill + buffered fill +
   square handle, updated by `_lpCtlTick` via `_lpClockTick`
   (`timeupdate` **plus** the 500 ms `_lpClockPump` interval — iOS MMS gaps
@@ -566,11 +572,24 @@ Don't re-add the `controls` attribute. Pieces:
   `currentTime`; the seek commits **once on release** (matters in on-demand
   mode, where each cold seek restarts the JIT ffmpeg). Time labels use
   `fmtTimeSecs`. All user-intent seeks (±10 s, scrub commit, skip-intro) go
-  through `_lpCommitSeek`, which verifies via `requestVideoFrameCallback` that
-  the pipeline actually jumped and rebuilds it at the target if the element
-  accepted the seek but kept presenting the old position (10.10.3; see
-  [GOTCHAS.md](GOTCHAS.md) § ManagedMediaSource) — never set `currentTime`
-  directly for a user seek.
+  through `_lpCommitSeek`, which arms two independent checks and logs a `seek`
+  row for each press — never set `currentTime` directly for a user seek.
+  - `_lpVerifySeek` watches composited frames via `requestVideoFrameCallback`
+    and rebuilds the pipeline if the element accepted the seek but kept
+    presenting the old position (10.10.3). **Blind while paused** — rVFC does
+    not fire on a paused element — so its `no-frames` verdict proves nothing on
+    its own.
+  - `_lpWatchBufferFreeze` is the one that catches the failure that actually
+    happens (18.12.3): a seek whose target is outside the buffer must make
+    `buffered` change within 2.2 s, or the loaders are wedged →
+    `_lpKickLoader(target)`, then `_lpPipelineRebuild` if that doesn't take.
+    It never looks at frames, so it works while paused. **`readyState` cannot
+    substitute for this** — it answers "do I have data", not "do I have data
+    *here*", and reads 4 throughout the wedge.
+
+  See [GOTCHAS.md](GOTCHAS.md) § ManagedMediaSource and
+  [DIAGNOSTICS.md](DIAGNOSTICS.md) § "the picture is frozen but the seek bar
+  moves".
 - **Options panel** — the **gear button** (`#lpOptsBtn`, `lpToggleOpts`)
   toggles `.lp-opts` on `#localPlayer`, showing `#lpTrackRow` (quality /
   audio / subtitle selectors, the **Sync** audio-delay slider, AI button, Clip

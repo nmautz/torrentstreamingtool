@@ -146,6 +146,7 @@ JS-written rows carry `src: "js"`.
 | `seek` | a user-intent seek was committed (18.12.1) — `from`, `to`, `back`, the `engine`, the `buffered` ranges and, the field that matters, **`inBuf`**: was the target inside the buffer. `engine: avplayer` means it was proxied to the native player instead |
 | `seek-verdict` | what became of it, 4.5 s later. `landed` / `elsewhere` / **`no-frames`** — the last meaning the element presented nothing at all, which is the shape a backward seek past the buffered edge takes and the one `_lpVerifySeek` cannot judge |
 | `seek-swallowed` | the detector caught the pipeline still presenting the pre-seek position, and a rebuild followed |
+| `seek-stuck` | **the one that actually fires** (18.12.3). A seek out of the buffer did not make the buffered set change — nothing is being fetched. `stage: "kick"` is the loader restart, `stage: "rebuild"` means the kick didn't take either and `_lpPipelineRebuild` ran. Carries the frozen `buffered` string, plus `ready` and `paused` |
 | `auto-skip` | the **native** player fired a Smart Skip while it held the display (18.12.0) — `type` (`intro`/`credits`), `from`, and for an intro `to`. This is the only skip actor during a handoff; the page draws the tile but never fires |
 | `native-skipped` | the page's record of the same event, written when native's `nativeSkipped` reaches it. Its absence under an `auto-skip` means the page was asleep at the time — normal, and the flag is reconciled on the next arm |
 | `next-armed` | the next episode was handed to native (`via`: `already-ready` / `warmed`). From 18.12.0 the arm also carries that episode's skip windows |
@@ -314,14 +315,40 @@ as a pair.
 - **`seek-swallowed`** — the known wedge: the pipeline kept presenting the old position
   while the element accepted the seek. A `_lpPipelineRebuild` follows. Twice inside a
   minute escalates to a full reload.
-- **`seek-verdict: no-frames`, with `back: true` and `inBuf: false` on the `seek`** — the
-  suspected cause of the 2026-09-23 report and the case the detector is documented not to
-  fire on. Nothing was presented at all, so there is no trajectory to compare against.
-  Check `now` (where `currentTime` ended up) and `stillInBuf`: a `now` that has drifted
-  well past `to` means the element kept playing from the old spot regardless.
+- **`seek-stuck`** — the wedge the 2026-09-23 report actually was, and the row to look for
+  first. The loader died; see the next recipe.
+- **`seek-verdict: no-frames`** — says almost nothing on its own. `requestVideoFrameCallback`
+  does not fire on a **paused** element, so *every* seek made while paused verdicts
+  `no-frames` whether the loader is healthy or dead. **Read `paused` before drawing any
+  conclusion, and never treat this row as evidence of a wedge.**
 - **No `seek` row at all** for a press the viewer swears they made — the press never
-  reached `_lpCommitSeek`. Check whether the controls were in remote mode
-  (`engine: avplayer` rows) or whether the player had been torn down.
+  reached `_lpCommitSeek`. Three ordinary causes before you suspect a bug: the controls were
+  in remote mode (look for `engine: avplayer` rows), the player had been torn down, or the
+  presses were **coalesced** (18.12.3 — a continuous burst of ±10 writes exactly two rows,
+  the first press and the resting place, so `from`→`to` on the second row will show a jump
+  of many multiples of 10).
+
+### Recipe: "the picture is frozen but the seek bar moves"
+
+This is the 2026-09-23 wedge, diagnosed from a 316-row transcript, and it is a **loader**
+failure, not a decode failure. The tell is in the `seek` rows themselves: compare the
+`buffered` string across consecutive seeks.
+
+- **`buffered` identical on row after row, with `inBuf: 0` on every one** — hls.js has
+  stopped fetching. In the reference case it froze at
+  `192.0-372.0,378.0-384.0,390.0-414.0` and stayed byte-identical across **22 seeks over
+  37.5 s**, including forward seeks far outside it. The element has media in exactly one
+  place and presents from there: `seek-verdict` reported `lastFrame: 204` while `currentTime`
+  read **991**.
+- **`ready: 4` throughout is not a contradiction** — it is the reason nothing caught this
+  for so long. There were 180 s of media buffered *ahead* of the playhead, just not *at* it,
+  so the element honestly reported HAVE_ENOUGH_DATA and both `_lpStallWatch` and
+  `_lpKickIfStalled` (which bail on `readyState >= 3`) reset themselves every tick.
+  `_lpStallWatch` also resets whenever `currentTime` advances — so the viewer's own presses
+  hid the stall from the stall detector.
+- From 18.12.3 this self-heals and says so: a `seek-stuck` with `stage: "kick"`, and if that
+  didn't take, a second one with `stage: "rebuild"`. A `kick` with no `rebuild` behind it is
+  the system working.
 
 Before 18.12.1 none of these existed: seeks were entirely unlogged, and the only trace of
 a bad one in the 2026-09-23 transcript was an accident — two unrelated rows that happened

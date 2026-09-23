@@ -1,5 +1,44 @@
 # Changelog
 
+## [18.12.3] — 2026-09-22
+### The seek was fine. The loader was dead.
+
+"±10 doesn't really go back" turned out not to be a decode bug at all. 18.12.1's `seek` /
+`seek-verdict` rows caught it on 2026-09-23: a burst of backward ±10 presses past the
+buffered edge leaves hls.js's fragment loaders wedged. At 05:01:43.789 the buffered set
+froze at `192.0-372.0,378.0-384.0,390.0-414.0` and stayed **byte-identical across the next
+22 seeks over 37.5 s** — no appends, no removals — including *forward* seeks to 604 / 765 /
+991 s. The element then has media in exactly one place and presents from there:
+`requestVideoFrameCallback` reported frames at **204 s while `currentTime` read 991 s**.
+
+Nothing in the player could see it. `_lpStallWatch` and `_lpKickIfStalled` both bail on
+`readyState >= 3`, and readyState was **4 for every row** — there were 180 s of media
+buffered *ahead* of the playhead, just not *at* it, so the element honestly reported
+HAVE_ENOUGH_DATA. `_lpStallWatch` also resets whenever `currentTime` advances, and the
+user's own presses were moving it constantly, so **the seeking hid the stall from the stall
+detector**.
+
+- **Wedged-loader detector.** A seek whose target is outside the buffer now has to make the
+  buffered set change within 2.2 s. If it doesn't, nothing is being fetched: kick the loader
+  at the target (`stopLoad` + `startLoad(target)`), then re-check — still frozen 4 s later
+  means the instance itself is gone, so `_lpPipelineRebuild` runs, which is the manual
+  stop+restart cure automated. Logs `seek-stuck` with `stage: "kick"` / `"rebuild"`.
+- **This judges the loader, not the picture** — which is the whole point.
+  `requestVideoFrameCallback` does not fire on a **paused** element, so `_lpVerifySeek` is
+  structurally blind to every seek made while paused (exactly what you do when hunting for a
+  spot), and its verdict there is `no-frames` whether the loader is healthy or dead. Buffer
+  movement is observable either way. **`no-frames` alone still triggers nothing.**
+- **±10 presses are coalesced.** Hunting for a spot means fifteen presses in three seconds,
+  and each one used to retarget the fragment loaders and abort the in-flight fetch ~180 ms
+  in — the exact load the wedge was measured under. Leading edge + trailing flush: an
+  isolated press still commits instantly, and a continuous burst now produces exactly **two**
+  commits, the first press and the resting place, however long it runs. The seek bar follows
+  every press regardless (`_npUiTime` reports the pending target, the same way `_lpScrub.t`
+  previews a drag). Measured against the log's own cadence: 15 presses at 180 ms → 2 commits,
+  final position identical.
+- `_lpKickLoader(at)` can now be aimed at an explicit position instead of trusting a
+  `currentTime` the wedge has made unreliable. Existing callers are unchanged.
+
 ## [18.12.2] — 2026-09-22
 ### The remote panel was a floating island under the play button
 

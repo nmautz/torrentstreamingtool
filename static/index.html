@@ -18758,7 +18758,16 @@ function _npApplyNativeTransport(pos, paused, dur) {
   try { lpEvaluateSkipOffer(_npNativePos); } catch (_) {}
 }
 // Position the UI should show: native's while it holds, the element's otherwise.
-function _npUiTime(v) { return _npHolding ? _npNativePos : ((v && v.currentTime) || 0); }
+// The time the CONTROLS should show. Two callers, both intent-side (lpSeekBy,
+// _lpCtlTick) — never progress saving, which must only ever record a position
+// the player actually reached. While a burst of +/-10 presses is being
+// coalesced the element has not moved yet, so the pending target is the honest
+// answer: the bar has to follow the thumb, not the loader. Same precedent as
+// _lpScrub.t previewing a drag.
+function _npUiTime(v) {
+  if (_lpSeekPendTarget != null) return _lpSeekPendTarget;
+  return _npHolding ? _npNativePos : ((v && v.currentTime) || 0);
+}
 
 // Put the phone into (or out of) remote mode.
 //
@@ -22932,11 +22941,15 @@ function _lpNetOnline() {
 // TCP connection without erroring it, so hls.js just sits on the dead request
 // (until the long `fragLoadingTimeOut`) and keeps "buffering" even after the
 // connection is back — exactly the symptom that a stop+restart cures instantly.
-function _lpKickLoader() {
+function _lpKickLoader(at) {
   if (lp.hls) {
     // stopLoad() aborts the in-flight (hung) fetch; startLoad(-1) resumes from
     // the current position. A live FRAG_LOADED then clears any reconnect state.
-    try { lp.hls.stopLoad(); lp.hls.startLoad(-1); } catch (_) {}
+    // `at` aims the restart at an explicit position instead — the wedged-loader
+    // path knows exactly which seek target went unserved and says so, rather
+    // than trusting an element whose currentTime the wedge has made unreliable.
+    const from = (typeof at === "number" && isFinite(at)) ? at : -1;
+    try { lp.hls.stopLoad(); lp.hls.startLoad(from); } catch (_) {}
   } else {
     // Safari native HLS: reload the still-set src, seeking back to the death
     // position via the resume machinery (load() resets currentTime to 0;
@@ -25248,6 +25261,79 @@ let _lpSeekVerdictTimer = null;
 function _lpCancelSeekVerify() {
   _lpSeekVerifyToken++;
   if (_lpSeekVerdictTimer) { clearTimeout(_lpSeekVerdictTimer); _lpSeekVerdictTimer = null; }
+  // Everything that invalidates a verdict invalidates the loader watch and any
+  // un-flushed seek intent too — they are all "the seek I was judging is no
+  // longer the seek that matters". Keeping them together is what stops a new
+  // call site from remembering one and forgetting the other two.
+  _lpCancelFreezeWatch();
+  _lpSeekPendCancel();
+}
+
+// ── Wedged-loader detector ──────────────────────────────────────────────────
+// The failure that actually happens, measured 2026-09-23 on a 316-row
+// transcript. A burst of backward +/-10 presses past the buffered edge leaves
+// hls.js's loaders wedged: at 05:01:43.789 the buffered set froze at
+// "192.0-372.0,378.0-384.0,390.0-414.0" and stayed BYTE-IDENTICAL across the
+// next 22 seeks over 37.5 s — no appends, no removals — including forward seeks
+// to 604 / 765 / 991 s. The element then has media in exactly one place and
+// presents from there: rVFC reported frames at 204 s while currentTime read
+// 991 s. That is the "+/-10 does nothing" report, end to end.
+//
+// Nothing already in the player could see it. _lpStallWatch and _lpKickIfStalled
+// both bail on `readyState >= 3`, and readyState was **4 for every row** — there
+// were 180 s of media buffered AHEAD of the playhead, just not AT it, so the
+// element honestly reported HAVE_ENOUGH_DATA. _lpStallWatch also resets whenever
+// currentTime advances, and the user's own presses were moving it constantly, so
+// the seeking hid the stall from the stall detector.
+//
+// So judge the LOADER, not the picture: a seek whose target is outside the
+// buffer must make the buffered set change within a couple of seconds. If it
+// does not, nothing is being fetched. This never touches frames, which is what
+// makes it the trigger _lpVerifySeek cannot be — requestVideoFrameCallback does
+// not fire on a paused element, so every verdict for a seek made while paused
+// is `no-frames` whether the loader is healthy or dead (see GOTCHAS).
+const LP_FREEZE_KICK_MS = 2200;      // one bundle segment loads in well under a second
+const LP_FREEZE_REBUILD_MS = 4000;   // and a kick that worked shows up inside two more
+let _lpFreezeToken = 0;
+let _lpFreezeTimer = null;
+function _lpCancelFreezeWatch() {
+  _lpFreezeToken++;
+  if (_lpFreezeTimer) { clearTimeout(_lpFreezeTimer); _lpFreezeTimer = null; }
+}
+
+function _lpWatchBufferFreeze(v, target) {
+  _lpCancelFreezeWatch();
+  if (!lp.itemId) return;
+  const token = _lpFreezeToken;
+  const stale = () => token !== _lpFreezeToken || !lp.itemId || lp.netDown
+                   || _lpReloading || _lpScrub;
+  const before = _lpBufferedDesc(v);
+  _lpFreezeTimer = setTimeout(() => {
+    _lpFreezeTimer = null;
+    if (stale()) return;
+    // The loader answered — the target is buffered now, or the ranges moved at
+    // all. Either way it is alive and this is an ordinary slow fetch.
+    if (_lpBufferedHas(v, target) || _lpBufferedDesc(v) !== before) return;
+    _npLog("seek-stuck", { stage: "kick", to: target, buffered: before,
+                           ready: v.readyState, paused: !!v.paused,
+                           engine: lp.hls ? "hls.js" : "native-hls",
+                           mode: lp.mode || "" }, "play");
+    _lpKickLoader(target);
+    const after = _lpBufferedDesc(v);
+    // Second look. A stop+start that took hold appends something; one that did
+    // not means the instance itself is wedged and only a rebuild clears it —
+    // which is the manual stop+restart cure users found, automated.
+    _lpFreezeTimer = setTimeout(() => {
+      _lpFreezeTimer = null;
+      if (stale()) return;
+      if (_lpBufferedHas(v, target) || _lpBufferedDesc(v) !== after) return;
+      _npLog("seek-stuck", { stage: "rebuild", to: target, buffered: after,
+                             ready: v.readyState, paused: !!v.paused,
+                             engine: lp.hls ? "hls.js" : "native-hls",
+                             mode: lp.mode || "" }, "play");
+      _lpPipelineRebuild(target);
+    }, LP_FREEZE_REBUILD_MS);
+  }, LP_FREEZE_KICK_MS);
 }
 
 // Compact buffered ranges for the log — "12.0-480.5,600.0-640.2".
@@ -25273,6 +25359,10 @@ function _lpBufferedHas(v, t) {
 // Every user-intent seek (±10 s, scrub commit, skip-intro) funnels through here.
 function _lpCommitSeek(t) {
   const v = _lpV(); if (!v) return;
+  // A scrub commit or a skip-intro accept arriving mid-burst supersedes whatever
+  // the +/-10 coalescer was still holding. (The coalescer's own flush nulls the
+  // target before calling here, so this is a no-op on that path.)
+  _lpSeekPendCancel();
   if (_npHolding && _cap.np) {
     // Optimistic local update so the bar responds at once; the 1 Hz poll
     // reconciles it. Never touch the element — it is not the player.
@@ -25297,6 +25387,11 @@ function _lpCommitSeek(t) {
   }, "play");
   try { v.currentTime = t; } catch (_) {}
   _lpVerifySeek(v, anchor, t);
+  // Out of the buffer is the only shape that can wedge the loaders, and it is
+  // also the only shape where "the ranges never moved" is unambiguous — an
+  // in-buffer seek legitimately needs no fetch at all. Armed after
+  // _lpVerifySeek, which cancels the previous watch on its way in.
+  if (!_lpBufferedHas(v, t)) _lpWatchBufferFreeze(v, t);
 }
 
 function _lpVerifySeek(v, anchor, target) {
@@ -25378,11 +25473,63 @@ function _lpPipelineRebuild(t) {
   }
 }
 
+// ── +/-10 coalescing ────────────────────────────────────────────────────────
+// Hunting for a spot means pressing -10 fifteen times in three seconds, and
+// every press used to retarget the fragment loaders and abort the in-flight
+// fetch ~180 ms into it. That is the load the wedge above was measured under.
+// Leading edge + trailing flush: an isolated press still commits instantly (a
+// coalescer that makes one tap feel laggy has traded the wrong thing), and a
+// continuous burst produces exactly TWO commits — the first press and the
+// resting place — however long it runs. The bar follows every press regardless,
+// because _npUiTime reports the pending target.
+//
+// The TV path never needed this: vlcSeek is executed server-side, so a burst
+// costs HTTP requests, not media-pipeline retargets.
+const LP_SEEK_COALESCE_MS = 300;
+let _lpSeekPendTarget = null;
+let _lpSeekPendTimer = null;
+let _lpSeekLastCommitAt = 0;
+let _lpSeekLastCommitT = NaN;
+
+function _lpSeekPendCancel() {
+  if (_lpSeekPendTimer) { clearTimeout(_lpSeekPendTimer); _lpSeekPendTimer = null; }
+  _lpSeekPendTarget = null;
+}
+
+function _lpSeekPendFlush() {
+  _lpSeekPendTimer = null;
+  const t = _lpSeekPendTarget;
+  _lpSeekPendTarget = null;
+  if (t == null || !lp.itemId) return;
+  // A burst that nets back to where the leading press already put us (+10 +10
+  // -10 -10) has nothing left to commit; re-seeking to the same target would
+  // cost a second pipeline retarget for no movement.
+  if (Math.abs(t - _lpSeekLastCommitT) < 0.01) return;
+  _lpSeekLastCommitAt = Date.now();
+  _lpSeekLastCommitT = t;
+  _lpCommitSeek(t);
+  _lpCtlTick();
+}
+
 function lpSeekBy(delta) {
   const v = _lpV();
   const d = v.duration || lp.duration || _npNativeDur || 0;
   if (!d) return;
-  _lpCommitSeek(Math.min(Math.max(_npUiTime(v) + delta, 0), d - 0.5));
+  // Accumulate from the pending target, not the element — otherwise every press
+  // in a burst would re-derive from a currentTime that has not moved yet and
+  // five presses would be worth one.
+  const base = _lpSeekPendTarget != null ? _lpSeekPendTarget : _npUiTime(v);
+  const t = Math.min(Math.max(base + delta, 0), d - 0.5);
+  const now = Date.now();
+  if (_lpSeekPendTarget == null && now - _lpSeekLastCommitAt > LP_SEEK_COALESCE_MS) {
+    _lpSeekLastCommitAt = now;
+    _lpSeekLastCommitT = t;
+    _lpCommitSeek(t);
+  } else {
+    _lpSeekPendTarget = t;
+    if (_lpSeekPendTimer) clearTimeout(_lpSeekPendTimer);
+    _lpSeekPendTimer = setTimeout(_lpSeekPendFlush, LP_SEEK_COALESCE_MS);
+  }
   _lpCtlShow(); _lpCtlTick();
 }
 
@@ -27983,6 +28130,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.12.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.12.3</div>
 </body>
 </html>
