@@ -297,6 +297,16 @@ Unplugging while the phone is **locked** is not this bug. The native player is l
 on purpose (handing back to a suspended WKWebView would stop playback outright), so the
 hand-back lands on the return to the foreground instead.
 
+### `locked+3s` / `handoff+10s` name a SCHEDULE, not an elapsed time
+
+The trail's timed snaps are `asyncAfter` work items, and a suspended app does not run
+them. Measured 2026-09-23: `locked+3s` landed on time, then `locked+10s` and `locked+20s`
+both fired **5 m 45 s later, in the same millisecond** — iOS had suspended the app (it was
+paused, so nothing held it up) and released both timers together when it next got CPU.
+
+Read `t` for when a row was taken and the `at` label only for which sample it is. A large
+gap before a coalesced pair is itself evidence — it dates the suspension.
+
 ### The build stamp
 
 Every `launch` row carries `build`, sourced from the single `NP_BUILD` constant in

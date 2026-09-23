@@ -4753,6 +4753,31 @@ that should have said so said `near-start` instead.
 dragged `armed.position` backwards once a second and a native seek was undone
 within a second of being made.
 
+## A player that hasn't loaded its item yet is not a player the user paused (18.11.1)
+
+`armed.paused` is intent — "what the user left it doing" — and everything downstream
+treats it that way: an arm inherits it, a file switch starts the new item with
+`play: !a.paused`, and `audioInterruption` resumes only `if !armed.paused`. The 1 Hz time
+observer mirrors the transport into it, and already excluded
+`.waitingToPlayAtSpecifiedRate` for exactly this reason.
+
+It did **not** exclude the window before `.readyToPlay`. `startNative` defers the first
+play to the status observer, so until the item is ready the player is genuinely `.paused`
+— and that says nothing about intent. The window is not brief: measured 2026-09-23, a
+host-streamed bundle sat `itemStatus=unknown` for **six seconds** after the handoff, and
+one observer tick inside it flipped `armed.paused` to true.
+
+`seekAndPlay` survived because `shouldPlay` is captured at handoff time (that capture
+exists for a sibling bug — a late arm flipping the flag mid-seek). Nothing else was
+defended. The same log has an `interruption` with `type: ended` landing inside the window
+with `armPaused: true`, so the resume was declined; playback only continued because the
+deferred `seekAndPlay` was still on its way. A real interruption there — a call ending —
+would have left the glasses silent with a correct position.
+
+The mirror is now gated on `p.currentItem?.status == .readyToPlay`. **The rule for this
+field, three bugs running: only a deliberate stop writes `armed.paused`. Buffering isn't
+one, and neither is "hasn't started yet."**
+
 ## A display arriving or leaving mid-episode is a HANDOFF, not a notification (18.11.0)
 
 Both halves of this were the same mistake: the code treated a display change as

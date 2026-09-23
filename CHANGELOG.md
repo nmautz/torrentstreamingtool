@@ -1,5 +1,34 @@
 # Changelog
 
+## [18.11.1] — 2026-09-22
+### Verified on device, plus one bug the log caught before it bit
+
+**18.11.0's two fixes both landed.** The transcript has the unplug handled 8 ms after the
+scene went away — `sceneDisconnect` at `rate=1, pos=560.5` → `display-lost-handback` →
+`stopNative` at 560.0 with a 200 on the flush — and the replug eight seconds later going
+`sceneConnect` → `earlyClaim` → `startNative` → `display-handoff` → `hold-start` with
+`elementWasPlaying: 1`. The episode resumed on the glasses at 565.4, so the web element
+really did carry the five seconds in between: nothing was lost and nothing was watched
+twice. A later unplug, done while the phone was locked, correctly did **not** hand back,
+and was repaired on the unlock nine minutes afterwards — the branch that could only be
+reasoned about before is now measured. No crash, and the sequence that killed a run the
+day before (unplug, replug, re-take the display) ran clean.
+
+**What the log caught on its own:** `armed.paused` was going true during the window
+between the handoff and the item becoming ready. That field is *intent* — an arm inherits
+it, a file switch starts the new item with `play: !paused`, and an ended audio
+interruption resumes only if it is false — and the 1 Hz transport mirror already knew not
+to trust buffering. It did not know to distrust "hasn't loaded yet", which on a
+host-streamed bundle lasted six seconds. The deferred first play survived it (that intent
+is captured at handoff time), but an `interruption ended` landed inside the window and
+its resume was declined. Nothing went wrong this time; a call ending there would have left
+the glasses silent at a perfectly correct position. The mirror now waits for
+`.readyToPlay`.
+
+Also noted for whoever next reads a trail: `locked+10s` and `locked+20s` both arrived in
+the same millisecond, 5m45s after `locked+3s`. Those labels name a schedule, not an
+elapsed time — iOS suspends a paused app and releases the timers together.
+
 ## [18.11.0] — 2026-09-22
 ### Plugging the glasses in, and pulling them out, mid-episode
 

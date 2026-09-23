@@ -60,7 +60,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "18.11.0"
+let NP_BUILD = "18.11.1"
 
 // MARK: - Armed state
 
@@ -1456,7 +1456,23 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             // it (`a.paused = armed.paused`) and a file switch starts the new item
             // with `play: !a.paused`, because a skip is exactly when the player is
             // most likely to be buffering. Only a real stop is a pause.
-            self.armed.paused = (p.timeControlStatus == .paused)
+            //
+            // AND NOT BEFORE THE ITEM IS READY. Until `.readyToPlay` we have not
+            // issued play() at all — that happens in the status observer — so the
+            // player really is `.paused`, and it means nothing about intent. This
+            // window is not brief: measured 2026-09-23, a host-streamed bundle sat
+            // `itemStatus=unknown` for six seconds after the handoff, during which
+            // one observer tick turned `armed.paused` true. `seekAndPlay` survived
+            // it because `shouldPlay` is captured at handoff time (see
+            // startNative) — but nothing else was defended. In the same log an
+            // `interruption` with `type: ended` landed inside the window, and
+            // `audioInterruption`'s `if !armed.paused { play() }` therefore
+            // declined to resume; playback only continued because the deferred
+            // seekAndPlay was still coming. A real interruption there — a call
+            // ending — would have left the glasses silent.
+            if p.currentItem?.status == .readyToPlay {
+                self.armed.paused = (p.timeControlStatus == .paused)
+            }
             self.updateNowPlaying()
             PlaybackLiveActivity.shared.update(state: self.liveActivityState(), force: false)
             // Push the transport to the page. While native holds the display the
