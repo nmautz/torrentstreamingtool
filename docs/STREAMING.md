@@ -1591,28 +1591,34 @@ Live Activity clock advancing between pushes → native subs in sync → progres
 while locked → the same against an LMS-served bundle in Airplane Mode → no-regression
 in a desktop browser.
 
-**The phone is a remote, and looks like one (18.12.0).** While `_npHolding` is true the
-page's `<video>` is parked on a frozen frame, and the controls that address it — mute,
-fullscreen, orientation lock, and the whole Options panel (quality / audio / subtitles /
-sync) — reach nothing. `.lp-remote` on `#localPlayer`, set by `_npSyncRemoteUi` at every
-site that writes `_npHolding`, replaces the stage with `#lpRemote` (a "Playing on Glasses"
-banner, poster art from `window._libCache`, series and episode) and hides exactly those
-controls. What stays is what proxies through: the transport row (`lpTogglePlay` →
-`np.setPaused`), the seek bar and ±10 (`_lpCommitSeek` → `np.seekTo`), and the skip tile.
-Changing audio track or subtitles means ending the handoff first — AVPlayer could switch
-`AVMediaSelectionOption`s mid-play, but nothing wires the menu to it yet.
+**The phone is a remote, and is built like one (18.12.0, rebuilt 18.13.0).** While
+`_npHolding` is true the page's `<video>` is parked on a frozen frame and the controls
+that address it — mute, fullscreen, orientation lock, the whole Options panel — reach
+nothing. `.lp-remote` on `#localPlayer`, set by `_npSyncRemoteUi` at every site that
+writes `_npHolding`, hides **`#lpControls` entirely** and puts `#lpRemote` in its place.
 
-**Where the panel may draw (18.12.2).** The transport cluster (`.lp-ctl-center`) is pinned
-to the dead centre of the stage, so the remote panel is anchored to the edges and never
-puts content in the middle band: a full-bleed status strip flush under the header
-(`top: header height`), a now-playing row butted against the control strip
-(`bottom: 73px` = seek bar 28 + button row 44 + its 1px top border), and the poster blown
-up as a dimmed full-bleed backdrop so the band the buttons live in is filled rather than
-empty. Under `max-height: 520px` — a phone in landscape — the row sheds its poster tile
-and hint line to keep clear of the transport. The header's location line (`#lpWhere`)
-flips to "On Glasses" and back in the same function, since it runs at every `_npHolding`
-write in both directions; the control row's right side, which loses five buttons to
-`.lp-remote`, carries time remaining (`#lpTimeLeft`) instead of a gap.
+The first two attempts drew a panel *on the stage*, around the overlay. That was the
+mistake: the overlay is designed to be small, sparse and out of the picture's way, and on
+a remote there is no picture, so it leaves most of the screen empty by construction. From
+18.13.0 the remote is a **control panel built in the same idiom as the TV's
+`#fullscreenControls`** — a full-height flex column of fixed rows (status strip,
+now-playing line, seek bar, skip offer) over a `flex-1` tile grid: seek steps, a
+full-bleed play tile, episode nav with the readiness dots, and Stop / To TV. The tiles
+reuse `.fc-tile` and the fullscreen grid's own class strings. See
+[GOTCHAS.md](GOTCHAS.md) § "A remote is a control panel, not an overlay".
+
+`#lpSeekBar` and `#lpSkipOffer` are **relocated** into the column — the real nodes, not
+copies — so `_lpSeekBarInit`, `_lpCtlTick` and `lpEvaluateSkipOffer` keep working
+untouched; the restore branch runs on every `_npHolding` write, both directions, because
+nothing else knows the page stopped being a remote. The header's location line
+(`#lpWhere`) flips to "On Glasses" and back in the same function.
+
+What the remote can drive is what `NativePlayback` exposes: `lpTogglePlay` →
+`np.setPaused`, `_lpCommitSeek` → `np.seekTo`, plus the existing episode-advance path.
+**There is deliberately no volume row and no audio/subtitle row** — the plugin has no
+volume method, and switching tracks needs the native item reloaded. AVPlayer could switch
+`AVMediaSelectionOption`s mid-play; nothing wires the menu to it yet. The phone's hardware
+volume buttons already drive the glasses.
 
 Native side: `ios-app/ios/App/App/NativePlayback.swift` (+ `PlaybackLiveActivity.swift`,
 `Shared/PlaybackIntents.swift`, `StreamLinkLiveActivities/PlaybackWidget.swift`).

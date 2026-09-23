@@ -824,10 +824,6 @@
       font-variant-numeric: tabular-nums;
     }
     .lp-ctl-dim { color: #6b7280; }
-    /* Time remaining — only ever drawn on the glasses remote, where the right
-       of the control row is otherwise empty (see #lpTimeLeft in the markup). */
-    .lp-ctl-left { display: none; padding-right: 6px; color: #9ca3af; letter-spacing: 0.08em; }
-    #localPlayer.lp-remote .lp-ctl-left { display: inline; }
     .lp-ctl-sm {
       width: 44px; height: 44px;
       display: flex;
@@ -889,66 +885,63 @@
     }
     #localPlayer.lp-tiny .lp-tiny-close:hover { color: #f87171; background: #111827; }
     /* ── Glasses remote (.lp-remote on #localPlayer, see _npSyncRemoteUi) ──
-       Everything hidden below addresses the PARKED <video>, not the glasses:
-       leaving it on screen means four buttons and a whole options panel that
-       silently do nothing. The transport row, the seek bar and the skip tile
-       stay, because those proxy through to the native player.
+       While the native player owns an external display this page is not a
+       player, it is a REMOTE — and a remote is a CONTROL PANEL, not an overlay.
 
-       LAYOUT RULE, and the reason 18.12.2 exists: the transport cluster is
-       pinned to the dead centre of the stage, so the remote panel may never put
-       content there. The first cut centred a small column — banner, poster,
-       two lines — which put its poster directly UNDER the play button and left
-       the rest of the screen empty. Everything here is therefore anchored to an
-       edge: a full-bleed strip at the top, a now-playing row at the bottom, and
-       the artwork blown up as a dimmed backdrop so the middle band is filled by
-       something rather than being a void the buttons float in. */
+       18.12.2 tried to make the overlay work here, and that was the mistake.
+       #lpControls is built to float over a picture: a transport cluster pinned
+       to the dead centre of the stage, a translucent strip on the floor, small
+       and sparse so it never covers the frame. Every one of those properties
+       exists to get out of the picture's way — and on the remote there is no
+       picture. Applied here it leaves most of an 844px screen empty BY
+       CONSTRUCTION. That is not a layout bug to be patched with a poster and a
+       status strip; it is the premise being false.
+
+       So in remote mode #lpControls is hidden outright and this replaces it,
+       built in the same idiom as the TV's #fullscreenControls — which is the
+       proven shape for "this phone is a remote for a picture somewhere else":
+       a full-height flex column, every row flex-1, every tile edge-to-edge.
+       Opaque, square, dividers instead of gaps, nothing floating and nothing
+       centred in a void. Rows grow and shrink with the screen rather than
+       leaving a hole in it, so there is no arithmetic here to get wrong.
+
+       The tiles deliberately reuse .fc-tile and the fullscreen grid's own
+       Tailwind class strings: same component, not a lookalike.
+
+       WHAT IS NOT HERE, AND WHY. No volume row and no audio/subtitle row.
+       NativePlayback exposes setPaused/seekTo/takeover/resume/state/setTvMode
+       and nothing else — there is no volume method, and switching tracks needs
+       the native item reloaded. A tile that cannot do anything is the same sin
+       as an empty overlay, just louder. The phone's hardware volume buttons
+       already drive the glasses. */
     #lpRemote { display: none; }
     #localPlayer.lp-remote #lpRemote {
       position: absolute;
-      inset: 0;
-      display: block;
+      /* Butts against the header's h-12 bar — 48px INCLUDING its border,
+         because Tailwind preflight puts everything in border-box. */
+      top: calc(env(safe-area-inset-top, 0px) + 48px);
+      left: 0; right: 0; bottom: 0;
+      display: flex;
+      flex-direction: column;
       background: #05070d;
-      overflow: hidden;
+      z-index: 40;
     }
+    /* The whole overlay goes, not piece by piece. Every control in it either
+       addresses the PARKED <video> (mute, fullscreen, rotate, the options
+       panel) or is re-rendered as a tile below. */
+    #localPlayer.lp-remote #lpControls,
     #localPlayer.lp-remote #lpVideo,
     #localPlayer.lp-remote #lpBuffSpin,
     #localPlayer.lp-remote #lpDevHud,
     #localPlayer.lp-remote #lpVolPill,
-    #localPlayer.lp-remote #lpOptsBtn,
-    #localPlayer.lp-remote #lpRotBtn,
-    #localPlayer.lp-remote #lpMuteBtn,
-    #localPlayer.lp-remote #lpFsBtn,
-    #localPlayer.lp-remote #lpTvBtn,
     #localPlayer.lp-remote #lpTrackRow { display: none !important; }
     /* Tiny mode is a thumbnail of the video; with no video there is nothing to
        thumbnail, so the panel stays out of it entirely. */
     #localPlayer.lp-tiny #lpRemote { display: none !important; }
-    /* Backdrop: the poster at full bleed, dimmed hard enough that white text
-       and the transport tiles keep their contrast. Flat — no blur, no gradient
-       on the image itself; the scrim below is a solid wash, not a fade. */
-    #lpRemoteBack {
-      position: absolute;
-      inset: 0;
-      background: #05070d;
-    }
-    #lpRemoteBackImg {
-      width: 100%; height: 100%;
-      object-fit: cover;
-      opacity: 0.38;
-      display: none;
-    }
-    #lpRemoteScrim {
-      position: absolute;
-      inset: 0;
-      background: rgba(5,7,13,0.35);
-    }
-    /* Status strip — full bleed, flush under the header bar. */
+
+    /* Status strip — full bleed, flush under the header. */
     #lpRemoteBanner {
-      position: absolute;
-      /* 48px = the header's h-12 bar, border included (Tailwind preflight puts
-         everything in border-box), so the strip butts against it with no seam. */
-      top: calc(env(safe-area-inset-top, 0px) + 48px);
-      left: 0; right: 0;
+      flex: 0 0 auto;
       height: 26px;
       display: flex;
       align-items: center;
@@ -962,41 +955,7 @@
       background: #312e81;
     }
     .lp-rm-dot { width: 7px; height: 7px; background: #a5b4fc; flex: 0 0 auto; }
-    /* Now-playing row — anchored to the bottom edge, directly above the
-       control strip (72px = seek bar 28 + button row 44), same as #lpTrackRow. */
-    #lpRemoteNow {
-      position: absolute;
-      left: 0; right: 0;
-      /* 73px = seek bar 28 + button row 44 + the strip's 1px top border.
-         (#lpTrackRow says 72 and floats, so its 1px overlap never shows.) */
-      bottom: calc(73px + env(safe-area-inset-bottom, 0px));
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 12px;
-      background: rgba(3,7,18,0.72);
-      border-top: 1px solid rgba(255,255,255,0.08);
-    }
-    #lpRemoteArt {
-      position: relative;
-      width: 54px;
-      height: 81px;
-      background: #0b1120;
-      border: 1px solid #1f2937;
-      flex: 0 0 auto;
-    }
-    #lpRemoteImg { width: 100%; height: 100%; object-fit: cover; display: none; }
-    #lpRemoteFallback {
-      position: absolute;
-      inset: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: #374151;
-      font-size: 26px;
-      font-weight: 900;
-    }
-    #lpRemoteMeta { min-width: 0; flex: 1 1 auto; }
+
     #lpRemoteSeries {
       font-size: 9px;
       font-weight: 900;
@@ -1008,32 +967,70 @@
       white-space: nowrap;
     }
     #lpRemoteTitle {
-      margin-top: 3px;
-      font-size: 14px;
+      margin-top: 2px;
+      font-size: 13px;
       font-weight: 700;
       color: #e5e7eb;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    #lpRemoteHint {
-      margin-top: 4px;
-      font-size: 9px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.14em;
-      color: #4b5563;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+
+    /* #lpSeekBar is RELOCATED into #lpRemoteSeek while remote mode is on (the
+       real node, not a copy — see _npSyncRemoteUi), so _lpSeekBarInit's
+       listeners and _lpCtlTick's writes keep working untouched. Same trick as
+       _applyPhoneLandLayout. It only needs to grow into a remote-sized touch
+       target; everything inside it is centre-anchored, so height is the only
+       thing to say. */
+    #localPlayer.lp-remote #lpSeekBar { height: 44px; }
+
+    /* Episode counter cell — a label between the Prev/Next tiles, not a tile. */
+    #lpRemoteEpCount {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 12px;
+      flex: 0 0 auto;
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      color: #6b7280;
+      pointer-events: none;
     }
-    /* Short/landscape phones: the stage is ~390px tall, so the now-playing row
-       has to shed height before it reaches up into the transport cluster. The
-       poster tile and the hint line go; the two text lines stay. */
+
+    /* Skip offer. Also relocated: floating an amber pill over a full grid of
+       tiles reads as a misplaced overlay, and its normal anchor is arithmetic
+       against a control strip that is not on screen in remote mode. In the
+       column it is simply the next row. */
+    #localPlayer.lp-remote #lpSkipOffer {
+      position: static;
+      flex: 0 0 auto;
+      z-index: auto;
+      border-bottom: 1px solid #1f2937;
+    }
+    #localPlayer.lp-remote #lpSkipBtn {
+      width: 100%;
+      justify-content: center;
+      border-width: 0;
+      box-shadow: none;
+    }
+    #localPlayer.lp-remote #lpSkipOffer > button:last-child {
+      margin: 4px auto;
+    }
+
+    /* Short/landscape phones: the column has ~390px to work with, so the fixed
+       rows shed what they can and the tile labels go, leaving the icons. The
+       grid itself needs no help — flex-1 rows simply get shorter. */
     @media (max-height: 520px) {
-      #lpRemoteNow { padding: 8px 12px; gap: 10px; }
-      #lpRemoteArt, #lpRemoteHint { display: none; }
-      #lpRemoteTitle { margin-top: 2px; font-size: 13px; }
+      #lpRemoteBanner { height: 20px; font-size: 8px; }
+      #lpRemoteTitle { font-size: 12px; }
+      /* Two ids + a class, so this wins over the Tailwind min-h utility on the
+         element without needing !important. */
+      #localPlayer.lp-remote #lpRemoteNow { min-height: 40px; padding-top: 4px; padding-bottom: 4px; }
+      #localPlayer.lp-remote #lpSeekBar { height: 36px; }
+      .lp-rm-label { display: none; }
+      /* The icons carry mb-1 to clear a label that is no longer there; id +
+         element beats the utility class, so no !important. */
+      #lpRemoteGrid svg { margin-bottom: 0; }
     }
     #lpSkipOffer {
       position: absolute;
@@ -3773,20 +3770,107 @@
          row — because the middle of the stage belongs to the transport
          cluster; see the LAYOUT RULE on .lp-remote in the stylesheet. -->
     <div id="lpRemote">
-      <div id="lpRemoteBack">
-        <img id="lpRemoteBackImg" alt="" aria-hidden="true"/>
-        <div id="lpRemoteScrim"></div>
-      </div>
       <div id="lpRemoteBanner"><span class="lp-rm-dot"></span><span>Playing on Glasses</span></div>
-      <div id="lpRemoteNow">
-        <div id="lpRemoteArt">
-          <img id="lpRemoteImg" alt=""/>
-          <div id="lpRemoteFallback"></div>
-        </div>
-        <div id="lpRemoteMeta">
+      <!-- What's playing + the clock, one fixed row. No poster: in a grid that
+           claims every pixel there is no void left for artwork to fill, and a
+           dimmed image under flat tiles is decoration Metro does not do. -->
+      <div id="lpRemoteNow" class="flex-shrink-0 flex items-center gap-3 px-3 py-2 border-b border-gray-800 min-h-[52px]">
+        <div class="flex-1 min-w-0">
           <div id="lpRemoteSeries"></div>
           <div id="lpRemoteTitle"></div>
-          <div id="lpRemoteHint">Transport controls the glasses</div>
+        </div>
+        <div id="lpRemoteClock" class="text-sm font-mono font-bold text-gray-400 tabular-nums flex-shrink-0 text-right">–:––</div>
+      </div>
+      <!-- #lpSeekBar and #lpSkipOffer are moved into these two slots while
+           remote mode is on, and back out when it ends — _npSyncRemoteUi. -->
+      <div id="lpRemoteSeek" class="flex-shrink-0 border-b border-gray-800"></div>
+      <div id="lpRemoteSkip" class="flex-shrink-0"></div>
+      <div id="lpRemoteGrid" class="flex-1 flex flex-col min-h-0">
+        <!-- Row A: seek steps, and Row B: play. The TV grid puts all five on one
+             row, but it has a volume row and a track row to fill its column and
+             this one does not (see the note in the stylesheet). Splitting the
+             transport in two is what keeps every tile a remote-sized rectangle
+             instead of three 220px slabs — and a full-bleed play button is the
+             right primary action for a surface you operate without looking. -->
+        <div class="flex flex-1 border-b border-gray-800 min-h-0">
+          <button onclick="lpSeekBy(-30)" title="Back 30 seconds"
+            class="fc-tile flex flex-1 border-r border-gray-800 hover:bg-gray-800/60 active:bg-gray-700/80 transition-colors text-gray-500">
+            <svg class="w-7 h-7 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 5V3m0 2a7 7 0 100 14 7 7 0 000-14zm-2.5 7l4-3v6l-4-3z"/></svg>
+            <span class="lp-rm-label text-[11px] font-bold">30s</span>
+          </button>
+          <button onclick="lpSeekBy(-10)" title="Back 10 seconds"
+            class="fc-tile flex flex-1 border-r border-gray-800 hover:bg-gray-800/60 active:bg-gray-700/80 transition-colors text-gray-300">
+            <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 5V3m0 2a7 7 0 100 14 7 7 0 000-14zm-2.5 7l4-3v6l-4-3z"/></svg>
+            <span class="lp-rm-label text-[11px] font-bold">10s</span>
+          </button>
+          <button onclick="lpSeekBy(10)" title="Forward 10 seconds"
+            class="fc-tile flex flex-1 border-r border-gray-800 hover:bg-gray-800/60 active:bg-gray-700/80 transition-colors text-gray-300">
+            <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 5V3m0 2a7 7 0 100 14 7 7 0 000-14zm2.5 7l-4-3v6l4-3z"/></svg>
+            <span class="lp-rm-label text-[11px] font-bold">10s</span>
+          </button>
+          <button onclick="lpSeekBy(30)" title="Forward 30 seconds"
+            class="fc-tile flex flex-1 hover:bg-gray-800/60 active:bg-gray-700/80 text-gray-500 transition-colors">
+            <svg class="w-7 h-7 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 5V3m0 2a7 7 0 100 14 7 7 0 000-14zm2.5 7l-4-3v6l4-3z"/></svg>
+            <span class="lp-rm-label text-[11px] font-bold">30s</span>
+          </button>
+        </div>
+        <div class="flex flex-1 border-b border-gray-800 min-h-0">
+          <button id="lpRemotePlayBtn" onclick="lpTogglePlay()" title="Play / Pause"
+            class="fc-tile flex flex-1 bg-indigo-900/25 hover:bg-indigo-900/50 active:bg-indigo-900/80 text-indigo-400 transition-colors">
+            <svg class="lp-ic-play w-16 h-16" fill="currentColor" viewBox="0 0 24 24">
+              <path d="M8 5v14l11-7z"/>
+            </svg>
+            <svg class="lp-ic-pause w-16 h-16 hidden" fill="currentColor" viewBox="0 0 24 24">
+              <path d="M6 4h4v16H6zM14 4h4v16h-4z"/>
+            </svg>
+          </button>
+        </div>
+        <!-- Row B: episode nav. Hold-to-activate and the readiness dot, same as
+             the header pair — _lpRenderNavButtons paints all four. Hidden when
+             the playlist has nowhere to go. -->
+        <div id="lpRemoteEpRow" class="hidden flex-1 border-b border-gray-800 min-h-0">
+          <button id="lpRemotePrevBtn"
+            onpointerdown="_holdStart(this, lpPrevEp, event)"
+            onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
+            title="Hold for previous episode"
+            class="hold-btn fc-tile flex flex-1 border-r border-gray-800 hover:bg-indigo-950/40 active:bg-indigo-950/70 text-indigo-400 transition-colors">
+            <span class="lp-ep-dot absolute top-1.5 right-1.5 w-1.5 h-1.5 bg-gray-600"></span>
+            <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7M18 12H5"/>
+            </svg>
+            <span class="lp-rm-label text-xs font-bold">Prev</span>
+          </button>
+          <div id="lpRemoteEpCount"></div>
+          <button id="lpRemoteNextBtn"
+            onpointerdown="_holdStart(this, lpNextEp, event)"
+            onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
+            title="Hold for next episode"
+            class="hold-btn fc-tile flex flex-1 border-l border-gray-800 hover:bg-indigo-950/40 active:bg-indigo-950/70 text-indigo-400 transition-colors">
+            <span class="lp-ep-dot absolute top-1.5 right-1.5 w-1.5 h-1.5 bg-gray-600"></span>
+            <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M6 12h13"/>
+            </svg>
+            <span class="lp-rm-label text-xs font-bold">Next</span>
+          </button>
+        </div>
+        <!-- Row C: where the picture goes next. Both exist in the header too,
+             as small icon buttons; the TV grid duplicates its Stop the same way,
+             because on a remote these are destinations, not chrome. -->
+        <div class="flex flex-1 min-h-0">
+          <button onpointerdown="_holdStart(this, lpStop, event)"
+            onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
+            title="Hold to stop"
+            class="hold-btn fc-tile flex flex-1 border-r border-gray-800 bg-red-950/15 hover:bg-red-950/45 active:bg-red-950/70 text-red-500 transition-colors">
+            <svg class="w-8 h-8 mb-1" fill="currentColor" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14"/></svg>
+            <span class="lp-rm-label text-xs font-bold">Stop</span>
+          </button>
+          <button onclick="lpHandoffToVlc(this)" title="Hand off to the TV (VLC)"
+            class="fc-tile flex flex-1 hover:bg-indigo-950/40 active:bg-indigo-950/70 text-indigo-400 transition-colors">
+            <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+              <rect x="2" y="4" width="20" height="14"/><path stroke-linecap="round" d="M8 20h8M12 18v2"/>
+            </svg>
+            <span class="lp-rm-label text-xs font-bold">To TV</span>
+          </button>
         </div>
       </div>
     </div>
@@ -3839,10 +3923,6 @@
           <span class="lp-ctl-time lp-ctl-dim">/</span>
           <span id="lpTimeDur" class="lp-ctl-time lp-ctl-dim">–:––</span>
           <div class="flex-1"></div>
-          <!-- Remote mode hides five buttons from the right of this row and left
-               a dead half-row behind. Time remaining is the readout a remote
-               actually wants, and it fills the gap with something true. -->
-          <span id="lpTimeLeft" class="lp-ctl-time lp-ctl-left">—</span>
           <button id="lpOptsBtn" class="lp-ctl-sm" onclick="lpToggleOpts()" title="Options — quality, audio, subtitles, clip">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
@@ -18788,32 +18868,33 @@ function _npSyncRemoteUi() {
     where.classList.toggle("text-indigo-400", on);
     where.classList.toggle("text-emerald-500", !on);
   }
-  if (!on) return;
-  const series = _npSeriesName();
-  document.getElementById("lpRemoteSeries").textContent = series || "On Glasses";
-  document.getElementById("lpRemoteTitle").textContent = lp.name || "";
-  const img  = document.getElementById("lpRemoteImg");
-  const back = document.getElementById("lpRemoteBackImg");
-  const fb   = document.getElementById("lpRemoteFallback");
-  let src = "";
-  try {
-    const it = (window._libCache || []).find((x) => x && x.id === lp.itemId);
-    if (it) src = it.poster_url
-                || (it.poster_path ? `${libGroupsImgBase}/w342${it.poster_path}` : "");
-  } catch (_) {}
-  if (src) {
-    img.src = src; img.style.display = "block"; fb.textContent = "";
-    // Same file, so the backdrop costs one cache hit, not a second download.
-    back.src = src; back.style.display = "block";
+  // Move the REAL seek bar and skip tile between the overlay and the remote
+  // column — not duplicates, so _lpSeekBarInit's listeners, _lpCtlTick's writes
+  // and lpEvaluateSkipOffer all keep addressing the one node they always have.
+  // (Same technique, and the same reason, as _applyPhoneLandLayout.) Both
+  // directions run here because this is the only function that knows the page
+  // stopped being a remote; there is no event for it.
+  const bar  = document.getElementById("lpSeekBar");
+  const skip = document.getElementById("lpSkipOffer");
+  if (on) {
+    const seekSlot = document.getElementById("lpRemoteSeek");
+    const skipSlot = document.getElementById("lpRemoteSkip");
+    if (bar && seekSlot && bar.parentElement !== seekSlot) seekSlot.appendChild(bar);
+    if (skip && skipSlot && skip.parentElement !== skipSlot) skipSlot.appendChild(skip);
   } else {
-    // No art is normal — an unmatched item, or an offline session with no host
-    // to proxy the image. An initial beats a broken-image icon, and the
-    // backdrop simply stays the flat panel colour.
-    img.removeAttribute("src"); img.style.display = "none";
-    back.removeAttribute("src"); back.style.display = "none";
-    fb.textContent = (series || lp.name || "?").trim().charAt(0).toUpperCase();
+    const strip = document.querySelector(".lp-ctl-bottom");
+    const row   = document.querySelector(".lp-ctl-row");
+    if (bar && strip && row && bar.parentElement !== strip) strip.insertBefore(bar, row);
+    if (skip && skip.parentElement !== c) c.appendChild(skip);
   }
+  if (!on) return;
+  document.getElementById("lpRemoteSeries").textContent = _npSeriesName() || "On Glasses";
+  document.getElementById("lpRemoteTitle").textContent = lp.name || "";
+  _lpRenderNavButtons();
+  _lpCtlSync();
+  _lpCtlTick();
 }
+
 let _npExternal = false;     // an external display / AirPlay route is present
 let _npArmed = false;        // we've told native a session is live
 let _npLastTick = 0;
@@ -26134,8 +26215,13 @@ function _lpCtlSync() {
   // While native holds the display the element is parked and always reads
   // paused; show what the DISPLAY is doing instead.
   const paused = _npHolding ? _npNativePaused : v.paused;
-  btn.querySelector(".lp-ic-play").classList.toggle("hidden", !paused);
-  btn.querySelector(".lp-ic-pause").classList.toggle("hidden", paused);
+  // Two play buttons now — the overlay's and the remote grid's. Only one is
+  // ever on screen, but painting both is one branch fewer than tracking which.
+  for (const el of [btn, document.getElementById("lpRemotePlayBtn")]) {
+    if (!el) continue;
+    el.querySelector(".lp-ic-play").classList.toggle("hidden", !paused);
+    el.querySelector(".lp-ic-pause").classList.toggle("hidden", paused);
+  }
   const mute = document.getElementById("lpMuteBtn");
   mute.querySelector(".lp-ic-vol").classList.toggle("hidden", v.muted);
   mute.querySelector(".lp-ic-muted").classList.toggle("hidden", !v.muted);
@@ -26152,10 +26238,10 @@ function _lpCtlTick() {
   const t = _lpScrub ? _lpScrub.t : _npUiTime(v);
   document.getElementById("lpTimeCur").textContent = fmtTimeSecs(t);
   document.getElementById("lpTimeDur").textContent = d ? fmtTimeSecs(d) : "–:––";
-  // Only visible on the glasses remote (.lp-ctl-left), but written always —
-  // one branch fewer than keeping it in sync with _npHolding.
-  document.getElementById("lpTimeLeft").textContent =
-    d && d > t ? "–" + fmtTimeSecs(d - t) + " LEFT" : "";
+  // The remote grid's own clock. Written unconditionally for the same reason
+  // as the labels above: cheaper than asking whether the panel is up.
+  const rc = document.getElementById("lpRemoteClock");
+  if (rc) rc.textContent = fmtTimeSecs(t) + " / " + (d ? fmtTimeSecs(d) : "–:––");
   const pct = d ? Math.min(t / d * 100, 100) : 0;
   document.getElementById("lpSeekFill").style.width = pct + "%";
   document.getElementById("lpSeekDot").style.left = pct + "%";
@@ -26655,6 +26741,19 @@ function _lpRenderNavButtons() {
   };
   paint("lpPrevEpBtn", lp.pi - 1);
   paint("lpNextEpBtn", lp.pi + 1);
+  // The remote grid carries the same pair as full tiles. Its row goes away
+  // entirely when there is nowhere to go — a dead tile on a remote is worse
+  // than a missing one, and the rows either side just grow to fill it.
+  paint("lpRemotePrevBtn", lp.pi - 1);
+  paint("lpRemoteNextBtn", lp.pi + 1);
+  const epRow = document.getElementById("lpRemoteEpRow");
+  if (epRow) {
+    const n = lp.playlist.length;
+    epRow.classList.toggle("hidden", n < 2);
+    epRow.classList.toggle("flex", n >= 2);
+    const cnt = document.getElementById("lpRemoteEpCount");
+    if (cnt) cnt.textContent = n >= 2 ? (lp.pi + 1) + " / " + n : "";
+  }
 }
 
 // Warm the NEXT episode's HLS bundle while the current one plays, so auto-advance
@@ -28130,6 +28229,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.12.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.13.0</div>
 </body>
 </html>

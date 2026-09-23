@@ -1,5 +1,51 @@
 # Changelog
 
+## [18.13.0] — 2026-09-22
+### The glasses remote is a control panel now, not an overlay with the video removed
+
+18.12.0 drew a panel on the player stage; 18.12.2 rearranged that panel so it stopped
+colliding with the transport. Both were wrong the same way, and the second is the
+instructive one: it fixed the collision without asking why there was empty space to
+collide over.
+
+`#lpControls` is an **overlay**. Its transport is pinned to the dead centre of an
+`inset: 0` stage, its strip to the floor; everything about it is small, sparse and
+translucent so it never covers the frame. On the remote there is no frame. Applied there,
+the design leaves most of an 844px screen empty *by construction* — and no amount of
+edge-anchoring, poster backdrops or status strips fixes that, because the premise is
+false in that mode.
+
+- **`#lpControls` is now hidden outright in `.lp-remote`**, and `#lpRemote` replaces it as
+  a full-height flex column built in the same idiom as the TV's `#fullscreenControls` —
+  the surface that has always been the answer to "this phone is a remote for a picture
+  somewhere else". Fixed rows for the status strip, the now-playing line, the seek bar and
+  the skip offer; below them a grid whose rows are `flex-1` and whose tiles are
+  edge-to-edge. **The tiles reuse `.fc-tile` and the fullscreen grid's own Tailwind class
+  strings** — same component, not a lookalike.
+- **The grid:** −30 / −10 / +10 / +30, a full-bleed play tile, episode nav with the same
+  hold-to-activate and prep-readiness dots as the header pair (the row disappears entirely
+  when the playlist has nowhere to go), and Stop / To TV. The transport gets two rows here
+  where the TV grid uses one, because this grid has no volume or track rows to fill the
+  column and splitting it is what keeps every tile a remote-sized rectangle.
+- **`#lpSeekBar` and `#lpSkipOffer` are relocated into the column** — the real nodes, not
+  copies — so `_lpSeekBarInit`'s listeners, `_lpCtlTick`'s writes and
+  `lpEvaluateSkipOffer` keep addressing the one node they always have. Same technique and
+  the same reason as `_applyPhoneLandLayout`. The restore branch runs on every
+  `_npHolding` write in both directions, and is verified idempotent.
+- **No volume row and no audio/subtitle row, deliberately.** `NativePlayback` exposes
+  `setPaused`/`seekTo`/`takeover`/`resume`/`state`/`setTvMode` and nothing else — there is
+  no volume method, and switching tracks needs the native item reloaded. A tile that
+  cannot do anything is the same sin as an empty overlay, just louder. The phone's
+  hardware volume buttons already drive the glasses.
+- Gone with the overlay: the poster tile and its dimmed full-bleed backdrop (in a grid
+  that claims every pixel there is no void left for artwork to fill), and `#lpTimeLeft`
+  (the control row it filled is no longer on screen; `#lpRemoteClock` carries position and
+  duration instead). The "On Device" → "On Glasses" header fix from 18.12.2 stays.
+
+Measured headlessly against the real vendored Tailwind in both orientations: portrait 4
+rows of 169px, landscape 4 rows of 59px, `scrollHeight == innerHeight` in both, no
+collisions and no seams.
+
 ## [18.12.3] — 2026-09-22
 ### The seek was fine. The loader was dead.
 

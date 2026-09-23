@@ -4877,42 +4877,67 @@ The consequences of moving the actor are where the real work was:
   at and wrong with the glasses on and the phone in a pocket — it reads as the player
   dying mid-credits. Native declines and lets `itemDidEnd` own the real end.
 
-## The overlay that is always centred owns the centre (18.12.2)
+## A remote is a control panel, not an overlay (18.13.0, superseding 18.12.2)
 
-`.lp-ctl-center` — back-10, play, forward-10 — is `position: absolute; top: 50%; left: 50%`
-on a stage that is `inset: 0`. It is the one piece of player chrome whose position is not
-negotiable and not affected by anything else on screen. 18.12.0's remote panel was written
-as its own self-contained thing: a flex column, `align-items: center`, `justify-content:
-center`, inset 0. Both are correct in isolation and both put their content in the same
-place, so the poster rendered underneath the play button while the other ~500px of an
-844px screen stayed black. Nothing errored; it just looked like a mistake, and it was one.
+While the native player holds an external display, the page is not a player — it is a
+remote. 18.12.0 drew a panel on the stage; 18.12.2 rearranged that panel to stop it
+colliding with the transport. Both were wrong in the same way, and the second one is the
+instructive failure: **it fixed the collision without questioning why there was empty
+space to collide over.**
 
-The rule, now stated in the stylesheet next to `.lp-remote`: **anything added to the stage
-is anchored to an edge, because the middle belongs to the transport.** In practice that
-means offsets expressed in the real heights of the chrome it butts against —
-`env(safe-area-inset-top) + 48px` for the header bar (`h-12`, border included: Tailwind's
-preflight is `border-box`) and `73px + env(safe-area-inset-bottom)` for the control strip
-(seek bar 28 + button row 44 + a 1px top border). Get those off by one and you ship a
-visible hairline of the wrong colour. `#lpTrackRow` says `72px` and gets away with it only
-because it floats above the strip rather than butting against it.
+`#lpControls` is an *overlay*. `.lp-ctl-center` is `position: absolute; top: 50%; left:
+50%` on an `inset: 0` stage; `.lp-ctl-bottom` is pinned to the floor; both are small,
+sparse and translucent. Every one of those properties exists for exactly one reason — **so
+the controls do not cover the picture.** On the remote there is no picture. Applied there,
+the design leaves most of an 844px screen empty *by construction*, and no amount of
+anchoring, poster backdrops or status strips changes that, because the premise ("get out
+of the way of the frame") is false in that mode.
 
-Two consequences worth keeping:
+So in `.lp-remote`, `#lpControls` is hidden **outright** and `#lpRemote` replaces it,
+built in the same idiom as the TV's `#fullscreenControls` — the surface that has always
+been the answer to "this phone is a remote for a picture somewhere else". A full-height
+flex column: fixed rows for the status strip, the now-playing line, the seek bar and the
+skip offer, then a grid whose rows are `flex-1` and whose tiles are edge-to-edge. **The
+tiles literally reuse `.fc-tile` and the fullscreen grid's own Tailwind class strings** —
+same component, not a lookalike.
 
-- **A dimmed full-bleed backdrop is how the reserved middle stops reading as waste.** The
-  band has to stay clear of content, but it does not have to stay empty. Same `src` as the
-  small tile, so it is a cache hit rather than a second download.
-- **Short screens are a different layout, not a smaller one.** At `max-height: 520px` — a
-  phone in landscape, ~390px of stage — the bottom row has to shed its poster tile and
-  hint line or it grows up into the transport. Measured after the change: 36px of
-  clearance in landscape, 209px in portrait.
+The general shape of the mistake, worth recognising elsewhere: **a component carries the
+assumptions of the context it was designed for, and those assumptions do not announce
+themselves when the context changes.** The overlay never errored. It just kept optimising
+for a constraint that no longer applied.
+
+Three things that fall out of it:
+
+- **A flex column has no offsets to get wrong.** The 18.12.2 version was a pile of
+  arithmetic against the chrome it butted against — `env(safe-area-inset-top) + 48px` for
+  the header (`h-12`, border included: Tailwind preflight is `border-box`) and `73px +
+  env(safe-area-inset-bottom)` for the control strip (seek bar 28 + button row 44 + a 1px
+  top border). Both were shipped off by one first, and an off-by-one there is a visible
+  hairline of the wrong colour. The column version states one offset (the header) and lets
+  flexbox do the rest.
+- **Move the real node, never a copy.** `#lpSeekBar` and `#lpSkipOffer` are *relocated*
+  into the remote column and back out by `_npSyncRemoteUi`, so `_lpSeekBarInit`'s
+  listeners, `_lpCtlTick`'s writes and `lpEvaluateSkipOffer` keep addressing the one node
+  they always have. Same technique and the same reason as `_applyPhoneLandLayout`. The
+  restore branch runs on **every** `_npHolding` write, both directions — there is no event
+  for "the page stopped being a remote".
+- **Never ship a tile that cannot do anything.** `NativePlayback` exposes
+  `setPaused`/`seekTo`/`takeover`/`resume`/`state`/`setTvMode` and no volume method, and
+  switching audio or subtitles needs the native item reloaded. So the remote has no volume
+  row and no track row, where the TV grid has both. A dead control is the same sin as an
+  empty overlay, just louder — and the phone's hardware volume buttons already drive the
+  glasses. That is also why the transport gets **two** rows here and one on the TV: with
+  no volume or track rows to fill the column, splitting it is what keeps every tile a
+  remote-sized rectangle instead of three 220px slabs.
 
 Verify layout claims like these headlessly rather than by eye: serve `static/index.html`
 plus `static/vendor/` from a temp dir, load it in an iframe at 390×844 and 844×390, force
-`lp-active lp-remote`, and compare `getBoundingClientRect()` on the panel against the
-transport. **Copying `index.html` alone is a trap** — Tailwind is vendored at
-`/vendor/tailwind.js`, and without it `h-12`, `flex-1` and the text sizes silently vanish,
-which is its own plausible-looking wrong answer.
-
+`lp-active lp-remote`, relocate the seek bar and skip offer as `_npSyncRemoteUi` does, and
+read `getBoundingClientRect()` off every row. **Copying `index.html` alone is a trap** —
+Tailwind is vendored at `/vendor/tailwind.js`, and without it `h-12`, `flex-1` and the
+text sizes silently vanish, which is its own plausible-looking wrong answer. Measured
+after the change: portrait 4 rows of 169px, landscape 4 rows of 59px, `scrollHeight ==
+innerHeight` in both, and the restore branch verified idempotent.
 ## The page is a remote, so it must not look like a player (18.12.0)
 
 `_npHolding` has always meant "the native player IS the presentation", and every

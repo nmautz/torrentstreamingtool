@@ -616,18 +616,22 @@ Don't re-add the `controls` attribute. Pieces:
   shows the square Metro spinner `#lpBuffSpin`, independent of overlay
   visibility.
 - **Glasses remote** — `.lp-remote` on `#localPlayer` (set by `_npSyncRemoteUi`
-  at every `_npHolding` write) hides the controls that address the parked
-  `<video>` — mute, fullscreen, orientation lock, TV Mode, the gear and the
-  whole options panel — and shows `#lpRemote`. That panel is **edge-anchored**:
-  `#lpRemoteBanner` is a full-bleed strip flush under the header,
-  `#lpRemoteNow` (poster tile + series + title + hint) butts against the
-  control strip, and `#lpRemoteBack` carries the poster as a dimmed full-bleed
-  backdrop. **The middle of the stage is reserved for `.lp-ctl-center`** — see
-  [GOTCHAS.md](GOTCHAS.md) § The overlay that is always centred owns the
-  centre. `#lpWhere` in the header flips "On Device" → "On Glasses", and
-  `#lpTimeLeft` fills the control row's right side where the hidden buttons
-  were. Everything else (transport, seek bar, skip tile) stays, because those
-  proxy through to the native player.
+  at every `_npHolding` write) hides **`#lpControls` outright** and shows
+  `#lpRemote` in its place. The remote is not an overlay with the video
+  removed; it is a control panel in the same idiom as the TV's
+  `#fullscreenControls`, and its tiles reuse `.fc-tile` and that grid's own
+  class strings. Structure, top to bottom: `#lpRemoteBanner` (status strip),
+  `#lpRemoteNow` (series + title + `#lpRemoteClock`), `#lpRemoteSeek` and
+  `#lpRemoteSkip` (empty slots that `#lpSeekBar` and `#lpSkipOffer` are
+  **relocated into** — the real nodes, so every existing listener and painter
+  keeps working; the restore branch runs in the same function), then
+  `#lpRemoteGrid`: seek steps, a full-bleed `#lpRemotePlayBtn`,
+  `#lpRemoteEpRow` (hold-to-activate Prev/Next with the readiness dots, hidden
+  when the playlist has nowhere to go), and Stop / To TV. `#lpWhere` in the
+  header flips "On Device" → "On Glasses". **No volume row and no track row** —
+  `NativePlayback` has no volume method and track switching needs a native
+  reload, and a tile that can't do anything is worse than a missing one. See
+  [GOTCHAS.md](GOTCHAS.md) § "A remote is a control panel, not an overlay".
 
 The header (`#lpHeader`, `.lp-chrome`, hidden in tiny mode; on phones ≤480px
 the Min / To TV text labels collapse to icons via `.lp-btn-label` so the bar
