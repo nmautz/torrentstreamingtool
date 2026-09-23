@@ -25375,11 +25375,55 @@ function _lpCancelSeekVerify() {
 // is `no-frames` whether the loader is healthy or dead (see GOTCHAS).
 const LP_FREEZE_KICK_MS = 2200;      // one bundle segment loads in well under a second
 const LP_FREEZE_REBUILD_MS = 4000;   // and a kick that worked shows up inside two more
+const LP_RECLAIM_POLL_MS = 600;      // how often to ask whether the target arrived
+const LP_RECLAIM_TRIES = 6;          // ~3.6 s of asking — ends before the rebuild check
+const LP_RECLAIM_TOL = 5;            // seconds of legitimate playback drift to allow
 let _lpFreezeToken = 0;
 let _lpFreezeTimer = null;
+let _lpReclaimTimer = null;
 function _lpCancelFreezeWatch() {
   _lpFreezeToken++;
   if (_lpFreezeTimer) { clearTimeout(_lpFreezeTimer); _lpFreezeTimer = null; }
+  if (_lpReclaimTimer) { clearTimeout(_lpReclaimTimer); _lpReclaimTimer = null; }
+}
+
+// Put the playhead back on the target once the media for it actually arrives.
+//
+// The kick revives the loaders, but its fetch takes a moment — and for that
+// moment the playhead is sitting in a hole with a buffered island above it,
+// which is precisely the state hls.js's gap handling exists to escape: it jumps
+// the playhead INTO the island rather than waiting. Measured on the 18.12.3
+// verify, 2 of 37 seeks ended up at exactly `island_start + playback_since`
+// (target 236.65, island 264.0-480.0, landed at 266.67 = 264.0 + 2.67; and
+// target 343.37, island 348.0-576.0, landed at 353.39). Note what this is NOT:
+// the seek was not swallowed. A frame was presented at the target and the
+// verdict for it reads `landed`. The playhead is dragged off it afterwards.
+//
+// So do not reclaim until `_lpBufferedHas(target)` — reclaiming into a hole
+// just gets dragged off again, and fighting the gap controller in a loop is a
+// far worse bug than the one being fixed. One reclaim per watch, then stop.
+//
+// The write is direct rather than through _lpCommitSeek: this is machinery
+// restoring the user's own target, not a new user intent, so it must not log a
+// `seek` row, re-arm the verifier, or re-arm this watchdog (which would
+// recurse). Same exemption as the resume seek and the cold-start nudge — see
+// GOTCHAS.md.
+function _lpReclaimSeek(v, target, stale, tries) {
+  _lpReclaimTimer = setTimeout(() => {
+    _lpReclaimTimer = null;
+    if (stale()) return;
+    if (!_lpBufferedHas(v, target)) {
+      if (tries > 1) _lpReclaimSeek(v, target, stale, tries - 1);
+      return;                                  // still no media there; nothing to reclaim to
+    }
+    const now = v.currentTime || 0;
+    if (now <= target + LP_RECLAIM_TOL) return;   // the seek held, or is merely playing on
+    _npLog("seek-reclaim", { to: target, from: now, drift: now - target,
+                             buffered: _lpBufferedDesc(v), paused: !!v.paused,
+                             ready: v.readyState }, "play");
+    try { v.currentTime = target; } catch (_) {}
+    _lpCtlTick();
+  }, LP_RECLAIM_POLL_MS);
 }
 
 function _lpWatchBufferFreeze(v, target) {
@@ -25400,6 +25444,7 @@ function _lpWatchBufferFreeze(v, target) {
                            engine: lp.hls ? "hls.js" : "native-hls",
                            mode: lp.mode || "" }, "play");
     _lpKickLoader(target);
+    _lpReclaimSeek(v, target, stale, LP_RECLAIM_TRIES);
     const after = _lpBufferedDesc(v);
     // Second look. A stop+start that took hold appends something; one that did
     // not means the instance itself is wedged and only a rebuild clears it —
@@ -28229,6 +28274,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.13.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.13.1</div>
 </body>
 </html>

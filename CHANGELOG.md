@@ -1,5 +1,42 @@
 # Changelog
 
+## [18.13.1] — 2026-09-22
+### Curing the loader is not the same as keeping the playhead
+
+The last 5% of the ±10 bug. On the 18.12.3 on-device verify, 35 of 37 seeks held and
+**2 did not** — and the two failures land on the mechanism exactly:
+
+| target | buffered island | ended up at |
+|---|---|---|
+| 343.37 | `348.0-576.0` | 353.39 |
+| 236.65 | `264.0-480.0` | **266.67 = 264.0 + 2.67** |
+
+Both are `island_start + playback_since`, to two decimals. The kick revives the loaders,
+but its fetch takes a moment, and for that moment the playhead sits in a hole with a
+buffered island above it — which is precisely the state hls.js's gap handling exists to
+escape, so it jumps the playhead **into** the island rather than waiting.
+
+Read what that rules out: these seeks were **not swallowed**. Each presented a frame at
+the target and its `seek-verdict` reads `landed`. The playhead is dragged off it
+afterwards, which is a different bug wearing the same symptom.
+
+- **`_lpReclaimSeek`** waits for the media to actually arrive (`_lpBufferedHas(target)`)
+  and only then puts the playhead back — polling every 600 ms for up to ~3.6 s, ending
+  before the rebuild check. Reclaiming into a hole would just get dragged off again, and a
+  loop fighting the gap controller is a far worse bug than the one being fixed, so it
+  reclaims **at most once** per kick and tolerates 5 s of legitimate playback drift.
+- The restore is a **direct `currentTime` write**, not `_lpCommitSeek`: this is machinery
+  re-asserting the user's own target, not a new intent, so it must not log a `seek` row,
+  re-arm the verifier, or re-arm the freeze watchdog (which would recurse). Same exemption
+  as the resume seek and the cold-start nudge.
+- Logs `seek-reclaim` with `from` (where it had been dragged to) and `drift`.
+
+Verified against a model of the player's buffer and playhead across six scenarios: loader
+answers early (nothing fires), kick works and the seek holds (no spurious write), **kick
+works and the playhead is dragged off** (one reclaim, position restored), kick fails
+(rebuild, no reclaim), target never arrives (polls out silently, zero writes), and a newer
+seek superseding the watch mid-flight (everything cancelled).
+
 ## [18.13.0] — 2026-09-22
 ### The glasses remote is a control panel now, not an overlay with the video removed
 

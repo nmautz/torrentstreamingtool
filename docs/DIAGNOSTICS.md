@@ -147,6 +147,7 @@ JS-written rows carry `src: "js"`.
 | `seek-verdict` | what became of it, 4.5 s later. `landed` / `elsewhere` / **`no-frames`** — the last meaning the element presented nothing at all, which is the shape a backward seek past the buffered edge takes and the one `_lpVerifySeek` cannot judge |
 | `seek-swallowed` | the detector caught the pipeline still presenting the pre-seek position, and a rebuild followed |
 | `seek-stuck` | **the one that actually fires** (18.12.3). A seek out of the buffer did not make the buffered set change — nothing is being fetched. `stage: "kick"` is the loader restart, `stage: "rebuild"` means the kick didn't take either and `_lpPipelineRebuild` ran. Carries the frozen `buffered` string, plus `ready` and `paused` |
+| `seek-reclaim` | the kick worked, but while its fetch was in flight the playhead got dragged into the buffered island above the target, so it was put back (18.13.1). `from` is where it had been dragged to, `drift` how far past the target that was. One per `seek-stuck: kick` at most |
 | `auto-skip` | the **native** player fired a Smart Skip while it held the display (18.12.0) — `type` (`intro`/`credits`), `from`, and for an intro `to`. This is the only skip actor during a handoff; the page draws the tile but never fires |
 | `native-skipped` | the page's record of the same event, written when native's `nativeSkipped` reaches it. Its absence under an `auto-skip` means the page was asleep at the time — normal, and the flag is reconciled on the next arm |
 | `next-armed` | the next episode was handed to native (`via`: `already-ready` / `warmed`). From 18.12.0 the arm also carries that episode's skip windows |
@@ -348,7 +349,16 @@ failure, not a decode failure. The tell is in the `seek` rows themselves: compar
   hid the stall from the stall detector.
 - From 18.12.3 this self-heals and says so: a `seek-stuck` with `stage: "kick"`, and if that
   didn't take, a second one with `stage: "rebuild"`. A `kick` with no `rebuild` behind it is
-  the system working.
+  the system working. Measured on the 18.12.3 verify: 8 kicks, 0 rebuilds, 35 of 37 seeks
+  held.
+- **`seek-reclaim` under a `kick`** — the other two. The kick revived the loader, but its
+  fetch had not landed yet and hls.js's gap handling dragged the playhead up into the
+  buffered island above the target; `_lpReclaimSeek` waited for the media to arrive and put
+  it back (18.13.1). Note this is **not** a swallowed seek — the reference cases each
+  presented a frame at the target and verdicted `landed` before being dragged off. If you
+  ever see `seek-reclaim` repeating for one press, that is the reclaim fighting the gap
+  controller and is a bug: it is meant to fire at most once per `kick`, and only once
+  `_lpBufferedHas(target)` is true.
 
 Before 18.12.1 none of these existed: seeks were entirely unlogged, and the only trace of
 a bad one in the 2026-09-23 transcript was an accident — two unrelated rows that happened
