@@ -28016,17 +28016,34 @@ function connectSSE(){
     catch(_){ showAlert("Switched to downloaded subtitles","success"); }
   });
   es.addEventListener("error",()=>{
-    sseDot.className="w-2 h-2 bg-red-600 transition-colors";
-    sseLabel.textContent="OFFLINE"; sseLabel.className="text-[10px] font-black uppercase tracking-wide text-red-500";
     // Brief network hiccups happen all the time (especially on cell). Don't
     // flag the app as offline immediately — wait a few seconds. While the
     // grace timer is running, actions still go through and we just dim the
     // status indicator. After the grace period, _connected flips false and
     // the Play guards refuse new requests until SSE comes back.
+    //
+    // THE LABEL DID NOT HONOUR THAT GRACE, and said so right under this comment:
+    // it painted a red OFFLINE on the first error and the 4 s only ever gated
+    // `_connected` and the toast. WKWebView drops the EventSource whenever the
+    // app is backgrounded, so EVERY reopen errors once — and the reconnect is a
+    // round trip (over a WireGuard tunnel, a handshake first), which is exactly
+    // the "it says offline for a few seconds" report. Amber while we are still
+    // trying; red only once we have given up.
+    if(app._connected === false){
+      // Already past the grace period — a failed retry must not flip it back
+      // to amber, or a long outage oscillates.
+      sseDot.className="w-2 h-2 bg-red-600 transition-colors";
+      sseLabel.textContent="OFFLINE"; sseLabel.className="text-[10px] font-black uppercase tracking-wide text-red-500";
+    } else {
+      sseDot.className="w-2 h-2 bg-amber-500 transition-colors";
+      sseLabel.textContent="RECONNECTING"; sseLabel.className="text-[10px] font-black uppercase tracking-wide text-amber-500";
+    }
     if(!_sseDisconnectTimer){
       _sseDisconnectTimer = setTimeout(()=>{
         app._connected = false;
         _sseDisconnectTimer = null;
+        sseDot.className="w-2 h-2 bg-red-600 transition-colors";
+        sseLabel.textContent="OFFLINE"; sseLabel.className="text-[10px] font-black uppercase tracking-wide text-red-500";
         // ONCE per outage, not once per retry. Each failed reconnect re-enters
         // this handler, and the toast only lives 4 s — so a stream that can't
         // come back (the loopback server died under a proxied session) painted
@@ -28349,6 +28366,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.17.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.17.1</div>
 </body>
 </html>

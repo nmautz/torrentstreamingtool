@@ -1,5 +1,27 @@
 # Changelog
 
+## [18.17.1] — 2026-09-23
+### "It says offline for a few seconds every time I reopen the app"
+
+It did, and the comment sitting directly above the code that caused it already
+said it shouldn't:
+
+> *Brief network hiccups happen all the time (especially on cell). Don't flag the
+> app as offline immediately — wait a few seconds.*
+
+The 4-second grace only ever gated `app._connected` and the toast. The **label and
+dot were painted red on the very first `error` event**, before the grace timer was
+even armed. WKWebView drops the `EventSource` whenever the app is backgrounded, so
+every single reopen raises one error — and the reconnect is a round trip, which
+over a WireGuard tunnel means a handshake first. Hence: a few seconds of red
+OFFLINE on a connection that was never actually lost.
+
+Now amber **RECONNECTING** while the grace period runs, red **OFFLINE** only once
+it expires and `_connected` actually flips. A failed retry after that point keeps
+it red rather than flipping back to amber, so a long outage doesn't oscillate.
+
+Host-side only (`static/index.html`) — no app rebuild.
+
 ## [18.17.0] — 2026-09-23
 ### 9,051 concurrent download tasks
 
