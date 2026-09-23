@@ -383,10 +383,21 @@ The axis is **suspended vs not**, not foreground vs background — locked was
 `BGContinuedProcessingTask` keeps the app out of suspension and the penalty
 disappears: 621 files / 384.7 MB in 131 s, most of it backgrounded.
 
-**`la-progress` now carries the conditions, not just the bytes** (18.17.0):
+**Differentiate `sess`, never `done` or `disk`** (18.18.0). `done` freezes while the
+app is suspended — delegate callbacks queue and arrive in a burst on resume, so a
+flat `done` is *not* a stall (measured: a beat read 0 KB/s, and half a second later
+`dl-fg` showed 23 MB more on disk). And `done`/`disk` are both sums over the jobs
+that are *currently live*, so both **fall** when a bundle completes and leaves the
+set. `sess` is confirmed bytes since the process started, only ever rises, and is
+the field to subtract; a `sess` that drops to near zero means the process restarted.
+
+**`la-progress` carries the conditions, not just the bytes** (18.17.0, extended
+18.18.0):
 `tasks` (in-flight download tasks, capped at 24), `jobs`, `mem`
 (`os_proc_available_memory()` in MB — headroom before jetsam), `grant` (seconds the
-continued-processing task has been held, `-1` when none), `bg`, `cpt`. It runs on
+continued-processing task has been held, `-1` when none), `bg`, `cpt`, plus
+`sess` / `disk` (see above), `memLow` (lowest headroom seen this run — a 30 s beat
+misses the spike a jetsam is decided at) and `warns` (count of `mem-warning`). It runs on
 its own 30 s clock whenever jobs exist, so **silence now means the process stopped**,
 not "the bytes stopped" and not "the Island was suppressed" — both of which it used
 to mean. It also refreshes the run marker, so a `prev-launch-dirty` dates the death

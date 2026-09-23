@@ -247,6 +247,14 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
                        name: UIApplication.didBecomeActiveNotification, object: nil)
         nc.addObserver(self, selector: #selector(appDidEnterBackground),
                        name: UIApplication.didEnterBackgroundNotification, object: nil)
+        // THE ONE SIGNAL THAT PRECEDES A JETSAM. The 2026-09-23 overnight run was
+        // killed while backgrounded and nothing in the transcript could say why;
+        // the memory theory rested entirely on a task count. iOS sends this on the
+        // way to killing a process, so a `mem-warning` sitting above a
+        // `prev-launch-dirty` is as close to a verdict as this can get from
+        // inside the process — and its absence is evidence too.
+        nc.addObserver(self, selector: #selector(appMemoryWarning),
+                       name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
     }
 
     @objc private func appDidBecomeActive() {
@@ -1375,6 +1383,22 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     }
 
     private var beatScheduled = false
+    /// Confirmed bytes landed since this PROCESS started. `disk` (and `done`) are
+    /// sums over the jobs that are *currently live*, so both FALL when a bundle
+    /// finishes and leaves the set — which makes them useless across exactly the
+    /// moments a long run is made of. This one only ever goes up, so any two
+    /// heartbeats can be subtracted. A reset to a small number means the process
+    /// restarted, which is itself worth seeing.
+    private var sessionBytes: Int64 = 0
+    /// Lowest `os_proc_available_memory()` seen this run. The 30 s heartbeat can
+    /// miss a spike entirely; a jetsam is decided at the spike. Carried into the
+    /// run marker too, so a death reports the worst it ever saw rather than
+    /// whatever happened to be true at the last beat.
+    private var memFloor = Int.max
+    /// Memory warnings received. iOS sends these on the way to a jetsam, so a
+    /// non-zero count beside a `prev-launch-dirty` is about as close to a verdict
+    /// as this can get from inside the process.
+    private var memWarnings = 0
 
     /// ON ITS OWN CLOCK, and that is the entire point. The obvious place to hang
     /// a progress heartbeat is the progress callback — and a heartbeat driven by
@@ -1410,22 +1434,49 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             soleName = j.name
         }
         let title = jobs.count == 1 ? soleName : "\(jobs.count) downloads"
+        var disk: Int64 = 0
+        for (_, j) in jobs { disk += j.doneBytes.values.reduce(0, +) }
         let live = inFlight
         // Bytes this process may still allocate before jetsam. The flood
         // hypothesis for the overnight kill is testable only against this number,
         // and nothing else in the transcript carries it.
         let mem = Int(os_proc_available_memory() / (1024 * 1024))
+        memFloor = min(memFloor, mem)
         let grant = cptActive ? Int(Date().timeIntervalSince(cptStartedAt)) : -1
         DiagLog.shared.write("la-progress", [
             "kind": "download", "title": title, "done": done, "total": total,
             "files": filesDone, "of": fileCount,
             "pct": total > 0 ? Int(Double(done) / Double(total) * 100) : 0,
-            "tasks": live, "jobs": jobs.count, "mem": mem, "grant": grant,
+            // `sess` is the one to differentiate — see its declaration. `disk` is
+            // kept because it is directly comparable with the dl-bg / dl-fg rows.
+            "sess": sessionBytes, "disk": disk,
+            "tasks": live, "jobs": jobs.count, "mem": mem, "memLow": memFloor,
+            "warns": memWarnings, "grant": grant,
             "bg": !appActive, "cpt": cptActive,
         ], cat: "offline")
         DiagLog.shared.touchMarker([
-            "tasks": live, "jobs": jobs.count, "mem": mem, "grant": grant,
+            "tasks": live, "jobs": jobs.count, "mem": mem, "memLow": memFloor,
+            "warns": memWarnings, "grant": grant, "sess": sessionBytes,
         ])
+    }
+
+    @objc private func appMemoryWarning() {
+        let mem = Int(os_proc_available_memory() / (1024 * 1024))
+        queue.async {
+            self.memWarnings += 1
+            self.memFloor = min(self.memFloor, mem)
+            DiagLog.shared.write("mem-warning", [
+                "mem": mem, "memLow": self.memFloor, "n": self.memWarnings,
+                "tasks": self.inFlight, "jobs": self.jobs.count,
+                "bg": !self.appActive, "cpt": self.cptActive,
+            ], cat: "app")
+            // Straight into the marker as well: if this is the warning that
+            // precedes the kill, the next beat may never come.
+            DiagLog.shared.touchMarker([
+                "warns": self.memWarnings, "memLow": self.memFloor, "mem": mem,
+                "tasks": self.inFlight, "jobs": self.jobs.count,
+            ])
+        }
     }
 
     private func decode(taskDescription: String?) -> (sha: String, file: String)? {
@@ -1493,6 +1544,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             }
             let size = (try? dest.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { Int64($0) } ?? 0
             job.doneBytes[fileName] = size
+            self.sessionBytes += size
             job.liveBytes[fileName] = nil
             job.tasks[fileName] = nil   // this file's task is finished — don't migrate a dead ref
             job.pending.remove(fileName)

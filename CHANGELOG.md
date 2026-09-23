@@ -1,5 +1,45 @@
 # Changelog
 
+## [18.18.0] — 2026-09-23
+### Instrumentation for an unattended day, because `done` lies while backgrounded
+
+Measured on 18.17.1: a heartbeat read **0 KB/s** and half a second later `dl-fg`
+showed **23 MB more on disk**. Delegate callbacks queue while the app is suspended
+and arrive in a burst on resume, so `doneBytes + liveBytes` freezes — **a flat
+`done` is not a stall.** Worse, `done` and `disk` are both sums over the jobs that
+are *currently live*, so both **fall** when a bundle finishes and leaves the set,
+which is exactly what a long queue does all day.
+
+`la-progress` now carries **`sess`** — confirmed bytes landed since the process
+started. It only ever goes up, so any two heartbeats can be subtracted no matter how
+many bundles came and went in between. A reset to a small number means the process
+restarted, which is worth seeing in its own right. `disk` rides along too, because
+it is directly comparable with the `dl-bg` / `dl-fg` rows.
+
+Without this, a day with no app opens would have yielded exactly **two** usable
+throughput readings.
+
+### The jetsam theory gets a witness
+
+The overnight kill was blamed on a task flood on the strength of a task count and
+nothing else. Two additions, both nearly free:
+
+- **`mem-warning`** — iOS sends `didReceiveMemoryWarningNotification` on the way to
+  killing a process. One sitting above a `prev-launch-dirty` is about as close to a
+  verdict as this can get from inside the process, and its **absence is evidence
+  too**. Written straight into the run marker as well, since the warning that
+  precedes the kill may be the last thing that runs.
+- **`memLow`** — the lowest `os_proc_available_memory()` seen this run. A 30-second
+  heartbeat can miss a spike entirely, and a jetsam is decided at the spike. A death
+  now reports the worst it ever saw rather than whatever was true at the last beat.
+
+`prev-launch-dirty` reports `memLow`, `warns` and `sess` alongside the existing
+`grant` / `tasks` / `mem` / `jobs`.
+
+All additive — no behaviour change, nothing that can alter a download.
+
+- `NP_BUILD` → **18.18.0**.
+
 ## [18.17.1] — 2026-09-23
 ### "It says offline for a few seconds every time I reopen the app"
 
