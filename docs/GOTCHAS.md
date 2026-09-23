@@ -3844,6 +3844,22 @@ optional. It sat in the build output for months under two unused-variable warnin
 **Treat "nearly matches" as an error** — it is the compiler saying a method you
 believe is a delegate callback is ordinary dead code.
 
+### The system ASKS THE USER whether a continued-processing task may keep running
+Observed on device 2026-09-23: on backgrounding with a grant held, iOS presented a
+prompt offering to **continue in the background or stop**. That is the
+`BGContinuedProcessingTask` UI the header promises (*"will present UI while in
+progress to provide awareness to the user"*), and its stop control ends the grant
+immediately.
+
+Consequences worth holding on to:
+- **An unattended run depends on a human having answered correctly.** Tapping stop,
+  or ignoring a re-prompt, drops everything onto the background session with nothing
+  in our transcript to distinguish it from a system-initiated expiry — `cpt-expired`
+  looks the same either way. If a run ends early and the cause is unclear, ask the
+  user what they tapped before theorising.
+- It is also the reason our own download Live Activity is suppressed under a grant
+  (18.16.0): the system's UI is already there and its button actually works.
+
 ### The progress you report to a continued-processing task is what keeps it alive (fixed 18.19.0)
 `BGTask.h` is explicit: *"Tasks that appear stalled may be forcibly expired by the
 scheduler to preserve system resources"*, with WWDC25 putting the threshold around
