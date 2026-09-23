@@ -4753,6 +4753,73 @@ that should have said so said `near-start` instead.
 dragged `armed.position` backwards once a second and a native seek was undone
 within a second of being made.
 
+## A cache nobody invalidates is a wrong answer with a fast response time (18.12.1)
+
+`_resumeNormal` resolved the Resume position out of `window._libCache`:
+
+```js
+const item = (window._libCache || []).find(it => it.id === itemId);
+const seekTo = hasProgress ? (resume.position_sec || 0) : 0;
+```
+
+That cache is written by `loadLibrary()`, which runs on tab switches and explicit user
+actions — **never because the on-device player wrote progress**. So the hint was frozen at
+whatever it said when the list was last fetched, and pressing Resume right after Stop
+replayed from there.
+
+Measured 2026-09-23 (client_iPhone-app.log): play began at 427.2, ran to 835, stopped at
+04:17:59; Resume four seconds later logged `loaded at: 427.2`. The server had 579 written
+and acknowledged (status 200) at 04:12:44 — six and a half minutes of re-watching, with
+the correct answer sitting on the host the whole time.
+
+The fix is both halves, because they cover different failures:
+
+1. **`_libRefreshCache()` before resolving the hint** (in `resumeLibraryItemWithChooser`,
+   above both the shuffle branch and `_resumeNormal`, since both read it). This is the one
+   that is actually *correct* — it also covers progress written by another device.
+2. **`_libCacheNoteProgress()` on every successful `saveProgress`**, so the snapshot and
+   the progress bars stay honest between fetches.
+
+Note what (2) deliberately does **not** do: move the hint to a different file. Which
+episode is "next" is the server's judgement — it owns what counts as completed
+(`watchrule.py`) — and a client guessing would send Resume to the wrong episode, a worse
+failure than a stale second count. It only updates the position when the hint already
+names that file.
+
+The general rule: a cached value that feeds a *decision* needs an invalidation path, not
+just a refresh path. `_libCache` had been fine for years as a rendering cache; it became a
+bug the moment `seekTo` was read from it.
+
+## "Give up quietly" is how a bug stays invisible for a year (18.12.1)
+
+`_lpVerifySeek` ends:
+
+```js
+if (el > 4) return;   // inconclusive → give up quietly
+```
+
+and the detector it guards is documented as unable to fire on a seek into cold media,
+because "a seek into cold/unbuffered media presents no frames at all while it buffers".
+Both statements are true and together they are a blind spot with no floor: in that case
+the `requestVideoFrameCallback` chain never fires again, so execution never even *reaches*
+the `el > 4` line. The one seek shape a viewer complains about — backward, past the
+buffered edge — produced **no row of any kind**.
+
+Worse, nothing logged seeks at all. When "±10 doesn't really go back" was reported, the
+only evidence anywhere in the transcript was an accident: two unrelated rows that happened
+to sample `armed.position` either side of a clean −20.000 (two −10 presses, the fraction
+preserved exactly, which is what a pure arithmetic seek looks like).
+
+18.12.1 adds `seek` at commit (with the **buffered ranges and whether the target was
+inside them** — the field that distinguishes the two failure modes) and a plain
+`setTimeout` verdict at 4.5 s. The timer is the point: it reports what frame callbacks by
+construction cannot, namely that they never came. It only observes — acting on `no-frames`
+is a separate decision, and one that wants real data first, because a wrong guess means a
+spurious pipeline rebuild mid-episode.
+
+**A detector with a documented blind spot needs an instrument aimed at the blind spot.**
+Otherwise the blind spot is also where you have no evidence, which is exactly backwards.
+
 ## The skip evaluator had no clock during a handoff (18.12.0)
 
 Smart Skip was dead for the entire life of external-display playback, and not because

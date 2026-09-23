@@ -143,6 +143,9 @@ JS-written rows carry `src: "js"`.
 | `arm-dropped-hold` | `_npArm()` turned into a teardown while native held the display, because the new file has no native master. The display is about to go back to the phone |
 | `advance` | an advance. From the page: `holding`, `ext`, `nextArmed`, `path` (`normal` vs `teardown-rebuild`). From native: `reason` (`ended` vs `credits`) plus the `introEnd`/`creditsAt` it promoted for the incoming episode (18.12.0) |
 | `native-advanced` | the **good** end-of-episode advance: native switched file without releasing the display |
+| `seek` | a user-intent seek was committed (18.12.1) — `from`, `to`, `back`, the `engine`, the `buffered` ranges and, the field that matters, **`inBuf`**: was the target inside the buffer. `engine: avplayer` means it was proxied to the native player instead |
+| `seek-verdict` | what became of it, 4.5 s later. `landed` / `elsewhere` / **`no-frames`** — the last meaning the element presented nothing at all, which is the shape a backward seek past the buffered edge takes and the one `_lpVerifySeek` cannot judge |
+| `seek-swallowed` | the detector caught the pipeline still presenting the pre-seek position, and a rebuild followed |
 | `auto-skip` | the **native** player fired a Smart Skip while it held the display (18.12.0) — `type` (`intro`/`credits`), `from`, and for an intro `to`. This is the only skip actor during a handoff; the page draws the tile but never fires |
 | `native-skipped` | the page's record of the same event, written when native's `nativeSkipped` reaches it. Its absence under an `auto-skip` means the page was asleep at the time — normal, and the flag is reconciled on the next arm |
 | `next-armed` | the next episode was handed to native (`via`: `already-ready` / `warmed`). From 18.12.0 the arm also carries that episode's skip windows |
@@ -299,6 +302,30 @@ the display and the player disagree about who is presenting, and nothing reconci
 Unplugging while the phone is **locked** is not this bug. The native player is left alone
 on purpose (handing back to a suspended WKWebView would stop playback outright), so the
 hand-back lands on the return to the foreground instead.
+
+### Recipe: "the ±10 button doesn't really move the picture"
+
+Every user-intent seek writes a `seek` row and, 4.5 s later, a `seek-verdict`. Read them
+as a pair.
+
+- **`seek` then `seek-verdict: landed`** — it worked. If the viewer still says it didn't,
+  they are describing something else (check `from`/`to` against what they expected; two
+  fast presses are two rows).
+- **`seek-swallowed`** — the known wedge: the pipeline kept presenting the old position
+  while the element accepted the seek. A `_lpPipelineRebuild` follows. Twice inside a
+  minute escalates to a full reload.
+- **`seek-verdict: no-frames`, with `back: true` and `inBuf: false` on the `seek`** — the
+  suspected cause of the 2026-09-23 report and the case the detector is documented not to
+  fire on. Nothing was presented at all, so there is no trajectory to compare against.
+  Check `now` (where `currentTime` ended up) and `stillInBuf`: a `now` that has drifted
+  well past `to` means the element kept playing from the old spot regardless.
+- **No `seek` row at all** for a press the viewer swears they made — the press never
+  reached `_lpCommitSeek`. Check whether the controls were in remote mode
+  (`engine: avplayer` rows) or whether the player had been torn down.
+
+Before 18.12.1 none of these existed: seeks were entirely unlogged, and the only trace of
+a bad one in the 2026-09-23 transcript was an accident — two unrelated rows that happened
+to sample `armed.position` either side of a clean −20.000.
 
 ### Recipe: "the intro didn't skip on the glasses"
 

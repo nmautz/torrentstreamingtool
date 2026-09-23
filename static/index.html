@@ -17925,6 +17925,24 @@ function offKey(itemId, filePath) { return `${itemId}|${filePath}`; }
 // signed-in one; the local player passes _lpProfileId() so a play PUSHED to the
 // TV kiosk from someone's phone is credited to them, not to whichever household
 // profile the kiosk is permanently signed in as.
+// Fold a just-written position back into the library snapshot, so the Resume
+// button and the progress bars agree with what is actually on the server
+// without waiting for the next full list fetch.
+//
+// Deliberately narrow: it only touches the hint when the hint ALREADY names
+// this file. Moving it to a different episode is the server's call — it owns
+// what counts as completed (watchrule.py) — and guessing here would send Resume
+// to the wrong episode, which is a worse failure than a stale second count.
+function _libCacheNoteProgress(itemId, filePath, posSec, durSec) {
+  try {
+    const it = (window._libCache || []).find((x) => x && x.id === itemId);
+    if (!it || !it.resume) return;
+    if (it.resume.file_path && it.resume.file_path !== filePath) return;
+    it.resume.position_sec = posSec;
+    if (durSec > 0) it.resume.pct = Math.min(100, (posSec / durSec) * 100);
+  } catch (_) {}
+}
+
 async function saveProgress(itemId, filePath, posSec, durSec, profileId) {
   const pid = profileId || profile.id || "";
   if (!pid && !_appOffline) return;
@@ -17982,6 +18000,7 @@ async function saveProgress(itemId, filePath, posSec, durSec, profileId) {
                                 status: _status, err: _err, stashed: stashed },
            "net");
   }
+  if (saved) _libCacheNoteProgress(itemId, filePath, posSec, durSec);
   return saved;
 }
 
@@ -21418,12 +21437,39 @@ async function prepForStreaming(itemId, filePath, fileName) {
 
 // Entry point for the library card Resume/Play buttons on multi-file items.
 // VLC path uses the backend's resume logic; device path plays the resume file directly.
-function resumeLibraryItemWithChooser(itemId) {
+// Re-read the library list into window._libCache. Returns false and leaves the
+// existing snapshot alone on any failure — a stale hint is bad, but refusing to
+// play because the list would not load is worse.
+async function _libRefreshCache() {
+  try {
+    const pid = profile.id ? `?profile_id=${encodeURIComponent(profile.id)}` : "";
+    const r = await fetch(`/api/library${pid}`, { headers: _appAuthHeaders() });
+    if (!r.ok) return false;
+    const items = (await r.json()).items || [];
+    if (items.length) window._libCache = items;
+    return true;
+  } catch (_) { return false; }
+}
+
+async function resumeLibraryItemWithChooser(itemId) {
   if (!profile.id) { showAlert("Select a profile first.", "warn"); return; }
   if (!navigator.onLine) {
     showAlert("Disconnected — playback needs the host to be reachable.", "error");
     return;
   }
+  // THE CACHE IS NOT THE PROGRESS, AND NOTHING REFRESHED IT.
+  //
+  // `window._libCache` is a snapshot taken whenever the library list was last
+  // fetched; `loadLibrary()` runs on tab switches and explicit actions, never
+  // because the on-device player wrote a position. So Resume replayed from
+  // wherever the snapshot thought you were.
+  //
+  // Measured 2026-09-23 (client_iPhone-app.log): started at 427.2, watched to
+  // 835, stopped at 04:17:59, pressed Resume four seconds later — `loaded
+  // at: 427.2`. The server had 579 written and acknowledged at 04:12:44; the
+  // page never asked it. Both branches below read the hint, so refresh above
+  // them both. One fetch, on a path that already awaits a prep-status call.
+  await _libRefreshCache();
   const item = (window._libCache || []).find(it => it.id === itemId);
   const resume = item && item.resume;
   // The last session for this show was Shuffle Play → ask before resuming whether
@@ -25102,7 +25148,31 @@ let _npNativePaused = false;
 // can never trip this. See GOTCHAS.md § ManagedMediaSource.
 let _lpSeekVerifyToken = 0;
 let _lpSeekRebuildLast = 0;   // last pipeline rebuild (escalation window)
-function _lpCancelSeekVerify() { _lpSeekVerifyToken++; }
+let _lpSeekVerdictTimer = null;
+function _lpCancelSeekVerify() {
+  _lpSeekVerifyToken++;
+  if (_lpSeekVerdictTimer) { clearTimeout(_lpSeekVerdictTimer); _lpSeekVerdictTimer = null; }
+}
+
+// Compact buffered ranges for the log — "12.0-480.5,600.0-640.2".
+// The point of logging a seek at all is knowing whether its target was INSIDE
+// the buffer: a backward seek past the buffered edge is the exact case the
+// swallowed-seek detector is documented not to fire on, and until 18.12.1
+// nothing recorded which kind of seek a given press had been.
+function _lpBufferedDesc(v) {
+  try {
+    const b = v.buffered, out = [];
+    for (let i = 0; i < b.length; i++) out.push(b.start(i).toFixed(1) + "-" + b.end(i).toFixed(1));
+    return out.join(",") || "none";
+  } catch (_) { return "?"; }
+}
+function _lpBufferedHas(v, t) {
+  try {
+    const b = v.buffered;
+    for (let i = 0; i < b.length; i++) if (t >= b.start(i) && t <= b.end(i)) return true;
+  } catch (_) {}
+  return false;
+}
 
 // Every user-intent seek (±10 s, scrub commit, skip-intro) funnels through here.
 function _lpCommitSeek(t) {
@@ -25110,12 +25180,25 @@ function _lpCommitSeek(t) {
   if (_npHolding && _cap.np) {
     // Optimistic local update so the bar responds at once; the 1 Hz poll
     // reconciles it. Never touch the element — it is not the player.
+    _npLog("seek", { from: _npNativePos, to: t, engine: "avplayer" }, "play");
     _npNativePos = t;
     try { _cap.np.seekTo({ position: t }); } catch (_) {}
     _lpCtlTick();
     return;
   }
   const anchor = v.currentTime || 0;
+  // EVERY USER-INTENT SEEK LEAVES A ROW. There was no seek event of any kind in
+  // the transcript until 18.12.1, which made "±10 doesn't really go back" a
+  // report with nothing to read against it — the only evidence in the 2026-09-23
+  // log was an accident, two unrelated rows that happened to sample the position
+  // either side of a clean -20.000. `inBuf` is the field that matters: a
+  // backward seek OUT of the buffer is the case _lpVerifySeek cannot judge.
+  _npLog("seek", {
+    from: anchor, to: t, back: t < anchor,
+    engine: lp.hls ? "hls.js" : "native-hls", mode: lp.mode || "",
+    buffered: _lpBufferedDesc(v), inBuf: _lpBufferedHas(v, t),
+    ready: v.readyState, paused: !!v.paused,
+  }, "play");
   try { v.currentTime = t; } catch (_) {}
   _lpVerifySeek(v, anchor, t);
 }
@@ -25127,20 +25210,48 @@ function _lpVerifySeek(v, anchor, target) {
   const token = _lpSeekVerifyToken;
   const t0 = performance.now();
   let onOldPath = 0;
+  let frames = 0;
+  let lastMt = NaN;
+  // A VERDICT EVERY TIME, INCLUDING "NOTHING HAPPENED".
+  //
+  // The rVFC chain below can only speak while frames keep arriving, and it ends
+  // with `if (el > 4) return;  // inconclusive → give up quietly`. Quietly is
+  // the bug: the case this detector was deliberately built NOT to fire on — a
+  // seek into cold media, which presents no frames at all while it buffers —
+  // never even reaches that line, because the callback simply never fires
+  // again. So the one seek shape a viewer complains about produced no row of
+  // any kind. A plain timer reports what frame callbacks by construction
+  // cannot: that they never came. It only OBSERVES; acting on this is a
+  // separate decision and wants real data first.
+  _lpSeekVerdictTimer = setTimeout(() => {
+    _lpSeekVerdictTimer = null;
+    if (token !== _lpSeekVerifyToken || !lp.itemId) return;
+    _npLog("seek-verdict", {
+      to: target, from: anchor, frames: frames, lastFrame: lastMt,
+      now: v.currentTime || 0, paused: !!v.paused, ready: v.readyState,
+      buffered: _lpBufferedDesc(v), stillInBuf: _lpBufferedHas(v, target),
+      verdict: frames === 0 ? "no-frames"
+             : (Math.abs(lastMt - target) < 4 ? "landed" : "elsewhere"),
+    }, "play");
+  }, 4500);
   const step = (_now, meta) => {
     if (token !== _lpSeekVerifyToken || !lp.itemId || lp.netDown) return;
     const el = (performance.now() - t0) / 1000;
     const mt = meta && typeof meta.mediaTime === "number" ? meta.mediaTime : NaN;
+    frames++; lastMt = mt;
     if (Math.abs(mt - target) < 4) return;     // a frame presented at the target → seek landed
     // Fresh frame still advancing along the pre-seek trajectory: the pipeline is
     // demonstrably still streaming the old position. Require a sustained run so
     // a single stale composite can never trigger a rebuild. (NaN mediaTime
     // fails both distance checks and just falls through to re-arm.)
     if (Math.abs(mt - (anchor + el)) < 2.5 && ++onOldPath >= 8 && el > 1.2) {
+      _npLog("seek-swallowed", { to: target, from: anchor, frames: frames,
+                                 lastFrame: mt, after: el,
+                                 buffered: _lpBufferedDesc(v) }, "play");
       _lpPipelineRebuild(target);
       return;
     }
-    if (el > 4) return;                        // inconclusive → give up quietly
+    if (el > 4) return;                        // inconclusive → the timer above says so
     try { v.requestVideoFrameCallback(step); } catch (_) {}
   };
   try { v.requestVideoFrameCallback(step); } catch (_) {}
@@ -27772,6 +27883,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.12.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.12.1</div>
 </body>
 </html>

@@ -1,5 +1,47 @@
 # Changelog
 
+## [18.12.1] — 2026-09-22
+### Resume was reading a cache nobody invalidated, and seeks left no trace at all
+
+Both from a transcript covering 03:56–04:28 on 2026-09-23.
+
+**Resume replayed from where you started, not where you stopped.** `_resumeNormal`
+resolved the position out of `window._libCache`, which is written by `loadLibrary()` — on
+tab switches and explicit actions, never because the on-device player wrote progress. The
+log catches it exactly: play began at 427.2, ran to 835, stopped at 04:17:59, and Resume
+four seconds later logged `loaded at: 427.2`. The server had 579 written and acknowledged
+at 04:12:44. Six and a half minutes of re-watching with the right answer sitting on the
+host the whole time.
+
+Fixed both ways, because they fail differently: `_libRefreshCache()` re-reads the list
+before the hint is resolved (the correct one — it also picks up progress another device
+wrote), and `_libCacheNoteProgress()` folds each successful save back into the snapshot so
+the progress bars stay honest in between. The second deliberately never moves the hint to
+a different *file*: which episode is next is the server's judgement, and a client guessing
+would send Resume to the wrong episode.
+
+**Seeks are now instrumented, because they were not at all.** "±10 sometimes doesn't
+really go back past the buffered content" was reported against a transcript containing no
+seek event of any kind. The only trace was an accident — two unrelated rows that happened
+to sample the position either side of a clean −20.000, which is what two −10 presses look
+like when the element accepts them arithmetically.
+
+`_lpVerifySeek` also had a blind spot with no floor. It is documented as unable to fire on
+a seek into cold media because that "presents no frames at all while it buffers" — but in
+that case its frame callback never fires again either, so it never reaches its own
+`if (el > 4) return; // inconclusive → give up quietly`. The shape a viewer complains
+about, backward past the buffered edge, was precisely the shape that said nothing.
+
+So: a `seek` row at commit carrying the buffered ranges and whether the target was inside
+them, a `seek-swallowed` row when the detector does fire, and a plain 4.5 s timer that
+reports `landed` / `elsewhere` / `no-frames`. The timer is the point — it reports what
+frame callbacks by construction cannot, that they never came. It only observes; acting on
+`no-frames` is a separate call that wants real data first, since a wrong guess means a
+spurious pipeline rebuild mid-episode.
+
+Not a bug, for the record: the two `progress-failed { err: "Load failed" }` rows at 04:24
+were the box rebooting.
+
 ## [18.12.0] — 2026-09-22
 ### Smart Skip on the glasses, and a phone that admits it is a remote
 
