@@ -323,6 +323,32 @@ private func slNoteEvent(_ name: String) {
     }
 }
 
+/// The pending file's path as a global, because the exception handler below is
+/// also a C function pointer and so may capture NOTHING — not even `self`, not
+/// even a `let` from the enclosing scope. (Swift catches that at SILGen, not at
+/// type-check, so `swiftc -typecheck` will happily wave a capturing closure
+/// through and the real build will not.)
+private var slCrashPendingPath = ""
+
+/// An uncaught ObjC exception — the likeliest shape of a UIKit or AVFoundation
+/// crash, and the only one that can say WHY in words. This is ORDINARY code
+/// (the `abort()` comes after), so unlike the signal handler it may allocate.
+private func slUncaughtExceptionHandler(_ e: NSException) {
+    slCrashHandled = 1
+    guard !slCrashPendingPath.isEmpty else { return }
+    var text = "kind=exception\n"
+    text += "name=\(e.name.rawValue)\n"
+    text += "reason=\((e.reason ?? "").replacingOccurrences(of: "\n", with: " "))\n"
+    text += "last=\(String(cString: slLastEvent))\n"
+    text += e.callStackSymbols.prefix(24).joined(separator: "\n")
+    text += "\n---\n"
+    guard let d = text.data(using: .utf8),
+          let h = FileHandle(forWritingAtPath: slCrashPendingPath) else { return }
+    _ = try? h.seekToEnd()
+    try? h.write(contentsOf: d)
+    try? h.close()
+}
+
 private func slCrashSignalHandler(_ sig: Int32) {
     if slCrashHandled == 0 {
         slCrashHandled = 1
@@ -531,26 +557,8 @@ final class DiagLog {
         slCrashMsgs = msgs
         slNoteEvent("launch")
 
-        // An uncaught ObjC exception is the likeliest shape of a UIKit or
-        // AVFoundation crash, and it is the only one that can say WHY in words.
-        // This runs as ordinary code — the abort() comes after — so it may
-        // allocate, and it writes the same text format the signal path does.
-        let pending = crashPending
-        NSSetUncaughtExceptionHandler { e in
-            slCrashHandled = 1
-            var text = "kind=exception\n"
-            text += "name=\(e.name.rawValue)\n"
-            text += "reason=\((e.reason ?? "").replacingOccurrences(of: "\n", with: " "))\n"
-            text += "last=\(String(cString: slLastEvent))\n"
-            text += e.callStackSymbols.prefix(24).joined(separator: "\n")
-            text += "\n---\n"
-            if let d = text.data(using: .utf8),
-               let h = try? FileHandle(forWritingTo: pending) {
-                _ = try? h.seekToEnd()
-                try? h.write(contentsOf: d)
-                try? h.close()
-            }
-        }
+        slCrashPendingPath = crashPending.path
+        NSSetUncaughtExceptionHandler(slUncaughtExceptionHandler)
 
         // A Swift runtime trap (nil force-unwrap, array bounds, a failed `as!`)
         // is a SIGTRAP/SIGILL and never becomes an NSException, so these are not

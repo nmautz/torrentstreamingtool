@@ -4791,6 +4791,15 @@ because it is the one symbol dumper documented as async-signal-safe. The record 
 text; parsing it into NDJSON is the *next* launch's job, where formatting a timestamp is
 legal again.
 
+**`swiftc -typecheck` does not catch a capturing C function pointer.** The first cut of
+this passed `-parse` and `-typecheck` clean and failed the real build outright:
+`NSSetUncaughtExceptionHandler` takes a `@convention(c)` function, the closure closed over
+one local `let`, and *"a C function pointer cannot be formed from a closure that captures
+context"* is diagnosed at **SILGen** — a stage `-typecheck` never reaches. Anything handed
+to `NSSetUncaughtExceptionHandler` or `signal()` must be a file-scope `func` reading
+file-scope state. On the Mac, build the app; `swiftc -emit-sil -o /dev/null` is the
+weakest substitute that would have caught it.
+
 The same reading cost a second fix: `startNative` wrote its row as the **last** statement
 of the function, which made it a report that the entire handoff had succeeded rather than
 a mark of how far it got. It now goes in as soon as the player and surface exist.
