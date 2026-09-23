@@ -3801,6 +3801,34 @@ transcript is unambiguous — `prev-launch-dirty was:"bg"` with **no `cpt-expire
 so the grant never expired and the expiry→migrate fallback never ran; the process
 died under it. CPT buys scheduling, not immunity.
 
+### The progress you report to a continued-processing task is what keeps it alive (fixed 18.19.0)
+`BGTask.h` is explicit: *"Tasks that appear stalled may be forcibly expired by the
+scheduler to preserve system resources"*, with WWDC25 putting the threshold around
+**30 seconds without progress**. `t.progress` is therefore a liveness signal, not a
+cosmetic for the system's UI.
+
+Two ways to get it wrong, and we had both:
+
+- **Coarse units stall on a slow link.** One unit per completed file means a ~900 KB
+  segment over a relayed tunnel reports nothing for tens of seconds while the
+  transfer is perfectly healthy. **Report bytes** — they advance on every
+  `didWriteData`, at any speed.
+- **A numerator summed over live jobs GOES BACKWARDS.** Both ends were sums over
+  `jobs`, which shrinks when a bundle finishes. Modelled over a 50-episode queue:
+  **50 regressions, largest drop 619 units.** Nothing looks more stalled to a
+  watchdog than a progress bar running in reverse. Keep a high-water mark and a
+  denominator that only grows (`sessionTotal`).
+
+Note this did NOT cause the overnight death — no bundle completed in that run, so no
+regression occurred. Two separate hazards; don't collapse them.
+
+### Low Power Mode is an off switch for background work — instrument it or misread the silence
+A multi-GB download on battery is how a phone reaches the 20% prompt that offers Low
+Power Mode, and a run that stops because the user accepted it looks exactly like a
+jetsam, a lost grant, or a throttle. `power-state` (on
+`NSProcessInfoPowerStateDidChange`, so the **transition** is captured, not just a
+sample) plus `batt` / `low` on every heartbeat and in the run marker.
+
 ### A suppressed UI must not take the evidence with it (self-inflicted, 18.16.0 → 18.17.0)
 `la-progress` — the byte heartbeat — was written inside
 `DownloadLiveActivity.sync()`. 18.16.0 suppressed the Island under a grant by

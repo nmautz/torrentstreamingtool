@@ -1,5 +1,49 @@
 # Changelog
 
+## [18.19.0] — 2026-09-23
+### The progress we report to the scheduler could go backwards 50 times in a run
+
+From `BGTask.h`, on `BGContinuedProcessingTask`:
+
+> *"...are subject to expiration based on changing system conditions and user
+> input. **Tasks that appear stalled may be forcibly expired by the scheduler to
+> preserve system resources.**"*
+
+WWDC25 guidance puts that at roughly **30 seconds without progress**. So the number
+handed to `t.progress` is not decoration — it is what keeps the grant alive. Ours
+was `doneBytes.count` over `files.count`, **completed files out of live-job files**,
+which fails both ways:
+
+- **Too coarse.** One unit per finished file. A ~900 KB segment over a slow link
+  takes tens of seconds, during which a perfectly healthy transfer reports nothing.
+- **It went backwards.** Numerator *and* denominator were sums over *currently
+  live* jobs, so finishing a bundle dropped both. Modelled over a 50-episode queue:
+  **50 regressions, the largest a 619-unit drop** — one every time a bundle
+  completed. A regressing progress bar is the loudest "stalled" signal there is.
+
+Now byte-granular and monotonic at both ends: `sessionTotal` (every job started this
+session, only grows) as the denominator, and a `cptFloor` high-water mark over
+`sessionBytes + live` as the numerator. Bytes advance on every `didWriteData`, so
+progress moves continuously however slow the link is.
+
+**This does not explain the 2026-09-23 overnight death** — no bundle completed in
+that run, so no regression happened. It is a separate hazard, found by reading the
+header, and it would have hit a long queue hard.
+
+### Battery and Low Power Mode, because "locked on a charger" was never realistic
+
+The run that matters happens on battery, in a pocket, on a phone in normal use. Low
+Power Mode is an off switch for background work, and a multi-GB download on battery
+is exactly how a phone reaches the 20% prompt that offers it. Without this, a run
+that stops because the user tapped "Low Power Mode" is indistinguishable from a
+jetsam, a lost grant, or a throttle — four verdicts from one silence.
+
+- New row **`power-state`** on `NSProcessInfoPowerStateDidChange`. The *transition*
+  is the event worth having, so it is observed rather than only sampled.
+- `la-progress` and the run marker carry **`batt`** and **`low`**.
+
+- `NP_BUILD` → **18.19.0**.
+
 ## [18.18.0] — 2026-09-23
 ### Instrumentation for an unattended day, because `done` lies while backgrounded
 

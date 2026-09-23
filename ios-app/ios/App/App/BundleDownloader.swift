@@ -255,6 +255,15 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         // inside the process — and its absence is evidence too.
         nc.addObserver(self, selector: #selector(appMemoryWarning),
                        name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
+        // LOW POWER MODE IS AN OFF SWITCH FOR BACKGROUND WORK, and a long download
+        // on battery is precisely how a phone gets to the 20% prompt that offers
+        // it. Without this a run that stops because the user tapped "Low Power
+        // Mode" is indistinguishable from a jetsam, a lost grant or a throttle —
+        // four different verdicts from one silence. The TRANSITION is the row that
+        // matters, so observe it rather than only sampling it.
+        nc.addObserver(self, selector: #selector(powerStateChanged),
+                       name: .NSProcessInfoPowerStateDidChange, object: nil)
+        UIDevice.current.isBatteryMonitoringEnabled = true
     }
 
     @objc private func appDidBecomeActive() {
@@ -454,12 +463,34 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
 
     /// The system stops a continued-processing task that stops reporting, so this
     /// runs off the same tick as the Live Activity. Assumes `queue`.
+    /// BYTES, AND MONOTONIC. Both properties are load-bearing, because the
+    /// scheduler reads this number to decide whether we are still working:
+    /// *"Tasks that appear stalled may be forcibly expired by the scheduler to
+    /// preserve system resources"* (BGTask.h), with WWDC25 guidance putting the
+    /// threshold around 30 seconds of no progress.
+    ///
+    /// This used to report COMPLETED FILES out of live-job files, which fails
+    /// both ways:
+    ///
+    ///  • **Too coarse.** One unit per finished file. A ~900 KB segment over a
+    ///    slow link (a relayed tunnel, say) can take tens of seconds, during which
+    ///    a perfectly healthy transfer reports nothing at all.
+    ///  • **It could go BACKWARDS.** Numerator and denominator were both sums over
+    ///    *currently live* jobs, so finishing a bundle dropped both. Over a long
+    ///    queue that regression happens every few minutes, and a regressing
+    ///    progress bar is the loudest "stalled" signal there is.
+    ///
+    /// Bytes advance on every `didWriteData`, so progress moves continuously no
+    /// matter how slow the link is; `sessionTotal` and the `cptFloor` high-water
+    /// mark keep both ends monotonic across bundles entering and leaving `jobs`.
     private func updateContinuedProgress() {
         guard #available(iOS 26.0, *), let t = cptTask as? BGContinuedProcessingTask else { return }
-        var done = 0, total = 0
-        for (_, j) in jobs { done += j.doneBytes.count; total += j.files.count }
-        t.progress.totalUnitCount = Int64(max(total, 1))
-        t.progress.completedUnitCount = Int64(min(done, max(total, 1)))
+        var live: Int64 = 0
+        for (_, j) in jobs { live += j.liveBytes.values.reduce(0, +) }
+        let total = max(sessionTotal, 1)
+        cptFloor = max(cptFloor, min(sessionBytes + live, total))
+        t.progress.totalUnitCount = total
+        t.progress.completedUnitCount = cptFloor
     }
 
     /// Every download finished — release the system's hold and let its UI dismiss.
@@ -920,6 +951,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             // instead of it: if the system refuses, everything below is unchanged.
             submitContinuedProcessing(name: name)
             if !jobOrder.contains(cacheKey) { jobOrder.append(cacheKey) }
+            sessionTotal += job.totalBytes
             pump()
             scheduleHeartbeat()
             result = StartResult(dir: dir.path, alreadyComplete: false)
@@ -1399,6 +1431,12 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     /// non-zero count beside a `prev-launch-dirty` is about as close to a verdict
     /// as this can get from inside the process.
     private var memWarnings = 0
+    /// Total bytes of every job STARTED this session. Only grows — see
+    /// updateContinuedProgress for why a shrinking denominator is dangerous.
+    private var sessionTotal: Int64 = 0
+    /// High-water mark of reported progress, so the number handed to the
+    /// scheduler can never regress.
+    private var cptFloor: Int64 = 0
 
     /// ON ITS OWN CLOCK, and that is the entire point. The obvious place to hang
     /// a progress heartbeat is the progress callback — and a heartbeat driven by
@@ -1452,12 +1490,31 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             "sess": sessionBytes, "disk": disk,
             "tasks": live, "jobs": jobs.count, "mem": mem, "memLow": memFloor,
             "warns": memWarnings, "grant": grant,
+            "batt": batteryPct, "low": lowPower,
             "bg": !appActive, "cpt": cptActive,
         ], cat: "offline")
         DiagLog.shared.touchMarker([
             "tasks": live, "jobs": jobs.count, "mem": mem, "memLow": memFloor,
             "warns": memWarnings, "grant": grant, "sess": sessionBytes,
+            "batt": batteryPct, "low": lowPower,
         ])
+    }
+
+    /// Battery percent, or -1 when iOS will not say (simulator, monitoring off).
+    private var batteryPct: Int {
+        let l = UIDevice.current.batteryLevel
+        return l < 0 ? -1 : Int((l * 100).rounded())
+    }
+    private var lowPower: Bool { ProcessInfo.processInfo.isLowPowerModeEnabled }
+
+    @objc private func powerStateChanged() {
+        let low = lowPower, pct = batteryPct
+        queue.async {
+            DiagLog.shared.write("power-state", [
+                "low": low, "batt": pct, "jobs": self.jobs.count,
+                "tasks": self.inFlight, "bg": !self.appActive, "cpt": self.cptActive,
+            ], cat: "app")
+        }
     }
 
     @objc private func appMemoryWarning() {

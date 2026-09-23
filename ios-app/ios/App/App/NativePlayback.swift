@@ -60,7 +60,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "18.18.0"
+let NP_BUILD = "18.19.0"
 
 // MARK: - Armed state
 
@@ -551,8 +551,8 @@ final class DiagLog {
             // Whatever the last heartbeat chose to describe itself with — the
             // grant's age, the in-flight task count, the memory headroom. These
             // are the conditions AT DEATH, which no row written before it can be.
-            for k in ["grant", "tasks", "mem", "memLow", "warns", "sess", "jobs"]
-            where m[k] != nil { row[k] = m[k] }
+            for k in ["grant", "tasks", "mem", "memLow", "warns", "sess", "jobs",
+                      "batt", "low"] where m[k] != nil { row[k] = m[k] }
             writeNow("prev-launch-dirty", row, cat: "app")
             try? fm.removeItem(at: runMarker)
         }
