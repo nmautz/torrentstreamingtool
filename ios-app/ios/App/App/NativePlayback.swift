@@ -60,7 +60,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "18.8.0"
+let NP_BUILD = "18.9.0"
 
 // MARK: - Armed state
 
@@ -104,7 +104,11 @@ struct ArmedPlayback {
     /// How to reach a wired monitor once locked: "window" (our own UIWindow on the
     /// display's UIWindowScene, replacing mirroring) or "route" (leave mirroring up and
     /// let AVFoundation take the picture over). See "External display surface".
-    var extMode = "window"
+    // "early" (claim the display now) or "route" (leave mirroring up and let
+    // AVFoundation route the video). The old "window" — claim it AS the phone
+    // locks — is gone: mirroring has already collapsed by then, so it only ever
+    // delivered the lock screen. Anything unrecognised reads as "early".
+    var extMode = "early"
     /// When `position` was sampled. Handoff extrapolates from this.
     var armedAt = Date()
 }
@@ -709,18 +713,35 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         a.nextFilePath   = call.getString("nextFilePath") ?? ""
         a.nextItemId     = call.getString("nextItemId") ?? ""
         a.handoffEnabled = call.getBool("handoffEnabled") ?? true
-        a.extMode        = call.getString("extMode") ?? "window"
+        a.extMode        = call.getString("extMode") ?? "early"
         a.armedAt        = Date()
 
         let wasActive = armed.active
+
+        // Does this arm move us to a DIFFERENT file while our player is running?
+        // Decided before anything is inherited, because most of what we inherit
+        // from the outgoing episode is wrong for an incoming one.
+        let switchingFile = isNativeActive
+            && !armed.filePath.isEmpty
+            && !a.filePath.isEmpty
+            && a.filePath != armed.filePath
+
         // While WE are the player, the page's `paused` is a stale echo of a web
         // element WebKit paused on our behalf — never a command. Taking it would
-        // let a routine arm stop playback the user never touched.
+        // let a routine arm stop playback the user never touched. That holds
+        // across a file switch too: pressing Next is not pressing Pause, so the
+        // transport the user left running is what the new episode inherits.
         if isNativeActive {
             a.paused = armed.paused
             // The item knows its own duration better than a page whose element is
             // parked; never let an arm overwrite a good value with 0.
-            if a.duration <= 0 { a.duration = armed.duration }
+            //
+            // But a duration is only lendable WITHIN one file. Measured
+            // 2026-09-23: skipping E01 -> E02 -> E03 filed all three under E01's
+            // 657.025 s, and E03 is 677.9 s long — so its progress was written
+            // against a runtime it does not have. On a switch, leave it at 0 and
+            // let adoptDuration() take it from the item that actually knows.
+            if a.duration <= 0 && !switchingFile { a.duration = armed.duration }
         }
 
         // AN ARM CAN CHANGE WHICH FILE THIS IS, AND THAT IS A TEARDOWN.
@@ -741,24 +762,53 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // "near-start" instead.
         //
         // So flush the OUTGOING file first, while `armed` still describes it.
-        let switchingFile = isNativeActive
-            && !armed.filePath.isEmpty
-            && !a.filePath.isEmpty
-            && a.filePath != armed.filePath
         if switchingFile {
             let outgoing = armed.filePath
             maybePostProgress(armed.position, force: true)
             DiagLog.shared.write("rearm-swap", [
                 "from": outgoing, "to": a.filePath,
                 "flushedAt": armed.position, "dur": armed.duration,
-                // The native player is still on the OLD file at this point. If the
-                // page did this as an advance it should have come through
-                // nextUrl/`advance` instead, so a run of these rows is the tell
-                // that the in-place advance path is not being taken.
+                // The native player is still on the OLD file at this point —
+                // swapNativeItem() below is what moves it. A `rearm-swap` with no
+                // `native-swap` after it means the player kept the old episode.
                 "nativePos": player.map { CMTimeGetSeconds($0.currentTime()) } ?? -1,
             ], cat: "play")
         }
         armed = a
+
+        // AND NOW MOVE THE PLAYER, NOT JUST THE PAPERWORK.
+        //
+        // Swapping `armed` alone leaves the config and the running player
+        // describing different episodes: the monitor keeps playing the old file
+        // while every readout, the Now Playing entry and every progress POST is
+        // filed under the new one.
+        //
+        // Measured 2026-09-23 (client iPhone-app log). Glasses connected, Next
+        // pressed twice. Both times `rearm-swap` fired and nothing else — no
+        // `startNative`, no `native-advanced`. E01 played on the display
+        // throughout; 114 s of it was written to E02's progress and 131 s to
+        // E03's, which is why the next Resume opened an episode the user had
+        // never watched.
+        //
+        // The page does call `takeover` on this path, and it could never have
+        // helped: takeover routes to startNative(), which guards on
+        // `!isNativeActive` and so is a no-op in exactly this case. The
+        // end-of-episode advance had a working in-place path (itemDidEnd ->
+        // replaceItem); a user-driven skip reached none of it.
+        if switchingFile {
+            if let url = a.url {
+                swapNativeItem(to: url, at: a.position, play: !a.paused)
+            } else {
+                // No URL means the page armed a file the native side cannot play
+                // (no master), and the running player is now presenting an
+                // episode nothing agrees it is playing. Nothing here can fix it;
+                // say so, because the alternative is a silent wrong-episode.
+                DiagLog.shared.write("swap-no-url", [
+                    "to": a.filePath, "item": a.itemId,
+                ], cat: "play")
+            }
+        }
+
         // A fresh session can be yielded again. Without this, one takeover would
         // leave the flag set for the life of the process and every later session
         // on this device would refuse to hand over.
@@ -1396,7 +1446,21 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         stopNative(endActivity: true)
     }
 
-    private func replaceItem(with url: URL) {
+    /// Move the RUNNING player onto a different file without letting go of
+    /// anything — the item changes, the player, its layer, the external window
+    /// and the audio session do not. That is the whole point: releasing them is
+    /// what drops the picture back onto the phone.
+    private func swapNativeItem(to url: URL, at start: Double, play: Bool) {
+        guard isNativeActive, player != nil else { return }
+        DiagLog.shared.write("native-swap", [
+            "to": armed.filePath, "item": armed.itemId,
+            "at": start, "play": play,
+            "extWindow": extWindow != nil,
+        ], cat: "play")
+        replaceItem(with: url, at: start, play: play)
+    }
+
+    private func replaceItem(with url: URL, at start: Double = 0, play: Bool = true) {
         guard let p = player else { return }
         if let old = item {
             for n in [Notification.Name.AVPlayerItemDidPlayToEndTime,
@@ -1412,6 +1476,9 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             guard let self = self, obs.status == .readyToPlay else { return }
             self.adoptDuration(from: obs)
             self.applyTrackSelection(on: obs)
+            // A fresh item already starts at 0, so only a real resume needs the
+            // seek — and it has to wait for readiness like startNative's does.
+            if start > 1 { self.seekAndPlay(to: start, play: play) }
         }
         NotificationCenter.default.addObserver(
             self, selector: #selector(itemDidEnd(_:)),
@@ -1423,7 +1490,9 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             self, selector: #selector(itemStalled(_:)),
             name: .AVPlayerItemPlaybackStalled, object: it)
         p.replaceCurrentItem(with: it)
-        p.play()
+        // The end-of-episode advance always plays; a skip carries the transport
+        // the user left running, which can legitimately be paused.
+        if play { p.play() } else { p.pause() }
         PlaybackLiveActivity.shared.update(state: liveActivityState(), force: true)
     }
 

@@ -1,5 +1,49 @@
 # Changelog
 
+## [18.9.0] — 2026-09-22
+### Pressing Next moved the paperwork, not the player
+
+**The skip never reached the monitor.** With the glasses connected, pressing Next
+advanced everything except the thing you were watching: the title changed, the progress
+bar changed, the server's idea of where you were changed — and the display went on
+playing the previous episode. `armed` is both the handoff's configuration and the only
+record of what the running player is playing, and a user-driven skip swapped it without
+touching the `AVPlayer`. The page does call `takeover` on that path, and it could never
+have helped: `takeover` routes to `startNative()`, which guards on `!isNativeActive`, so
+for exactly this case it was a no-op. The end-of-episode advance had a working in-place
+path (`itemDidEnd` → `replaceItem`); the skip reached none of it. `arm()` now carries a
+file change into the running player — new item, same player, same layer, same external
+window, same audio session — because releasing any of those is what drops the picture
+back onto the phone.
+
+**Which is also why Resume opened the wrong episode.** Once the config and the player
+disagreed, the 1 Hz time observer kept reading the position off the *old* file and filing
+it under the *new* one. Measured in the client log: two skips wrote 114 s to an episode
+that had never played a frame and 131 s to the one after it, so the next Resume picked up
+in the middle of a show the user hadn't started. The same swap fixes both — there is only
+ever one episode now.
+
+**And it was borrowing the wrong runtime.** An arm with no duration inherits the current
+one so a parked web element can't overwrite a good value with zero. That is right within
+a file and wrong across one: all three skipped episodes were filed under the first one's
+657.025 s, and the third is 677.9 s long. On a file switch the duration is left for
+`adoptDuration()` to take from the item that actually knows.
+
+**"At lock" is gone; Early is the default.** The third monitor mode claimed the external
+display as the phone locked, and by then `willResignActive` has already cost the app its
+last composite pass while mirroring collapses — so the claim arrived too late to draw
+anything and the monitor showed the lock screen, which is the precise failure the setting
+exists to escape. It was also the default. Settings now offers Early (claim it when the
+episode starts) and Mirrored (let iOS route the video), and any stored `"window"` reads
+as `"early"`.
+
+**Three new log rows, all for silent failures.** `native-swap` says the player really
+moved — a `rearm-swap` with no `native-swap` after it now means the old episode is still
+on screen. `swap-no-url` catches a file the native side cannot play. `arm-dropped-hold`
+catches the other way to lose the display: `_npArm()` turns into a teardown when the new
+file has no native master, and the log previously showed only a bare `disarm` with no
+cause anywhere near it.
+
 ## [18.8.0] — 2026-09-22
 ### The log became a feature instead of a one-off
 

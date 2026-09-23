@@ -1403,8 +1403,15 @@ locked**, `streamlink_app_extmode`, passed through `arm()` as `extMode`):
 
 | Mode | What it does | When to pick it |
 |---|---|---|
-| **Direct** (`window`, default) | a `UIWindow` of our own in the external display's **`UIWindowScene`** (`UIWindow(windowScene:)`), with an `AVPlayerLayer` in it. Putting content in that scene **replaces mirroring** for the display, so the lock screen never reaches the monitor. Built at `willResignActive` — the last moment the app is guaranteed a composite pass — and released at `didBecomeActive` with `windowScene = nil`, which hands the display back to mirroring so foreground/TV Mode still get it. | most wired adapters |
-| **Mirrored** (`route`) | leaves mirroring up and gives the player a full-screen `AVPlayerLayer` at the back of the app's own window (invisible behind the opaque webview), so AVFoundation's external-screen route has something to take over. | if Direct leaves the monitor blank |
+| **Early** (`early`, default) | a `UIWindow` of our own in the external display's **`UIWindowScene`** (`UIWindow(windowScene:)`), with an `AVPlayerLayer` in it, claimed **the moment an episode starts** and held across foreground/background. Putting content in that scene **replaces mirroring** for the display, so the lock screen never reaches the monitor. The monitor goes black until the phone is locked, and that black screen is the proof the claim landed. | always — this is the one that works |
+| **Mirrored** (`route`) | leaves mirroring up and gives the player a full-screen `AVPlayerLayer` at the back of the app's own window (invisible behind the opaque webview), so AVFoundation's external-screen route has something to take over. | only if an adapter refuses Early |
+
+> **Removed in 18.9.0: "At lock" (`window`).** Same window, claimed at
+> `willResignActive` instead. That is one composite pass before the app loses the
+> ability to draw, by which point mirroring is already collapsing — so the claim
+> arrived too late and the monitor showed the lock screen, the exact failure this
+> setting exists to escape. It was also the default. Anything still holding
+> `"window"` in `localStorage` reads as `"early"`, in JS and in Swift.
 
 > ### Wired external display: what actually works (18.5.x)
 >
@@ -1553,12 +1560,12 @@ which is worse than none. Handoff still works on a not-yet-prepped file.
 playback — `AVVideoComposition` is unsupported for HLS assets — and rendering the
 libass overlay to an external `UIScreen` while backgrounded, because a backgrounded
 app cannot **draw** at all. (That limit is about app-drawn content; an
-`AVPlayerLayer` is fed by the media server, which is why the Direct mode above can
+`AVPlayerLayer` is fed by the media server, which is why the Early mode above can
 still show video there.) TV Mode is the answer to both.
 
 **Verification sequence** (on-device; each is a go/no-go gate): bare background audio
 → position fidelity across a lock/unlock → wired HDMI unlocked → **wired HDMI locked**
-(the load-bearing assumption — try **Direct** first, then flip the setting to
+(the load-bearing assumption — try **Early** first, then flip the setting to
 **Mirrored** and repeat; `nativeStarted` carries `extMode` / `extWindow` and
 `displays()` carries `ownWindow` / `externalPlayback` to say which path actually ran)
 → TV Mode incl. brightness restore after a force-quit, **with the episode still visible

@@ -135,9 +135,12 @@ JS-written rows carry `src: "js"`.
 | `startNative` | handoff began — `reason` (`early`/`background`/`manual`), `shouldPlay`, `extWindow` |
 | `stopNative` | handoff ended, with the position it ended at |
 | `disarm` | teardown, with the `reason` threaded from JS (`unload` = episode advance, `stop`, `yield`, `transport-next`/`-prev`, `bgplay-off`, `not-armable`), the position, and whether a final flush was posted |
-| `rearm-swap` | an arm changed which FILE this is while a player was running; the outgoing file was flushed first. A run of these means the in-place advance path is not being taken |
+| `rearm-swap` | an arm changed which FILE this is while a player was running; the outgoing file was flushed first. **Must be followed by `native-swap`** — see below |
+| `native-swap` | the running player really moved onto the new file (same player, same layer, same external window). This is what makes a skip land on the monitor |
+| `swap-no-url` | the page armed a file the native side cannot play, so the swap could not happen and the player is still on the old episode |
+| `arm-dropped-hold` | `_npArm()` turned into a teardown while native held the display, because the new file has no native master. The display is about to go back to the phone |
 | `advance` | the page advancing — `holding`, `ext`, `nextArmed`, and `path` (`normal` vs `teardown-rebuild`) |
-| `native-advanced` | the **good** advance: native switched file without releasing the display |
+| `native-advanced` | the **good** end-of-episode advance: native switched file without releasing the display |
 | `hold-start` | native took the display; `elementWasPlaying` says whether a second engine was running |
 | `play-while-holding` | the web element tried to play while native held the display — always a bug, and it names the path |
 | `setPaused` | who paused/resumed, by `src` (`user-transport`, `remote-play`, `remote-pause`, `transport-toggle`) |
@@ -178,10 +181,33 @@ disarm-order bug: a real 322 s position was being dropped by a row that looked e
 like harmless post-teardown noise. See
 [GOTCHAS.md § The one teardown path that wiped its state before saving it](GOTCHAS.md).
 
+### Recipe: "I pressed Next and the monitor kept playing the old episode"
+
+A **user-driven skip** is a different path from an episode ending, and it fails
+differently: nothing changes on the display, but the title, the seek bar and the server's
+progress all move on. Read it in this order.
+
+1. `load-while-holding` — the page loaded a new file while native held the display.
+2. `rearm-swap` — the arm carried the file change to the native side. `flushedAt` is the
+   outgoing episode's final position and `nativePos` is where the player actually is; they
+   should agree to within a second.
+3. **`native-swap`** — the player moved. *This is the row that matters.* A `rearm-swap`
+   with no `native-swap` after it is the 18.9.0 bug: the config advanced and the player
+   did not, so the display is still on the old episode while every progress POST is filed
+   under the new one. (Which is also how Resume ends up opening an episode that was never
+   watched — check the `progress` rows between the two `rearm-swap`s and see whose `file`
+   they name.)
+4. If `swap-no-url` is there instead, the page armed a file with no native master.
+5. If `arm-dropped-hold` is there, `_npArm()` disarmed rather than armed — the display is
+   being handed back to the phone, and a `disarm`/`stopNative` pair follows.
+
+`takeover` appears on this path and proves nothing: it routes to `startNative()`, which
+guards on `!isNativeActive`, so while holding it is a no-op by construction.
+
 ### Recipe: "it advanced onto the phone instead of the glasses"
 
-With a display connected there are two advance paths and they look identical from outside.
-`advance`'s `path` field names which one ran:
+This is the *end-of-episode* version. With a display connected there are two advance paths
+and they look identical from outside. `advance`'s `path` field names which one ran:
 
 - **`path: "normal"` followed by `native-advanced`** — the native player switched file in
   place. The display never changed hands. This is what should happen.

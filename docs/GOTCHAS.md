@@ -4753,6 +4753,63 @@ that should have said so said `near-start` instead.
 dragged `armed.position` backwards once a second and a native seek was undone
 within a second of being made.
 
+## Swapping `armed` is not swapping the episode (18.9.0)
+
+18.8.0 made a mid-playback file change **flush** the outgoing episode. It still
+did not **move** anything: `armed = a` changes the handoff's configuration, and
+the `AVPlayer` goes on playing the item it was given. Config and player then
+describe different episodes, and everything downstream believes the config.
+
+Measured 2026-09-23, glasses connected, Next pressed twice:
+
+```
+rearm-swap  from=E01 to=E02  flushedAt=102.0  nativePos=102.9
+loaded      file=E02  holding=1
+rearm-swap  from=E02 to=E03  flushedAt=114.0  nativePos=114.2
+```
+
+Three things to read off that. There is **no `startNative` and no
+`native-advanced`** between them — the player never changed item, so E01 played
+on the display throughout. `flushedAt` for E02 is 114 s of an episode that never
+rendered a frame, because the 1 Hz time observer was reading E01's clock and
+filing it under E02 — which is why the next **Resume opened the wrong episode**.
+And every one of those posts carried `dur=657.025`, E01's runtime, borrowed by
+the `a.duration <= 0` inheritance; E03 is 677.9 s long.
+
+`takeover` was already being called on this path and could never have helped:
+it routes to `startNative()`, which guards on `!isNativeActive`. The
+end-of-episode advance had a working in-place path all along (`itemDidEnd` →
+`replaceItem`); a user-driven skip reached none of it.
+
+So `arm()` now calls `swapNativeItem()` on a file change — new `AVPlayerItem`
+into the **same** player, layer, external window and audio session, because
+releasing any of those is what drops the picture back onto the phone. The
+duration inheritance is scoped to same-file arms. **A `rearm-swap` with no
+`native-swap` after it means the old episode is still on screen.**
+
+The other way to lose the display on a skip is `_npArm()` itself: it disarms
+when `_npOk()` fails, and `_npOk()` wants a native master URL, so a next file
+that has none turns a routine arm into a teardown. That now logs
+`arm-dropped-hold` first — before, the transcript showed a bare `disarm` with
+no cause anywhere near it.
+
+## "At lock" was never a working monitor mode (18.9.0)
+
+`streamlink_app_extmode` had three values; `window` ("At lock") was the
+**default**. It built the external-display window at `willResignActive`, which
+reads like the right moment — the last composite pass the app is guaranteed —
+and is not: mirroring is already collapsing by then, so the claim regularly
+arrived too late to draw and the monitor showed the lock screen. That is the
+precise failure the setting exists to escape, shipped as the default.
+
+Removed in 18.9.0. Two modes remain, `early` (default) and `route`. Both the JS
+`_appPlaybackPrefs()` and Swift's `ArmedPlayback.extMode` / `arm()` fallback now
+read anything unrecognised — including a stored `"window"` — as `"early"`, so
+the migration needs no write. Don't reintroduce a lock-time claim: the finding
+that cost a full day of on-device trails is *everything must be claimed BEFORE
+the lock, because the moment of the lock is the one moment nothing can be
+claimed* (docs/STREAMING.md § 2b).
+
 ## A failed progress POST is a lost episode tail (18.8.0)
 
 `URLSession...resume()` with the result logged is better than silent, and the
