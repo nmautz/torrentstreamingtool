@@ -27,6 +27,58 @@ class MainViewController: CAPBridgeViewController {
         bridge?.registerPluginInstance(NativePlayback())
         injectCapacitorRuntime()
         injectViewportLock()
+        watchWebContentProcess()
+    }
+
+    // THE GREY SCREEN. Reported 2026-09-23 after ~20 minutes backgrounded with
+    // 2.3 GB of downloads running: coming back to the app showed a blank grey
+    // view, and only a force-quit fixed it. The transcript carries NO `crash` and
+    // NO `prev-launch-dirty`, so the app process was alive the whole time — what
+    // died was the WebView's *content* process, which iOS jettisons under memory
+    // pressure independently of the app. WKWebView does not recover on its own:
+    // it keeps showing an empty view forever, which is exactly what a grey screen
+    // with a healthy log looks like.
+    //
+    // CAPACITOR ALREADY HANDLES THIS, AND ITS HANDLER CANNOT WORK.
+    // WebViewDelegationHandler.webViewWebContentProcessDidTerminate does:
+    //
+    //     bridge?.reset()
+    //     webView.reload()
+    //
+    // and `reload()` is a no-op on a terminated content process — reloading needs
+    // a committed page and the kill leaves none. So the delegate fires, the log
+    // says "WebView process terminated", nothing happens, and the view stays grey
+    // until the app is force-quit. That is the report exactly.
+    //
+    // The cure is `load(URLRequest:)` rather than `reload()`. Rather than fight
+    // Capacitor for its navigation delegate — which would mean reimplementing
+    // every other method on it — probe the content process when the app comes
+    // forward, which is the moment the user would otherwise be looking at grey.
+    // Evaluating JS against a dead process fails immediately and specifically with
+    // `WKError.webContentProcessTerminated`, so there is no guessing and no
+    // false positive from a page that is merely slow.
+    private func watchWebContentProcess() {
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(checkWebContentAlive),
+            name: UIApplication.didBecomeActiveNotification, object: nil)
+    }
+
+    @objc private func checkWebContentAlive() {
+        guard let wv = bridge?.webView else { return }
+        wv.evaluateJavaScript("1") { [weak self] _, err in
+            guard let self = self, let e = err as NSError?,
+                  e.domain == WKError.errorDomain else { return }
+            let code = WKError.Code(rawValue: e.code)
+            guard code == .webContentProcessTerminated || code == .webViewInvalidated else { return }
+            DiagLog.shared.write("webview-died", [
+                "code": e.code, "url": wv.url?.absoluteString ?? "",
+            ], cat: "app")
+            DispatchQueue.main.async {
+                // Downloads are untouched by this — they live in the native layer,
+                // not the page — and the dashboard rebuilds its state from the host.
+                if let u = wv.url { wv.load(URLRequest(url: u)) } else { _ = wv.reload() }
+            }
+        }
     }
 
     // Lock the viewport so the WebView never zooms. iOS auto-zooms when an input

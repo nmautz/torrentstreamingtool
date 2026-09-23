@@ -7,12 +7,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        // MUST be here, and must be before launch completes: BGTaskScheduler
-        // requires every handler to be registered by the time the app finishes
-        // launching, otherwise the system has nowhere to deliver the task and
-        // the failure is silent. A Capacitor plugin's `load()` is too late — it
-        // runs when the bridge is built, which is after this returns.
-        BundleDownloadManager.shared.registerContinuedProcessing()
+        // NOTHING TO REGISTER HERE. Every other BGTask type must have its handler
+        // registered before launch completes, and 18.15.0 dutifully did that with
+        // a wildcard — which the system rejects outright ("Registering a wild card
+        // handler ... is specifically blocked"). BGContinuedProcessingTask is
+        // exempt from the register-before-launch rule, so BundleDownloadManager
+        // registers each unique identifier immediately before submitting it.
         return true
     }
 

@@ -292,32 +292,23 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     private(set) var cptActive = false
     /// Guards against submitting twice for one run of downloads.
     private var cptSubmitted = false
-    /// "Register each task identifier only once. The system KILLS THE APP on the
-    /// second registration of the same task identifier." — BGTaskScheduler.h.
-    /// AppDelegate runs once per process, but a crash-on-launch loop is not the
-    /// way to discover that a second caller appeared.
-    private var cptRegistered = false
-
-    /// Called from AppDelegate. Continued-processing registrations are actually
-    /// exempt from the register-before-launch-completes rule, but doing it there
-    /// costs nothing and keeps every BGTaskScheduler registration in one place.
-    func registerContinuedProcessing() {
-        guard #available(iOS 26.0, *) else { return }
-        guard !cptRegistered else {
-            DiagLog.shared.write("cpt-register", ["ok": false, "why": "already"], cat: "offline")
-            return
-        }
-        cptRegistered = true
-        let ok = BGTaskScheduler.shared.register(
-            forTaskWithIdentifier: BundleDownloadManager.cptWildcard,
-            using: .main) { [weak self] task in
-                self?.beginContinuedProcessing(task)
-            }
-        // `false` means the identifier is missing from BGTaskSchedulerPermittedIdentifiers.
-        DiagLog.shared.write("cpt-register", [
-            "ok": ok, "id": BundleDownloadManager.cptWildcard,
-        ], cat: "offline")
-    }
+    // REGISTRATION IS PER-REQUEST, NOT AT LAUNCH — measured the hard way.
+    // 18.15.0 registered the wildcard once at launch, as every other BGTask type
+    // wants. It returned `ok: false` and every submit came back
+    // `BGTaskSchedulerErrorDomain Code=3 "Unrecognized Identifier"`. Apple DTS:
+    // "Registering a wild card handler like this ... is specifically blocked, as
+    // it would greatly complicate both the routing of new jobs ... and it would
+    // require your block to be reentrant."
+    //
+    // The wildcard's only job is to sit in BGTaskSchedulerPermittedIdentifiers and
+    // PERMIT a family of identifiers. For a dynamic identifier you register the
+    // exact one immediately before submitting it — which is legal precisely
+    // because continued-processing registrations are exempt from the
+    // register-before-launch-completes rule that governs every other BGTask.
+    //
+    // Each identifier carries a fresh UUID and so is registered exactly once;
+    // "the system kills the app on the second registration of the same task
+    // identifier" (BGTaskScheduler.h) and that is not a theoretical concern.
 
     /// Ask the system to keep us running. Only ever in response to the user
     /// starting a download, and only while genuinely foreground: `dasd` rejects a
@@ -341,6 +332,20 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
                 return
             }
             let id = BundleDownloadManager.cptPrefix + UUID().uuidString
+            // Register THIS identifier, right now, immediately before submitting
+            // it. `ok: false` here means the wildcard is missing from
+            // BGTaskSchedulerPermittedIdentifiers, not that the id is wrong.
+            let reg = BGTaskScheduler.shared.register(
+                forTaskWithIdentifier: id, using: .main) { [weak self] task in
+                    self?.beginContinuedProcessing(task)
+                }
+            DiagLog.shared.write("cpt-register", [
+                "ok": reg, "id": id, "permits": BundleDownloadManager.cptWildcard,
+            ], cat: "offline")
+            guard reg else {
+                self.queue.async { self.cptSubmitted = false }
+                return
+            }
             let req = BGContinuedProcessingTaskRequest(
                 identifier: id, title: title, subtitle: "\(files) files")
             // .fail rather than the default .queue: if the system will not take it
@@ -556,7 +561,14 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     /// Per-host connection limit for the BACKGROUND session — an open
     /// experiment (18.14.1), reported on every `dl-bg`/`dl-fg` as `conns` so a
     /// transcript always says which value produced its numbers.
-    fileprivate static let bgConnsPerHost = 8
+    /// REVERTED. 18.14.1 raised this to 8 as a stated experiment, with the
+    /// pre-commitment that it comes back out if the ratio did not move. It did
+    /// not: a clean 20-minute backgrounded window on 2026-09-23 measured
+    /// **31.9 KB/s at conns=8**, against the 46 KB/s baseline at the default.
+    /// No improvement, possibly worse — so the throttling is in nsurlsessiond's
+    /// byte scheduling, not the socket count. Back to URLSession's default, and
+    /// one source warns a high value saturates the daemon anyway.
+    fileprivate static let bgConnsPerHost = 0   // 0 = leave the default alone
     private static let bgSessionIdentifier = "com.streamlink.bundledownloader"
     private lazy var session: URLSession = {
         let cfg = URLSessionConfiguration.background(withIdentifier: BundleDownloadManager.bgSessionIdentifier)
@@ -575,7 +587,9 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         // instead of being raised again. Watch the done-delta across a
         // `dl-bg` -> `dl-fg` pair; `la-progress` cannot answer it, since a
         // suspended app receives no delegate callbacks to write rows from.
-        cfg.httpMaximumConnectionsPerHost = BundleDownloadManager.bgConnsPerHost
+        if BundleDownloadManager.bgConnsPerHost > 0 {
+            cfg.httpMaximumConnectionsPerHost = BundleDownloadManager.bgConnsPerHost
+        }
         return URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
     }()
     // The fast, in-process default session used whenever the app is foreground.

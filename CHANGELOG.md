@@ -1,5 +1,75 @@
 # Changelog
 
+## [18.15.1] — 2026-09-23
+### A wildcard you may permit but must not register, and a reload that reloads nothing
+
+18.15.0 shipped `BGContinuedProcessingTask` and it never ran once:
+`cpt-register ok:false`, then every submit rejected with
+`BGTaskSchedulerErrorDomain Code=3 "Unrecognized Identifier"`. The fallback did
+its job — `cpt:false` on the transitions, the hybrid carried on — so nothing was
+lost but the attempt.
+
+**The wildcard belongs in the Info.plist and nowhere else.** Apple DTS:
+*"Registering a wild card handler like this... is specifically blocked, as it
+would greatly complicate both the routing of new jobs... and it would require
+your block to be reentrant."* For a dynamic identifier you **register the exact
+identifier immediately before submitting it** — legal precisely because
+continued-processing registrations are exempt from the
+register-before-launch-completes rule every other `BGTask` obeys. The launch-time
+registration in `AppDelegate` is gone.
+
+### The grey screen
+
+Reported after ~20 minutes backgrounded with 2.3 GB downloading: returning to the
+app showed a blank grey view that only a force-quit fixed. The transcript has
+**no `crash` and no `prev-launch-dirty`** — the app process was alive throughout.
+What died was the WebView's *content* process, which iOS jettisons under memory
+pressure independently of the app.
+
+Capacitor does handle the delegate callback, and its handler cannot work:
+
+```swift
+open func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+    bridge?.reset()
+    webView.reload()      // no-op: reloading needs a committed page
+}
+```
+
+A content-process kill leaves no committed page, so `reload()` does nothing and
+the view stays grey. The cure is `load(URLRequest:)`. Rather than take the
+navigation delegate off Capacitor — which would mean reimplementing every other
+method on it — the content process is probed when the app comes **forward**,
+which is exactly when the user would otherwise be staring at grey. Evaluating JS
+against a dead process fails immediately with `WKError.webContentProcessTerminated`,
+so there is no guessing and no false positive from a merely slow page. Logs
+`webview-died`. Downloads are unaffected either way: they live in the native
+layer, not the page.
+
+### The `conns = 8` experiment failed, and is reverted
+
+18.14.1 raised the background session's per-host connection limit as an
+experiment, with the stated pre-commitment that it comes back out if the ratio
+did not move. **A clean 20-minute backgrounded window measured 31.9 KB/s at
+`conns = 8`, against the 46 KB/s baseline at the default.** No improvement,
+possibly worse. So the throttling is in `nsurlsessiond`'s byte scheduling rather
+than the socket count — and one source warns a high value saturates the daemon
+anyway. Back to `URLSession`'s own default.
+
+### What that window actually proved
+
+| state | rate |
+|---|---|
+| foreground | ~3,300 KB/s |
+| **backgrounded, screen ON, unlocked** | **31.9 KB/s** |
+| locked | ~46 KB/s |
+
+**The screen state is irrelevant.** Backgrounded-but-unlocked is the same as
+locked, within noise. It is *suspension* that costs ~100x, which is precisely
+what `BGContinuedProcessingTask` prevents — so the case for it is stronger than
+when it was only a hypothesis about the lock screen.
+
+- `NP_BUILD` → **18.15.1**.
+
 ## [18.15.0] — 2026-09-23
 ### Downloads keep the fast session when the phone is put down
 
