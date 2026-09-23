@@ -1,5 +1,55 @@
 # Changelog
 
+## [18.14.2] — 2026-09-23
+### The measurement was wrong, so the experiment couldn't be judged
+
+Instrument-only. 18.14.1 raised the background session's per-host connection
+limit as an experiment, and the next transcript could not tell whether it helped
+— two locked windows read **721 KB/s** and **0 KB/s** against a 46 KB/s
+baseline. Both figures were untrustworthy, for reasons that were defects in the
+rows rather than in the downloader.
+
+- **`disk` — the monotonic byte count, and the one to divide by.** `done` is
+  on-disk *plus* `liveBytes` (bytes an in-flight task has written), and
+  `migrateTasks` clears `liveBytes` on every transition, because a cancelled
+  task's bytes are gone and its replacement re-counts them. So `done` falls
+  across exactly the moments a throughput measurement spans: measured
+  164.5 MB → 161.9 MB → 160.6 MB with the download progressing throughout.
+  `done` stays on the row — it is what the Live Activity shows — but `disk` is
+  the one a rate comes from.
+- **`after` on `dl-bgtask-expired`.** The grant, measured from the clock instead
+  of asked of an API that lies. Observed 12.5 s and 3.5 s, against the single
+  real `left` value ever obtained (5 s).
+- **`left` reverted to the later read.** 18.14.1 moved it to the notification
+  handler to fix it and made it strictly worse: `backgroundTimeRemaining` is
+  `.greatestFiniteMagnitude` until the app is genuinely background, so every row
+  logged `-1` instead of the occasional real number the hopped read produced.
+  It is documented as best-effort now, with `after` as the number to trust.
+- **`conns` reads from the constant it configures** (`bgConnsPerHost`), so a
+  transcript can never claim a value the session did not use.
+
+Verified: a model of `Job`'s two accumulators across a migration reproduces the
+measured decrease in `done` and shows `disk` never falls.
+
+**Still open, and this is what the next long test decides:** whether
+`httpMaximumConnectionsPerHost = 8` does anything. It needs one locked window of
+20+ minutes to compare against the 46 KB/s baseline, which was itself measured
+over 24 minutes — a 60-second window right after backgrounding says nothing,
+because iOS throttles background transfers progressively.
+
+Also confirmed in that transcript, with no code change needed:
+- **The stale Live Activity is real, and it is the download one.** `la-reap
+  kind:"download" found:1` at 07:31:22, with three downloads in flight when the
+  app died. Before 18.14.0 that Island would have persisted *and* had a second
+  stacked beside it.
+- **The background-assertion fix works.** Every `dl-bg` now reads
+  `bgTask: true`; every one after the first read `false` before 18.14.1.
+- The start-path barrier is wired in (`play-start ok:1 attach:"attached"`), but
+  the failing case — stop, then immediately replay the same warm episode — was
+  not re-challenged in this run.
+
+- `NP_BUILD` → **18.14.2**.
+
 ## [18.14.1] — 2026-09-23
 ### The start never happened, and the download died five files from the end
 

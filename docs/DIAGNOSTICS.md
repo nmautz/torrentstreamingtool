@@ -174,8 +174,8 @@ JS-written rows carry `src: "js"`.
 | `progress-failed` | a web-player save that failed, and whether it was stashed offline or lost |
 | `bundle-start` | a download beginning — how many files were asked for, how many `resumed` straight off disk, total `bytes`, and whether the app was foreground |
 | `bundle-retry` / `bundle-complete` / `bundle-failed` | a download's course, not just its verdict |
-| `dl-bg` / `dl-fg` | the app crossed the foreground/background line with jobs running (18.14.0). `moved` is how many in-flight transfers `migrateTasks` handed to the other session; **`left`** is `backgroundTimeRemaining` in seconds on a `dl-bg` (`-1` on a `dl-fg`, where it has no meaning), the budget the re-enqueue has to finish inside; `conns` is the background session's per-host connection limit. A `dl-bg` with `moved: 0` and `pending > 0` means nothing migrated and the transfers die with the assertion. **`done` is only comparable between two rows carrying the same `jobs` and `total`** — the denominators move as bundles start and finish, so a throughput figure taken across a change in the job set is meaningless |
-| `dl-bgtask-expired` | iOS reclaimed the background assertion (~30 s). Expected mid-bundle and **not a bug on its own** — what decides it is whether the preceding `dl-bg` moved the transfers to the background session first |
+| `dl-bg` / `dl-fg` | the app crossed the foreground/background line with jobs running (18.14.0). `moved` is how many in-flight transfers `migrateTasks` handed to the other session; **`disk`** (18.14.2) is confirmed on-disk bytes and is **the field to divide by**; `done` is `disk` plus in-flight bytes and therefore goes DOWN on every transition (`migrateTasks` clears them), so a rate taken from it is nonsense. `left` is `backgroundTimeRemaining` and is best-effort only — read `after` on the following `dl-bgtask-expired` for the grant that was really given. `conns` is the background session's per-host connection limit. A `dl-bg` with `moved: 0` and `pending > 0` means nothing migrated and the transfers die with the assertion. **Both byte counts are only comparable between rows carrying the same `jobs` and `total`** — the denominators move as bundles start and finish |
+| `dl-bgtask-expired` | iOS reclaimed the background assertion. **`after`** (ms since the backgrounding, 18.14.2) is the grant that was actually given — measured from the clock rather than asked of an API that reports "infinite" until the app is really background. Observed: 12.5 s, 5 s, 3.5 s, so "~30 s" is optimistic. Expected mid-bundle and **not a bug on its own** — what decides it is whether the preceding `dl-bg` moved the transfers to the background session first |
 | `dl-bg-events` | the OS relaunched us to deliver finished background transfers. Its **absence** across a whole suspended stretch means the background session delivered nothing at all |
 | `dl-bg-flushed` | that batch finished flushing; `completed` is how many bundles the on-disk reconcile repaired |
 | `la-progress` | 30 s download heartbeat — bytes done vs total, files done vs count. **This is what separates "stalled" from "not running"** while the app is RUNNING. It cannot fire while the app is suspended: a background `URLSession` delivers no delegate callbacks to a suspended process, so there is nothing to write a row from. For a locked-phone stretch, measure the `done` delta across the enclosing `dl-bg` → `dl-fg` pair instead |
@@ -354,7 +354,12 @@ From the 2026-09-23 07:00 transcript — same link, same device:
 | state | rate | source |
 |---|---|---|
 | foreground | **~3.3 MB/s** | three consecutive `la-progress` rows on one job (3341 / 3395 / 3329 KB/s) |
-| locked / suspended | **~46 KB/s** | `done` delta across one `dl-bg` → `dl-fg` pair, 24 min, job set unchanged |
+| locked / suspended | **~46 KB/s** | byte delta across one `dl-bg` → `dl-fg` pair, 24 min, job set unchanged |
+
+**Measure over 20+ minutes or not at all.** iOS throttles background transfers
+progressively, so the first minute after a backgrounding is not representative:
+the 2026-09-23 07:28 transcript produced 721 KB/s over 61 s and 0 KB/s over 38 s
+in the same session. Use `disk`, not `done` — see the row description.
 
 **~72×.** A 1.73 GB queue is ~8 minutes foreground and ~10 hours locked. So "the
 download didn't run overnight" and "the download is running" can both be true,

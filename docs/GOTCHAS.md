@@ -3697,10 +3697,28 @@ session on a backgrounding, so losing it silently is how "downloads stop when I
 lock the phone" comes back after appearing fixed. Re-take it on every
 backgrounding; the call is idempotent.
 
-Related instrument trap: `UIApplication.backgroundTimeRemaining` is
-`.greatestFiniteMagnitude` until the app is actually background, so reading it
-after a `DispatchQueue.main.async` hop usually returns "infinite" and tells you
-nothing. Read it on the notification thread, in the handler itself.
+Related instrument trap, and it cuts both ways: `backgroundTimeRemaining` is
+`.greatestFiniteMagnitude` until the app is *genuinely* background. 18.14.1
+moved the read into the notification handler to fix an occasional `-1` and made
+it **strictly worse** — every row then logged `-1`, because the handler runs
+before the transition completes. The later (hopped) read at least sometimes
+catches a real number. **Don't ask the API for the grant; measure it.** The gap
+between a `dl-bg` and its `dl-bgtask-expired` is the grant that was actually
+given, which is why `after` exists on that row (18.14.2). Measured grants:
+12.5 s, 5 s, 3.5 s — well under the ~30 s the documentation implies.
+
+### A progress counter that includes in-flight bytes is not a progress counter (fixed 18.14.2)
+`BundleDownloadManager`'s `done` is `doneBytes` (confirmed, moved into place)
+**plus** `liveBytes` (what an in-flight task has written so far). `migrateTasks`
+clears `liveBytes` for every file it moves, because a cancelled task's bytes are
+gone and its replacement re-counts from zero — so `done` **falls** at exactly
+the fg/bg transitions a throughput measurement spans. Measured 2026-09-23:
+164.5 MB → 161.9 MB → 160.6 MB while the download was progressing the whole
+time, which made a 38-second locked window read as 0 KB/s. The rows now also
+carry **`disk`** (confirmed bytes only, monotonic) and that is the field to
+divide by; `done` stays because it is what the Live Activity shows the user.
+General form: any counter that mixes settled and in-flight state is safe to
+*display* and unsafe to *differentiate*.
 
 ### Background transfers are ~72× slower than foreground — that is iOS, not a bug (measured 18.14.1)
 Same link, same device, 2026-09-23: **~3.3 MB/s foreground, ~46 KB/s locked.** A

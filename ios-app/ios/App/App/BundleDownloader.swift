@@ -254,15 +254,16 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             // Pull any still-running suspended-mode transfers back onto the fast
             // session so an open app always downloads at full speed.
             let moved = self.migrateTasks(to: self.fgSession)
-            self.logTransition("dl-fg", moved: moved, left: nil)
+            self.logTransition("dl-fg", moved: moved, readBudget: false)
         }
     }
+    /// When the app last went background, for the `after` on `dl-bgtask-expired`.
+    /// The gap between that row and its `dl-bg` is the REAL grant, measured
+    /// rather than asked for — see logTransition.
+    private var bgAt = Date.distantPast
+
     @objc private func appDidEnterBackground() {
-        // Read on the notification thread, BEFORE the hop: `backgroundTimeRemaining`
-        // only becomes a real number once the app is actually background, and
-        // reading it a beat late returned `.greatestFiniteMagnitude` — which is
-        // why every `dl-bg` after the first logged `left: -1` and told us nothing.
-        let left = UIApplication.shared.backgroundTimeRemaining
+        bgAt = Date()
         queue.async {
             self.appActive = false
             guard !self.jobs.isEmpty else { return }
@@ -278,7 +279,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             // keep running while suspended. The job-keyed bgTask assertion (held for
             // the whole download) keeps us alive long enough to re-enqueue.
             let moved = self.migrateTasks(to: self.session)
-            self.logTransition("dl-bg", moved: moved, left: left)
+            self.logTransition("dl-bg", moved: moved, readBudget: true)
         }
     }
 
@@ -287,27 +288,51 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     // it ran but moved nothing, the OS killed the background assertion, or the
     // transfers migrated fine and `nsurlsessiond` simply throttled them — and
     // until 18.14.0 the transcript could not distinguish them, because neither
-    // transition wrote a row at all. `left` is the one to read on a `dl-bg`:
-    // seconds of execution the OS is granting us, which is how long the
-    // re-enqueue has to finish. Assumes `queue`.
-    private func logTransition(_ ev: String, moved: Int, left: TimeInterval?) {
-        var pending = 0, done: Int64 = 0, total: Int64 = 0
+    // transition wrote a row at all.
+    //
+    // WHICH BYTE COUNT TO DIVIDE BY. `done` is on-disk PLUS `liveBytes`, the
+    // bytes an in-flight task has written — and `migrateTasks` clears
+    // `liveBytes` on every transition, because a cancelled task's bytes are
+    // gone and its replacement re-counts them. So `done` goes DOWN across
+    // exactly the moments a throughput measurement spans: measured 2026-09-23,
+    // 164.5 MB -> 161.9 MB -> 160.6 MB with the download progressing the whole
+    // time. **`disk` is the monotonic one** — confirmed, moved-into-place bytes
+    // only — and it is the field to divide by. `done` stays because it is what
+    // the Live Activity shows the user.
+    //
+    // Both are only comparable between two rows carrying the SAME `jobs` and
+    // `total`: the denominators move as bundles start and finish, so a figure
+    // taken across a change in the job set is meaningless.
+    //
+    // `left` is `backgroundTimeRemaining`, and it is BEST-EFFORT. iOS reports
+    // `.greatestFiniteMagnitude` until the app is really background, so reading
+    // it in the notification handler returns "infinite" every time (measured:
+    // 18.14.1 moved the read earlier to fix it and got `-1` on every row
+    // instead of the occasional real number the later read produced). Hence the
+    // hop below — and hence `after` on `dl-bgtask-expired`, which measures the
+    // grant from the clock instead of asking for it, and is the number to
+    // trust. Assumes `queue`.
+    private func logTransition(_ ev: String, moved: Int, readBudget: Bool) {
+        var pending = 0, done: Int64 = 0, disk: Int64 = 0, total: Int64 = 0
         for (_, j) in jobs {
             pending += j.pending.count
+            disk += j.doneBytes.values.reduce(0, +)
             done += j.doneBytes.values.reduce(0, +) + j.liveBytes.values.reduce(0, +)
             total += j.totalBytes
         }
-        // `done` is only comparable between two rows with the SAME job set — the
-        // totals move as bundles start and finish, so a throughput figure taken
-        // across a change in `jobs`/`total` is meaningless. Both are on the row
-        // so the reader can check before dividing.
-        var secs = -1
-        if let l = left, l.isFinite, l < 100000 { secs = Int(l) }
-        DiagLog.shared.write(ev, [
-            "jobs": jobs.count, "pending": pending, "moved": moved,
-            "done": done, "total": total, "bgTask": bgTask != .invalid,
-            "left": secs, "conns": 8,
-        ], cat: "offline")
+        let jobCount = jobs.count, held = bgTask != .invalid
+        let emit: (Int) -> Void = { secs in
+            DiagLog.shared.write(ev, [
+                "jobs": jobCount, "pending": pending, "moved": moved,
+                "disk": disk, "done": done, "total": total, "bgTask": held,
+                "left": secs, "conns": BundleDownloadManager.bgConnsPerHost,
+            ], cat: "offline")
+        }
+        guard readBudget else { emit(-1); return }
+        DispatchQueue.main.async {
+            let l = UIApplication.shared.backgroundTimeRemaining
+            emit((l.isFinite && l < 100000) ? Int(l) : -1)
+        }
     }
 
     // HYBRID SESSIONS — speed while active, durability while suspended.
@@ -336,6 +361,10 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     // session delivers per-file completions on wake. Both sessions share `self` as
     // delegate; the delegate methods key off `taskDescription` (sha + file) and so
     // handle tasks from either session identically.
+    /// Per-host connection limit for the BACKGROUND session — an open
+    /// experiment (18.14.1), reported on every `dl-bg`/`dl-fg` as `conns` so a
+    /// transcript always says which value produced its numbers.
+    fileprivate static let bgConnsPerHost = 8
     private static let bgSessionIdentifier = "com.streamlink.bundledownloader"
     private lazy var session: URLSession = {
         let cfg = URLSessionConfiguration.background(withIdentifier: BundleDownloadManager.bgSessionIdentifier)
@@ -354,7 +383,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         // instead of being raised again. Watch the done-delta across a
         // `dl-bg` -> `dl-fg` pair; `la-progress` cannot answer it, since a
         // suspended app receives no delegate callbacks to write rows from.
-        cfg.httpMaximumConnectionsPerHost = 8
+        cfg.httpMaximumConnectionsPerHost = BundleDownloadManager.bgConnsPerHost
         return URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
     }()
     // The fast, in-process default session used whenever the app is foreground.
@@ -894,8 +923,13 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
                 // bug on its own — what matters is whether the transfers had
                 // already migrated to the background session by then, which the
                 // preceding `dl-bg` row says.
+                // `after` is the grant we ACTUALLY got, measured from the
+                // backgrounding rather than asked of an API that lies early.
+                // Observed 2026-09-23: 12.5 s and 3.5 s, against a 5 s the one
+                // time `left` returned a real number at all.
                 DiagLog.shared.write("dl-bgtask-expired", [
                     "jobs": self.jobs.count, "active": self.appActive,
+                    "after": Int(Date().timeIntervalSince(self.bgAt) * 1000),
                 ], cat: "offline")
                 if self.bgTask != .invalid { UIApplication.shared.endBackgroundTask(self.bgTask); self.bgTask = .invalid }
             }
