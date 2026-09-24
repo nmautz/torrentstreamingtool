@@ -3012,7 +3012,9 @@ player UI works with no host. The pieces:
   device-rung only, Prev/Next expands across the item's *downloaded* episodes
   from the native index, and a Reconnect probe (auto every 15 s while nothing
   plays + a manual button) that `location.replace(host)`s back to the real
-  dashboard. It binds the native player's events (`_npBindEvents`) exactly as
+  dashboard. The Downloads menu's Play (`_appPlayDownloaded`) resumes from the
+  host when online and from `OfflineStore` otherwise — before 18.21.5 it read
+  nothing online and always started at 0. It binds the native player's events (`_npBindEvents`) exactly as
   the online boot does — without them a glasses handoff plays with no remote on
   the phone (fixed 18.21.4). Progress + track picks write to `OfflineStore` explicitly
   (the loopback `/api` 404s RESOLVE — they don't throw — so the online code's

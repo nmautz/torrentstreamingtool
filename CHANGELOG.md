@@ -1,5 +1,19 @@
 # Changelog
 
+## [18.21.5] — 2026-09-24
+### Playing a download from the Downloads menu resumes again
+
+- **A download played from the app's Downloads menu while connected always
+  started from the beginning.** `_appPlayDownloaded` looked up a resume position
+  only when offline (from the on-device store). Online it passed `0`, the proxied
+  handoff carried `seek=0` into the loopback page, and native was armed at 0. The
+  box had the right position the whole time (142.6 s, synced seconds earlier).
+  Online, the menu now reads the position from the host like every other Play,
+  and falls back to the on-device store when the host doesn't answer.
+- The related offline symptom (stopped at 151 s, resumed at ~141 s) was the
+  18.21.4 bug. The page didn't know native held playback, so on stop it saved the
+  parked phone element's position instead of the glasses' position.
+
 ## [18.21.4] — 2026-09-24
 ### The phone is a remote for offline glasses playback too
 

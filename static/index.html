@@ -20800,10 +20800,24 @@ async function _appRenderDashboard() {
 // native LocalMediaServer), then close the overlay so the player is visible.
 async function _appPlayDownloaded(itemId, filePath) {
   _appCloseDashboard();   // offline mode: a no-op — the player floats above the pinned overlay
-  // Offline: resume comes from the native store (the host's progress is
-  // unreachable, and the M3 seed already adopted it while online).
-  let seekTo = 0;
-  if (_appOffline && isApp && _cap.os) {
+  // Online: resume from the host, like every other Play. This used to read
+  // nothing online, so a download played from this menu always started at 0 —
+  // and the proxied handoff carried that 0 straight into native (18.21.5).
+  // Offline, or when the host can't answer: the native store (the M3 seed
+  // adopted the host's position while online).
+  let seekTo = 0, hostAnswered = false;
+  if (!_appOffline && navigator.onLine) {
+    try {
+      const r = await fetch(`/api/library/${itemId}/files?profile_id=${encodeURIComponent(profile.id || "")}`);
+      if (r.ok) {
+        const f = ((await r.json()).files || []).find((x) => x.path === filePath);
+        hostAnswered = true;
+        const p = f && f.progress;
+        if (p && !p.completed && (p.position_sec || 0) > 5) seekTo = p.position_sec;
+      }
+    } catch (_) {}
+  }
+  if (!hostAnswered && isApp && _cap.os) {
     try {
       const p = await _cap.os.getProgress({ itemId, filePath, profileId: profile.id || "" });
       if (p && p.found && !p.completed && (p.positionSec || 0) > 5) seekTo = p.positionSec;
@@ -28783,6 +28797,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.21.4</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.21.5</div>
 </body>
 </html>
