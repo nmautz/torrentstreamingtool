@@ -1,5 +1,27 @@
 # Changelog
 
+## [18.21.2] — 2026-09-24
+### The glasses get their own screen again
+
+- **Glasses playback stopped engaging; Early and Mirrored behaved identically.**
+  A regression from 18.20.1's UIScene adoption. Before it, UIKit's compatibility
+  path handed the app the external display's
+  `…ExternalDisplayNonInteractive` scene unasked, and Early mode's window in that
+  scene is what displaced mirroring. A scene-based app is never offered that
+  scene unless it asks. The transcript shows it on every row: `extScreen: true,
+  screens: 2`, `extScene: false`. The app now asks: on iOS 27 through
+  `registerSceneAccessory(.externalNonInteractive(...))` on the root view
+  controller, and before 27 through the manifest's external-display role. Both
+  point at an empty `ExternalDisplaySceneDelegate`, and NativePlayback still
+  builds the window. The accessory is enabled for Early and withdrawn for Mirrored
+  at every arm.
+- **Mirrored mode lost its presenting layer too.** `attachFallbackLayer` found the
+  app's window through `AppDelegate.window`, which is `nil` for good under scenes
+  (`mainLayer: false` on every row). It now uses the application scene's window.
+- Diagnostics: `snap` rows carry `accessory` (`on/avail` / `off/unavail` / `-`),
+  plus new `ext-scene` (role connected) and `ext-accessory` (registered / toggled)
+  rows.
+
 ## [18.21.1] — 2026-09-23
 ### The TV is listed once, and the Next Episode strip sits on the player
 

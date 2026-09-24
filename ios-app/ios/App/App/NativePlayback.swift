@@ -60,7 +60,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "18.20.1"
+let NP_BUILD = "18.21.2"
 
 // MARK: - Armed state
 
@@ -1178,6 +1178,13 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // Early mode takes the display now, while the app can still draw and the
         // scene is live. Idempotent, so riding the arm push is enough — no extra
         // JS surface, and it self-heals if the glasses are plugged in mid-episode.
+        //
+        // The scene itself only exists if we asked for it (iOS 27 scene accessory;
+        // see ExternalDisplayAccessory). Offer it in Early mode, withdraw it in
+        // Mirrored, so the route's takeover has nothing of ours to fight. If this
+        // arm is what enables it, the scene lands later and sceneDidConnect claims.
+        let wantScene = armed.extMode != "route"
+        onMain { ExternalDisplayAccessory.setEnabled(wantScene) }
         maybeClaimEarly()
     }
 
@@ -2425,9 +2432,14 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     /// Only ever attached while a display is actually connected (see
     /// `attachVideoSurface`).
     private func attachFallbackLayer() {
+        // The app's window lives on the APPLICATION scene since 18.20.1 adopted
+        // scenes — `AppDelegate.window` is nil for good, and reading it is what left
+        // Mirrored mode with no presenting layer (mainLayer:false on every row).
         guard mainLayer == nil, let p = player,
-              let root = (UIApplication.shared.delegate?.window ?? nil)?
-                  .rootViewController?.view else { return }
+              let root = UIApplication.shared.connectedScenes
+                  .compactMap({ $0 as? UIWindowScene })
+                  .first(where: { $0.session.role == .windowApplication })?
+                  .windows.first?.rootViewController?.view else { return }
         let l = AVPlayerLayer(player: p)
         l.videoGravity = .resizeAspect
         l.frame = root.bounds
@@ -2629,6 +2641,9 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             "extPlayback": player?.isExternalPlaybackActive ?? false,
             "native":      isNativeActive,
             "mode":        armed.extMode,
+            // iOS 27 scene-accessory registration: "on/avail", "off/unavail", "-".
+            // `extScene:false` beside `accessory:"-"` means we never asked.
+            "accessory":   ExternalDisplayAccessory.state,
             // "act" / "inact" / "bg". Run 4 could not distinguish "the phone was
             // locked" from "the app came back and the reading is meaningless", and
             // the user had no way to know either. There is no public API for WHY a

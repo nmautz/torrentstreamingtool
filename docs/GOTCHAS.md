@@ -4086,6 +4086,20 @@ Separately, a **free developer profile allows only 3 apps per device**, which is
 different quota from a sideloader's "signs left" (App IDs per 7 days) and fails at
 install with `ApplicationVerificationFailed`.
 
+**Adopting scenes silently took the glasses away (fixed 18.21.2).** The entry on
+18.2.1 about the external-display scene "being there without a manifest" was true
+**only because** there was no manifest. That scene came from UIKit's compatibility
+path. Once the app is scene-based, UIKit connects
+`UIWindowSceneSessionRoleExternalDisplayNonInteractive` only if the app asks: on iOS
+27, `UIViewController.registerSceneAccessory(.externalNonInteractive(sceneConfiguration:))`,
+and before that, a manifest entry for the role. Nothing crashed and nothing logged. The
+display simply kept mirroring, so Early and Mirrored looked identical. The transcript
+shows it plainly: `extScreen: true`, `extScene: false`. In the same change,
+`UIApplication.shared.delegate?.window` became permanently `nil`, and Mirrored mode's
+fallback `AVPlayerLayer` had been hanging off it. **Any future scene or lifecycle
+change: grep for `delegate?.window` and check that `extScene` flips on a real
+device.**
+
 ### Throttling a download to save battery costs MORE battery (18.20.0)
 The obvious battery setting — full speed / limited speed / off — is wrong in the
 middle, and the 2026-09-23 run measured it. Battery cost per gigabyte, by

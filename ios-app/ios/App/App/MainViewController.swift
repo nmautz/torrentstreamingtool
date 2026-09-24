@@ -28,6 +28,10 @@ class MainViewController: CAPBridgeViewController {
         injectCapacitorRuntime()
         injectViewportLock()
         watchWebContentProcess()
+        // The glasses' external-display scene. Without this, iOS 27 never hands a
+        // scene-based app that scene and both glasses modes are plain mirroring.
+        // See ExternalDisplayAccessory in AppDelegate.swift.
+        ExternalDisplayAccessory.register(on: self)
     }
 
     // THE GREY SCREEN. Reported 2026-09-23 after ~20 minutes backgrounded with

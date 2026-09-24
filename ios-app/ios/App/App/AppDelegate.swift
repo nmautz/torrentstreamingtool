@@ -134,3 +134,77 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             UIApplication.shared, continue: activity, restorationHandler: { _ in })
     }
 }
+
+// MARK: - External display (the glasses)
+//
+// 18.20.1 ADOPTING SCENES BROKE THE GLASSES, AND THIS IS WHY. Before it, the app
+// had no scene manifest and UIKit's compatibility path handed us a
+// `…ExternalDisplayNonInteractive` scene unasked (measured, 18.2.0) — NativePlayback
+// put a window in it and that is what displaced mirroring. A scene-BASED app gets
+// no such gift: UIKit connects the external-display role only if the app asks for
+// it. Measured 2026-09-24 on 18.20.1: `extScreen: true, screens: 2` and
+// `extScene: false` on every row, so Early and Mirrored both fell straight
+// through to plain mirroring and looked identical.
+//
+// How to ask differs by OS, so both are here:
+//   - iOS 27+: `registerSceneAccessory(.externalNonInteractive(...))` on a view
+//     controller (MainViewController does it). The SDK is explicit that the role is
+//     delivered for a registered accessory.
+//   - iOS 16–26: the manifest's `UIWindowSceneSessionRoleExternalDisplayNonInteractive`
+//     entry in Info.plist, pointing at the same delegate.
+//
+// The delegate is deliberately empty. NativePlayback finds the scene through
+// `connectedScenes` / `UIScene.willConnectNotification` and builds its own window
+// in it when (and only when) it wants the display; until then the scene has no
+// window and the display keeps mirroring the phone.
+class ExternalDisplaySceneDelegate: UIResponder, UIWindowSceneDelegate {
+    var window: UIWindow?
+
+    func scene(_ scene: UIScene, willConnectTo session: UISceneSession,
+               options connectionOptions: UIScene.ConnectionOptions) {
+        DiagLog.shared.write("ext-scene", [
+            "role": session.role.rawValue,
+        ], cat: "ext")
+    }
+}
+
+/// Owns the iOS 27 scene-accessory registration. `enabled` is toggled by
+/// NativePlayback per the Early/Mirrored preference: Mirrored must NOT be offered a
+/// scene of ours, or the route's own takeover has something to fight with.
+enum ExternalDisplayAccessory {
+    private static var registration: AnyObject?
+
+    static func register(on vc: UIViewController) {
+        guard registration == nil else { return }
+        if #available(iOS 27.0, *) {
+            let cfg = UISceneConfiguration(name: "External Display",
+                                           sessionRole: .windowExternalDisplayNonInteractive)
+            cfg.delegateClass = ExternalDisplaySceneDelegate.self
+            let reg = vc.registerSceneAccessory(.externalNonInteractive(sceneConfiguration: cfg))
+            registration = reg
+            DiagLog.shared.write("ext-accessory", [
+                "registered": true, "available": reg.isAvailable, "enabled": reg.isEnabled,
+            ], cat: "ext")
+        }
+    }
+
+    static func setEnabled(_ on: Bool) {
+        if #available(iOS 27.0, *) {
+            guard let reg = registration as? UISceneAccessoryRegistration,
+                  reg.isEnabled != on else { return }
+            reg.isEnabled = on
+            DiagLog.shared.write("ext-accessory", [
+                "enabled": on, "available": reg.isAvailable,
+            ], cat: "ext")
+        }
+    }
+
+    /// For diagSnap: "-" before iOS 27 or before registration.
+    static var state: String {
+        if #available(iOS 27.0, *),
+           let reg = registration as? UISceneAccessoryRegistration {
+            return (reg.isEnabled ? "on" : "off") + (reg.isAvailable ? "/avail" : "/unavail")
+        }
+        return "-"
+    }
+}
