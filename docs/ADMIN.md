@@ -179,6 +179,8 @@ Endpoints:
 
 ### Cleanup (qBittorrent + download folder)
 
+> **Since 18.23.0 a delete cleans up after itself** (the reaper; see [GOTCHAS.md](GOTCHAS.md) § qBit "delete with files" is not a delete). Strays that remain are ones StreamLink can't prove are its own, such as files placed by hand, or a file still locked after ~2 days of retries. Dead `.<hash>.parts` files are swept automatically at startup.
+
 A dedicated tab that **cross-references three sources** — qBittorrent's torrent list, the library, and the download folder on disk — and surfaces the ways they drift apart, each with a guided **Recover** (where possible) and a **confirm-gated Delete**. Distinct from the **File Validator** (decodes *existing* library source files) and **Offline Cache** (manages `.offline_cache/` HLS bundles only): this is the only view of broken/orphan **torrents** and download-folder **clutter**.
 
 Backed by `_build_cleanup_inventory` ([main.py](../main.py)), which reuses the Offline Cache tab's snapshot discipline: it loads the library + `qbit_info_all()`, runs the (blocking) stray-file disk walk in `_cleanup_inventory_sync` via `asyncio.to_thread`, and caches the result (`_cleanup_inv_snapshot`, guarded by `_cleanup_inv_lock`). `GET /api/admin/cleanup` serves the snapshot instantly with an **"As of …"** line; the **Refresh** button calls `?refresh=1`. Every mutation calls `_invalidate_cleanup_inventory()`. When qBittorrent is unreachable the payload carries `qbit_ok:false` (UI shows a **qBittorrent offline** chip) rather than mislabelling every library torrent as broken/orphan.

@@ -7,6 +7,10 @@ The only persistent server-side state. Lives at the project root. Accessed via `
 ```jsonc
 {
   "profiles": [ … ],   // up to 6
+  "pending_deletes": [ … ],  // optional (18.23.0). Deletes the reaper hasn't finished:
+                             // {eid, item_id, title, profile_id, stage: "new"|"reap", hashes, paths,
+                             //  targets, bundle_dirs, attempts, next_at, added_at}. Written in the SAME
+                             // write that removes the rows; resumed on startup. See GOTCHAS § the reaper
   "items":    [ … ],   // library entries
   "settings": {
     "library_paths": [ … ],            // UI-added paths (POST /api/settings/library-paths)

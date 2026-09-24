@@ -1571,13 +1571,53 @@ the grid and queued every other viewer behind the lock 300 times. Now:
   per-item `hidden_by_profiles` is folded in on every load by `_fold_item_hides`;
   don't write it.
 - **Delete** (`_delete_items`) drops the rows in one write and returns; bundles,
-  torrents and files go in a throttled `_spawn_bg` job. So a 200 from delete means
-  "gone from the library", **not** "gone from disk". A restart mid-job leaves the
-  rest as Cleanup-tab orphans, and `qreq` doesn't raise on an HTTP error status, so
-  a qBit that answers 4xx/5xx is only caught by that same orphan sweep.
+  torrents and files are the reaper's job (next section). So a 200 from delete
+  means "gone from the library", **not** "gone from disk".
 - The frontend edits `window._libCache` and repaints **before** the request
   (`_libSetHidden` / `_libDelete`), then reloads to reconcile. Any new hide/delete
   button should go through those two, never loop per-item requests again.
+
+### qBit "delete with files" is not a delete — the reaper finishes it (18.23.0)
+
+qBit removes the files the **torrent** owns and nothing else, and on Windows it
+gives up without a word on any file another process has open. Every "stray" in
+the admin Cleanup tab on the live box came from one of those:
+
+- **Our own files keep the folder alive.** Subtitle sidecars
+  (`<stem>.<lang>.opensubs.srt`, the AI `.srt`s) and the emptied
+  `.streamlink_cache/` aren't the torrent's, so qBit can't remove the folder
+  (Obi-Wan: six AI `.srt`s, 197 KB, a whole folder left behind).
+- **A file held open survives.** A bulk delete at 16:17:07 landed while the White
+  Lotus prep encode still had its source open (DONE at 16:17:37): 3.5 GB kept, with
+  no owner.
+- **qBit's `.<infohash>.parts`** outlives its torrent.
+
+So every file-deleting qBit call goes through `_qbit_delete_reaped` (or, for a
+library delete, a `pending_deletes` record written with the row removal), and the
+**reaper** (`_reap_worker`, pure rules in `reaper.py`) removes whatever is left:
+the recorded paths, their sidecars, an empty `.streamlink_cache`, emptied parent
+folders, and the torrent's `.parts`. A locked path is retried on a backoff
+(30 s → 24 h, ~2 days total), then left for the Cleanup tab, and the deleting
+profile gets a `library_cleanup` alert. The record is persisted, so a restart
+mid-delete resumes. Prep jobs on a deleted file are cancelled first (same
+intentional-kill flag as on-demand-only). The Smart Skip analyzer and the
+compressor have no per-file cancel, so a file they hold simply waits for the retry.
+
+**Rules for touching this:**
+- Never call `qbit_delete(h, delete_files=True)` directly; use `_qbit_delete_reaped`.
+  It takes no lock, so it's safe inside `mutate_library` (the race engine calls it
+  there). It drops the record in `_reap_inbox` and the worker persists it.
+- `reaper.may_reap` is the only gate before an unlink. It refuses anything outside
+  a configured root, a root itself (a no-subfolder torrent's `content_path` IS the
+  root), and anything a live torrent or library file owns (a retry can reuse the
+  folder name). A torrent the entry itself just deleted is excluded from "owned",
+  since qBit lists it for a moment after the delete.
+- No qBit torrent list means no owned set, so nothing is reaped that round.
+  Missing evidence is never permission.
+- It does **not** sweep the Cleanup tab's strays. "Stray" only means unowned, and
+  a hand-placed folder is unowned too. The one exception is the startup
+  `_sweep_dead_parts`, because a `.parts` name carries its torrent's hash and is
+  provably qBit's.
 
 ### Every library mutation goes through `mutate_library()` — `get_library` + `put_library` is a lost-update race
 

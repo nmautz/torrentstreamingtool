@@ -60,6 +60,7 @@ import racerules
 import relquality
 import reltracks
 import srcevict
+import reaper
 import stt
 import subpack
 import subsearch
@@ -2385,7 +2386,7 @@ async def _qbit_delete_transient(h: Optional[str], why: str = "stream cleanup") 
     if await _hash_backs_library_item(h):
         log.warning("Refusing %s delete of %s — that torrent backs a library item", why, h)
         return
-    await qbit_delete(h, delete_files=True)
+    await _qbit_delete_reaped(h)
 
 
 async def qbit_recheck(h: str) -> None:
@@ -9878,7 +9879,7 @@ async def _pack_slice_fallback(item: dict) -> bool:
         return False        # qBit is stopped anyway — hold and retry next tick
     await _race_abandon(item, "pack-unsliceable")
     if cur_hash:
-        await qbit_delete(cur_hash, delete_files=True)
+        await _qbit_delete_reaped(cur_hash)
     new_hash = await qbit_add_magnet(magnet, save_path=save_path) or ""
     if not new_hash:
         # The replacement was rejected too. Leave the pack alone (it is already
@@ -9986,7 +9987,7 @@ async def _retry_dead_download(item: dict, lib: dict) -> str:
     # Drop the dead torrent first so it stops occupying a queue slot. Safe to take
     # its files with it: we only get here at zero bytes.
     if cur_hash:
-        await qbit_delete(cur_hash, delete_files=True)
+        await _qbit_delete_reaped(cur_hash)
 
     # Work down the candidate list within this item's remaining budget. A qBit
     # reject burns the attempt but must never end the call with the item left
@@ -10508,7 +10509,7 @@ async def _race_drop(item: dict, entry: dict, reason: str) -> None:
     _race_bank_attempt(item, entry, "raced_out:" + reason)
     h = (entry.get("hash") or "").lower()
     if h and h != (item.get("torrent_hash") or "").lower():
-        await qbit_delete(h, delete_files=True)
+        await _qbit_delete_reaped(h)
     log.info("[race] %s: dropped %r (%s)", item.get("title", ""),
              entry.get("title", ""), reason)
     await _race_event(item["id"], "culled", title=entry.get("title", ""),
@@ -10538,7 +10539,7 @@ async def _race_abandon(item: dict, why: str) -> bool:
         _race_bank_attempt(item, e, "raced_out:" + why)
         h = (e.get("hash") or "").lower()
         if h and h != incumbent:
-            await qbit_delete(h, delete_files=True)
+            await _qbit_delete_reaped(h)
     race["state"] = "settled"
     race["settled_at"] = _now_iso()
     race["entries"] = []
@@ -10593,7 +10594,7 @@ async def _race_promote(item: dict, entry: dict) -> None:
         if cur is not None:
             cur.update(item)
     if old:
-        await qbit_delete(old, delete_files=True)
+        await _qbit_delete_reaped(old)
     await broadcast("library_update", {"item_id": item["id"], "status": "downloading",
                                        "message": "Switched to " + item["title"]})
 
@@ -10788,7 +10789,7 @@ async def _race_start(item_id: str, candidates: list, runtime_min: float,
             if cur is None:
                 # Deleted while we were adding. Nothing owns these now.
                 for e in added:
-                    await qbit_delete(e["hash"], delete_files=True)
+                    await _qbit_delete_reaped(e["hash"])
                 return
             race = cur.get("race") or {}
             if not added:
@@ -11181,7 +11182,7 @@ async def _apply_race_upgrade(item_id: str) -> None:
                             e["dropped_at"] = _now_iso()
                     r["state"] = "settled"
                     r["settled_at"] = _now_iso()
-            await qbit_delete(hq_hash, delete_files=True)
+            await _qbit_delete_reaped(hq_hash)
             await _race_event(item_id, "settled", title=hq.get("title", ""),
                               label=hq.get("label", ""))
             return
@@ -11234,7 +11235,7 @@ async def _apply_race_upgrade(item_id: str) -> None:
             cur = next((it for it in fresh["items"] if it["id"] == item_id), None)
             if cur is None:
                 # Deleted mid-swap. Nothing owns the HQ torrent now.
-                await qbit_delete(hq_hash, delete_files=True)
+                await _qbit_delete_reaped(hq_hash)
                 return
             was_downloading = cur.get("status") == "downloading"
             cur["torrent_hash"] = hq_hash
@@ -11295,17 +11296,17 @@ async def _apply_race_upgrade(item_id: str) -> None:
 
         # 5. Now the old copy can go.
         if incumbent:
-            await qbit_delete(incumbent, delete_files=True)
+            await _qbit_delete_reaped(incumbent, paths=old_paths)
             for _ in range(20):
                 if not await qbit_info(incumbent):
                     break
                 await asyncio.sleep(0.25)
             left = [p for p in old_paths if Path(p).exists()]
             if left:
-                # Logged, not forced. Never os.remove a torrent-backed file;
-                # the admin Cleanup tab will offer these as stray.
-                log.warning("[race] %s: %d old file(s) survived the delete: %s",
-                            item_id, len(left), left[:3])
+                # The reaper finishes these once whatever holds them lets go —
+                # never while a live torrent or library file still owns them.
+                log.warning("[race] %s: %d old file(s) survived the delete, reaper "
+                            "will retry: %s", item_id, len(left), left[:3])
 
         _spawn_bg(_probe_item_video_async(item_id))
         new_label = hq.get("label", "")
@@ -11380,7 +11381,7 @@ async def _race_orphan_sweep() -> None:
                 continue
             log.warning("[race] sweeping orphaned racer %s (%s)", h[:12],
                         t.get("name", ""))
-            await qbit_delete(h, delete_files=True)
+            await _qbit_delete_reaped(h)
     except Exception:
         log.exception("[race] orphan sweep failed")
 
@@ -13575,6 +13576,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     od_reaper_loop  = asyncio.create_task(_od_reaper())
     maint_loop      = asyncio.create_task(background_maintenance_loop())
     evict_loop      = asyncio.create_task(source_eviction_loop())
+    # Finish any delete a restart interrupted, and clear qBit `.parts` files whose
+    # torrent is long gone. See "The reaper".
+    _reap_kick()
+    _spawn_bg(_sweep_dead_parts())
     shotscan_task   = asyncio.create_task(shot_scan_loop())
     tvui_task       = asyncio.create_task(tv_ui_loop())
     rvol_guard      = asyncio.create_task(remote_volume_guard())   # opt-in: no-op unless REMOTE_VOLUME_GUARD=1 (Windows)
@@ -16769,14 +16774,9 @@ async def _purge_offline_bundles(paths: list[str]) -> int:
 # bundle purge and a qBit round trip. Minutes of wall clock, the tile sitting
 # there the whole time, and every other viewer queued behind the lock 300 times.
 #
-# Now: ONE library write drops every row (the tile is gone the moment it lands),
-# and the slow part — bundles, torrents, files — is a throttled background job.
-# A torrent the job fails to remove surfaces in the admin Cleanup tab as an
-# orphan, the same recoverable trade the single delete has always made.
-
-_DELETE_CHUNK = 20          # items whose bundles + torrents go per step
-_DELETE_CHUNK_PAUSE = 0.5   # s between steps — let playback + page loads breathe
-
+# Now: ONE library write drops every row (the tile is gone the moment it lands)
+# and records what has to go in `lib["pending_deletes"]`, in that same write. The
+# slow part — bundles, torrents, files — is the reaper's job, below.
 
 def _drop_orphan_hidden_series(lib: dict) -> None:
     """Forget a hidden series nothing in the library belongs to any more, so a
@@ -16788,72 +16788,414 @@ def _drop_orphan_hidden_series(lib: dict) -> None:
             p["hidden_series"] = [k for k in hs if k in live]
 
 
-async def _cleanup_deleted_items(doomed: list[dict], delete_file: bool,
-                                 profile_id: str, title: str) -> None:
-    """Background half of a delete: stop playback on it, then purge bundles and
-    torrents a chunk at a time. `doomed` = [{id, hashes, paths}] captured under the
-    lock; the rows themselves are already gone."""
-    ids = {d["id"] for d in doomed}
-    # Deleting what is on screen: stop first.
-    #
-    # Nothing used to check, so "delete the thing I am watching" pulled the file
-    # out from under VLC — it wedged or errored with no explanation, and
-    # state.library_item_id went on pointing at an item that no longer exists.
-    # It also makes the delete WORK on the primary target: Windows refuses to
-    # unlink a file another process holds open, so deleting the playing episode
-    # failed on the file itself and left the media behind with the library row
-    # gone — the one combination the Cleanup tab calls an orphan. A merged series
-    # playlist spans items, so any of them being in the run counts.
-    playing = state.library_item_id in ids or any(
-        iid in ids for iid in (state.library_series_map or {}).values())
-    if playing:
+# ── The reaper: a delete is finished when the files are gone ──────────────────
+#
+# qBit's "delete with files" removes what the TORRENT owns and nothing more, and
+# on Windows it gives up silently on a file another process has open. Everything
+# the admin Cleanup tab called "stray" came from one of those (measured on the
+# live box, 2026-09-24): subtitle sidecars and `.streamlink_cache` keeping a
+# torrent's folder non-empty; a 3.5 GB episode deleted while its prep encode still
+# had it open; qBit's own `.<hash>.parts` outliving the torrent.
+#
+# So a delete is a persisted record (`lib["pending_deletes"]`, survives a restart)
+# that one worker drives to the end:
+#
+#   stage "new"  — stop playback of it, cancel prep jobs reading it, purge its
+#                  bundles, note each torrent's content path, delete the torrents.
+#   stage "reap" — every recorded path still on disk is removed by us, with its
+#                  sidecars, then empty parent folders and dead `.parts` files.
+#                  A path still locked is retried on `reaper.retry_delay`'s backoff;
+#                  after the last try it is left for the Cleanup tab and the
+#                  deleting profile is told.
+#
+# `reaper.may_reap` guards every unlink: inside a configured root, never a root,
+# never a path a live torrent or library file still owns. The owned set needs
+# qBit's torrent list; qBit unreachable ⇒ nothing is reaped that round.
+#
+# Callers that already hold the library lock (the race engine) can't write the
+# record themselves, so they drop it in `_reap_inbox` and the worker persists it.
+
+_REAP_CHUNK = 20            # entries per step
+_REAP_CHUNK_PAUSE = 0.5     # s between steps — let playback + page loads breathe
+_REAP_QBIT_SETTLE = 10.0    # s to wait for qBit to drop a torrent before reaping
+_reap_inbox: list[dict] = []
+_reap_task: "Optional[asyncio.Task]" = None
+_reap_wake: "Optional[asyncio.Event]" = None
+
+
+def _reap_entry(*, hashes=(), paths=(), targets=(), bundle_dirs=(), stage="new",
+                item_id="", title="", profile_id="", delay=0.0) -> dict:
+    return {"eid": uuid.uuid4().hex, "item_id": item_id, "title": title,
+            "profile_id": profile_id, "stage": stage,
+            "hashes": [h.lower() for h in hashes if h],
+            "paths": [p for p in paths if p],
+            "targets": [t for t in targets if t],
+            "bundle_dirs": [str(b) for b in bundle_dirs if b],
+            "attempts": 0, "next_at": time.time() + delay,
+            "added_at": _now_iso()}
+
+
+def _reap_kick() -> None:
+    """Make sure the worker is running, and wake it if it is waiting."""
+    global _reap_task, _reap_wake
+    if _reap_wake is None:
+        _reap_wake = asyncio.Event()
+    _reap_wake.set()
+    if _reap_task is None or _reap_task.done():
+        _reap_task = _spawn_bg(_reap_worker())
+
+
+def _owned_paths(lib: dict, torrents: list[dict]) -> set[str]:
+    """Normalised paths something live still owns: every library file, every
+    qBit torrent's content path. Mirrors the Cleanup inventory's own set."""
+    owned: set[str] = set()
+    for it in lib.get("items", []):
+        for f in it.get("files", []):
+            if f.get("path"):
+                owned.add(_norm_path(f["path"]))
+    for t in torrents:
+        cpath = t.get("content_path") or ""
+        spath = t.get("save_path") or ""
+        name = t.get("name") or ""
+        if cpath:
+            owned.add(_norm_path(cpath))
+        if spath and name:
+            owned.add(_norm_path(str(Path(spath) / name)))
+    return owned
+
+
+def _cancel_jobs_for_delete(item_ids: set, paths: list[str]) -> int:
+    """Cancel prep jobs reading anything being deleted, so Windows lets go of the
+    file. Same intentional-kill flag the on-demand-only toggle uses, so the job
+    reads the non-zero exit as a cancel rather than retrying or erroring."""
+    want = {_norm_path(p) for p in paths}
+    n = 0
+    for j in list(_offline_jobs.values()):
+        if j.get("status") not in ("pending", "processing", "paused"):
+            continue
+        if not (j.get("item_id") in item_ids or _norm_path(j.get("src", "")) in want):
+            continue
+        j["_ondemand_cancelled"] = True
+        proc = j.get("_proc")
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        j["status"] = "cancelled"
+        n += 1
+    return n
+
+
+def _reap_sync(entry: dict, roots: list[str], owned: set[str],
+               live_hashes: set[str]) -> list[str]:
+    """Remove what `entry` still has on disk. Returns the targets that are still
+    there (locked); anything refused by `may_reap` is dropped, not retried."""
+    left: list[str] = []
+    prune: list[str] = []
+    for t in dict.fromkeys(entry.get("targets") or []):
+        ok, why = reaper.may_reap(t, roots, owned)
+        if not ok:
+            if why != "owned":
+                log.info("[reap] not touching %s (%s)", t, why)
+            continue
+        p = Path(t)
+        try:
+            if p.is_dir():
+                shutil.rmtree(p)
+            elif p.exists():
+                p.unlink()
+        except OSError as exc:
+            log.info("[reap] %s still held (%s) — will retry", t, exc)
+            left.append(t)
+            continue
+        # Sidecars and the bundle folder beside a single file (a folder target
+        # took them with it).
+        par = p.parent
+        try:
+            for c in (par.iterdir() if par.is_dir() else []):
+                if c.is_file() and reaper.is_sidecar(p.name, c.name) \
+                        and reaper.may_reap(str(c), roots, owned)[0]:
+                    try:
+                        c.unlink()
+                    except OSError:
+                        left.append(str(c))
+            cache = par / OFFLINE_CACHE_DIRNAME
+            if cache.is_dir() and not any(cache.iterdir()):
+                cache.rmdir()
+        except OSError:
+            pass
+        prune.append(t)
+    # qBit's `.parts` for each torrent that is really gone.
+    for h in entry.get("hashes") or []:
+        if h in live_hashes:
+            continue
+        for r in roots:
+            f = Path(r) / f".{h}.parts"
+            try:
+                if f.exists():
+                    f.unlink()
+            except OSError:
+                left.append(str(f))
+    # Folders the delete emptied, innermost first, never a root.
+    for t in prune:
+        for d in reaper.prunable_parents(t, roots):
+            try:
+                dp = Path(d)
+                if dp.is_dir():
+                    cache = dp / OFFLINE_CACHE_DIRNAME
+                    if cache.is_dir() and not any(cache.iterdir()):
+                        cache.rmdir()
+                    dp.rmdir()          # only succeeds when empty
+            except OSError:
+                break
+    return left
+
+
+async def _reap_start(entries: list[dict]) -> bool:
+    """Stage "new" for a batch: stop, cancel, purge bundles, delete torrents.
+    Returns False when qBit couldn't be reached (retry the whole batch later)."""
+    ids = {e["item_id"] for e in entries if e.get("item_id")}
+    # Deleting what is on screen: stop first. Nothing used to check, so "delete
+    # the thing I am watching" pulled the file out from under VLC, and Windows
+    # refused to unlink a file VLC held open — the media stayed with the row gone.
+    # A merged series playlist spans items, so any of them in the run counts.
+    if ids and (state.library_item_id in ids or any(
+            iid in ids for iid in (state.library_series_map or {}).values())):
         try:
             await stop()
-        except Exception as exc:              # never let teardown block the delete
-            log.warning("stop() before delete of %s failed: %s", sorted(ids)[:3], exc)
-    failed = 0
-    for i in range(0, len(doomed), _DELETE_CHUNK):
-        chunk = doomed[i:i + _DELETE_CHUNK]
-        # Bundles first — their cache key needs the media files to still be on disk.
-        if delete_file:
+        except Exception as exc:
+            log.warning("stop() before delete failed: %s", exc)
+    paths = [p for e in entries for p in e.get("paths") or []]
+    if _cancel_jobs_for_delete(ids, paths):
+        await asyncio.sleep(1.0)      # let ffmpeg exit and release the file
+    # Bundles first — their cache key needs the media files to still be on disk.
+    try:
+        await _purge_offline_bundles(paths)
+    except Exception as exc:
+        log.warning("[reap] bundle purge failed: %s", exc)
+    evicted = [b for e in entries for b in e.get("bundle_dirs") or []]
+    for b in evicted:
+        await asyncio.to_thread(shutil.rmtree, b, ignore_errors=True)
+    if evicted:
+        _invalidate_offline_cache_inventory()
+        _invalidate_bundle_index()
+    for e in entries:
+        for p in e.get("paths") or []:
+            if p not in e["targets"]:
+                e["targets"].append(p)
+    hashes = [h for e in entries for h in e.get("hashes") or []]
+    if not hashes:
+        return True
+    torrents = await qbit_info_all()
+    if torrents is None:
+        return False
+    by_hash = {(t.get("hash") or "").lower(): t for t in torrents}
+    for e in entries:
+        for h in e.get("hashes") or []:
+            cp = (by_hash.get(h) or {}).get("content_path") or ""
+            if cp and cp not in e["targets"]:
+                e["targets"].append(cp)
+    present = [h for h in hashes if h in by_hash]
+    if present:
+        try:
+            await qbit_delete("|".join(present), delete_files=True)
+        except Exception as exc:
+            log.warning("[reap] qBit delete of %d torrent(s) failed: %s", len(present), exc)
+            return False
+        # qBit removes files asynchronously; reaping before it's done would race it.
+        deadline = time.time() + _REAP_QBIT_SETTLE
+        while time.time() < deadline:
+            await asyncio.sleep(0.5)
+            now = await qbit_info_all()
+            if now is not None and not ({(t.get("hash") or "").lower() for t in now}
+                                        & set(present)):
+                break
+    return True
+
+
+async def _reap_batch(entries: list[dict]) -> None:
+    """Advance a batch of due entries one step and persist the outcome."""
+    new = [e for e in entries if e.get("stage") == "new"]
+    started = True
+    if new:
+        started = await _reap_start(new)
+        if started:
+            for e in new:
+                e["stage"] = "reap"
+    torrents = await qbit_info_all() if started else None
+    done: set[str] = set()
+    gave_up: list[dict] = []
+    if torrents is not None:
+        lib = await get_library()
+        roots = [info["path"] for info in await _all_library_paths()]
+        live = {(t.get("hash") or "").lower() for t in torrents}
+        for e in entries:
+            if e.get("stage") != "reap":
+                continue
+            # A torrent this entry deleted can still be listed while qBit finishes
+            # dropping it; it must not count as owning its own files.
+            mine = set(e.get("hashes") or [])
+            owned = _owned_paths(lib, [t for t in torrents
+                                       if (t.get("hash") or "").lower() not in mine])
+            left = await asyncio.to_thread(_reap_sync, e, roots, owned, live)
+            if not left:
+                done.add(e["eid"])
+            else:
+                e["targets"] = left
+    now = time.time()
+    for e in entries:
+        if e["eid"] in done:
+            continue
+        e["attempts"] = int(e.get("attempts", 0)) + 1
+        delay = reaper.retry_delay(e["attempts"])
+        if delay is None:
+            gave_up.append(e)
+            done.add(e["eid"])
+        else:
+            e["next_at"] = now + delay
+    by_eid = {e["eid"]: e for e in entries}
+    async with mutate_library() as lib:
+        pend = []
+        for e in lib.get("pending_deletes") or []:
+            if e.get("eid") in done:
+                continue
+            pend.append(by_eid.get(e.get("eid"), e))
+        lib["pending_deletes"] = pend
+    _invalidate_cleanup_inventory()
+    for e in gave_up:
+        log.warning("[reap] giving up on %s after %d tries: %s", e.get("title") or e["eid"],
+                    e["attempts"], (e.get("targets") or [])[:3])
+        await broadcast("library_cleanup", {"profile_id": e.get("profile_id", ""),
+                                            "title": e.get("title", ""),
+                                            "failed": len(e.get("targets") or []) or 1})
+
+
+async def _reap_worker() -> None:
+    """Drive `pending_deletes` to empty, then exit. Re-spawned by `_reap_kick`."""
+    while True:
+        try:
+            if _reap_inbox:
+                batch = _reap_inbox[:]
+                del _reap_inbox[:len(batch)]
+                async with mutate_library() as lib:
+                    lib.setdefault("pending_deletes", []).extend(batch)
+            lib = await get_library()
+            pend = lib.get("pending_deletes") or []
+            if not pend and not _reap_inbox:
+                return
+            now = time.time()
+            due = [e for e in pend if float(e.get("next_at", 0)) <= now]
+            if not due:
+                nxt = min(float(e.get("next_at", 0)) for e in pend) if pend else now
+                _reap_wake.clear()
+                try:
+                    await asyncio.wait_for(_reap_wake.wait(),
+                                           timeout=max(1.0, min(60.0, nxt - now)))
+                except asyncio.TimeoutError:
+                    pass
+                continue
+            for i in range(0, len(due), _REAP_CHUNK):
+                await _reap_batch(due[i:i + _REAP_CHUNK])
+                await asyncio.sleep(_REAP_CHUNK_PAUSE)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("[reap] worker error")
+            await asyncio.sleep(30)
+
+
+async def _qbit_delete_reaped(h: str, delete_files: bool = True,
+                              paths: "Iterable[str]" = (), title: str = "") -> None:
+    """`qbit_delete` for a torrent whose files should go, finished by the reaper:
+    whatever qBit leaves behind (a locked file, our sidecars, the folder) is
+    removed afterwards. Safe to call while holding the library lock."""
+    if not h:
+        return
+    if not delete_files:
+        await qbit_delete(h, delete_files=False)
+        return
+    info = await qbit_info(h)
+    await qbit_delete(h, delete_files=True)
+    cp = (info or {}).get("content_path") or ""
+    _reap_inbox.append(_reap_entry(
+        hashes=[h], stage="reap", targets=[*paths, cp],
+        title=title or (info or {}).get("name", ""), delay=_REAP_QBIT_SETTLE))
+    _reap_kick()
+
+
+async def _sweep_dead_parts() -> int:
+    """Remove `.<hash>.parts` files in the configured roots whose torrent is gone
+    from qBit and from the library. Runs at startup; the reaper handles the ones
+    its own deletes leave."""
+    await asyncio.sleep(60)            # let qBit come up first
+    torrents = await qbit_info_all()
+    if torrents is None:
+        return 0
+    lib = await get_library()
+    keep = {(t.get("hash") or "").lower() for t in torrents}
+    for it in lib.get("items", []):
+        keep.update(_item_all_torrent_hashes(it))
+    keep |= _cleanup_in_use_hashes(lib)
+    roots = [info["path"] for info in await _all_library_paths()]
+
+    def _sweep() -> int:
+        n = 0
+        for r in roots:
             try:
-                await _purge_offline_bundles([p for d in chunk for p in d["paths"]])
-            except Exception as exc:
-                log.warning("bundle purge during delete failed: %s", exc)
-        hashes = [h for d in chunk for h in d["hashes"]]
-        if hashes:
-            try:
-                # qBit takes a `|`-joined list: one round trip for the chunk.
-                await qbit_delete("|".join(hashes), delete_files=delete_file)
-            except Exception as exc:
-                failed += len(hashes)
-                log.warning("qBit delete of %d torrent(s) failed: %s", len(hashes), exc)
-        if i + _DELETE_CHUNK < len(doomed):
-            await asyncio.sleep(_DELETE_CHUNK_PAUSE)
-    if failed:
-        await broadcast("library_cleanup", {"profile_id": profile_id, "title": title,
-                                            "failed": failed})
+                kids = list(Path(r).iterdir())
+            except OSError:
+                continue
+            for c in kids:
+                h = reaper.parts_hash(c.name)
+                if h and h not in keep and c.is_file():
+                    try:
+                        c.unlink()
+                        n += 1
+                    except OSError:
+                        pass
+        return n
+
+    n = await asyncio.to_thread(_sweep)
+    if n:
+        log.info("[reap] removed %d dead .parts file(s)", n)
+        _invalidate_cleanup_inventory()
+    return n
 
 
 async def _delete_items(request: Request, item_ids: list[str], delete_file: bool,
                         profile_id: str = "") -> list[str]:
-    """Drop every row in ONE write, then hand the file work to the background.
-    Returns the ids actually removed."""
+    """Drop every row in ONE write, recording what the reaper must remove in the
+    same write. Returns the ids actually removed."""
     want = set(item_ids)
+    keep_files: list[str] = []
     async with mutate_library() as lib:
         _require_delete_auth(request, lib)
         gone = [it for it in lib["items"] if it["id"] in want]
         if not gone:
             raise HTTPException(404, "Item not found.")
-        doomed = [{"id": it["id"],
-                   "hashes": _item_all_torrent_hashes(it),
-                   "paths": [f.get("path", "") for f in it.get("files", []) if f.get("path")]}
-                  for it in gone]
         lib["items"] = [it for it in lib["items"] if it["id"] not in want]
         _drop_orphan_hidden_series(lib)
-    title = (gone[0].get("series") or gone[0].get("title") or "") if gone else ""
-    _spawn_bg(_cleanup_deleted_items(doomed, delete_file, profile_id, title))
-    removed = [d["id"] for d in doomed]
+        if delete_file:
+            pend = lib.setdefault("pending_deletes", [])
+            for it in gone:
+                files = it.get("files", [])
+                pend.append(_reap_entry(
+                    item_id=it["id"], profile_id=profile_id,
+                    title=it.get("series") or it.get("title") or "",
+                    hashes=_item_all_torrent_hashes(it),
+                    paths=[f.get("path", "") for f in files],
+                    # An evicted source can't be stat'ed for its bundle key; the
+                    # stored key finds the bundle without it.
+                    bundle_dirs=[_evicted_bundle_dir(f) for f in files
+                                 if _file_evicted(f)]))
+        else:
+            keep_files = [h for it in gone for h in _item_all_torrent_hashes(it)]
+    if delete_file:
+        _reap_kick()
+    elif keep_files:
+        _spawn_bg(qbit_delete("|".join(keep_files), delete_files=False))
+    removed = [it["id"] for it in gone]
     # Every other open dashboard drops the tile too, not just the deleter's.
     await broadcast("library_update", {"item_id": "", "status": "removed",
                                        "item_ids": removed})
@@ -30344,7 +30686,7 @@ async def _run_offline_job(job_id: str) -> None:
                     job["status"] = "cancelled"
                     job["progress"] = 0.0
                     await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
-                    hls_log.info("job %s CANCELLED (flagged on-demand-only)", job_id)
+                    hls_log.info("job %s CANCELLED (on-demand-only or deleted)", job_id)
                     return
                 # All-GPU attempt failed or stalled. The cuda decode→scale_cuda→
                 # nvenc chain can be unsupported for this source/driver (non-zero
@@ -36825,7 +37167,7 @@ async def admin_cleanup_delete_torrent(torrent_hash: str, request: Request,
         lib["items"] = [it for it in lib["items"]
                         if (it.get("torrent_hash") or "").lower() != h]
         dropped = before - len(lib["items"])
-    await qbit_delete(h, delete_files=delete_files)
+    await _qbit_delete_reaped(h, delete_files)
     _invalidate_cleanup_inventory()
     return JSONResponse({"ok": True, "items_removed": dropped})
 
@@ -36935,7 +37277,7 @@ async def admin_cleanup_delete_item(item_id: str, request: Request,
     if delete_files:
         await _purge_offline_bundles(file_paths)
     for _h in hashes:
-        await qbit_delete(_h, delete_files=delete_files)
+        await _qbit_delete_reaped(_h, delete_files, paths=file_paths)
     _invalidate_cleanup_inventory()
     return JSONResponse({"ok": True})
 

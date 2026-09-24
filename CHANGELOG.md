@@ -1,5 +1,31 @@
 # Changelog
 
+## [18.23.0] — 2026-09-24
+### A delete cleans up after itself, so the Cleanup tab has nothing to do
+
+- **qBit's "delete with files" was never the whole job.** It removes the torrent's
+  own files and nothing else, and on Windows it silently skips a file another
+  process has open. That's where every Cleanup-tab stray on the box came from:
+  - subtitle sidecars and the `.streamlink_cache` folder kept the torrent's folder
+    alive;
+  - a 3.5 GB episode was deleted while its prep encode still had it open;
+  - qBit's `.parts` files outlived their torrents.
+- **New: the reaper** (`reaper.py`). A delete writes a `pending_deletes` record in
+  the same write that removes the rows. A worker then:
+  - stops playback of it and cancels prep jobs reading its files;
+  - purges its bundles, including ones whose source was already evicted;
+  - deletes the torrents;
+  - removes whatever is left: locked files (retried on a 30 s → 24 h backoff),
+    sidecars, the emptied `.streamlink_cache`, empty folders and `.parts`.
+- The record is persisted, so a restart mid-delete resumes where it stopped.
+- **The race engine, dead-swarm retry and the Cleanup tab's own deletes** go the
+  same way (`_qbit_delete_reaped`). A race loser no longer leaves its folder behind.
+- **Guarded:** nothing outside a configured root, never a root itself, never a path
+  a live torrent or library file owns. If qBit can't be reached, nothing is reaped.
+- **Not an auto-sweep.** Strays that StreamLink can't prove are its own (e.g. a
+  folder placed by hand) stay in the Cleanup tab. Dead `.<hash>.parts` files are
+  swept at startup, because the hash in the name proves which torrent they belong to.
+
 ## [18.22.0] — 2026-09-24
 ### Hiding or deleting a whole show is instant, and stops blocking everyone else
 
