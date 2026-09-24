@@ -1,5 +1,23 @@
 # Changelog
 
+## [18.24.1] — 2026-09-24
+### Library tiles are called by the show, not the torrent
+
+- **A show held as one torrent (a season pack) was still titled by its release
+  name** on its library tile, e.g. `Hunter.X.Hunter.2011.S01.1080p.Blu-Ray…` or
+  `Death Note [BDRip 1080p][HEVC x265 10bit]`. Tiles now show TMDb's name for the
+  show, and a film as `Title (Year)`. A one-episode item reads
+  `Show · S01E03`. A whole-season pack no longer gets a stray `S01E01 ·`
+  prefix, which came from the season/episode the item was downloaded under.
+- The same name is used for the TV's now-playing title, the series page header,
+  the Group page's "add" list, the app's auto-download show list, and the admin
+  panel: item pickers, the skip and content lists, storage, offline cache,
+  on-demand-only, activity jobs, cleanup's "Library:" line, and the item line
+  under every file row. The release name stays on hover in the admin panel.
+- `item.title` is unchanged and is still the item's identity: keys, rename,
+  searches, zip names. `/api/library` and `/api/admin/library` add
+  `display_show` / `display_title` (`_item_display_names`).
+
 ## [18.24.0] — 2026-09-24
 ### Episodes are called by their names, not their file names
 

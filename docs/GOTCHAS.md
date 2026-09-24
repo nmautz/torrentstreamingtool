@@ -5887,6 +5887,11 @@ playing, `_fileLabel()` / `_fileLabelHtml()` in the admin panel. The rules live 
 `eplabel.py` and are mirrored by `_composeLabel` / `_cleanStem` in `static/index.html`;
 change one, change both.
 
+The same goes for an **item**: `item.title` is the release name the torrent arrived as
+(`Hunter.X.Hunter.2011.S01.1080p.Blu-Ray…`). It is the item's identity (keys, rename,
+searches, zip names) and must never be printed. Use `display_show` / `display_title`
+(`_item_display_names`), and `libShow(item)` / `libTitle(item)` in the page (18.24.1).
+
 Where the name deliberately survives: the pre-download torrent file picker (nothing is
 attributed yet), the `download=` / zip entry names of saved files (media servers and
 subtitle sites parse those), the movie page's small grey release line (the one place to see

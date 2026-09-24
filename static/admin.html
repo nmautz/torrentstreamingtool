@@ -3581,7 +3581,7 @@ async function _loadForcePrepItems(){
     if(!sel) return;
     const cur = sel.value;
     sel.innerHTML = `<option value="">Whole library</option>`
-      + (items || []).map(it=>`<option value="${escHtml(it.id)}">${escHtml(it.title)}</option>`).join("");
+      + (items || []).map(it=>`<option value="${escHtml(it.id)}">${escHtml(it.display_title||it.title)}</option>`).join("");
     sel.value = cur;
     _fpItemsLoaded = true;
   }catch(_){}
@@ -3736,7 +3736,7 @@ async function _loadFileValidationItems(){
     if(!sel) return;
     const cur = sel.value;
     sel.innerHTML = `<option value="">Whole library</option>`
-      + (items || []).map(it=>`<option value="${escHtml(it.id)}">${escHtml(it.title)}</option>`).join("");
+      + (items || []).map(it=>`<option value="${escHtml(it.id)}">${escHtml(it.display_title||it.title)}</option>`).join("");
     sel.value = cur;
     _fvItemsLoaded = true;
   }catch(_){}
@@ -4036,7 +4036,7 @@ async function _loadStorageItems(){
     if(!r.ok) return;
     const {items} = await r.json();
     const opts = `<option value="">Whole library</option>`
-      + (items || []).map(it=>`<option value="${escHtml(it.id)}">${escHtml(it.title)}</option>`).join("");
+      + (items || []).map(it=>`<option value="${escHtml(it.id)}">${escHtml(it.display_title||it.title)}</option>`).join("");
     ["fcItem","hlsTrimItem","hlsResyncItem"].forEach(id=>{
       const sel = document.getElementById(id);
       if(!sel) return;
@@ -5419,7 +5419,7 @@ function _renderSkipRow(it, job){
   return `
     <div class="flex items-center justify-between px-5 py-4 gap-3" data-series-key="${escHtml(series_key)}" id="skip-row-${escHtml(it.id)}">
       <div class="min-w-0 flex-1">
-        <div class="text-sm font-bold text-gray-200 truncate">${escHtml(it.title)}</div>
+        <div class="text-sm font-bold text-gray-200 truncate" title="${escHtml(it.title)}">${escHtml(it.display_title||it.title)}</div>
         <div class="text-xs text-gray-600 mt-0.5">
           ${it.series?escHtml(it.series)+' · ':''}${it.file_count} file${it.file_count!==1?'s':''}
           · <span class="uppercase">${escHtml(it.status)}</span>
@@ -5431,7 +5431,7 @@ function _renderSkipRow(it, job){
           class="text-xs font-bold uppercase tracking-wide px-3 py-2 border bg-indigo-950 border-indigo-800 text-indigo-300 hover:bg-indigo-900 transition-colors">
           Analyze
         </button>
-        <button onclick="openSkipEditor('${escHtml(it.id)}', '${escHtml(it.title)}')"
+        <button onclick="openSkipEditor('${escHtml(it.id)}', '${escHtml(it.display_title||it.title)}')"
           class="text-xs font-bold uppercase tracking-wide px-3 py-2 border bg-gray-800 border-gray-700 text-gray-300 hover:text-white transition-colors">
           Edit
         </button>
@@ -6059,7 +6059,7 @@ async function loadContentList(){
   el.innerHTML = items.map(it=>`
     <div class="flex items-center justify-between px-5 py-4 gap-3">
       <div class="min-w-0 flex-1">
-        <div class="text-sm font-bold text-gray-200 truncate">${escHtml(it.title)}</div>
+        <div class="text-sm font-bold text-gray-200 truncate" title="${escHtml(it.title)}">${escHtml(it.display_title||it.title)}</div>
         <div class="text-xs text-gray-600 mt-0.5">
           ${it.series?escHtml(it.series)+' · ':''}${it.file_count} file${it.file_count!==1?'s':''}
           · ${escHtml(it.size_human)} · <span class="uppercase">${escHtml(it.status)}</span>

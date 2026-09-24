@@ -4851,7 +4851,7 @@ function _cleanStem(name){
 function _labelShowFor(itemId){
   try {
     const it=(window._libCache||[]).find(x=>x && x.id===itemId);
-    return it ? ((it.series||"").trim() || (it.title||"").trim()) : "";
+    return it ? libShow(it).trim() : "";
   } catch(_){ return ""; }
 }
 // fileLabel(fileObjOrPath, itemId?) -> label. Server label when known; else the
@@ -7354,7 +7354,7 @@ function libGetSeason(seriesKey, season){
 
 function _libShowIconBtns(gItems){
   const idsAttr=escHtml(JSON.stringify(gItems.map(it=>it.id)));
-  const title=gItems[0].series||gItems[0].title||"";
+  const title=gItems[0].display_show||gItems[0].series||gItems[0].title||"";
   const tArg=escHtml(JSON.stringify(title));
   let h="";
   if(profile.id){
@@ -7396,7 +7396,7 @@ function _libShowIconBtns(gItems){
 // the episodes on the TV.
 function _libShowTileHtml(seriesTitle, gItems){
   const key=gItems[0].series_key||"";
-  const title=seriesTitle||gItems[0].series||gItems[0].title||"";
+  const title=gItems[0].display_show||seriesTitle||gItems[0].series||gItems[0].title||"";
   const totalEps=gItems.reduce((n,it)=>n+(it.file_count||1),0);
   const seasons=[...new Set(gItems.map(it=>+it.season||0).filter(s=>s>0))];
   const anyDownloading=gItems.some(it=>it.status==="downloading");
@@ -7475,6 +7475,20 @@ async function playSeries(seriesKey, mode, section, opts){
 // Per-item chrome — the badges, action buttons, progress bar, meta and flags for
 // one library item. Extracted so the LIST and CARD renderers build from the exact
 // same source (guaranteeing no action is view-only). Returns a plain object.
+// What a library tile PRINTS (18.24.1). `item.title` is the torrent's release
+// name and stays the item's identity (keys, rename, searches); these are the
+// server's display names - TMDb's show name (a film "Title (Year)"), and for a
+// one-episode item that episode's "Show · S01E03". See _item_display_names.
+function libShow(item){
+  return (item && (item.display_show || item.series || item.title)) || "";
+}
+function libTitle(item){
+  if(item && item.display_title) return item.display_title;
+  const pre=(item && item.season && item.episode && (item.file_count||1)<=1)
+    ? `S${pad2(item.season)}E${pad2(item.episode)} · ` : "";
+  return pre + ((item && (item.series || item.title)) || "");
+}
+
 function _libItemChrome(item){
   const isDownloading=item.status==="downloading";
   const isError=item.status==="error";
@@ -7564,7 +7578,7 @@ function _libItemChrome(item){
   let iconBtns="";
   if(isDownloading){
     if(isMulti){
-      buttons+=`<button onclick="openEpisodePicker('${item.id}',${escHtml(JSON.stringify(item.title))})"
+      buttons+=`<button onclick="openEpisodePicker('${item.id}',${escHtml(JSON.stringify(libShow(item)))})"
         class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 hover:text-white px-3 py-2.5 transition-colors min-h-[44px] flex items-center gap-1.5 flex-shrink-0">
         <svg class="ic" aria-hidden="true"><use href="#i-menu"/></svg> <span class="text-xs">Episodes</span>
       </button>`;
@@ -7616,7 +7630,7 @@ function _libItemChrome(item){
     }
     if(isMulti){
       const contLabel=hasProgress?`<svg class="ic" aria-hidden="true"><use href="#i-resume"/></svg> Resume ${Math.round(pct)}%`:`<svg class="ic" aria-hidden="true"><use href="#i-play"/></svg> Play All`;
-      buttons+=`<button onclick="openEpisodePicker('${item.id}',${escHtml(JSON.stringify(item.title))})"
+      buttons+=`<button onclick="openEpisodePicker('${item.id}',${escHtml(JSON.stringify(libShow(item)))})"
         class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white
                flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
         <svg class="ic" aria-hidden="true"><use href="#i-menu"/></svg> Episodes
@@ -7760,9 +7774,9 @@ function _libItemListHtml(item){
   const c=_libItemChrome(item);
   return `<div class="bg-gray-900 border border-gray-800 border-l-4 ${c.borderAccent} px-4 py-3 flex flex-col gap-2" data-item-id="${item.id}">
     <div class="min-w-0 ${c.tileOpen?'lib-tile-open cursor-pointer hover:bg-gray-800/40 -mx-1 px-1 transition-colors':''}"
-      ${c.tileOpen?`data-item-id="${item.id}" data-title="${escHtml(item.title)}" role="button" tabindex="0" title="View details"`:''}>
+      ${c.tileOpen?`data-item-id="${item.id}" data-title="${escHtml(libShow(item))}" role="button" tabindex="0" title="View details"`:''}>
       <div class="flex items-center gap-2 flex-wrap">
-        <span class="text-sm font-medium text-gray-200 truncate ${c.tileOpen?'hover:text-white':''}">${c.epPrefix}${escHtml(item.title)}</span>
+        <span class="text-sm font-medium text-gray-200 truncate ${c.tileOpen?'hover:text-white':''}">${escHtml(libTitle(item))}</span>
         ${c.statusBadge}
         ${c.partialBadge}
         ${c.compressedBadge}
@@ -7785,7 +7799,7 @@ function _libItemListHtml(item){
 // action set (buttons + icon cluster) the list row shows — so no feature is lost.
 function _libItemCardHtml(item){
   const c=_libItemChrome(item);
-  const title=item.title||"";
+  const title=libTitle(item);
   const badges=`${c.statusBadge}${c.partialBadge}${c.compressedBadge}${c.greenBadge}${c.skipBadge}${c.newSeasonChip}`;
   // Both multi-episode shows and single-file movies route through the chooser so
   // the poster Play/Resume always asks "On TV vs On Device" (macOS auto-falls to
@@ -7807,12 +7821,12 @@ function _libItemCardHtml(item){
     const top=c.isReady?`<button class="tv-card-btn tv-card-play" data-tv-default
         onkeydown="if(event.key==='Enter'||event.key===' ')event.stopPropagation()"
         onclick="event.stopPropagation();${oc}">${c.hasProgress?'<svg class="ic" aria-hidden="true"><use href="#i-resume"/></svg> Resume':'<svg class="ic" aria-hidden="true"><use href="#i-play"/></svg> Play'}</button>`:'';
-    const eps=(c.tileOpen&&c.isMulti)?`<button class="tv-card-btn lib-tile-open" data-item-id="${item.id}" data-title="${escHtml(title)}"
+    const eps=(c.tileOpen&&c.isMulti)?`<button class="tv-card-btn lib-tile-open" data-item-id="${item.id}" data-title="${escHtml(libShow(item))}"
         onkeydown="if(event.key==='Enter'||event.key===' ')event.stopPropagation()" onclick="event.stopPropagation()">Episodes</button>`:'';
     if(top||eps) tvOverlay=`<div class="tv-card-ov" data-tv-group>${top}${eps}</div>`;
   }
   const posterCls=`lib-cardv-poster${c.tileOpen?' lib-tile-open':''}`;
-  const posterAttrs=c.tileOpen?`data-item-id="${item.id}" data-title="${escHtml(title)}" role="button" tabindex="0" title="View details"`:'';
+  const posterAttrs=c.tileOpen?`data-item-id="${item.id}" data-title="${escHtml(libShow(item))}" role="button" tabindex="0" title="View details"`:'';
   const progOverlay=c.hasProgress?`<div class="lib-cardv-prog"><div class="bg-green-500 h-full" style="width:${Math.round(c.pct)}%"></div></div>`:'';
   const actionRow=(c.buttons||c.iconBtns)
     ?`<div class="lib-card-actions flex items-center gap-2 flex-wrap">${c.buttons}${c.iconBtns?`<div class="flex items-center gap-1">${c.iconBtns}</div>`:""}</div>`
@@ -7821,7 +7835,7 @@ function _libItemCardHtml(item){
   return `<div class="lib-cardv" data-item-id="${item.id}">
     <div class="${posterCls}" ${posterAttrs}>
       <img class="lib-poster-img hidden" data-item-id="${item.id}" alt="">
-      <div class="lib-poster-ph">${c.epPrefix}${escHtml(title)}</div>
+      <div class="lib-poster-ph">${escHtml(title)}</div>
       <button class="lib-cardv-more" title="More actions" onclick="event.stopPropagation();_libCardMore(this)"><svg class="ic" aria-hidden="true"><use href="#i-dots"/></svg></button>
       ${playOverlay}
       ${badges?`<div class="lib-cardv-badges">${badges}</div>`:''}
@@ -7829,7 +7843,7 @@ function _libItemCardHtml(item){
       ${tvOverlay}
     </div>
     <div class="lib-cardv-info">
-      <div class="text-xs font-medium text-gray-200 leading-snug" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${c.epPrefix}${escHtml(title)}</div>
+      <div class="text-xs font-medium text-gray-200 leading-snug" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${escHtml(title)}</div>
       <div class="text-[10px] text-gray-600 mt-0.5">${escHtml(c.meta)}</div>
       ${c.dlStat}
       ${c.prepChip}
@@ -7846,7 +7860,7 @@ function _libItemCardHtml(item){
 // delegation wires the poster + play button with no extra code.
 function _libShowCardHtml(seriesTitle, gItems){
   const key=gItems[0].series_key||"";
-  const title=seriesTitle||gItems[0].series||gItems[0].title||"";
+  const title=gItems[0].display_show||seriesTitle||gItems[0].series||gItems[0].title||"";
   const totalEps=gItems.reduce((n,it)=>n+(it.file_count||1),0);
   const seasons=[...new Set(gItems.map(it=>+it.season||0).filter(s=>s>0))];
   const anyDownloading=gItems.some(it=>it.status==="downloading");
@@ -8685,7 +8699,7 @@ function openGroupAdd(){
     if(have.has(it.series_key) || seen.has(it.series_key)) return;
     seen.set(it.series_key, {
       key: it.series_key,
-      title: (it.series||"").trim() || it.title || "",
+      title: libShow(it),
       kind: it.tmdb_kind || "",
     });
   });
@@ -8957,7 +8971,7 @@ function renderLibrary(items){
   const groups=new Map();
   gridItems.forEach(item=>{
     const key=item.series||"\x00"+item.id;
-    const label=item.series||(item.file_count>1?item.title:"");
+    const label=item.display_show||item.series||(item.file_count>1?libShow(item):"");
     if(!groups.has(key)) groups.set(key,{label,items:[]});
     groups.get(key).items.push(item);
   });
@@ -9142,7 +9156,7 @@ function setShufflePref(itemId, shuffle, scope){
 // Look up the cached library item title so the optimistic UI shows the right name
 function _libraryLabel(itemId){
   const item = (window._libCache || []).find(it => it && it.id === itemId);
-  return (item && item.title) || "";
+  return (item && libShow(item)) || "";
 }
 
 // Flip the UI to "buffering" immediately so the user sees feedback while
@@ -19099,7 +19113,7 @@ function _npSeriesName() {
   try {
     const it = (window._libCache || []).find((x) => x && x.id === lp.itemId);
     if (!it) return "";
-    return (it.series || "").trim() || (it.title || "").trim();
+    return libShow(it).trim();
   } catch (_) { return ""; }
 }
 
@@ -21754,7 +21768,7 @@ async function _appScopeSeries() {
     const k = it && it.series_key;
     if (!k || k.indexOf("series:") !== 0) return;
     const g = byKey.get(k) || { id: k, items: 0, eps: 0,
-      title: ((it.series || it.title || "Untitled") + "").trim() || "Untitled" };
+      title: (libShow(it) + "").trim() || "Untitled" };
     g.items += 1;
     // /api/library returns file_count per item (not a files[] array — those live
     // in the per-item /files endpoint).
@@ -22156,7 +22170,7 @@ async function resumeLibraryItemWithChooser(itemId) {
   // to keep shuffling (fresh random run) or fall back to natural order. The pref
   // (and its scope) come from the resume hint; clearing happens on any normal play.
   if (resume && resume.shuffle) {
-    _shuffleResumeCtx = { itemId, scope: resume.shuffle_scope || "all", label: (item && item.title) || "", resume };
+    _shuffleResumeCtx = { itemId, scope: resume.shuffle_scope || "all", label: (item && libShow(item)) || "", resume };
     document.getElementById("shuffleResumeModal").classList.remove("hidden");
     return;
   }
@@ -22174,7 +22188,7 @@ function _resumeNormal(itemId) {
   // the first file when everything's watched. Only seek into it mid-episode.
   const resumeFile = (resume && resume.file_path) || "";
   const seekTo     = hasProgress ? (resume.position_sec || 0) : 0;
-  const label      = (item && item.title) || "";
+  const label      = (item && libShow(item)) || "";
   pcCtx = { itemId, files: resumeFile ? [resumeFile] : [], seekTo, label, _continueMode: true };
   // macOS host: no device option — go straight to VLC instead of a 1-item modal.
   if (!hlsAvailable) return pcChoose("vlc");
@@ -28973,6 +28987,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.24.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.24.1</div>
 </body>
 </html>

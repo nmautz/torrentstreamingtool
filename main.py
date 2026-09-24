@@ -9637,7 +9637,7 @@ async def _sync_state_from_vlc() -> None:
 
         state.stream_status = "playing"
         if matched_item and matched_path:
-            state.active_title = matched_item.get("title") or Path(cur_path).stem
+            state.active_title = _item_display_names(matched_item)[0] or Path(cur_path).stem
             state.library_item_id = matched_item["id"]
             state.library_item_file_count = len(matched_item.get("files", []))
             state.active_hash = matched_item.get("torrent_hash") or None
@@ -14516,9 +14516,14 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
             f0 = files[0]
             first_file = {"path": f0.get("path", ""), "name": f0.get("name", "")}
         meta = it.get("metadata") or {}
+        disp_show, disp_title = _item_display_names(it)
         items.append({
             "id": it["id"],
             "title": it["title"],
+            # What a tile PRINTS (18.24.1): `title` is the torrent's release name
+            # and stays the item's identity. See _item_display_names.
+            "display_show": disp_show,
+            "display_title": disp_title,
             "tmdb_id": meta.get("tmdb_id") or 0,   # 0 until metadata resolves; Explore "In library" match
             "tmdb_kind": meta.get("tmdb_kind") or "",
             "series": it.get("series", ""),
@@ -14802,6 +14807,36 @@ def _file_label_show(item: dict) -> str:
     """The library's own name for an item's show - what `eplabel` falls back on
     when TMDb has no series name (no key, a custom binding, not matched yet)."""
     return (item.get("series") or item.get("title") or "").strip()
+
+
+def _item_display_names(item: dict) -> tuple[str, str]:
+    """(show, title) to SHOW for a library item - never its torrent name.
+
+    `item["title"]` is the release name the torrent arrived as ("Hunter.X.Hunter.
+    2011.S01.1080p.Blu-Ray…") and stays the item's identity; this is only what a
+    tile prints. show: TMDb's name (a film as "Title (Year)"), then the library's
+    `series`, then the show parsed out of the release name. title: the show - or,
+    for an item that is one episode, that episode's one-line label."""
+    meta = item.get("metadata") or {}
+    files = item.get("files") or []
+    if meta.get("tmdb_kind") == "movie" and meta.get("title"):
+        film = eplabel.label_file(files[0] if files else {}, meta, "")["line1"]
+        return film, film
+    show = (meta.get("title") or "").strip() or (item.get("series") or "").strip()
+    if not show:
+        raw = item.get("title") or ""
+        try:
+            show = (parse_torrent_title(raw).get("show") or "").strip()
+        except Exception:
+            show = ""
+        # clean_stem drops a file extension; a release name has none, and
+        # "…Blu-Ray.10-Bit" would otherwise lose its tail as one.
+        show = show or eplabel.clean_stem(raw + ".x")
+    if len(files) == 1:
+        lab = eplabel.label_file(files[0], meta, show)
+        if lab["kind"] != "file":
+            return show, lab["short"]
+    return show, show
 
 
 def _file_label(item: dict, f: dict) -> dict:
@@ -15228,9 +15263,9 @@ async def get_series_files(request: Request, series_key: str,
     files.sort(key=episodes.sort_key)
 
     # Title + metadata: prefer a member that already has cached TMDb metadata.
-    title = next((it.get("series") for it in members if (it.get("series") or "").strip()),
-                 members[0].get("title", ""))
     meta_item = next((it for it in members if it.get("metadata")), None)
+    # TMDb's name for the show, never a member's torrent name (_item_display_names).
+    title = _item_display_names(meta_item or members[0])[0]
     meta = meta_item.get("metadata") if meta_item else None
     resume = find_series_resume_hint(members, profile_id) if profile_id else None
     # Sections of the merged show, each with its own resume + watched count, so
@@ -16283,7 +16318,7 @@ async def move_library_item(item_id: str, req: MoveReq, request: Request) -> JSO
         if h:
             ok = await qbit_set_location(h, str(dest))
             if not ok:
-                qbit_errors.append(it.get("title", "") or h)
+                qbit_errors.append(_item_display_names(it)[0] or h)
                 entry["skip"] = True
         snapshot.append(entry)
 
@@ -17534,7 +17569,7 @@ async def library_pack_fetch(req: PackFetchReq) -> JSONResponse:
             # May flip the item ready -> downloading and resume the torrent, which is
             # the whole point: a sliced pack goes "ready" when its one episode lands.
             await _apply_item_schedule(it, lib)
-            touched.append({"item_id": it["id"], "title": it.get("title", ""),
+            touched.append({"item_id": it["id"], "title": _item_display_names(it)[0],
                             "count": len(paths)})
         if not touched:
             raise HTTPException(404, "Those episodes aren't sitting in a pack on this box.")
@@ -18255,7 +18290,7 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     # Flip state to buffering NOW so the SSE-driven UI paints loading state
     # before the slow VLC roundtrips even start.
     state.stream_status = "buffering"
-    state.active_title = item["title"]
+    state.active_title = _item_display_names(item)[0]
     state.active_file = first
     state.current_audio_track = -1
     state.current_subtitle_track = -1
@@ -18746,7 +18781,7 @@ async def _begin_library_file_stream(
 
     prof_obj = next((p for p in lib.get("profiles", []) if p["id"] == profile_id), {})
     state.stream_status = "buffering"
-    state.active_title = item["title"]
+    state.active_title = _item_display_names(item)[0]
     state.active_file = Path(path)
     state.current_audio_track = -1
     state.current_subtitle_track = -1
@@ -21926,7 +21961,7 @@ async def _tv_local_start_play(item: dict, playlist: list, seek_sec, req,
     state.tv_local_file_path = playlist[0]
     state.tv_local_playback = "buffering"
     state.stream_status = "buffering"
-    state.active_title = item.get("title") or Path(playlist[0]).name
+    state.active_title = _item_display_names(item)[0] or Path(playlist[0]).name
     state.library_item_id = item["id"]
     state.library_current_file = playlist[0]
     # Via the helper, not a raw assignment: it also snapshots the profile's
@@ -25113,6 +25148,7 @@ async def admin_list_library(request: Request) -> JSONResponse:
         items.append({
             "id": it["id"],
             "title": it["title"],
+            "display_title": _item_display_names(it)[1],   # what the panel prints (18.24.1)
             "series": it.get("series", ""),
             "season": it.get("season", 0),
             "episode": it.get("episode", 0),
@@ -27073,7 +27109,7 @@ async def admin_get_ondemand_only(request: Request) -> JSONResponse:
                                "file_count": 0, "on": [], "locked": []}
             order.append(key)
         if not g["title"]:
-            g["title"] = (it.get("series") or "").strip() or it.get("title", "")
+            g["title"] = _item_display_names(it)[0]
         g["item_ids"].append(it.get("id", ""))
         g["file_count"] += sum(1 for f in it.get("files", [])
                                if Path(f.get("path", "")).suffix.lower() in VIDEO_EXTS)
@@ -27433,10 +27469,14 @@ async def admin_set_auto_maintenance(request: Request, body: AutoMaintReq) -> JS
 # progress bar that "reset" wasn't a bug — the process restarted under it.
 
 def _activity_title(item_id: str, src: str, items_by_id: dict) -> str:
-    """Best display name for a job: the library item's title, else the filename."""
+    """Best display name for a job: the file's label when the job is about one
+    file of a library item, else the item's display name, else the filename."""
     it = items_by_id.get(item_id) if item_id else None
-    if it and it.get("title"):
-        return it["title"]
+    if it:
+        f = next((f for f in it.get("files") or [] if src and f.get("path") == src), None)
+        if f is not None:
+            return _file_label(it, f)["short"]
+        return _item_display_names(it)[0]
     if src:
         try:
             return Path(src).name
@@ -27517,7 +27557,7 @@ async def _activity_snapshot() -> dict:
         if it.get("status") != "downloading":
             continue
         add(category="Download",
-            title=it.get("title") or "Library content",
+            title=_item_display_names(it)[0] or "Library content",
             status="downloading",
             reason="A library torrent is still downloading from peers (subject to any idle/night download window and seeding limits).",
             resumes=True,
@@ -32097,7 +32137,7 @@ async def _run_bundle_audit(scope: str = "all", *, auto: bool = False,
             for f in item.get("files", []):
                 if auto and not _needs_bundle_check(f):
                     continue
-                targets.append((item.get("id", ""), item.get("title", ""),
+                targets.append((item.get("id", ""), _item_display_names(item)[0],
                                 f.get("path", ""),
                                 f.get("name") or Path(f.get("path", "")).name))
                 await asyncio.sleep(0)
@@ -32327,7 +32367,7 @@ def _evict_candidates_sync(lib: dict, policy: "srcevict.Policy", now: datetime,
             name = f.get("name", "") or src.name
             base = srcevict.Candidate(
                 path=path, series_key=skey, name=name,
-                item_id=it.get("id", ""), item_title=it.get("title", ""),
+                item_id=it.get("id", ""), item_title=_item_display_names(it)[0],
                 source_bytes=0, clock=clock,
             )
             if src.suffix.lower() not in VIDEO_EXTS:
@@ -32348,7 +32388,7 @@ def _evict_candidates_sync(lib: dict, policy: "srcevict.Policy", now: datetime,
                 continue
             base = srcevict.Candidate(
                 path=path, series_key=skey, name=name,
-                item_id=it.get("id", ""), item_title=it.get("title", ""),
+                item_id=it.get("id", ""), item_title=_item_display_names(it)[0],
                 source_bytes=source_bytes, clock=clock,
             )
             reasons = list(srcevict.age_blockers(clock, now, policy))
@@ -32812,7 +32852,7 @@ async def _run_file_validation(scope: str, deep: bool) -> None:
                 p = f.get("path", "")
                 if Path(p).suffix.lower() not in VIDEO_EXTS:
                     continue
-                targets.append((item.get("id", ""), item.get("title", ""),
+                targets.append((item.get("id", ""), _item_display_names(item)[0],
                                 p, f.get("name") or Path(p).name))
                 await asyncio.sleep(0)
         fv["total"] = len(targets)
@@ -33005,7 +33045,7 @@ async def _run_file_repair(paths: list[str], reencode: bool) -> None:
             torrent = bool(item.get("torrent_hash"))
             for f in item.get("files", []):
                 p = f.get("path", "")
-                meta[p] = (item.get("title", ""), f.get("name") or Path(p).name, torrent)
+                meta[p] = (_item_display_names(item)[0], f.get("name") or Path(p).name, torrent)
         fr["total"] = len(paths)
         for path in paths:
             if state.file_repair_stop:
@@ -33331,7 +33371,7 @@ async def _run_file_compression(scope: str, crf: int, codec: str,
                 p = f.get("path", "")
                 if Path(p).suffix.lower() not in VIDEO_EXTS:
                     continue
-                targets.append((item.get("title", ""), p, f.get("name") or Path(p).name, torrent))
+                targets.append((_item_display_names(item)[0], p, f.get("name") or Path(p).name, torrent))
                 await asyncio.sleep(0)
         fc["total"] = len(targets)
         for (title, path, name, torrent) in targets:
@@ -34360,7 +34400,7 @@ async def offline_active(request: Request, profile_id: str = "") -> JSONResponse
         it = items_by_id.get(item_id)
         items_out.append({
             "item_id":    item_id,
-            "title":      it.get("title", "") if it else "",
+            "title":      _item_display_names(it)[0] if it else "",
             "processing": len(jobs),
             "progress":   round(total_progress / len(jobs), 3) if jobs else 0,
             "eta_secs":   round(eta_total, 1) if eta_count > 0 else None,
@@ -36274,7 +36314,7 @@ def _offline_cache_inventory_sync(lib: dict, jobs: list[dict]) -> dict:
         if files_out:
             items_out.append({
                 "item_id":          it["id"],
-                "title":            it.get("title", ""),
+                "title":            _item_display_names(it)[0],
                 "file_count":       len(files_out),
                 "total_bytes":      item_bytes,
                 "cached_count":     cached_n,
@@ -36395,7 +36435,7 @@ def _storage_breakdown_sync(lib: dict, bundle_by_path: dict[str, int]) -> dict:
         files_out.sort(key=lambda x: x["total_bytes"], reverse=True)
         items_out.append({
             "id":           it.get("id", ""),
-            "title":        it.get("title", ""),
+            "title":        _item_display_names(it)[0],
             "file_count":   len(files_out),
             "source_bytes": i_src,
             "bundle_bytes": i_bundle,
@@ -37061,7 +37101,7 @@ def _cleanup_inventory_sync(lib: dict, torrents: list[dict], in_use: set[str],
             "added_on": t.get("added_on", 0) or 0,
             "in_use": h in in_use,
             "item_id": linked.get("id", ""),
-            "item_title": linked.get("title", ""),
+            "item_title": (_item_display_names(linked)[0] if linked else ""),
         }
         content_missing = bool(cpath) and not Path(cpath).exists()
         if tstate in _BROKEN_TORRENT_STATES or content_missing:
@@ -37092,7 +37132,7 @@ def _cleanup_inventory_sync(lib: dict, torrents: list[dict], in_use: set[str],
             h = (it.get("torrent_hash") or "").lower()
             missing_items.append({
                 "item_id":       it["id"],
-                "title":         it.get("title", ""),
+                "title":         _item_display_names(it)[0],
                 "missing":       gone,
                 "missing_count": len(gone),
                 "has_torrent":   bool(h and h in qbit_hashes),
