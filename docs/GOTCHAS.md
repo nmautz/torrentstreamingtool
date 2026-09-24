@@ -1618,6 +1618,14 @@ compressor have no per-file cancel, so a file they hold simply waits for the ret
   a hand-placed folder is unowned too. The one exception is the startup
   `_sweep_dead_parts`, because a `.parts` name carries its torrent's hash and is
   provably qBit's.
+- **A `.parts` file is live data while its torrent lives.** It holds the edge
+  pieces of files you deselected. Its name matches no content path, so before
+  18.23.1 the Cleanup tab listed a LIVE torrent's `.parts` as stray (South Park
+  S07's, on the box), and deleting it costs a recheck. `_parts_keep_hashes`
+  decides for both the sweep and the tab: qBit's hashes, in-use hashes, and every
+  item's `torrent_hash`. It deliberately excludes a race's dropped candidates,
+  which stay in `race.entries` forever and would pin their `.parts` forever.
+  The sweep waits for qBit (it starts behind the VPN) and logs its count every run.
 
 ### Every library mutation goes through `mutate_library()` — `get_library` + `put_library` is a lost-update race
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## [18.23.1] — 2026-09-24
+### A live torrent's `.parts` is no longer "stray"
+
+- **The Cleanup tab listed a live torrent's `.parts` file as stray** (South Park
+  S07's, on the box). That file holds the edge pieces of deselected files, so
+  deleting it costs a recheck. The tab and the startup sweep now share one rule,
+  `_parts_keep_hashes`: keep it while qBit has the torrent, it is in use, or it is
+  an item's current torrent.
+- **The startup sweep kept a dead `.parts` forever** because its hash was still
+  listed among a finished race's dropped candidates. Those no longer count.
+- The sweep now waits for qBit to come up (it starts behind the VPN) instead of
+  giving up, and logs how many files it removed each run.
+
 ## [18.23.0] — 2026-09-24
 ### A delete cleans up after itself, so the Cleanup tab has nothing to do
 

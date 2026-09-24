@@ -17124,19 +17124,34 @@ async def _qbit_delete_reaped(h: str, delete_files: bool = True,
     _reap_kick()
 
 
+def _parts_keep_hashes(lib: dict, torrents: list[dict]) -> set[str]:
+    """Hashes whose `.parts` file is live data, not litter: anything qBit still
+    has, anything in use, every library item's current torrent. NOT a race's
+    dropped candidates: their hash stays in `race.entries` long after qBit forgot
+    them, so keeping their `.parts` for that reason kept it forever."""
+    keep = {(t.get("hash") or "").lower() for t in torrents}
+    keep |= _cleanup_in_use_hashes(lib)
+    for it in lib.get("items", []):
+        if it.get("torrent_hash"):
+            keep.add(it["torrent_hash"].lower())
+    return keep
+
+
 async def _sweep_dead_parts() -> int:
-    """Remove `.<hash>.parts` files in the configured roots whose torrent is gone
-    from qBit and from the library. Runs at startup; the reaper handles the ones
-    its own deletes leave."""
-    await asyncio.sleep(60)            # let qBit come up first
-    torrents = await qbit_info_all()
+    """Remove `.<hash>.parts` files in the configured roots whose torrent is gone.
+    Runs at startup; the reaper handles the ones its own deletes leave. qBit
+    starts behind the VPN, so wait for it rather than give up on a cold boot."""
+    torrents = None
+    for _ in range(30):
+        await asyncio.sleep(60)
+        torrents = await qbit_info_all()
+        if torrents is not None:
+            break
     if torrents is None:
+        log.info("[reap] .parts sweep skipped: qBit never answered")
         return 0
     lib = await get_library()
-    keep = {(t.get("hash") or "").lower() for t in torrents}
-    for it in lib.get("items", []):
-        keep.update(_item_all_torrent_hashes(it))
-    keep |= _cleanup_in_use_hashes(lib)
+    keep = _parts_keep_hashes(lib, torrents)
     roots = [info["path"] for info in await _all_library_paths()]
 
     def _sweep() -> int:
@@ -17157,8 +17172,8 @@ async def _sweep_dead_parts() -> int:
         return n
 
     n = await asyncio.to_thread(_sweep)
+    log.info("[reap] .parts sweep: removed %d dead file(s)", n)
     if n:
-        log.info("[reap] removed %d dead .parts file(s)", n)
         _invalidate_cleanup_inventory()
     return n
 
@@ -37004,6 +37019,7 @@ def _cleanup_inventory_sync(lib: dict, torrents: list[dict], in_use: set[str],
     # another isn't flagged when its parent is scanned.
     dl_dirs = [Path(p) for p in download_paths if (p or "").strip()]
     dl_norms = {_norm_path(str(d)) for d in dl_dirs}
+    parts_keep = _parts_keep_hashes(lib, torrents)
     stray: list[dict] = []
     seen_children: set[str] = set()
     for dl in dl_dirs:
@@ -37028,6 +37044,11 @@ def _cleanup_inventory_sync(lib: dict, torrents: list[dict], in_use: set[str],
                 continue
             if any(o == n or o.startswith(n + os.sep) or n.startswith(o + os.sep)
                    for o in owned):
+                continue
+            # qBit's `.<hash>.parts` belongs to its torrent, not to a content path;
+            # while that torrent lives it is data, and deleting it costs a recheck.
+            ph = reaper.parts_hash(child.name)
+            if ph and ph in parts_keep:
                 continue
             try:
                 is_dir = child.is_dir()
