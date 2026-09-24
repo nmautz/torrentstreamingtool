@@ -1,5 +1,21 @@
 # Changelog
 
+## [18.21.4] — 2026-09-24
+### The phone is a remote for offline glasses playback too
+
+- **Playing a downloaded bundle with no server connection sent it to the glasses
+  but left the phone with no controls.** The offline dashboard boots down its own
+  path (`_appOfflineBoot`), and that path never subscribed to the native player's
+  events. The handoff still happened — native decides it — but `nativeStarted`
+  never reached the page, so it never became the remote; `nativeProgress`,
+  `nativeEnded` (end-of-episode advance) and `displayChanged` were deaf offline
+  too. The transcript shows it cleanly: online, `startNative` is followed by
+  `hold-start` and `display holding:1`; offline, `startNative` and then nothing,
+  `holding:0`. The offline boot now binds the same listeners and runs the same
+  boot-time orphan check as the online one.
+- Reaches the phone through the offline player snapshot, which refreshes on the
+  next online launch. No app rebuild.
+
 ## [18.21.3] — 2026-09-24
 ### A stale episode no longer takes over the glasses
 

@@ -3012,7 +3012,9 @@ player UI works with no host. The pieces:
   device-rung only, Prev/Next expands across the item's *downloaded* episodes
   from the native index, and a Reconnect probe (auto every 15 s while nothing
   plays + a manual button) that `location.replace(host)`s back to the real
-  dashboard. Progress + track picks write to `OfflineStore` explicitly
+  dashboard. It binds the native player's events (`_npBindEvents`) exactly as
+  the online boot does — without them a glasses handoff plays with no remote on
+  the phone (fixed 18.21.4). Progress + track picks write to `OfflineStore` explicitly
   (the loopback `/api` 404s RESOLVE — they don't throw — so the online code's
   catch-based fallback would never fire); resume and audio/subtitle picks are
   restored from `getProgress` (which returns the saved track fields). The M3

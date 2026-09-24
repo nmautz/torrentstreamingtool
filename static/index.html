@@ -20260,6 +20260,11 @@ async function _appOfflineBoot() {
   // Hydrate the on-device bundle state (native only; its queue resumer is
   // offline-gated) and open the overlay that IS the offline UI.
   await _appInitOfflineBundles();
+  // The native player's events. Without these the glasses handoff still happens
+  // (native decides it) but the page never hears nativeStarted, so it never
+  // becomes the remote — the phone shows nothing while the glasses play.
+  _npBindEvents();
+  _npReconcileOrphan("page-boot");
   _appOpenDashboard();
   _appOfflineReconnectInit();
 }
@@ -28778,6 +28783,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.21.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.21.4</div>
 </body>
 </html>

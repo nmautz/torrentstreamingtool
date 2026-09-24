@@ -5791,3 +5791,16 @@ Its twin: the kiosk plays through the phone's `lpPlay`, so it inherited
 `_pbBeatStart()` and heartbeat as a device named "The TV" — the same screen,
 listed twice. The kiosk must never beat; `_pbBeatStart` / `_pbBeat` return under
 `TV_MODE`.
+
+## The offline boot is a second `main()` — anything added to init must go in both (18.21.4)
+
+`DOMContentLoaded` returns early into `_appOfflineBoot()` when the page is the
+device-served snapshot with no host. Everything below that `return` — including
+`_npBindEvents()` — never runs offline. That meant offline glasses
+playback handed off to native (native decides the handoff on its own) while the
+page heard none of `nativeStarted` / `nativeProgress` / `nativeEnded` /
+`displayChanged`: the glasses played and the phone showed no remote. It looked like
+"works online, broken offline", which reads like a network problem and is not one.
+When you add an init step, decide explicitly whether the offline boot needs it too.
+In the transcript the tell is `startNative reason:"early"` with no `hold-start`
+after it.
