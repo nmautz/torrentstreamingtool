@@ -60,7 +60,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "18.21.2"
+let NP_BUILD = "18.21.3"
 
 // MARK: - Armed state
 
@@ -164,8 +164,15 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
     ]
 
     private let mgr = NativePlaybackManager.shared
+    private var pageLoadObs: NSKeyValueObservation?
 
     public override func load() {
+        // An arm belongs to the page that made it. Watch for that page being
+        // replaced, so its arm cannot outlive it (see pageWillLoad).
+        pageLoadObs = bridge?.webView?.observe(\.isLoading, options: [.new]) { [weak self] _, ch in
+            guard ch.newValue == true else { return }
+            DispatchQueue.main.async { self?.mgr.pageWillLoad() }
+        }
         mgr.onEvent = { [weak self] name, payload in
             self?.notifyListeners(name, data: payload)
         }
@@ -1306,6 +1313,31 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // "playback is over" — exits TV Mode.
     }
 
+    /// The page is being replaced (a reload, or the recovery load after its
+    /// content process was jettisoned). Whatever it armed, the page that comes
+    /// up next knows nothing about, and nothing will ever disarm it — the
+    /// orphan then waits for the next display connect to be claimed onto the
+    /// glasses with no controls behind it. Measured 2026-09-24, see the
+    /// hand-back deadline above.
+    ///
+    /// Only an IDLE arm is dropped. A player that is running is the one thing
+    /// the viewer can see, and killing it because WebKit reloaded a page behind
+    /// a locked phone would stop the episode they are watching; the page's own
+    /// boot check (`_npReconcileOrphan`) decides about that one, and the row
+    /// here says it happened.
+    func pageWillLoad() {
+        guard armed.active else { return }
+        if isNativeActive {
+            DiagLog.shared.write("orphan-native", ["why": "page-load",
+                                                   "pos": armed.position,
+                                                   "paused": armed.paused,
+                                                   "holding": isHolding,
+                                                   "title": armed.title], cat: "play")
+            return
+        }
+        disarm(reason: "page-load")
+    }
+
     // MARK: Handoff in
 
     @objc private func appDidEnterBackground() {
@@ -1995,11 +2027,19 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // If the webview never calls resume() — it reloaded, crashed, or the
         // page was replaced — we'd be left playing invisible audio with no UI.
         // Tear down after a grace period so the app can't get into that state.
+        //
+        // AND WIPE THE ARM, NOT JUST THE PLAYER. A page that never answered is a
+        // page that no longer knows it armed anything, so nothing will ever
+        // disarm it. This used to stop the player and keep `armed` — measured
+        // 2026-09-24: the deadline fired at 13:03:04 with E32 paused at 1163 s,
+        // the arm sat there `active` for 2h22m, and when the glasses were
+        // plugged in at 15:25 maybeClaimEarly() started it on the display from
+        // that orphaned arm — a frozen frame, and a freshly booted page with no
+        // player and so no controls. disarm() flushes before it wipes.
         handBackDeadline?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self = self, self.isNativeActive else { return }
-            self.maybePostProgress(self.armed.position, force: true)
-            self.stopNative(endActivity: true)
+            self.disarm(reason: "handback-timeout")
         }
         handBackDeadline = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)

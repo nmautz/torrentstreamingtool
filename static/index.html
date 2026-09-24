@@ -19150,6 +19150,26 @@ function _npTick() {
   } catch (_) {}
 }
 
+// A native player this page never started. Native keeps its arm across a page
+// reload (a jettisoned content process reloads the page behind a locked phone),
+// so a freshly booted page can find a player running with no web player, no
+// remote panel and no controls — measured 2026-09-24 as a frozen Hunter x Hunter
+// frame on the glasses and nothing on the phone. A PAUSED one is released (its
+// position is flushed on the way out, and Resume picks it up). A PLAYING one is
+// left alone and only logged: it is what the viewer is watching, and the lock
+// screen's Now Playing controls still reach it.
+async function _npReconcileOrphan(why) {
+  if (!isApp || !_cap.np || lp.filePath) return;
+  let st = null;
+  try { st = await _cap.np.state(); } catch (_) { return; }
+  if (!st || !st.native || lp.filePath) return;
+  _npLog("orphan-native", { why, pos: st.position || 0, paused: !!st.paused,
+                            holding: !!st.holding, released: !!st.paused }, "play");
+  if (!st.paused) return;
+  _npArmed = false;
+  try { _cap.np.disarm({ reason: "orphan-" + why }); } catch (_) {}
+}
+
 function _npDisarm(reason) {
   if (!isApp || !_cap.np || !_npArmed) return;
   _npArmed = false;
@@ -19217,6 +19237,10 @@ function _npBindEvents() {
     // recorded as a pause the native side would inherit it on the next handoff.
     _cap.np.addListener("nativeStarted", (e) => {
       if (!e || e.reason !== "early") return;
+      // No player on this page means the arm native just played is not ours —
+      // it outlived the page that made it. Becoming a remote for it would draw
+      // controls for an episode this page never opened; release it instead.
+      if (!lp.filePath) { _npReconcileOrphan("started-without-player"); return; }
       const v = _lpV();
       const wasPlaying = !!(v && !v.paused);
       if (wasPlaying) { try { v.pause(); } catch (_) {} }
@@ -28648,6 +28672,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
   // iOS: subscribe to the background player's events (ended / advanced / a
   // display appearing or going away). No-op in a plain browser.
   _npBindEvents();
+  _npReconcileOrphan("page-boot");
   // Keep the offline player snapshot fresh (fire-and-forget; no-op in a browser).
   _appRefreshPlayerSnapshot();
   // M3: when the browser regains connectivity, drain any offline progress the
@@ -28753,6 +28778,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.21.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.21.3</div>
 </body>
 </html>

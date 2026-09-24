@@ -1,5 +1,19 @@
 # Changelog
 
+## [18.21.3] — 2026-09-24
+### A stale episode no longer takes over the glasses
+
+- **Opening the app with the glasses connected put a frozen frame from the last
+  episode on them, with nothing playing and no controls on the phone.** The native
+  player's arm outlived the page that made it. The 5 s hand-back deadline (the page
+  never answered after a long background) stopped the player but kept the arm, so
+  hours later the glasses' display-connect claimed it and started it paused, while
+  the freshly reloaded page had no player to draw controls for. The deadline now
+  disarms; a page reload drops an idle arm; and the page releases a paused native
+  player it never opened (at boot, and on any `nativeStarted` with no player).
+- Diagnostics: new `orphan-native` row (`why`, `paused`, `holding`, `released`), and
+  `disarm` rows with reason `handback-timeout` / `page-load` / `orphan-*`.
+
 ## [18.21.2] — 2026-09-24
 ### The glasses get their own screen again
 

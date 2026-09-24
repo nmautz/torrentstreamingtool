@@ -2575,6 +2575,22 @@ Eleven constraints, each of which independently breaks the feature. See
   playback it was written to leave alone. **A guard evaluated at arm time is not a
   guard; re-test it in the callback, or arm from the state change you actually mean.**
 
+- **The native arm outlives the page that made it (18.21.3).** `armed` lives in the
+  app process; the page that set it lives in the WebKit content process, which iOS
+  jettisons behind a backgrounded app and which then reloads with no player and
+  `_npArmed = false` — so nothing will ever disarm it. Measured 2026-09-24: paused E32
+  at 1163 s, unplugged while locked (05:25); on the 13:02 unlock the page never called
+  `resume()`, and the 5 s hand-back deadline stopped the player **but kept the arm**.
+  At 15:25 the glasses were plugged in, `maybeClaimEarly()` found an `active` arm and
+  started it paused on the display — a frozen frame, while the page booted three
+  seconds *later* with nothing open and so no controls. Three closes, any one of which
+  would have caught it: the deadline now `disarm("handback-timeout")`s; a main-frame
+  load (`isLoading` KVO in the plugin) drops an **idle** arm (`page-load`); and the page
+  runs `_npReconcileOrphan` at boot and on any `nativeStarted` with no `lp.filePath`,
+  releasing a **paused** orphan. A *playing* orphan is only logged (`orphan-native`) —
+  it is what the viewer is watching. **Any state the page hands to native needs an
+  owner that survives the page, or a path that drops it when the page goes.**
+
 Two more, on the JS side:
 
 - **`visibilitychange`→hidden cannot be trusted to complete before suspension.** It is
