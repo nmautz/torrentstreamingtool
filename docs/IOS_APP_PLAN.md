@@ -55,6 +55,36 @@
 > is skipped — the in-app pass owns it), computing the frontier from `/files`
 > progress: furthest in-progress episode, else last-completed + 1; never-watched
 > series are skipped, fully-watched series get all their downloads cleaned up.
+> **Keyed on the SHOW, and the window crosses seasons (`18.21.0`).** Everything
+> above was keyed on a library **item id**, which is not what a show is: on the
+> live box South Park is 32 items holding 66 episodes and next week's season is a
+> 33rd. So the picker listed the same show thirty times, a selection could not
+> name a season that did not exist yet, and the ahead-window stopped dead at the
+> end of whatever item was playing. All of it is now keyed on the server's
+> **`series_key`** (`_appSeriesKey`, `_appSeriesKeyOf`, `_appEnsureLib`):
+> `_appScopeSeries()` groups `/api/library` by it and returns one row per show
+> (`{id: seriesKey, title, items, eps}`, films excluded — auto-manage only rolls a
+> window along a series and never deletes a film); `_appAutoScoped(idOrKey, prefs,
+> fallbackSeries)` takes either a key or an item id and answers `false` for
+> anything with no show; and `_appAutoShowsMigrate(items)` folds a legacy item-id
+> selection into shows on first read. Both feeders now source
+> **`_appAutoSeriesFiles(seriesKey)`** → `GET /api/library/series/{key}` (every
+> member item's files in `(season, episode)` order, each tagged `item_id`), which
+> is what makes the window cross a boundary: the next season's item is simply the
+> next rows. The sweep groups on-device bundles by show (`meta.series` is the cold
+> -cache fallback for the key) and computes **one frontier per show**. That
+> endpoint can return the **same episode twice** (a single-episode item *and* a
+> pack), so the helper returns `{eps, byKey, copies}`: `eps` is one row per
+> episode (ranked by `_appAutoCopyRank` — the copy already on the device wins),
+> `byKey` is every copy with the episode's best-known progress written onto all of
+> them, and `copies` feeds `_appAutoKeepCopies` so a kept episode is kept in every
+> copy. `_appAutoWants(f)` / `_appAutoApply(byKey, keep, toStart, q)` lost their
+> `itemId` parameter — membership is now "this file belongs to the show", which is
+> what lets the delete half reach across seasons too. Shuffle deliberately still
+> does not cross a boundary (a shuffle is over the playlist you started). Each
+> pass writes an `automg-player` / `automg-sweep` row (cat `offline`) naming the
+> show, the window size and how many downloads it started.
+>
 > **Per-show scope (`8.6.0`).** An **Apply to** selector in Settings scopes which
 > shows auto-manage touches: **`all_except`** (block-list — every show except the
 > picked few) or **`none_except`** (allow-list — no show except the picked few),
@@ -68,7 +98,8 @@
 > **Default = unchanged behaviour**: `all_except` + empty set == all shows managed.
 > Prefs persist in host-origin localStorage: `streamlink_app_automanage`,
 > `streamlink_app_ahead`, `streamlink_app_autoq`, `streamlink_app_autoscope`
-> (`all_except`|`none_except`), `streamlink_app_autoshows` (JSON array of item ids).
+> (`all_except`|`none_except`), `streamlink_app_autoshows` (JSON array of **series
+> keys** since 18.21.0 — item ids before that, migrated in place on first read).
 > Online-only (`_appOffline`/`navigator.onLine`/`app._connected` gated) and
 > `isApp`-gated; host-served, no app rebuild.
 >

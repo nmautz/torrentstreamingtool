@@ -2998,6 +2998,28 @@ Related pre-existing trap fixed at the same time: the endpoint clamped timed pau
 
 ## Frontend layout
 
+### A count of downloads is not a count of shows (18.21.0)
+
+The library's Hidden/Visible button counted **items**, which on the live box means South Park
+is 32 and Hacks is 23 — so a single show could read as "32 hidden" and the number never
+matched the one tile the page actually drew. The page has grouped items into a show tile since
+17.x; only the counter never learned. `_libTileCount(list, hiddenView)` now counts what the
+unit loop below it emits — one per franchise shelf, one per merged show, one per lone item —
+and 84/0 becomes 18/0. **If you add a new kind of tile to `units[]`, add it to `_libTileCount`
+in the same patch**, or the button quietly starts lying again.
+
+Two things fell out of that and are load-bearing:
+
+- **Hiding is a per-SHOW act.** `toggleItemVisibility` fans out over `_libSeriesSiblings(itemId)`
+  — every item sharing a `series:` key — so a show cannot be half-hidden and be counted on both
+  sides. A film (`item:` key) has no siblings and is unaffected.
+- **A shelf's counts come from the server and describe the whole franchise.** So `_libShelves`
+  emits a *shallow copy* with `member_count`/`count`/`watched` recomputed from the members
+  present on this side; hiding one Star Wars film leaves a shelf saying `5 titles` instead of
+  blowing the collection into six tiles. And the **Hidden view gets no shelves**: that view
+  exists for its eye icons, and a collection tile carries only *Open collection* — folding
+  hidden films into one would put the control that restores them behind a page.
+
 ### The dashboard is a height-locked app shell — the document must never become scrollable again (except the player escape hatch)
 
 `html`/`body` in `static/index.html` are `100dvh` + `overflow:hidden` + `overscroll-behavior:none`; `<main>` and the overlay lists are the only scroll containers. This is deliberate (v5.26.2): when the body was the scroller, mobile overscroll rubber-banded the whole page — the fixed player footer and `fixed inset-0` overlays visibly detached, pull-to-refresh fired mid-list, and flicking past the end of a modal scrolled the page behind it. Footguns: don't put `min-h-screen` back on `<body>` (`100vh` > `100dvh` while the mobile URL bar is visible → the shell overflows the locked viewport and the bottom of `<main>` gets clipped); don't attach scroll listeners or `window.scrollTo` to the document (it no longer scrolls — target `<main>` or the specific container); any new scrollable region needs `overscroll-behavior:contain` (the Tailwind `.overflow-y-auto` class is blanket-covered in the `<style>` head; elements made scrollable by bespoke CSS must be added to that rule).
@@ -3009,6 +3031,37 @@ Related pre-existing trap fixed at the same time: the endpoint clamped timed pau
 The player's orientation lock (`#lpRotBtn` → `.lp-lock-landscape`) needs a CSS fallback because iPhone Safari has no `screen.orientation.lock()`: in a portrait viewport the whole `#localPlayer` is sized to the swapped viewport dimensions and `rotate(90deg)`-ed (the native lock and the CSS rule can't fight — when the native lock holds, the `(orientation:portrait)` media query never matches). Traps: **(1)** the `transform` makes `#localPlayer` the containing block for `position:fixed` descendants — every child of the player must stay `position:absolute` (they all are today; a `fixed` child would silently anchor to the rotated box on lock and to the viewport otherwise). **(2)** Browser hit-testing follows the transform, but any **manual screen-coordinate math** does not: the seek bar renders vertically while rotated, so `_lpSeekPosFromEvent` swaps to `clientY`/`r.height` when `_lpRotated()` is true — any new drag/scrub interaction inside the player must do the same.
 
 ## iOS client app (Capacitor)
+
+### Auto-manage keyed on an item id cannot know about next season (18.21.0)
+
+A library item is one torrent, not one show. South Park is **32 items / 66 episodes** on the
+live box, so an auto-manage selection made of item ids listed the same show thirty times, cost
+thirty taps to exclude, and — the part that actually broke behaviour — could not name the
+season that arrives next week, because that is a **33rd item no stored id has ever seen**. The
+ahead-window had the same shape of bug from the other end: it walked `lp.playlist` or one
+item's `/files`, so it stopped dead at the last episode that item held rather than continuing
+into the next season. Everything is keyed on the server's `series_key` now, and both feeders
+read the merged `GET /api/library/series/{key}` — where the next season is simply the next
+rows, so no code has to know a boundary was crossed.
+
+Three traps inside that endpoint, all live on the box today:
+
+- **It can return one episode twice.** S07E01 exists both as a single-episode item and inside a
+  pack. Untreated, one episode eats two slots of a three-ahead window, and the copy watched
+  under one item reads as unwatched under the other and is never cleaned up. `_appAutoSeriesFiles`
+  returns `{eps, byKey, copies}` — one row per episode for the window, *every* copy for
+  deletion, with the episode's best-known progress written onto all of them.
+- **Keep one copy and you delete the other.** `_appAutoKeepCopies` expands the keep set over
+  `copies`, or the duplicate of the episode playing right now reads as "watched and outside the
+  window" and is removed mid-rewatch.
+- **A film has no series key, and `_appAutoScoped` answers `false` for it.** That is deliberate:
+  auto-manage only ever rolls a window along a series, so it must never delete a film. Don't
+  "fix" the picker by falling back to an item id when a key can't be resolved — that is exactly
+  the behaviour that was removed.
+
+The cold-cache case matters on this path: `_appAutoScoped` needs the library to map an item id
+to its show, so both feeders `await _appEnsureLib()` first, and the sweep passes the on-device
+bundle's `meta.series` as a fallback.
 
 See [IOS_APP_PLAN.md](IOS_APP_PLAN.md). The app lives in `ios-app/` (separate
 Node/Xcode project; exempt from the repo's Windows-first rule — but its *server*

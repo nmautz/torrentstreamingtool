@@ -7037,14 +7037,33 @@ function watchPctOf(prog){ return (!prog||!prog.duration_sec)?0:Math.round(prog.
 // disappearing once loadLibrary() comes back — until then the button looks
 // ignored, and a second tap sends the OPPOSITE intent (hide, then unhide), so an
 // impatient double-tap used to land the item back where it started.
+// Every item of a show shares one visibility bucket: a show is hidden or it is
+// not, never half of each. A show downloaded episode-by-episode is 32 items
+// (South Park, on the live box) and hiding it one item at a time was never the
+// intent — so a single item's eye icon fans out to every sibling sharing its
+// `series:` key. An item with no series (a film) has no siblings and behaves
+// exactly as before.
+function _libSeriesSiblings(itemId){
+  const items=window._libCache||[];
+  const me=items.find(x=>x.id===itemId);
+  const key=me&&me.series_key;
+  if(!key || key.indexOf("series:")!==0) return [itemId];
+  const ids=items.filter(x=>x.series_key===key).map(x=>x.id);
+  return ids.length?ids:[itemId];
+}
+
 async function toggleItemVisibility(itemId,makeHidden,btn){
   if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
   await withInflight(`vis_${itemId}`, btn||null, async () => {
-    const r=await fetch(`/api/library/${itemId}/visibility`,{
-      method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({profile_id:profile.id,hidden:makeHidden}),
-    });
-    if(r.ok) await loadLibrary();
+    let ok=true;
+    for(const id of _libSeriesSiblings(itemId)){
+      const r=await fetch(`/api/library/${id}/visibility`,{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({profile_id:profile.id,hidden:makeHidden}),
+      });
+      if(!r.ok) ok=false;
+    }
+    if(ok) await loadLibrary();
     else showAlert("Could not update visibility.","error");
   });
 }
@@ -8718,6 +8737,45 @@ function _libGroupTileHtml(g, isCard){
 
 let libGroupsImgBase = "/api/metadata/img";
 
+// Which franchise shelves stand in for their members on THIS side of the
+// visible/hidden split, and the member keys they therefore swallow.
+//
+// Two rules, both learned from the counts:
+//  - A shelf's numbers come from the server and describe the WHOLE franchise, so
+//    a shelf standing for five of six films has to say five. Hiding one Star
+//    Wars film should leave the shelf in place minus that film — not blow the
+//    collection apart into six separate tiles, which is what counting naively
+//    did.
+//  - The hidden view gets NO shelves. Its whole job is the eye icons, and a
+//    collection tile carries only "Open collection" — folding hidden films into
+//    one would put the control to restore them behind a page.
+function _libShelves(list, hiddenView){
+  const shelves=[], claimed=new Set();
+  if(!libGroups.length || hiddenView) return {shelves, claimed};
+  libGroups.forEach(g=>{
+    const present=(g.members||[]).filter(m=>list.some(i=>i.series_key===m.key));
+    if(!present.length) return;
+    shelves.push(present.length===(g.members||[]).length ? g : {...g,
+      members: present,
+      member_count: present.length,
+      count: present.reduce((n,m)=>n+(m.count||0),0),
+      watched: present.reduce((n,m)=>n+(m.watched||0),0)});
+    present.forEach(m=>claimed.add(m.key));
+  });
+  return {shelves, claimed};
+}
+
+// How many TILES a list of items renders as — the exact unit count the loop
+// below produces: one per franchise shelf, plus one per remaining show (items
+// sharing a series name merge into a single tile) or lone item. Used for the
+// Hidden/Visible button so its number always matches what is on screen.
+function _libTileCount(list, hiddenView){
+  const {shelves, claimed}=_libShelves(list, hiddenView);
+  const keys = new Set(list.filter(i=>!claimed.has(i.series_key))
+                           .map(i=>i.series||("\x00"+i.id)));
+  return shelves.length + keys.size;
+}
+
 function renderLibrary(items){
   const el=document.getElementById("libraryContent");
 
@@ -8741,7 +8799,14 @@ function renderLibrary(items){
   if(hiddenItems.length>0 && visibleItems.length>0){
     toggleBtn.classList.remove("hidden");
     toggleBtn.classList.add("flex");
-    const label=effectiveShowHidden?`Visible (${visibleItems.length})`:`Hidden (${hiddenItems.length})`;
+    // Count TILES, not downloads. South Park is one show on this page whether it
+    // arrived as one pack or as 32 separate items, and a franchise shelf is one
+    // tile however many films it holds — so the number on this button has to be
+    // the number of things you can actually see, or it reads as "84 hidden" for
+    // a library of 23 shows. _libTileCount mirrors the render below exactly.
+    const label=effectiveShowHidden
+      ?`Visible (${_libTileCount(visibleItems,false)})`
+      :`Hidden (${_libTileCount(hiddenItems,true)})`;
     toggleLabel.textContent=label;
     toggleBtn.classList.toggle("text-indigo-400",effectiveShowHidden);
     toggleBtn.classList.toggle("text-gray-600",!effectiveShowHidden);
@@ -8782,17 +8847,14 @@ function renderLibrary(items){
 
   // A franchise stands in for its members: pull every claimed item out of the
   // grid first, so "Star Wars" appears once instead of its nine films appearing
-  // separately. Hidden-view rendering is left alone — that list is about
-  // per-item visibility, and folding it into shelves would hide the very
-  // controls the user came there to use.
-  const showGroups = !effectiveShowHidden && libGroups.length>0;
-  const claimed = showGroups ? libGroupedKeys : new Set();
+  // separately. Hiding is a per-SHOW act now (see toggleItemVisibility), so the
+  // hidden view draws the same merged show tiles the grid does — one South Park,
+  // not thirty-two downloads — and the counts on both sides mean the same thing.
+  // Shelves are the one exception there; see _libShelves for why.
+  const {shelves:activeGroups, claimed} = _libShelves(renderItems, effectiveShowHidden);
   const gridItems = claimed.size
     ? renderItems.filter(i=>!claimed.has(i.series_key))
     : renderItems;
-  const activeGroups = showGroups
-    ? libGroups.filter(g=>g.members.some(m=>renderItems.some(i=>i.series_key===m.key)))
-    : [];
 
   // Group by series. Multi-file items without a series name fall back to the
   // torrent title so the series header is always visible.
@@ -20933,12 +20995,73 @@ function _appAutoPrefs() {
   return { on, ahead, q, mode, shows };
 }
 
-// Is this series in scope for auto-manage under the current mode + selection?
+// ── Shows, not downloads ─────────────────────────────────────────────────────
+// Everything below is keyed on a SERIES key ("series:south park"), never on a
+// library item id. On the live box South Park is 32 separate items holding 66
+// episodes, and next week's season is a 33rd — so a selection made of item ids
+// listed the same show thirty times and still knew nothing about the season that
+// arrived after it was made. The series key is stable across all of that.
+const _appSeriesKey = (name) => {
+  const s = ((name || "") + "").trim();
+  return s ? "series:" + s.toLowerCase() : "";
+};
+
+// The library, fetched once if this device hasn't loaded it yet (the picker must
+// list shows that aren't downloaded here — that's the whole point of the
+// "Only these shows…" mode).
+async function _appEnsureLib() {
+  let items = window._libCache;
+  if (!Array.isArray(items) || !items.length) {
+    try {
+      const pid = profile.id ? `?profile_id=${encodeURIComponent(profile.id)}` : "";
+      const r = await fetch(`/api/library${pid}`, { headers: _appAuthHeaders() });
+      if (r.ok) { items = (await r.json()).items || []; window._libCache = items; }
+    } catch (_) {}
+  }
+  return Array.isArray(items) ? items : [];
+}
+
+// Which show an item belongs to. `fallbackSeries` is the series name carried in
+// an on-device bundle's meta, so the sweep can still name a show while the
+// library cache is cold.
+function _appSeriesKeyOf(itemId, fallbackSeries) {
+  const it = (window._libCache || []).find((x) => x.id === itemId);
+  const k = it && it.series_key;
+  if (k && k.indexOf("series:") === 0) return k;
+  return _appSeriesKey(fallbackSeries);
+}
+
+// One-time migration of the stored selection: it used to hold item ids. Map each
+// to its show, so an exclusion made when a show was twelve items still means
+// that show now it is thirty-two. A legacy id that is no longer a series (a film,
+// or a row since deleted) drops — films are out of scope for auto-manage.
+function _appAutoShowsMigrate(items) {
+  let raw = [];
+  try { raw = JSON.parse(localStorage.getItem(_APP_AUTOSHOWS_KEY) || "[]"); } catch (_) { return; }
+  if (!Array.isArray(raw) || !raw.length) return;
+  if (raw.every((x) => typeof x === "string" && x.indexOf("series:") === 0)) return;
+  const byId = new Map((items || []).map((it) => [it.id, it]));
+  const out = new Set();
+  raw.forEach((x) => {
+    if (typeof x !== "string") return;
+    if (x.indexOf("series:") === 0) { out.add(x); return; }
+    const k = (byId.get(x) || {}).series_key;
+    if (k && k.indexOf("series:") === 0) out.add(k);
+  });
+  try { localStorage.setItem(_APP_AUTOSHOWS_KEY, JSON.stringify([...out])); } catch (_) {}
+}
+
+// Is this show in scope for auto-manage under the current mode + selection?
 // all_except: a selected show is EXEMPT (not managed); every other show is managed.
 // none_except: ONLY selected shows are managed.
-function _appAutoScoped(itemId, prefs) {
+// Takes a series key or an item id. Something with no show — a film, a one-off —
+// is never in scope: auto-manage only ever rolls a window along a series.
+function _appAutoScoped(idOrKey, prefs, fallbackSeries) {
   const p = prefs || _appAutoPrefs();
-  return p.mode === "none_except" ? p.shows.has(itemId) : !p.shows.has(itemId);
+  const key = ((idOrKey || "") + "").indexOf("series:") === 0
+    ? idOrKey : _appSeriesKeyOf(idOrKey, fallbackSeries);
+  if (!key) return false;
+  return p.mode === "none_except" ? p.shows.has(key) : !p.shows.has(key);
 }
 
 function _appOpenAppSettings() {
@@ -21361,7 +21484,7 @@ function _appOpenAppSettings() {
     const series = await _appScopeSeries();
     if (!ov.isConnected) return;   // overlay closed while we waited
     if (!series.length) {
-      box.innerHTML = `<div style="padding:11px 12px;font-size:12px;color:#8a8a92;line-height:1.45;">No multi-episode series in your library yet.</div>`;
+      box.innerHTML = `<div style="padding:11px 12px;font-size:12px;color:#8a8a92;line-height:1.45;">No shows in your library yet.</div>`;
       return;
     }
     const sel = _appAutoPrefs().shows;
@@ -21371,8 +21494,16 @@ function _appOpenAppSettings() {
       const row = document.createElement("div");
       row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;"
         + "padding:11px 12px;cursor:pointer;" + (i ? "border-top:1px solid #2a2a30;" : "");
+      // The sub-line is the point of the row: one show, however many separate
+      // downloads it arrived as.
+      const sub = s.eps
+        ? `${s.eps} episode${s.eps === 1 ? "" : "s"}` + (s.items > 1 ? ` \u00b7 ${s.items} downloads` : "")
+        : "";
       row.innerHTML = `
-        <div style="font-size:14px;font-weight:600;color:#f2f2f4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(s.title)}</div>
+        <div style="min-width:0;flex:1 1 auto;">
+          <div style="font-size:14px;font-weight:600;color:#f2f2f4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(s.title)}</div>
+          ${sub ? `<div style="font-size:11px;color:#8a8a92;margin-top:2px;">${escHtml(sub)}</div>` : ""}
+        </div>
         <div class="chk" style="flex:0 0 auto;width:20px;height:20px;border:1px solid ${on ? "#3a7afe" : "#2a2a30"};background:${on ? "#3a7afe" : "transparent"};"></div>`;
       row.addEventListener("click", () => {
         const cur = _appAutoPrefs().shows;
@@ -21412,25 +21543,27 @@ function _appOpenAppSettings() {
   });
 }
 
-// Full-library series list for the scope picker: every multi-episode item, as
-// { id, title }, sorted A→Z. Sourced from the cached library (window._libCache,
-// populated by loadLibrary); lazily fetched if the cache is cold so the picker
-// can list shows that aren't downloaded on this device yet (needed for the
-// allow-list "Only these shows…" mode).
+// Full-library SHOW list for the scope picker: one row per show, as
+// { id: seriesKey, title, items, eps }, sorted A→Z. Grouped on the server's
+// `series_key`, so a show downloaded episode-by-episode is one row and not
+// thirty-two, and a season that arrives later joins the row that already exists.
+// Films and one-offs (an `item:` key) are left out — they are never auto-managed.
 async function _appScopeSeries() {
-  let items = window._libCache;
-  if (!Array.isArray(items) || !items.length) {
-    try {
-      const pid = profile.id ? `?profile_id=${encodeURIComponent(profile.id)}` : "";
-      const r = await fetch(`/api/library${pid}`, { headers: _appAuthHeaders() });
-      if (r.ok) { items = (await r.json()).items || []; window._libCache = items; }
-    } catch (_) {}
-  }
-  // /api/library returns file_count per item (not a files[] array — those live
-  // in the per-item /files endpoint), so multi-episode series are file_count >= 2.
-  return (items || [])
-    .filter((it) => it && it.id && (it.file_count || (it.files || []).length) >= 2)
-    .map((it) => ({ id: it.id, title: ((it.series || it.title || "Untitled") + "").trim() || "Untitled" }))
+  const items = await _appEnsureLib();
+  _appAutoShowsMigrate(items);   // fold any legacy item-id selection into shows
+  const byKey = new Map();
+  items.forEach((it) => {
+    const k = it && it.series_key;
+    if (!k || k.indexOf("series:") !== 0) return;
+    const g = byKey.get(k) || { id: k, items: 0, eps: 0,
+      title: ((it.series || it.title || "Untitled") + "").trim() || "Untitled" };
+    g.items += 1;
+    // /api/library returns file_count per item (not a files[] array — those live
+    // in the per-item /files endpoint).
+    g.eps += (it.file_count || (it.files || []).length || 0);
+    byKey.set(k, g);
+  });
+  return [...byKey.values()]
     .sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }));
 }
 
@@ -21443,8 +21576,10 @@ async function _appScopeSeries() {
 function _appAutoManage() {
   if (!isApp || _appOffline || !_appAutoPrefs().on) return;
   const itemId = lp.itemId, filePath = lp.filePath, pi = lp.pi;
-  if (!itemId || !filePath || (lp.playlist || []).length < 2) return;
-  if (!_appAutoScoped(itemId)) return;   // this show is out of scope for the current mode
+  if (!itemId || !filePath) return;
+  // No playlist-length gate any more: a single-episode item is still part of a
+  // show, and the show is what gets managed. The scope check (which may need to
+  // fetch the library to resolve the series) happens inside the run.
   setTimeout(() => { _appAutoManageRun(itemId, filePath, pi); }, 4000);
 }
 
@@ -21453,78 +21588,161 @@ async function _appAutoManageRun(itemId, filePath, pi) {
   if (_appAutoMgBusy || !isApp || _appOffline || !_cap.dl) return;
   if (lp.itemId !== itemId || lp.filePath !== filePath) return;  // stopped / advanced meanwhile
   if (!navigator.onLine || app._connected === false) return;     // acts only while connected
-  if (!_appAutoScoped(itemId)) return;                           // out of scope for the current mode
+  await _appEnsureLib();
+  const prefs = _appAutoPrefs();
+  const seriesKey = _appSeriesKeyOf(itemId);
+  if (!_appAutoScoped(seriesKey, prefs)) return;   // out of scope, or not a show at all
   _appAutoMgBusy = true;
   try {
-    const { ahead, q } = _appAutoPrefs();
-    const files = await _appAutoFiles(itemId);
-    if (!files) return;
-    const byPath = new Map(files.map((f) => [f.path, f]));
-    // Keep window: the playing episode + the next `ahead` in playlist order (in
-    // Shuffle that IS the order the user will watch). Collect what's missing.
-    const keep = new Set([filePath]);
+    const { ahead, q } = prefs;
+    const show = await _appAutoSeriesFiles(seriesKey);
+    if (!show || !show.eps.length) return;
+    const { eps, byKey, copies } = show;
+    const keep = new Set([offKey(itemId, filePath)]);
     const toStart = [];
-    for (let i = pi + 1; i <= pi + ahead && i < lp.playlist.length; i++) {
-      const path = lp.playlist[i];
-      if (!path) break;
-      // Merged-series: ahead episodes owned by a *different* item are pre-cached
-      // by that item's own auto-manage pass — skip them here (their paths aren't
-      // in this item's `byPath`). Offline bundle prefetch stays per-item.
-      if (lp.playlistItems && lp.playlistItems[i] && lp.playlistItems[i] !== itemId) continue;
-      keep.add(path);
-      if (_appAutoWants(itemId, byPath.get(path))) toStart.push(byPath.get(path));
+    // Shuffle Play: the shuffled playlist IS the order you will watch, so it
+    // wins inside the item you started. It deliberately does not roll into the
+    // next season — a shuffle is over the playlist you chose.
+    const shuffled = lp.shuffle && Array.isArray(lp.playlist) && lp.playlist.length > 1;
+    if (shuffled) {
+      for (let i = pi + 1; i <= pi + ahead && i < lp.playlist.length; i++) {
+        const owner = (lp.playlistItems && lp.playlistItems[i]) || itemId;
+        const f = byKey.get(offKey(owner, lp.playlist[i]));
+        if (!f) continue;
+        keep.add(offKey(owner, f.path));
+        if (_appAutoWants(f)) toStart.push(f);
+      }
+    } else {
+      // Natural order across the WHOLE show. This is what makes the window carry
+      // across a season boundary: when the playing episode is the last row its
+      // own item holds, the next rows belong to the next season's item and are
+      // picked up here without anything knowing a boundary was crossed.
+      let at = eps.findIndex((f) => f.item_id === itemId && f.path === filePath);
+      if (at < 0) at = eps.findIndex((f) => f.path === filePath);
+      if (at < 0) return;
+      for (let i = at + 1; i <= at + ahead && i < eps.length; i++) {
+        keep.add(offKey(eps[i].item_id, eps[i].path));
+        if (_appAutoWants(eps[i])) toStart.push(eps[i]);
+      }
     }
-    await _appAutoApply(itemId, byPath, keep, toStart, q);
+    _appAutoKeepCopies(keep, copies);
+    _npLog("automg-player", { show: seriesKey, eps: eps.length, ahead: ahead,
+                              keep: keep.size, start: toStart.length,
+                              order: shuffled ? "shuffle" : "series" }, "offline");
+    await _appAutoApply(byKey, keep, toStart, q);
   } finally { _appAutoMgBusy = false; }
 }
 
-// Fresh authoritative file list + per-profile progress for one item — the cached
-// downloadFilesData may predate the episodes just watched. null on failure.
-async function _appAutoFiles(itemId) {
+// Every episode of one SHOW, in (season, episode) order across all of its items,
+// with this profile's progress. The merged endpoint is what lets the window cross
+// a season boundary: season 3's item is simply the next rows of the same list.
+//
+// Two things the raw response can't be used for directly:
+//  - DUPLICATES. A box can hold S07E01 both as a single-episode item and inside
+//    a pack (South Park does, live). Left alone, one episode would eat two slots
+//    of a three-ahead window, and a copy watched under one item would look
+//    unwatched under the other and never be cleaned up.
+//  - Deletion needs EVERY copy, while the window needs one row per episode.
+// So: `eps` is one row per episode (preferring the copy this device already
+// holds), `byKey` is every copy by offKey with the episode's best-known progress
+// written onto all of them, and `copies` maps a copy to its siblings.
+async function _appAutoSeriesFiles(seriesKey) {
+  let files = null;
   try {
     const pid = profile.id ? `?profile_id=${encodeURIComponent(profile.id)}` : "";
-    const r = await fetch(`/api/library/${itemId}/files${pid}`, { headers: _appAuthHeaders() });
+    const r = await fetch(`/api/library/series/${encodeURIComponent(seriesKey)}${pid}`,
+                          { headers: _appAuthHeaders() });
     if (!r.ok) return null;
-    const files = (await r.json()).files || [];
-    downloadFilesData.set(itemId, files);
-    return files;
+    files = (await r.json()).files || [];
   } catch (_) { return null; }
+
+  const epKey = (f) => (f.season != null && f.episode != null)
+    ? `s${f.season}e${f.episode}` : `p:${f.item_id}|${f.path}`;
+  const byEp = new Map();     // epKey → [file, …] in server order
+  files.forEach((f) => {
+    if (!f || !f.path || !f.item_id) return;
+    const k = epKey(f);
+    if (!byEp.has(k)) byEp.set(k, []);
+    byEp.get(k).push(f);
+  });
+
+  const eps = [], byKey = new Map(), copies = new Map();
+  byEp.forEach((group) => {
+    // Best-known progress for the episode, shared by every copy of it: watched
+    // is a property of the episode, not of which torrent it came down in.
+    let best = null;
+    group.forEach((f) => {
+      const p = f.progress;
+      if (!p) return;
+      if (!best || (p.completed && !best.completed)
+          || (!!p.completed === !!best.completed
+              && (p.position_sec || 0) > (best.position_sec || 0))) best = p;
+    });
+    const keys = group.map((f) => offKey(f.item_id, f.path));
+    group.forEach((f) => {
+      if (best) f.progress = best;
+      byKey.set(offKey(f.item_id, f.path), f);
+      copies.set(offKey(f.item_id, f.path), keys);
+    });
+    eps.push(group.slice().sort((a, b) => _appAutoCopyRank(b) - _appAutoCopyRank(a))[0]);
+  });
+  return { eps, byKey, copies };
+}
+
+// Which copy of a duplicated episode the window should stand on: the one already
+// downloaded here, then one already coming down, then one the host has finished.
+function _appAutoCopyRank(f) {
+  const st = offlineBundles.get(offKey(f.item_id, f.path));
+  return (st && st.complete ? 4 : 0)
+       + (st && (st.queued || st.downloading) ? 2 : 0)
+       + (f.complete !== false ? 1 : 0);
+}
+
+// A kept episode is kept in every copy — otherwise the duplicate of the episode
+// playing right now reads as "watched and outside the window" and gets deleted
+// out from under a rewatch.
+function _appAutoKeepCopies(keep, copies) {
+  [...keep].forEach((k) => (copies.get(k) || []).forEach((sib) => keep.add(sib)));
 }
 
 // Does this keep-window file need a download driven? (on the host's disk, and
 // not already on-device or actively in flight — a stranded `waiting` entry is
 // fair game, same rule as the durable-queue resumer.)
-function _appAutoWants(itemId, f) {
+function _appAutoWants(f) {
   if (!f || f.complete === false) return false;
-  const st = offlineBundles.get(offKey(itemId, f.path));
+  const st = offlineBundles.get(offKey(f.item_id, f.path));
   return !(st && (st.complete || st.queued || (st.downloading && !st.waiting)));
 }
 
-// Apply one series' auto-manage decision. Shared by the in-app-player pass and
+// Apply one SHOW's auto-manage decision. Shared by the in-app-player pass and
 // the server-progress sweep below.
-// 1. Delete this series' watched episodes from the device. Never a path in
-//    `keep` (the playing/frontier episode + its ahead window — a rewatch keeps
-//    its window), and only files the server reports completed for this profile.
+// 1. Delete this show's watched episodes from the device — any season, since
+//    membership is "this file belongs to the show" and not "to this item".
+//    Never a path in `keep` (the playing/frontier episode + its ahead window —
+//    a rewatch keeps its window), and only files the server reports completed
+//    for this profile.
 // 2. Top up the ahead window (`toStart`). Fire-and-forget (host prep can take
 //    minutes and must not hold the caller's busy flag across episodes);
 //    appDownloadBundle's own in-flight guard + the `queued` marks make
 //    overlapping passes safe.
-async function _appAutoApply(itemId, byPath, keep, toStart, q) {
+async function _appAutoApply(byKey, keep, toStart, q) {
   let removed = 0;
   let ondevice = [];
   try { ondevice = (await _cap.dl.list()).items || []; } catch (_) {}
   for (const it of ondevice) {
-    if (it.itemId !== itemId || !it.complete || keep.has(it.filePath)) continue;
-    const f = byPath.get(it.filePath);
-    if (!f || !f.progress || !f.progress.completed) continue;
+    if (!it.complete || it.itemId === _APP_PLAYER_KEY) continue;
+    const k = offKey(it.itemId, it.filePath);
+    if (keep.has(k)) continue;
+    const f = byKey.get(k);
+    if (!f || !f.progress || !f.progress.completed) continue;   // not this show's, or not watched
     await _appRemoveOne(it.itemId, it.filePath);
     removed++;
   }
   if (removed) _appRenderDashboard();
   if (toStart.length && hlsAvailable) {
     for (const f of toStart)
-      offlineBundles.set(offKey(itemId, f.path), { queued: true, fraction: 0, name: f.name });
-    _appRunPooled(toStart, 2, (f) => appDownloadBundle(itemId, f.path, f.name, null, q));
+      offlineBundles.set(offKey(f.item_id, f.path), { queued: true, fraction: 0, name: f.name });
+    _appRunPooled(toStart, 2, (f) => appDownloadBundle(f.item_id, f.path, f.name, null, q));
   }
 }
 
@@ -21551,59 +21769,74 @@ async function _appAutoSweepRun() {
   _appAutoSweepBusy = true;
   _appAutoSweepLast = Date.now();
   try {
+    await _appEnsureLib();
     const prefs = _appAutoPrefs();
     const { ahead, q } = prefs;
     let ondevice = [];
     try { ondevice = (await _cap.dl.list()).items || []; } catch (_) {}
-    const seriesIds = new Set();
-    for (const it of ondevice)
-      if (it.itemId && it.itemId !== _APP_PLAYER_KEY) seriesIds.add(it.itemId);
-    for (const itemId of seriesIds) {
-      if (!_appAutoScoped(itemId, prefs)) continue;   // out of scope for the current mode
-      // The in-app player pass owns the series it's playing — it has the live
+    // Group what's on the device by SHOW, not by item. Two seasons of the same
+    // show are one sweep with one frontier — which is the only way the window
+    // can run off the end of one season's item and into the next.
+    const shows = new Map();   // seriesKey → Set(itemId)
+    for (const it of ondevice) {
+      if (!it.itemId || it.itemId === _APP_PLAYER_KEY) continue;
+      const key = _appSeriesKeyOf(it.itemId, (it.meta || {}).series);
+      if (!key) continue;                                  // a film — never managed
+      if (!shows.has(key)) shows.set(key, new Set());
+      shows.get(key).add(it.itemId);
+    }
+    for (const [seriesKey, itemIds] of shows) {
+      if (!_appAutoScoped(seriesKey, prefs)) continue;   // out of scope for the current mode
+      // The in-app player pass owns the show it's playing — it has the live
       // playlist order (incl. Shuffle); don't fight it with a second frontier.
-      if (lp.itemId === itemId && lp.filePath) continue;
-      const files = await _appAutoFiles(itemId);
-      if (!files || files.length < 2) continue;   // movies: nothing to roll
-      const byPath = new Map(files.map((f) => [f.path, f]));
+      if (lp.itemId && lp.filePath && itemIds.has(lp.itemId)) continue;
+      const show = await _appAutoSeriesFiles(seriesKey);
+      if (!show || show.eps.length < 2) continue;   // nothing to roll
+      const { eps, byKey, copies } = show;
       const keep = new Set(), toStart = [];
       // Shuffle Play on the TV/VLC: the "next episodes" are the next `ahead`
       // entries in the LIVE shuffle order (broadcast as library_playlist), NOT
       // natural episode order — so we download exactly what's coming up in the
-      // shuffle. Only the active-on-TV series carries a live shuffle order;
-      // every other series falls through to the natural-order frontier below.
-      const shufPl = (app.library_item_id === itemId && app.library_shuffle
+      // shuffle. Only the active-on-TV item carries a live shuffle order;
+      // every other show falls through to the natural-order frontier below.
+      const shufPl = (itemIds.has(app.library_item_id) && app.library_shuffle
                       && Array.isArray(app.library_playlist) && app.library_playlist.length)
                    ? app.library_playlist : null;
       if (shufPl) {
         const start = Math.max(0, app.library_current_index ?? 0);   // TV's index in the shuffle
         for (let i = start; i <= start + ahead && i < shufPl.length; i++) {
-          const f = byPath.get(shufPl[i]);
+          const f = byKey.get(offKey(app.library_item_id, shufPl[i]));
           if (!f) continue;
-          keep.add(f.path);
-          if (_appAutoWants(itemId, f)) toStart.push(f);
+          keep.add(offKey(f.item_id, f.path));
+          if (_appAutoWants(f)) toStart.push(f);
         }
       } else {
-        // Watch frontier from server progress, in natural episode order (= /files
-        // order): the furthest in-progress episode, else the episode after the
-        // last completed one. Untouched series are skipped (no basis to act);
-        // a fully-watched series has no frontier — its downloads are cleaned up.
+        // Watch frontier from server progress, in natural episode order across
+        // the whole show: the furthest in-progress episode, else the episode
+        // after the last completed one. Untouched shows are skipped (no basis to
+        // act); a fully-watched show has no frontier — its downloads are cleaned
+        // up. The frontier is an index into the SHOW, so finishing a season just
+        // moves it into the first episode of the next one.
         let lastDone = -1, inProg = -1;
-        files.forEach((f, i) => {
+        eps.forEach((f, i) => {
           const p = f.progress || {};
           if (p.completed) lastDone = i;
           else if ((p.position_sec || 0) > 5) inProg = i;
         });
         if (lastDone < 0 && inProg < 0) continue;   // never watched — leave alone
-        const frontier = Math.max(inProg, lastDone + 1 < files.length ? lastDone + 1 : -1);
+        const frontier = Math.max(inProg, lastDone + 1 < eps.length ? lastDone + 1 : -1);
         if (frontier >= 0) {
-          for (let i = frontier; i <= frontier + ahead && i < files.length; i++) {
-            keep.add(files[i].path);
-            if (_appAutoWants(itemId, files[i])) toStart.push(files[i]);
+          for (let i = frontier; i <= frontier + ahead && i < eps.length; i++) {
+            keep.add(offKey(eps[i].item_id, eps[i].path));
+            if (_appAutoWants(eps[i])) toStart.push(eps[i]);
           }
         }
       }
-      await _appAutoApply(itemId, byPath, keep, toStart, q);
+      _appAutoKeepCopies(keep, copies);
+      _npLog("automg-sweep", { show: seriesKey, items: itemIds.size, eps: eps.length,
+                               keep: keep.size, start: toStart.length,
+                               order: shufPl ? "shuffle" : "series" }, "offline");
+      await _appAutoApply(byKey, keep, toStart, q);
     }
   } finally { _appAutoSweepBusy = false; }
 }
@@ -28506,6 +28739,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.20.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.21.0</div>
 </body>
 </html>

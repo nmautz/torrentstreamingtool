@@ -1,5 +1,50 @@
 # Changelog
 
+## [18.21.0] — 2026-09-23
+### A show is one thing, however many torrents it arrived in
+
+Two counts, one mistake. The app's auto-manage picker listed **library items**, and
+the library's Hidden/Visible button counted them — so on the live box South Park,
+which is thirty-two separate downloads holding sixty-six episodes, was thirty-two
+rows in the picker and would have read as "32 hidden" for one show. Excluding it
+meant ticking all thirty-two, and the season you grab next week is a thirty-third
+item that no selection made before it has ever heard of.
+
+**Auto-manage is keyed on the show now** (`series:south park`), never on an item id:
+
+- The picker draws **one row per show** — 15 rows instead of 25 on the live box —
+  with a sub-line saying what it stands for (`66 episodes · 32 downloads`). Films
+  and one-offs are gone from it: auto-manage only ever rolls a window along a
+  series, and it never deletes a film.
+- **The ahead-window crosses seasons.** Both feeders — the in-app player pass and
+  the server-progress sweep — now read the merged
+  `GET /api/library/series/{key}`, whose rows are every member item's episodes in
+  (season, episode) order. When the episode playing is the last one its own item
+  holds, the next rows belong to the next season's item and are picked up without
+  anything having to know a boundary was crossed. The sweep's frontier is an index
+  into the *show*, so finishing a season simply moves it into the next one.
+- **Duplicates are collapsed.** A box can hold S07E01 both as a single-episode item
+  and inside a pack. Left alone, one episode ate two slots of a three-ahead window,
+  and a copy watched under one item looked unwatched under the other and was never
+  cleaned up. The window now stands on one copy per episode (preferring the one
+  already on the device), while progress and deletion cover every copy.
+- Existing selections **migrate**: stored item ids are folded into the shows they
+  belong to on first read.
+- Shuffle is unchanged and deliberately does not cross seasons — a shuffle is over
+  the playlist you started.
+- Each pass writes an `automg-player` / `automg-sweep` row to the client transcript
+  (cat `offline`) naming the show, the window and what it started.
+
+**The library's Hidden/Visible button counts tiles**, which is what the page draws:
+a merged show is one, a franchise shelf is one. 84/0 becomes 18/0 on the live box.
+Hiding is now a per-**show** act — a single item's eye icon fans out to every
+sibling sharing its series key, so a show can no longer be half-hidden — and the
+hidden view draws the same merged show tiles the grid does. Shelves are the one
+exception there: a collection tile carries only "Open collection", so folding
+hidden films into one would put the control to restore them behind a page. A shelf
+that loses a member to the hidden view stays put and says `5 titles`, rather than
+blowing the collection apart into six separate tiles.
+
 ## [18.20.1] — 2026-09-23
 ### The iOS 27 SDK makes UIScene adoption mandatory, and fatal
 
