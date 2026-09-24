@@ -5746,3 +5746,18 @@ Clearing needs a handshake, because the server cannot reach a phone. `DELETE
 next upload's response carries `clear_local`, the app deletes its own file and
 writes a `log-cleared-by-server` row. Skip the flag and the device restores
 every cleared row on its next send.
+
+## A record synthesised on read has no one to bump its rev (18.21.1)
+
+The "playing elsewhere" banner only re-fetches when `playback_sessions_rev`
+moves, and only device heartbeats and the reaper moved it. The TV's row is built
+on read by `_playback_tv_session()` from state nothing in the session registry
+watches — so a banner that fetched while the TV was buffering showed "Starting"
+and a frozen clock for the whole episode. `stat_broadcaster` now diffs the TV
+record's material fields (`_playback_tv_sig`) each tick and bumps the rev itself.
+Any future synthesised row needs the same.
+
+Its twin: the kiosk plays through the phone's `lpPlay`, so it inherited
+`_pbBeatStart()` and heartbeat as a device named "The TV" — the same screen,
+listed twice. The kiosk must never beat; `_pbBeatStart` / `_pbBeat` return under
+`TV_MODE`.

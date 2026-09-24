@@ -9117,6 +9117,7 @@ async def updater_loop() -> None:
 
 async def stat_broadcaster() -> None:
     """Push a full state snapshot to all SSE clients every 2 s."""
+    global _playback_tv_sig
     while True:
         if state.active_hash and state.stream_status in ("buffering", "playing"):
             info = await qbit_info(state.active_hash)
@@ -9161,6 +9162,16 @@ async def stat_broadcaster() -> None:
         # walk over at most a handful of entries, on a loop that is already
         # about to broadcast the rev it may have just bumped.
         if _playback_reap_sessions():
+            _playback_bump_rev()
+        # The TV's record is synthesised on read, so nothing bumps the rev when
+        # IT changes — a banner fetched while the TV was buffering kept saying
+        # "Starting" with a frozen clock for the rest of the episode. Same rule
+        # as a device beat: only the material fields, never the playhead.
+        tv = _playback_tv_session()
+        sig = (tv["item_id"], tv["file_path"], tv["playback"],
+               tv["profile_id"]) if tv else None
+        if sig != _playback_tv_sig:
+            _playback_tv_sig = sig
             _playback_bump_rev()
         await broadcast("state", state_snapshot())
         await asyncio.sleep(2)
@@ -21476,6 +21487,11 @@ _playback_yield_events: dict = {}
 # markup and in a URL path — so it is shaped, not trusted. UUIDs and the short
 # fallback id both fit; anything else is a client we did not write.
 _PB_DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+# Material signature of the synthesised TV session as of the last broadcaster
+# tick (see stat_broadcaster) — lets a TV state change bump the rev.
+_playback_tv_sig: Optional[tuple] = None
 
 
 def _playback_bump_rev() -> None:

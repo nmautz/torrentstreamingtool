@@ -5888,14 +5888,25 @@ function renderSkipOffer(offer){
   } else if(offer.type === "credits"){
     lbl.textContent = offer.has_next ? "Skip to Next Episode" : "Skip Credits";
   }
-  // Position above either the fullscreen overlay or the footer
-  const fc = document.getElementById("fullscreenControls");
-  const inFC = fc && !fc.classList.contains("hidden");
-  el.style.zIndex = inFC ? 60 : 60;
-  el.style.bottom = inFC
-    ? "calc(env(safe-area-inset-bottom) + 12px)"
-    : "calc(env(safe-area-inset-bottom) + 200px)";
+  el.style.bottom = _offerBottom(0);
   el.classList.remove("hidden");
+}
+
+// Where a floating offer strip (Skip / Resume) sits. Out of fullscreen it docks
+// flush on the footer's top edge, measured live: the footer is not one height —
+// the Audio/Subs row, the seek bar and a wrapped title all come and go — and the
+// old fixed 200px left a band of library showing between the strip and the
+// player, so the strip read as floating loose over the page. offsetHeight
+// already includes the footer's safe-bottom padding, so no env() on top.
+// `stack` lifts the strip clear of another one docked beneath it.
+function _offerBottom(stack){
+  const fc = document.getElementById("fullscreenControls");
+  if(fc && !fc.classList.contains("hidden"))
+    return `calc(env(safe-area-inset-bottom) + ${12 + stack}px)`;
+  const ft = document.querySelector("footer");
+  const h = ft ? ft.offsetHeight : 0;
+  return h > 0 ? `${h + stack}px`
+               : `calc(env(safe-area-inset-bottom) + ${12 + stack}px)`;
 }
 
 async function triggerSkip(){
@@ -5934,13 +5945,10 @@ function renderResumeOffer(offer){
   }
   const lbl = document.getElementById("resumeOfferLabel");
   lbl.textContent = "Resume from " + fmtTimeSecs(Math.round(offer.position_sec));
-  const fc = document.getElementById("fullscreenControls");
-  const inFC = fc && !fc.classList.contains("hidden");
-  const skipVisible = document.getElementById("skipOffer") && !document.getElementById("skipOffer").classList.contains("hidden");
-  const stackOffset = skipVisible ? 70 : 0; // stack above skip offer tile if both visible
-  el.style.bottom = inFC
-    ? `calc(env(safe-area-inset-bottom) + ${12 + stackOffset}px)`
-    : `calc(env(safe-area-inset-bottom) + ${200 + stackOffset}px)`;
+  const skip = document.getElementById("skipOffer");
+  const skipVisible = skip && !skip.classList.contains("hidden");
+  // Stack above the skip strip if both are up — by its real height, not a guess.
+  el.style.bottom = _offerBottom(skipVisible ? skip.offsetHeight : 0);
   el.classList.remove("hidden");
   _resumeOfferTimer = setTimeout(() => dismissResume(), 60000);
 }
@@ -22339,6 +22347,11 @@ function _pbProfileId(){
 // ── This device reporting in ───────────────────────────────────────────────
 
 function _pbBeatStart(){
+  // The kiosk is never a device session. The TV already appears in every
+  // banner as the one record the host synthesises from its own state (id "tv",
+  // pulled by stopping the TV) — a kiosk heartbeat on top of that listed the
+  // same screen twice, "Starting on The TV" over "Playing on The TV".
+  if(TV_MODE) return;
   // _pbIsHere() changes the moment this device starts playing, and the server
   // rev won't move just because WE opened a player — repaint now so the banner
   // doesn't keep offering an episode that is already up on this screen. Outside
@@ -22373,6 +22386,7 @@ function _pbBeatStop(useBeacon){
 }
 
 async function _pbBeat(){
+  if(TV_MODE) return;
   if(!lp.itemId || !lp.filePath) return;
   // Offline cached-player mode: this origin's /api is the loopback server, so
   // the POST would 404 against a host that isn't there. A phone genuinely off
@@ -28739,6 +28753,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.21.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.21.1</div>
 </body>
 </html>

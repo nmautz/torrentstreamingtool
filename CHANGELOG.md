@@ -1,5 +1,25 @@
 # Changelog
 
+## [18.21.1] — 2026-09-23
+### The TV is listed once, and the Next Episode strip sits on the player
+
+- **"Playing elsewhere" showed the TV twice** — "Starting on The TV" above
+  "Playing on The TV", same episode, two different clocks. The kiosk plays through
+  the same on-device player a phone does, and that player heartbeat into the
+  session registry as a device named "The TV" — on top of the TV record the host
+  already synthesises for every banner. The kiosk no longer beats
+  (`_pbBeatStart` / `_pbBeat` return under `TV_MODE`); the API doc always said it
+  didn't.
+- **…and the real TV row froze on "Starting".** That record is built on read from
+  the TV's state, and nothing bumped the sessions rev when that state changed, so
+  a banner fetched while the TV buffered kept "Starting" and a stopped clock for
+  the rest of the episode. `stat_broadcaster` now bumps the rev when the TV
+  record's item / file / playback / profile changes (never on the playhead).
+- **The Skip / Next Episode strip floated loose above the footer** at a fixed
+  200px, with a band of library posters showing beneath it. It now docks on the
+  footer's measured top edge (`_offerBottom`), whatever height the footer has;
+  the Resume strip stacks on it by its real height instead of a guessed 70px.
+
 ## [18.21.0] — 2026-09-23
 ### A show is one thing, however many torrents it arrived in
 

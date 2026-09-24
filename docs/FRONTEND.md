@@ -95,7 +95,7 @@ Single `EventSource('/api/events')`. Every handler first calls `_noteSSEMsg()` (
 
 - `renderPlayer(s)` — drives the footer + fullscreen overlay. The seek bar shows **VLC position** when `stream_status==="playing"` and `vlc_duration > 0`; otherwise download progress. On mobile (<768 px) the fullscreen overlay auto-opens on **buffering OR playing** (not just `playing`) so slow-network Play taps get immediate visible feedback. The overlay is **never auto-closed** on `stream_status==="idle"` — the server can take seconds to publish the next track, and the volume slider must stay reachable during that gap. Closing the fullscreen is manual only (the X button, which sets `_fcDismissed=true`). For library plays the buffering badge says **"Loading…"** and the fullscreen status says **"Starting playback…"** (instead of the misleading "Buffering…" / "Connecting…" copy — those imply network work, but the file is already local).
 - `renderPlaybackOwner(s)` — paints the **"started by" chip** (`#ownerBadge` in the footer status row + `#fcOwner` in the fullscreen overlay): a colored profile dot + the owner's name (`· you` when `s.library_profile_id === profile.id`). Driven by the `library_profile_*` snapshot fields and shown only while a library item is playing. Surfaces *whose* progress the shared VLC controls feed — a second viewer driving pause/seek/next can't reattribute the session, so this tells them their controls save to the starter's profile, not their own. Called from `renderPlayer`; seeded optimistically in `_optimisticBuffering` (the local profile owns a play it just started).
-- `renderSkipOffer(offer)` / `renderResumeOffer(offer)` — manage the floating amber/blue offer tiles.
+- `renderSkipOffer(offer)` / `renderResumeOffer(offer)` — manage the floating amber/teal offer strips. Both dock through `_offerBottom(stack)`: flush on the footer's **measured** top edge (`footer.offsetHeight`, which already includes the safe-bottom padding), or 12px above the safe area in fullscreen. The footer's height varies (Audio/Subs row, seek bar, wrapped title); the old fixed 200px left a band of library showing between strip and player. Resume stacks on Skip by Skip's real `offsetHeight`.
 - `renderLibrary(items)` — groups items by `series`, then renders in one of **two view modes** (toggled per-device in Settings → This Device; see § Library view mode). Both modes build every item from the **shared `_libItemChrome(item)`** (returns the badges + the `buttons`/`iconBtns` action set + progress/meta/flags), so **no action is view-only** — that shared source is the invariant that keeps the two views at feature parity. `_libItemChrome` is the single place per-item actions are defined; edit it, not two copies.
   - **Order: most recently watched first (17.12.0).** The server already hands `items` back that way (per profile — see [API.md](API.md) `GET /api/library`), and `renderLibrary` repeats the ordering at **tile** level: every tile — franchise shelf included — is built into a `units[]` array carrying its own `at` (`_libLastWatched(items)`, the newest `last_watched_at` in it), then stably sorted newest-first with the never-watched keeping the server's A-Z order behind them. That last part is the reason the pass exists at all: a franchise tile used to be emitted unconditionally *above* the grid, so the show you watched last night rendered below a collection you hadn't touched in a year. Build a new kind of tile into `units`, never straight into `html`.
   - **List view** (`_libItemListHtml`) — the original grouped layout: per-series header + a wide row per item with the full `.lib-card-actions` strip inline. The row's **title/meta block is a clickable surface** (`.lib-tile-open`, wired via `data-item-id`/`data-title` + `addEventListener` after render, same escaping-safe pattern as `.lib-restart-btn`) that opens the info page (`openEpisodePicker`) — episode list for a series, **movie panel** for a single-file item.
@@ -1139,6 +1139,10 @@ Both are carried across the iOS **proxied** loopback origin (`did=` / `dnm=` in
 
 **Reporting this device.**
 
+- `_pbBeatStart()` / `_pbBeat()` are **no-ops under `TV_MODE`** (18.21.1). The kiosk
+  plays through the same `lpPlay`, but the TV is already in every list as the one
+  record the host synthesises (`id:"tv"`); a kiosk beat on top of it listed the
+  same screen twice — "Starting on The TV" over "Playing on The TV".
 - `_pbBeatStart()` — called from `lpPlay` at the **start** of a play, not the first
   frame. A cold JIT start takes seconds, and a session nobody can see yet is a
   session nobody can pull. Also repaints the banner, because `_pbIsHere()` has
@@ -1155,7 +1159,10 @@ Both are carried across the iOS **proxied** loopback origin (`did=` / `dnm=` in
 **The banner.**
 
 - `_pbOnRev(rev)` from the `state` SSE handler → `_pbFetchSessions()` when the
-  counter moved. Also re-fetched on a profile switch (`_doSelectProfile`), where
+  counter moved. The TV's synthesised record moves it too: `stat_broadcaster`
+  bumps the rev whenever that record's item / file / playback / profile changes
+  (18.21.1) — before that, a banner fetched while the TV was buffering said
+  "Starting" with a frozen clock for the whole episode. Also re-fetched on a profile switch (`_doSelectProfile`), where
   the list is wrong the instant the profile changes.
 - `renderElsewhere()` — one row per session: device icon (`i-monitor` for the TV,
   `i-phone` otherwise), state word (`Playing` / `Paused` / `Starting` /
