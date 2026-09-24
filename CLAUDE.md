@@ -67,6 +67,7 @@ Each entry is a short hook so future Claude instances can jump straight to the r
 | [docs/YOUTUBE.md](docs/YOUTUBE.md) | Working on YouTube-on-TV — `/api/youtube*`, the Chrome kiosk + `static/tv.html` IFrame player, the `yt_command` SSE relay, the dashboard control routing (`app.youtube_active`). |
 | [docs/REMOTE.md](docs/REMOTE.md) | Working on HID wireless remote (air-mouse) support or the Firestick-style TV UI — `remote_input.py` (pynput input hooks), `_remote_key_action` / `_remote_should_handle` / the `tv_ui_*` block in `main.py`, `?tv=1` in `index.html`, button map (incl. 🏠 Home), Windows key suppression, screen arbitration. |
 | [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) | **Read when the server is unreachable, slow, or "crashed" with no traceback.** `diagnostics.py` — access/vitals logging, the in-process self-probe (`/healthz`), event-loop lag, thread-pool + library-lock instrumentation, stall stack dumps. Includes how to read an incident. |
+| [docs/ALT_VERSIONS_PLAN.md](docs/ALT_VERSIONS_PLAN.md) | **Deferred design, not built.** Alternate versions of an episode/pack (competing dubs, richer audio/subs): per-profile default, player "Version" row, verify-before-delete replace, per-slot collapse. Read before starting that work. |
 | [docs/GOTCHAS.md](docs/GOTCHAS.md) | **Read before any non-trivial change.** VLC ES-ID quirks, qBit sequential-download traps, VPN dual-enforcement, Jackett `Category[]=0`, canonical path matching, etc. |
 
 ---
