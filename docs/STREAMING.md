@@ -3018,8 +3018,11 @@ player UI works with no host. The pieces:
   the online boot does — without them a glasses handoff plays with no remote on
   the phone (fixed 18.21.4). It arms native with an **empty `serverUrl`** (18.21.6):
   the loopback origin 405s a progress POST, so native skips its own writes
-  (`progress-skipped why:"no-server"`) and the page's OfflineStore write records
-  the position. Progress + track picks write to `OfflineStore` explicitly
+  (`progress-skipped why:"no-server"`). From 18.21.7 it also sends `offline: true`,
+  and native writes `OfflineProgressStore` itself (every 15 s, on stop and at the end,
+  `progress-local` rows). That is the only writer while the phone is locked,
+  because the page's timers are frozen. An app build older than 18.21.7 ignores the
+  flag, and the page's own OfflineStore write is then the only record. Progress + track picks write to `OfflineStore` explicitly
   (the loopback `/api` 404s RESOLVE — they don't throw — so the online code's
   catch-based fallback would never fire); resume and audio/subtitle picks are
   restored from `getProgress` (which returns the saved track fields). The M3

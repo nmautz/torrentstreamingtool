@@ -5,7 +5,9 @@
 //  A small, durable, native key/value log of watch progress captured while the
 //  device is offline. The offline player (www/downloads.html) writes progress
 //  here during playback (the host dashboard can't load with no network, so this
-//  is the only place offline history can live); the dashboard's B5 sync glue
+//  is the only place offline history can live), and so does NativePlayback while
+//  it holds an offline episode (18.21.7) — with the phone locked the page's timers
+//  are frozen, so native is the only writer left; the dashboard's B5 sync glue
 //  (static/index.html), which DOES run on the host once reconnected, drains it to
 //  POST /api/sync/progress and records each file's new `base_synced_at`
 //  watermark via markSynced().

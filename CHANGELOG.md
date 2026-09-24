@@ -1,5 +1,19 @@
 # Changelog
 
+## [18.21.7] — 2026-09-24
+### An episode watched offline with the phone locked is remembered
+
+- **Offline, a native-held episode recorded progress only while the page was
+  awake.** With the phone locked the page's timers are frozen, and native could
+  only POST to a host, and offline there is none (18.21.6 made it skip rather than
+  405). Watch a whole episode offline in your pocket and nothing was saved. The
+  offline page now arms native with `offline: true`, and native writes the same
+  `OfflineProgressStore` record the page does: every 15 s, on stop, and at the end.
+  It uses the same played-time accrual (watchrule), so the reconnect sync pushes it
+  like any other offline watch. New `progress-local` diagnostic row (cat `offline`).
+- **Needs the app rebuilt** (`NP_BUILD` 18.21.7). An older build ignores the flag
+  and keeps 18.21.6's behaviour.
+
 ## [18.21.6] — 2026-09-24
 ### Offline glasses playback stops posting progress to nobody
 

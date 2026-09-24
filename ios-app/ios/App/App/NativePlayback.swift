@@ -60,7 +60,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "18.21.3"
+let NP_BUILD = "18.21.7"
 
 // MARK: - Armed state
 
@@ -84,6 +84,12 @@ struct ArmedPlayback {
     var profileId = ""
     var serverUrl = ""
     var token = ""
+    /// The page is the OFFLINE snapshot: there is no host, so progress goes to
+    /// OfflineProgressStore — the same record the page writes, which the page
+    /// syncs to the host on reconnect. Without this, an episode watched offline
+    /// with the phone locked recorded nothing: JS is frozen, and a POST had
+    /// nowhere to go. See maybePostProgress.
+    var offline = false
     /// Cross-device playback sessions. While the app is backgrounded the
     /// webview's JS timers are frozen, so the web player's own 2 s session beat
     /// stops — this device would drop out of every other device's "playing
@@ -1015,6 +1021,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         a.profileId      = call.getString("profileId") ?? ""
         a.serverUrl      = call.getString("serverUrl") ?? ""
         a.token          = call.getString("token") ?? ""
+        a.offline        = call.getBool("offline") ?? false
         a.deviceId       = call.getString("deviceId") ?? ""
         a.deviceName     = call.getString("deviceName") ?? ""
         a.sessionProfileId = call.getString("sessionProfileId") ?? (call.getString("profileId") ?? "")
@@ -1629,7 +1636,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     /// Mirrors saveProgress()'s endpoint and its near-zero guard.
     private func maybePostProgress(_ t: Double, force: Bool = false) {
         guard t >= 5, armed.duration > 0, !armed.itemId.isEmpty, !armed.filePath.isEmpty,
-              !armed.serverUrl.isEmpty else {
+              armed.offline || !armed.serverUrl.isEmpty else {
             // The duration-0 bug was invisible for a day because this guard is
             // silent. Log the refusal, throttled so a stopped player cannot flood.
             if force || Date().timeIntervalSince(lastProgressSkipLog) >= 60 {
@@ -1662,6 +1669,25 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         }
         guard force || Date().timeIntervalSince(lastProgressPost) >= 15 else { return }
         lastProgressPost = Date()
+
+        if armed.offline {
+            // Same record, same accrual rule (watchrule) the page's own offline
+            // save uses; the page's reconnect sync pushes it. nil track picks
+            // leave the page's stored picks untouched.
+            let a = armed
+            DispatchQueue.global(qos: .utility).async {
+                OfflineProgressStore.shared.saveProgress(
+                    profileId: a.profileId, itemId: a.itemId, filePath: a.filePath,
+                    positionSec: t, durationSec: a.duration,
+                    subtitleSel: nil, audioSel: nil,
+                    localAudioIdx: nil, localSubtitleIdx: nil)
+                DiagLog.shared.write("progress-local", [
+                    "pos": t, "dur": a.duration, "item": a.itemId,
+                    "file": a.filePath, "final": force,
+                ], cat: "offline")
+            }
+            return
+        }
 
         guard let base = URL(string: armed.serverUrl),
               let url = URL(string: "/api/library/\(armed.itemId)/progress", relativeTo: base)
