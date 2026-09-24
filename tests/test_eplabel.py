@@ -150,6 +150,15 @@ L = el.label_file({"path": "C:\\dl\\x\\clip.avi"}, None, "")
 eq("path-only entry, Windows separators", L["line1"], "clip")
 
 
+
+# ── A special TMDb's episode groups placed (epgroups.py) ─────────────────────
+AOT = {"tmdb_kind": "tv", "title": "Attack on Titan", "seasons": {"0": {"episodes": [
+    {"episode": 36, "name": "The Final Chapters Special (1)"}]}}}
+L = el.label_file(F("[Anime Time] Attack on Titan Season 4 - Finale 1.mkv", 0, 36,
+                    home={"season": 4, "after": 28, "placed": True}), AOT, "")
+eq("homed special: code", L["code"], "Special 36")
+eq("homed special: TMDb name", L["line2"], "The Final Chapters Special (1)")
+
 print("%d passed, %d failed" % (_PASS, len(_FAIL)))
 for f in _FAIL:
     print("  FAIL", f)

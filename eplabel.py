@@ -239,7 +239,9 @@ def label_file(f: dict, meta: Optional[dict], fallback_show: str = "") -> dict:
         # Season 0 with no bucket is one of two things: a real TMDb special
         # ("S00E05" in the name), or an absolute number the TMDb-aware pass has
         # not placed yet ("[Group] Show - 148.mkv"), which IS the main run.
-        if _SPECIAL_MARK_RE.search(_stem(file_name)):
+        # A `home` settles it: TMDb's episode groups placed that special
+        # (epgroups.py - Attack on Titan's "Season 4 - Finale 1" is S00E36).
+        if isinstance(f.get("home"), dict) or _SPECIAL_MARK_RE.search(_stem(file_name)):
             eps = ((seasons.get("0") or {}).get("episodes")) or []
             name = _episode_names(eps, episode, episode)[0] or name_from_file(file_name)
             return compose(show, f"Special {episode}", name, file_name)

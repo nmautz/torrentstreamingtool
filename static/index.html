@@ -123,6 +123,13 @@
     .ep-season-dot        { width:.375rem; height:.375rem; background:currentColor; flex-shrink:0; }
     .ep-season-tab.incomplete .ep-season-count { color:#f59e0b; }
     .ep-season-tab.absent .ep-season-count     { color:#f87171; }
+    /* View picker: TMDb's seasons or one of its episode groups (story arcs, DVD
+       order, ...). A native <select> so a phone gets its own wheel picker. */
+    .ep-view-sel          { background:#111827; color:#e5e7eb; border:1px solid #374151;
+                            border-radius:0; font-size:.68rem; font-weight:800;
+                            text-transform:uppercase; letter-spacing:.06em;
+                            padding:.3rem .5rem; max-width:min(70vw,22rem); min-width:0; }
+    .ep-view-sel:focus    { outline:2px solid #4f46e5; outline-offset:0; }
     /* Netflix-style episode card */
     .ep-card { display:flex; gap:.75rem; align-items:stretch; padding:.6rem .25rem;
                border-bottom:1px solid rgba(31,41,55,.6); transition:background .12s; }
@@ -2011,6 +2018,15 @@
       </svg>
       Delete (<span id="epDeleteCount">0</span>)
     </button>
+  </div>
+
+  <!-- View picker: TMDb's seasons, or one of the show's episode groups (story
+       arcs, DVD order...). Hidden when TMDb has no groups for the show. -->
+  <div id="epViewBar" class="hidden items-center gap-2 px-2 sm:px-5 pt-2 flex-shrink-0 min-w-0">
+    <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest flex-shrink-0">View</span>
+    <select id="epViewSel" class="ep-view-sel" onchange="epSetView(this.value)"
+      title="Arrange this show by TMDb's seasons, or by one of its episode groups. Remembered per profile."></select>
+    <span id="epViewKind" class="hidden sm:inline text-[10px] text-gray-600 uppercase tracking-widest truncate"></span>
   </div>
 
   <!-- Season tabs (auto-hidden when the item has zero / one season) -->
@@ -4559,6 +4575,16 @@ let epHeroTitle = "";      // fallback title for late metadata repaints (SSE)
 let _epMetaRetryTimer = null; // fallback re-pull while server metadata fetch is pending
 let epCurrentSeason = 0;   // active season tab; 0 = "all" / no season info
 let epSeasonList = [];     // sorted seasons present in epFiles (positive ints only)
+// Episode views (18.25.0): TMDb's other arrangements of the open show - story
+// arcs, DVD order, production order. A VIEW only: files keep their TMDb
+// (season, episode), so progress/prep/play never know. See epgroups.py.
+let epViews = [];          // picker rows from /api/tmdb/tv/{id}/episode-groups
+let epView = null;         // chosen group id; null = TMDb's seasons (the default)
+let epViewData = null;     // the chosen group, normalized: {id, name, buckets:[{name, episodes}]}
+let epViewTab = 0;         // active bucket index in the group view; -1 = "Other"
+let _epViewsFor = 0;       // TMDb id the views were loaded for (0 = none yet)
+let _epViewSeq = 0;        // bumps on every page open, so a late answer can't land on another show
+const _epViewCache = new Map();   // group id -> normalized group (for this page session)
 let epHasTorrent = false;  // item has a qBit torrent → download-scheduling controls apply
 let epDownloadMode = "now"; // item-level download mode (now | idle) from /files
 let epPrepPrioDefault = "mid"; // item/series-level stream-prep queue priority default
@@ -4868,6 +4894,18 @@ function fileLabel(f, itemId){
   const e = +(f && f.episode) || (info ? info.ep : 0);
   const code = (s && e) ? `S${pad2(s)}E${pad2(e)}` : "";
   return _composeLabel(show, code, (info && info.name) || "", stem);
+}
+// Where a saved bundle sits in its show, from its meta: the season it's listed
+// under and its place there. A special TMDb's episode groups put inside a season
+// (`home`, epgroups.py) joins that season after the episode it follows, the same
+// as on the episode page (_epTabOf / _epSeasonPos).
+function _bundleSeason(m){
+  const h=m&&m.home;
+  return (h && +h.season>0) ? +h.season : (+(m&&m.season)||0);
+}
+function _bundlePos(m){
+  const h=m&&m.home;
+  return (h && +h.season>0) ? (+h.after||0) + 0.5 + (+m.episode||0)/1e6 : (+(m&&m.episode)||0);
 }
 // The lock screen / Live Activity / glasses remote: the episode's NAME is the
 // big line, "Show · S01E03" the small one (how Apple TV and Netflix do it).
@@ -9670,7 +9708,7 @@ async function openEpisodePicker(itemId, title, section, filePath){
   epFiles=[]; epChecked=new Set();
   _epAutoScrollArmed=true; _epScrollSettleUntil=0;   // open on next-up until the viewer scrolls
   epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[]; epIsMovie=false;
-  epSection=section||"";
+  epSection=section||""; _epResetViews();
 
   document.getElementById("episodePage").classList.remove("hidden");
   document.body.style.overflow="hidden";  // lock background scroll
@@ -9755,7 +9793,7 @@ async function openSeriesPage(seriesKey, title, section, filePath){
   epFiles=[]; epChecked=new Set();
   _epAutoScrollArmed=true; _epScrollSettleUntil=0;   // open on next-up until the viewer scrolls
   epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[]; epIsMovie=false;
-  epSection=section||"";
+  epSection=section||""; _epResetViews();
 
   document.getElementById("episodePage").classList.remove("hidden");
   document.body.style.overflow="hidden";
@@ -9800,6 +9838,7 @@ async function openSeriesPage(seriesKey, title, section, filePath){
   renderEpHero(epHeroTitle);
   renderEpSeasonTabs();
   renderEpList();
+  _epLoadViews();
 
   // Enrich with full-series TMDb metadata (member items only cache the seasons
   // they contain; a merged show wants every season's episode names — and the
@@ -9825,8 +9864,8 @@ async function _epTopUpSeasons(stillOpen, title, retried){
   // assign that over the section's own binding, putting Attack on Titan's
   // poster and episode titles on Junior High. A section's episode list arrives
   // complete with the section (see _fetch_section_metadata) — there is nothing
-  // to top up.
-  if(epSection) return;
+  // to top up. ("main" is the show itself, so it may.)
+  if(epSection && epSection!=="main") return;
   // What we need episode lists for: the TMDb inventory, floored at the seasons we
   // actually hold files in (an older cache carries no inventory, and a merged
   // series' member metadata only ever covered that member's own seasons).
@@ -9919,7 +9958,9 @@ async function _epApplyMetadata(itemId, title, respPromise){
     // item-level metadata arriving late must not overwrite it. Take the image
     // base — that is shared — and re-apply the section on top of the fresh
     // sections map, which may only now have resolved.
-    if(epSection){
+    // "main" is the item's own run: its metadata IS the item's (it has no
+    // entry of its own in metadata.sections), so it takes the path below.
+    if(epSection && epSection!=="main"){
       epMetaImgBase=m.img_base||epMetaImgBase;
       const secs=((m.metadata||{}).sections)||{};
       const sec=secs[epSection];
@@ -9944,6 +9985,7 @@ async function _epApplyMetadata(itemId, title, respPromise){
     renderEpHero(title);
     renderEpSeasonTabs();
     renderEpList();
+    _epLoadViews();
     // A single item only ever caches the seasons it contains — pull the rest so
     // a missing season can list its real episodes rather than just a count.
     _epTopUpSeasons(()=>epItemId===itemId, title);
@@ -10082,10 +10124,10 @@ function _epSeasonCounts(season){
 // show has (when the diff is trustworthy). Season 0 is appended as a trailing
 // "Specials" tab only when season-0 files actually exist — it is never invented.
 function _epRebuildSeasonList(){
-  const seen=new Set(epFiles.map(f=>+f.season||0).filter(n=>n>0));
+  const seen=new Set(epFiles.map(_epTabOf).filter(n=>n>0));
   if(_epMissingOn()) _tmdbSeasonNumbers(epMetadata).forEach(n=>seen.add(n));
   const positive=[...seen].sort((a,b)=>a-b);
-  const hasZero=epFiles.some(f=>(+f.season||0)===0);
+  const hasZero=epFiles.some(f=>_epTabOf(f)===0);
   epSeasonList = positive.length && hasZero ? [...positive, 0] : positive;
 }
 
@@ -10094,7 +10136,7 @@ function pickDefaultSeason(){
   // 1) season of currently playing file
   if(app.library_current_file){
     const f=epFiles.find(x=>x.path===app.library_current_file);
-    if(f && f.season) return +f.season;
+    if(f && _epTabOf(f)) return _epTabOf(f);
   }
   // 2) season of the episode the viewer is up to — the same answer the page
   //    then scrolls to, and the same rule the server resumes by: anchored on the
@@ -10105,21 +10147,21 @@ function pickDefaultSeason(){
   //    next one instead of re-opening on itself. Numbered seasons only —
   //    season 0 sorts last, and "you've seen every episode, here are the
   //    creditless openings" is not where a show should open.
-  const numbered=epFiles.filter(f=>(+f.season||0)>0);
+  const numbered=epFiles.filter(f=>_epTabOf(f)>0);
   const upNext=_epNextUpPath(numbered);
   if(upNext){
     const f=numbered.find(x=>x.path===upNext);
-    if(f && f.season) return +f.season;
+    if(f && _epTabOf(f)) return _epTabOf(f);
   }
   // 3) first season with an unwatched episode
   for(const s of epSeasonList){
-    const any=epFiles.some(f=>(+f.season||0)===s && !f.progress?.completed);
+    const any=epFiles.some(f=>_epTabOf(f)===s && !f.progress?.completed);
     if(any) return s;
   }
   // 4) first season we actually hold files in — never land on a season we own
   //    nothing from; a wall of "not downloaded" is a poor way to open a show.
   for(const s of epSeasonList){
-    if(epFiles.some(f=>(+f.season||0)===s)) return s;
+    if(epFiles.some(f=>_epTabOf(f)===s)) return s;
   }
   return epSeasonList[0];
 }
@@ -10488,7 +10530,7 @@ async function toggleEpOndemandOnly(btn){
 function _epSeason0Buckets(){
   const seen=[];
   for(const f of epFiles){
-    if((+f.season||0)!==0) continue;
+    if(_epTabOf(f)!==0) continue;
     const b=f.bucket||"";
     if(b && !seen.includes(b)) seen.push(b);
   }
@@ -10501,8 +10543,233 @@ function _epSeason0Label(){
   return b.length===1 ? b[0] : (b.length ? "Extras" : "Specials");
 }
 
+// ── Episode views (18.25.0) ─────────────────────────────────────────────────
+// TMDb's seasons are one arrangement of a show; its episode groups are others
+// (story arcs, DVD order, production order, "absolute"). Seasons stay the
+// default, and the choice is remembered per profile per show. A group only
+// REARRANGES: every entry is a real TMDb (season, episode), so a file is found
+// by its own slot and nothing about playing, prepping or progress changes.
+// Only unbucketed files take part: an OAD folder's "OAD 3" is numbered inside
+// its folder, not on TMDb's specials list. See epgroups.py.
+
+// The Seasons-view tab a file belongs in. A special TMDb's episode groups agree
+// belongs INSIDE a season carries `home` and joins that season's tab.
+function _epTabOf(f){
+  const h=f&&f.home;
+  return (h && +h.season>0) ? +h.season : (+f.season||0);
+}
+// Order within a Seasons-view tab: episode number, a homed special just after
+// the episode it follows (Attack on Titan's finales after S04E28).
+function _epSeasonPos(f){
+  const h=f&&f.home;
+  return (h && +h.season>0) ? (+h.after||0) + 0.5 + (+f.episode||0)/1e6 : (+f.episode||0);
+}
+function _epViewActive(){ return !!(epView && epViewData && epViewData.id===epView); }
+function _epViewKey(s, e){ return `${+s||0}:${+e||0}`; }
+function _epResetViews(){
+  epViews=[]; epView=null; epViewData=null; epViewTab=0; _epViewsFor=0; _epViewSeq++;
+  const bar=document.getElementById("epViewBar");
+  if(bar){ bar.classList.add("hidden"); bar.classList.remove("flex"); }
+}
+// What the open tab/scope is called, for the scheduling bar and friends.
+function _epScopeLabel(){
+  if(_epViewActive()){
+    if(epViewTab<0) return "Other";
+    const b=epViewData.buckets[epViewTab];
+    return (b && b.name) || `Part ${epViewTab+1}`;
+  }
+  return `Season ${epCurrentSeason}`;
+}
+
+// Unbucketed files by slot. A slot can hold two copies (an alternate version).
+function _epViewFilesBySlot(){
+  const m=new Map();
+  for(const f of epFiles){
+    if(f.bucket) continue;
+    const k=_epViewKey(f.season, f.episode);
+    if(!m.has(k)) m.set(k, []);
+    m.get(k).push(f);
+  }
+  return m;
+}
+// The open tab's rows, in the group's order: {f} for a file here, {te} for an
+// episode that isn't. Missing rows only for real seasons: a season-0 entry may
+// well be on the box in an OAD folder, numbered in a way we can't match.
+function _epViewTabRows(i){
+  if(!_epViewActive()) return [];
+  const by=_epViewFilesBySlot();
+  if(i<0){
+    const inAny=new Set();
+    epViewData.buckets.forEach(b=>b.episodes.forEach(te=>inAny.add(_epViewKey(te.season, te.episode))));
+    return epFiles.filter(f=>!f.bucket && !inAny.has(_epViewKey(f.season, f.episode)))
+                  .map(f=>({f}));
+  }
+  const b=epViewData.buckets[i];
+  if(!b) return [];
+  const rows=[], seen=new Set();
+  const missingOn=_epMissingOn();
+  for(const te of b.episodes){
+    const k=_epViewKey(te.season, te.episode);
+    if(seen.has(k)) continue;
+    seen.add(k);
+    // Exactly as a season tab: every file is a card, and a slot with nothing
+    // actually on the box also gets its missing row (a "skip" file in a pack
+    // reads "in a pack you have" there).
+    const fs=by.get(k)||[];
+    fs.forEach(f=>rows.push({f}));
+    if(!fs.some(_epOnBox) && missingOn && +te.season>0
+       && (missingUnaired || !_tmdbEpUnaired(te)))
+      rows.push({te});
+  }
+  return rows;
+}
+function _epViewTabFiles(i){ return _epViewTabRows(i).filter(r=>r.f).map(r=>r.f); }
+// Files no part of the group holds (a stuck file, a special it leaves out).
+function _epViewHasOther(){ return _epViewTabRows(-1).length>0; }
+
+// Which part to open on: the one holding next-up, else the first with anything
+// unwatched, else the first with anything at all.
+function _epViewDefaultTab(){
+  if(!_epViewActive()) return 0;
+  const n=epViewData.buckets.length;
+  const upNext=_epNextUpPath(epFiles.filter(f=>!f.bucket));
+  const idx=[...Array(n).keys()].concat(_epViewHasOther()?[-1]:[]);
+  if(upNext){
+    for(const i of idx) if(_epViewTabFiles(i).some(f=>f.path===upNext)) return i;
+  }
+  for(const i of idx) if(_epViewTabFiles(i).some(f=>!f.progress?.completed)) return i;
+  for(const i of idx) if(_epViewTabFiles(i).length) return i;
+  return 0;
+}
+
+async function _epLoadViewData(id){
+  if(_epViewCache.has(id)){ epViewData=_epViewCache.get(id); return true; }
+  try{
+    const r=await fetch(`/api/tmdb/episode-group/${encodeURIComponent(id)}`);
+    if(!r.ok) return false;
+    const g=await r.json();
+    if(!g || !Array.isArray(g.buckets)) return false;
+    _epViewCache.set(id, g);
+    epViewData=g;
+    return true;
+  }catch(_){ return false; }
+}
+
+// Called once metadata is on the page. Idempotent per show; shows the picker
+// only when TMDb has groups, and applies this profile's saved choice.
+async function _epLoadViews(){
+  const m=epMetadata;
+  if(!m || m.tmdb_kind!=="tv" || !m.tmdb_id || epIsMovie) return;
+  if(epSection && epSection!=="main") return;   // a section is its own thing
+  const tmdb=+m.tmdb_id;
+  if(_epViewsFor===tmdb) return;
+  _epViewsFor=tmdb;
+  const seq=_epViewSeq;
+  let d=null;
+  try{
+    const pid=profile.id?`?profile_id=${encodeURIComponent(profile.id)}`:"";
+    const r=await fetch(`/api/tmdb/tv/${tmdb}/episode-groups${pid}`);
+    if(r.ok) d=await r.json();
+  }catch(_){}
+  if(seq!==_epViewSeq) return;
+  epViews=(d && d.groups) || [];
+  if(d && d.selected && await _epLoadViewData(d.selected) && seq===_epViewSeq){
+    epView=d.selected;
+    epViewTab=_epViewDefaultTab();
+    renderEpSeasonTabs(); renderEpList();
+  }
+  _epRenderViewBar();
+}
+
+function _epRenderViewBar(){
+  const bar=document.getElementById("epViewBar"), sel=document.getElementById("epViewSel");
+  if(!bar || !sel) return;
+  // Not on TV: the TV shows the viewer's chosen arrangement, it doesn't pick one.
+  if(!epViews.length || TV_MODE || epIsMovie){ bar.classList.add("hidden"); bar.classList.remove("flex"); return; }
+  const kinds=[];
+  epViews.forEach(g=>{ if(!kinds.includes(g.kind)) kinds.push(g.kind); });
+  sel.innerHTML=`<option value="">Seasons</option>`+kinds.map(k=>
+    `<optgroup label="${escHtml(k||"Other")}">${epViews.filter(g=>g.kind===k).map(g=>
+      `<option value="${escHtml(g.id)}">${escHtml(g.name)} · ${g.groups} part${g.groups===1?"":"s"}</option>`).join("")}</optgroup>`).join("");
+  sel.value=epView||"";
+  const cur=epViews.find(g=>g.id===epView);
+  document.getElementById("epViewKind").textContent=
+    cur ? `${cur.kind}${cur.description?" · "+cur.description:""}` : "";
+  document.getElementById("epViewKind").title=cur?.description||"";
+  bar.classList.remove("hidden"); bar.classList.add("flex");
+}
+
+async function epSetView(id){
+  id=id||null;
+  if(id && !(await _epLoadViewData(id))){
+    showAlert("Couldn't load that arrangement from TMDb.","error");
+    _epRenderViewBar();
+    return;
+  }
+  epView=id;
+  if(id) epViewTab=_epViewDefaultTab();
+  else { epViewData=null; _epRebuildSeasonList(); epCurrentSeason=pickDefaultSeason(); }
+  _epAutoScrollArmed=false;
+  renderEpSeasonTabs(); renderEpList(); _epRenderViewBar();
+  const list=document.getElementById("epList"); if(list) list.scrollTop=0;
+  const tmdb=+(epMetadata&&epMetadata.tmdb_id)||0;
+  if(tmdb && profile.id){
+    fetch(`/api/profiles/${encodeURIComponent(profile.id)}/episode-view`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({tmdb_id:tmdb, group_id:id}),
+    }).catch(()=>{});
+  }
+}
+
+function epSwitchViewTab(i){
+  epViewTab=+i;
+  renderEpSeasonTabs();
+  renderEpList();
+  _epAutoScrollArmed=false;
+  const list=document.getElementById("epList"); if(list) list.scrollTop=0;
+}
+
+function _renderEpViewTabs(tabs){
+  const seasonSel=document.getElementById("epSeasonSelBtn");
+  if(seasonSel) seasonSel.classList.remove("hidden");
+  const by=_epViewFilesBySlot();
+  const missingOn=_epMissingOn();
+  const idx=epViewData.buckets.map((_,i)=>i).concat(_epViewHasOther()?[-1]:[]);
+  tabs.classList.remove("hidden"); tabs.classList.add("flex");
+  tabs.innerHTML=idx.map(i=>{
+    let cls=i===epViewTab?"ep-season-tab active":"ep-season-tab", count="";
+    const label=i<0 ? "Other" : (epViewData.buckets[i].name || `Part ${i+1}`);
+    if(i>=0 && missingOn){
+      // "have of total", counted like a season: real-season entries, plus a
+      // special only when it's here.
+      let have=0, total=0;
+      for(const te of epViewData.buckets[i].episodes){
+        const on=(by.get(_epViewKey(te.season, te.episode))||[]).some(_epOnBox);
+        if(on) have++;
+        if(on || (+te.season>0 && (missingUnaired || !_tmdbEpUnaired(te)))) total++;
+      }
+      if(total>have){
+        cls += have ? " incomplete" : " absent";
+        count=`<span class="ep-season-count"><i class="ep-season-dot"></i>${have} of ${total}</span>`;
+      }
+    }
+    return `<button class="${cls}" onclick="epSwitchViewTab(${i})">${escHtml(label)}${count}</button>`;
+  }).join("");
+  requestAnimationFrame(_scrollActiveSeasonIntoView);
+}
+
+function epDownloadViewTab(){
+  const files=_visibleSeasonFiles();
+  const title=document.getElementById("epTitle")?.textContent||"download";
+  const label=`${title} ${_epScopeLabel()}`;
+  if(isApp && epSeriesKey) return _appSaveFiles(files, label);
+  if(!epItemId) return;
+  epDownloadPaths(files.map(f=>f.path), label);
+}
+
 function renderEpSeasonTabs(){
   const tabs=document.getElementById("epSeasonTabs");
+  if(_epViewActive()) return _renderEpViewTabs(tabs);
   // The "± Season" bulk chip only makes sense when the item is split into seasons.
   const seasonSel=document.getElementById("epSeasonSelBtn");
   if(seasonSel) seasonSel.classList.toggle("hidden", !epSeasonList.length);
@@ -10567,7 +10834,7 @@ function closeEpisodePage(){
   document.body.style.overflow="";
   epItemId=null; epSeriesKey=null; epFileItem={}; _epSeriesResume=null;
   epFiles=[]; epChecked=new Set(); _epAutoScrollArmed=false; _epNextUpNow=null;
-  epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[];
+  epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[]; _epResetViews();
   epHeroTitle=""; clearTimeout(_epMetaRetryTimer); _epMetaRetryTimer=null;
   epIsMovie=false; _epApplyMovieChrome(false);
 }
@@ -10960,8 +11227,14 @@ function _tmdbEpisode(file){
   // Look up the TMDb episode entry matching this file's season+episode.
   if(!epMetadata || epMetadata.tmdb_kind!=="tv") return null;
   const s = epMetadata.seasons?.[String(+file.season||0)];
-  if(!s) return null;
-  return s.episodes?.find(e=>+e.episode===(+file.episode||0)) || null;
+  const hit = s ? (s.episodes?.find(e=>+e.episode===(+file.episode||0)) || null) : null;
+  // A group carries each entry's name/still too - a special whose season-0
+  // list was never fetched still gets its real tile in a group view.
+  if(hit || file.bucket || !_epViewActive()) return hit;
+  const k=_epViewKey(+file.season||0, +file.episode||0);
+  for(const b of epViewData.buckets) for(const te of b.episodes)
+    if(_epViewKey(te.season, te.episode)===k) return te;
+  return null;
 }
 
 function _stillUrl(stillPath){
@@ -11823,7 +12096,8 @@ function _epPrepBtn(mode, label, color, cur){
 // Files in the currently-visible scope (the active season, or every file when the
 // item has no season grouping).
 function _visibleSeasonFiles(){
-  if(epSeasonList.length) return epFiles.filter(f=>(+f.season||0)===epCurrentSeason);
+  if(_epViewActive()) return _epViewTabFiles(epViewTab);
+  if(epSeasonList.length) return epFiles.filter(f=>_epTabOf(f)===epCurrentSeason);
   return epFiles.slice();
 }
 // Paths in the currently-visible scope.
@@ -12242,10 +12516,15 @@ function renderEpList(){
     return;
   }
 
-  // Pick the visible files: filter by epCurrentSeason if seasons exist; else show everything.
+  // Pick the visible files: the open tab of a group view; else filter by
+  // epCurrentSeason if seasons exist; else show everything.
+  const inView=_epViewActive();
+  const viewRows=inView ? _epViewTabRows(epViewTab) : null;
   let visibleFiles;
-  if(epSeasonList.length){
-    visibleFiles = epFiles.filter(f=>(+f.season||0)===epCurrentSeason);
+  if(inView){
+    visibleFiles = viewRows.filter(r=>r.f).map(r=>r.f);
+  } else if(epSeasonList.length){
+    visibleFiles = epFiles.filter(f=>_epTabOf(f)===epCurrentSeason);
     if(epCurrentSeason===0){
       // Season 0 is a grab-bag — specials, OVAs, movies, a spin-off's own run —
       // so keep each source folder together and ordered within itself, rather
@@ -12256,22 +12535,25 @@ function renderEpList(){
         (+a.episode||0)-(+b.episode||0) ||
         (a.name||"").localeCompare(b.name||""));
     } else {
-      // Sort by episode number within season for predictable ordering
-      visibleFiles.sort((a,b)=>(+a.episode||0)-(+b.episode||0));
+      // Sort by episode number within season for predictable ordering. A
+      // homed special (TMDb's episode groups put it inside this season) sits
+      // right after the episode it follows.
+      visibleFiles.sort((a,b)=>_epSeasonPos(a)-_epSeasonPos(b));
     }
   } else {
     visibleFiles = epFiles;
   }
   // Episodes this season HAS that aren't on disk. A season we own nothing from
   // is simply the case where this is the whole list.
-  const missingEps = epSeasonList.length ? _epMissingEpisodes(epCurrentSeason) : [];
+  const missingEps = inView ? viewRows.filter(r=>r.te).map(r=>r.te)
+                   : epSeasonList.length ? _epMissingEpisodes(epCurrentSeason) : [];
 
   if(!visibleFiles.length && !missingEps.length){
     // A season TMDb says exists but whose episode list isn't cached here (the
     // lazy top-up hasn't landed, or the internet is down) still deserves better
     // than "no episodes" — that reads as "this season is empty", not "you own
     // none of it", and the tab beside it already says "0 of 12".
-    const c=(epCurrentSeason>0 && _epMissingOn()) ? _epSeasonCounts(epCurrentSeason) : null;
+    const c=(!inView && epCurrentSeason>0 && _epMissingOn()) ? _epSeasonCounts(epCurrentSeason) : null;
     el.innerHTML = (c && c.total>0)
       ? `<div class="flex flex-col items-center gap-3 py-12 px-4 text-center">
            <span class="w-2.5 h-2.5 bg-orange-400"></span>
@@ -12290,7 +12572,7 @@ function renderEpList(){
              </button>`}
            </div>`}
          </div>`
-      : `<p class="text-gray-600 text-sm text-center py-12">No episodes in this season.</p>`;
+      : `<p class="text-gray-600 text-sm text-center py-12">No episodes ${inView?"here":"in this season"}.</p>`;
     updateEpCount(); return;
   }
 
@@ -12304,8 +12586,11 @@ function renderEpList(){
   // per-item and a merged season spans many items, so it could only be a dead
   // button (same reason #epDownloadSelBtn is hidden there). The app's Save
   // Season is a per-file device save and works across items, so it stays.
-  if(epSeasonList.length){
-    const sMeta = epMetadata?.seasons?.[String(epCurrentSeason)];
+  if(epSeasonList.length || inView){
+    // A group's parts have no overview of their own; the count line and the
+    // save button still belong there.
+    const sMeta = inView ? {name:_epScopeLabel(), overview:""}
+                         : epMetadata?.seasons?.[String(epCurrentSeason)];
     if(sMeta && (sMeta.overview || sMeta.name)){
       html += `<div class="px-3 sm:px-5 py-3 border-b border-gray-800">
         ${sMeta.overview ? `<p class="text-xs text-gray-400 line-clamp-3">${escHtml(sMeta.overview)}</p>` : ""}
@@ -12314,7 +12599,7 @@ function renderEpList(){
             missingEps.length
               ? `${visibleFiles.length} of ${visibleFiles.length+missingEps.length} episodes`
               : `${visibleFiles.length} episode${visibleFiles.length===1?"":"s"}`}</span>
-          ${(TV_MODE || (!isApp && epSeriesKey))?"":`<button onclick="epDownloadSeason(${epCurrentSeason})"
+          ${(TV_MODE || (!isApp && epSeriesKey) || (inView && !visibleFiles.length))?"":`<button onclick="${inView?"epDownloadViewTab()":`epDownloadSeason(${epCurrentSeason})`}"
             class="text-[10px] text-gray-500 hover:text-indigo-300 hover:bg-indigo-950/40 px-2 py-1 flex items-center gap-1 transition-colors uppercase tracking-wide">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -12342,7 +12627,7 @@ function renderEpList(){
           <span class="w-2 h-2 mt-1 bg-gray-600 flex-shrink-0"></span>
           <p class="text-[11px] text-gray-500 leading-snug">Some files here carry no season or episode number, so missing episodes can't be worked out for this show.</p>
         </div>`;
-    } else if(epSeasonList.length && epCurrentSeason>0 && missingEps.length){
+    } else if(!inView && epSeasonList.length && epCurrentSeason>0 && missingEps.length){
       const n=missingEps.length;
       // When every gap in this season is really the head of a neighbouring
       // release pack, name it once here as well as on the rows — and ADD a
@@ -12401,7 +12686,7 @@ function renderEpList(){
   // thirty episodes one at a time. One button, scoped to whatever the page is
   // showing (this season, or the whole show when it has no seasons).
   if(SIMPLE && !TV_MODE && visibleFiles.length && visibleFiles.some(f=>f.progress?.completed)){
-    const scopeLbl=epSeasonList.length?`Season ${epCurrentSeason}`:"this show";
+    const scopeLbl=(inView||epSeasonList.length)?_epScopeLabel():"this show";
     html += `<div class="px-3 sm:px-5 py-2 border-b border-gray-800 flex justify-end bg-gray-900/40">
       <button onclick="epStartOver(this)"
         title="Mark every episode here unwatched so it plays from the start again. Nothing is deleted."
@@ -12420,7 +12705,7 @@ function renderEpList(){
   //   • Recheck — force a piece-hash verify of the checked episodes.
   // Not on TV: download/prep scheduling is host management, done from a phone.
   if(epHasTorrent && !TV_MODE && !SIMPLE && visibleFiles.length){
-    const scope=epSeasonList.length?`Season ${epCurrentSeason}`:"All files";
+    const scope=(inView||epSeasonList.length)?_epScopeLabel():"All files";
     const multi=epSeasonList.length>1;
     const allDownloaded=epFiles.length>0 && epFiles.every(f=>f.complete!==false);
     const prepCur=_visibleSeasonPrepMode();
@@ -12475,7 +12760,11 @@ function renderEpList(){
   }
 
   html += `<div class="grid grid-cols-1 xl:grid-cols-2 items-start">`;
-  if(epCurrentSeason===0 && _epSeason0Buckets().length>1){
+  if(inView){
+    // The group's own order, missing episodes in their place. Its missing
+    // rows are real TMDb episodes, so the season-keyed card still fits.
+    viewRows.forEach(r=>{ html += r.f ? _epCardHtml(r.f) : _epMissingCardHtml(r.te.season, r.te); });
+  } else if(epCurrentSeason===0 && _epSeason0Buckets().length>1){
     // Several folders share the season-0 tab: label each run so it reads as a
     // set of named groups instead of one undifferentiated scroll (GitHub #15).
     // The heading spans both columns so the grid stays aligned. No missing-row
@@ -12496,7 +12785,7 @@ function renderEpList(){
     // having gone missing. Missing episodes interleave by episode number, so a gap
     // mid-season reads as a gap. Only re-sorted when there's something to
     // interleave, so a fully-downloaded season keeps exactly its natural order.
-    const rows = visibleFiles.map(f=>({ep:+f.episode||0, html:_epCardHtml(f)}))
+    const rows = visibleFiles.map(f=>({ep:_epSeasonPos(f), html:_epCardHtml(f)}))
       .concat(missingEps.map(te=>({ep:+te.episode||0,
                                    html:_epMissingCardHtml(epCurrentSeason, te)})));
     if(missingEps.length) rows.sort((a,b)=>a.ep-b.ep);
@@ -12712,10 +13001,10 @@ function epDownloadSeason(season){
   // per-item so it can't serve one, but a device save is per-file — in the app
   // the season saves across every item it spans.
   if(isApp && epSeriesKey){
-    return _appSaveFiles(epFiles.filter(f=>(+f.season||0)===s), `${title} Season ${s}`);
+    return _appSaveFiles(epFiles.filter(f=>_epTabOf(f)===s), `${title} Season ${s}`);
   }
   if(!epItemId) return;
-  const paths=epFiles.filter(f=>(+f.season||0)===s).map(f=>f.path);
+  const paths=epFiles.filter(f=>_epTabOf(f)===s).map(f=>f.path);
   epDownloadPaths(paths, `${title} Season ${s}`);
 }
 
@@ -20859,7 +21148,7 @@ async function _appRenderDashboard() {
       // No positive season anywhere (movies, unparsed names) ⇒ one flat list.
       const bySeason = new Map();
       for (const ep of g.eps) {
-        const s = +((ep.meta || {}).season) || 0;
+        const s = _bundleSeason(ep.meta || {});
         if (!bySeason.has(s)) bySeason.set(s, []);
         bySeason.get(s).push(ep);
       }
@@ -20921,7 +21210,7 @@ async function _appRenderDashboard() {
       const sections = seasonOrder.map((s) => {
         const eps = bySeason.get(s).sort((a, b) => {
           const am = a.meta || {}, bm = b.meta || {};
-          return ((+am.episode || 0) - (+bm.episode || 0))
+          return (_bundlePos(am) - _bundlePos(bm))
             || String(am.episode_name || a.name || "").localeCompare(String(bm.episode_name || b.name || ""));
         });
         const divider = divided
@@ -23324,7 +23613,7 @@ async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope, items
           .filter(it => it.itemId === itemId && it.complete && it.itemId !== _APP_PLAYER_KEY)
           .sort((a, b) => {
             const am = a.meta || {}, bm = b.meta || {};
-            return ((am.season || 0) - (bm.season || 0)) || ((am.episode || 0) - (bm.episode || 0));
+            return (_bundleSeason(am) - _bundleSeason(bm)) || (_bundlePos(am) - _bundlePos(bm));
           });
         const all = eps.map(it => it.filePath);
         const idx = all.indexOf(playlist[0]);
@@ -28987,6 +29276,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.24.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.25.0</div>
 </body>
 </html>

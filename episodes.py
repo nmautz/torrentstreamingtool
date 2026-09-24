@@ -469,10 +469,19 @@ def apply_slot(file_dict: dict, slot: dict) -> bool:
 
 def sort_key(f: dict) -> tuple:
     """Canonical library file order: seasons ascending, season-0 buckets last
-    (grouped by label), then episode, then name."""
+    (grouped by label), then episode, then name.
+
+    A special with a `home` (`epgroups.place_files` - TMDb's episode groups
+    agree it belongs inside a numbered season) sorts right after the episode it
+    follows there, so the play order runs S04E28, then the two Final Chapters
+    specials, instead of saving them until after the whole show."""
+    home = f.get("home")
+    if isinstance(home, dict) and int(home.get("season", 0) or 0) > 0:
+        return (int(home["season"]), "", int(home.get("after", 0) or 0), 1,
+                int(f.get("episode", 0) or 0), f.get("name") or "")
     season = int(f.get("season", 0) or 0)
     return (season or 9999, f.get("bucket") or "",
-            int(f.get("episode", 0) or 0) or 9999, f.get("name") or "")
+            int(f.get("episode", 0) or 0) or 9999, 0, 0, f.get("name") or "")
 
 
 # ── Sections ─────────────────────────────────────────────────────────────────

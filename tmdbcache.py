@@ -51,6 +51,8 @@ _SEASON_RE = re.compile(r"^/tv/\d+/season/\d+$")
 _TV_RE = re.compile(r"^/tv/\d+$")
 _MOVIE_RE = re.compile(r"^/movie/\d+$")
 _COLLECTION_RE = re.compile(r"^/collection/\d+$")
+_EP_GROUPS_RE = re.compile(r"^/tv/\d+/episode_groups$")
+_EP_GROUP_RE = re.compile(r"^/tv/episode_group/[0-9a-f]+$")
 # Curated, fast-moving lists (Explore rails).
 _LIST_RE = re.compile(r"^/(?:trending/|discover/|(?:tv|movie)/(?:popular|top_rated|"
                       r"on_the_air|airing_today|now_playing|upcoming)$)")
@@ -83,6 +85,8 @@ def ttl_for(path: str, data: Optional[dict], now: Optional[float] = None) -> flo
       once TMDb calls it Ended/Canceled.
     * **Movie details** carry the theatrical-only flags, so 12 h for anything
       released in the last six months (or not yet), 7 days after that.
+    * Episode groups (community arrangements: story arcs, DVD order) are
+      edited rarely: a show's list of them 24 h, one group 7 days.
     * Searches, 24 h. Genre lists and collections, 7 days. Curated
       trending/popular lists, 1 h.
     """
@@ -101,6 +105,10 @@ def ttl_for(path: str, data: Optional[dict], now: Optional[float] = None) -> flo
         if rel and rel < today - timedelta(days=180):
             return 7 * DAY
         return 12 * HOUR
+    if _EP_GROUPS_RE.match(path):
+        return DAY
+    if _EP_GROUP_RE.match(path):
+        return 7 * DAY
     if _COLLECTION_RE.match(path) or path.startswith("/genre/"):
         return 7 * DAY
     if path.startswith("/search/"):

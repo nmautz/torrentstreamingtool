@@ -167,6 +167,9 @@ The only persistent server-side state. Lives at the project root. Accessed via `
       "groups": { "<sig>": { "...same fields..." } }   // per-layout pick for mixed-release series
     }
   },
+  "episode_views": {                    // optional (18.25.0); how this profile arranges a show on its episode page.
+    "1429": "63469b5dd34eb3007e7bce8a"  //   TMDb show id -> TMDb episode group id. Absent = TMDb's seasons (the default).
+  },                                    //   Keyed by TMDb id so a season pack and the same show merged from singles agree.
   "audio_language_pref": {              // optional (8.9.3); self-learning per-profile audio fallback.
     "lang": "jpn",                     // canonical language of the last-picked audio track
     "idx": 1,                          // slot index of that pick (for untagged multi-audio releases)
@@ -627,6 +630,9 @@ in the `/files` response. See [STREAMING.md](STREAMING.md).
                                          //   the mapping table covers. Doubles as that pass's "this season is settled" mark — see below
   "rel_season": 2,                       // optional (17.1.0); what the RELEASE called this file, kept only where the anime pass moved it.
   "rel_episode": 1,                      //   Never read by the decode; it is the record, and what `animemap.reset_files` rewinds to
+  "home": {"season": 4, "after": 28,     // optional (18.25.0); a season-0 special TMDb's episode groups agree belongs INSIDE
+           "placed": true},              //   season 4, after its episode 28. `placed` = pass 4 MOVED it here from (4, 0).
+                                         //   Seasons view, play order (`sort_key`) and the app's Downloads tab list it there
   "compressed": true,                    // optional; set true when this file was re-encoded IN PLACE by the compression tool — see below
   "compressed_at": "2026-06-25T18:00:00Z", // optional; when the in-place re-encode replaced the original
   "validation": {                        // optional; written by the file validator
@@ -706,6 +712,37 @@ its seasons on a different grid than TMDb does. See § Anime season mapping belo
 show the mapping table covers, so no Western show can reach it, and it never touches a season pass 2
 resolved — those numbers are already TMDb slots, and reading them as release labels would shift them
 a second time.
+
+**Pass 4 — episode groups (18.25.0)** (`epgroups.place_files`, same call site). TMDb's *episode
+groups* are community arrangements of a show (story arcs, DVD order, production order), and every
+entry in one points at a real TMDb `(season, episode)`. The ones that arrange the show *by season*
+know something TMDb's own seasons don't: Attack on Titan's "Final Chapters" specials are
+**S00E36/E37**, TMDb's Final Season stops at episode 28, and every season-shaped group puts the two
+specials right after it. So does the release (`Attack on Titan Season 4/… - Finale 1.mkv`). Pass 1
+reads that as `(4, 0)`: a season, no episode number it trusts.
+
+`epgroups.season_homes` turns the groups into `{season: [{episode, after}]}`:
+
+* A vote comes only from a bucket holding **exactly one whole TMDb season** (every episode of it,
+  nothing from another). Story arcs and DVD discs cut seasons in pieces, so they never vote.
+* One dissenting whole-season bucket vetoes. `after` is the highest season episode ahead of the
+  special in the bucket, not the nearest, because an "intended order" group reshuffles the season.
+
+`place_files` then (all-or-nothing per season, and never onto a special another file already is):
+
+* moves each stuck `(S, 0)` file (unbucketed, not `abs_episode`) onto one of season S's specials:
+  by the number its name ends on (`Finale 2` → the 2nd) when every file has a distinct one in
+  range, else by order when the counts agree **and** each file shares a real word with its
+  special's TMDb name;
+* stamps `home` on every unbucketed season-0 file the groups place. Bucketed files (an `OAD`
+  folder's `OAD 3`) never take part, because their numbers are local to the folder.
+
+It is **offline**: the groups come from the TMDb disk cache (`_ep_group_homes`, sync, memoised
+5 min). `_settle_attribution` fetches them first (`_ep_groups_fetch`), but only for an item that
+has a candidate (`epgroups.eligible`). Nothing cached means no opinion and nothing moves. The admin
+**Refresh** rewinds it with `epgroups.reset_files` beside `animemap.reset_files`. Measured on the
+real data (`tests/test_epgroups.py`): Attack on Titan's specials land after S04E28, Firefly's three
+unaired episodes after S01E11, and Breaking Bad, Game of Thrones and Hunter x Hunter move nothing.
 
 `_settle_attribution` also **tops up the episode lists for any season the correction reveals**: the
 season list sent to TMDb is derived from the files, so correcting the files can surface seasons whose

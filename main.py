@@ -56,6 +56,7 @@ import clientlog
 import refiner
 import dvprobe
 import eplabel
+import epgroups
 import episodes
 import racerules
 import relquality
@@ -3922,6 +3923,66 @@ async def _tmdb_fetch_one_season(show_id: int, sn: int) -> Optional[dict]:
     }
 
 
+# ── Episode groups (18.25.0) ─────────────────────────────────────────────────
+# TMDb's other arrangements of a show: story arcs, DVD order, production order.
+# A VIEW on the episode page (the choice lives on the profile, per show), plus
+# attribution pass 4, which reads them for the specials that belong inside a
+# season. Never stored on `metadata` (most of those blobs are pinned); the TMDb
+# disk cache is the store. See epgroups.py.
+_EP_GROUPS_MAX = 24                  # One Piece has 18; past this is noise
+_ep_homes_memo: dict[int, tuple[float, Optional[dict]]] = {}
+
+
+async def _ep_groups_fetch(show_id: int) -> tuple[list[dict], dict[str, dict]]:
+    """Every episode group of a show: `(picker rows, {id: normalized})`.
+    Also what fills the disk cache `_ep_group_homes` reads."""
+    listing = await _tmdb_get(f"/tv/{show_id}/episode_groups")
+    if listing is None:
+        # No answer (no key, a 404, TMDb down with nothing cached). Remember
+        # "no opinion" for the memo window, or every page open would ask again.
+        _ep_homes_memo[int(show_id)] = (time.monotonic(), {})
+        return [], {}
+    rows = epgroups.summarize(listing)[:_EP_GROUPS_MAX]
+    details = await asyncio.gather(
+        *(_tmdb_get(f"/tv/episode_group/{g['id']}") for g in rows))
+    out = {}
+    for d in details:
+        n = epgroups.normalize(d)
+        if n:
+            out[n["id"]] = n
+    _ep_homes_memo.pop(int(show_id), None)
+    return rows, out
+
+
+def _ep_group_homes(metadata: Optional[dict]) -> Optional[dict]:
+    """`epgroups.season_homes` for a show, from the TMDb disk cache only (sync:
+    it runs inside the attribution pass). None = the groups were never fetched
+    here, so there's no opinion; `{}` = fetched, and nothing belongs anywhere.
+    Stale entries count, because a special doesn't change seasons."""
+    meta = metadata or {}
+    try:
+        show_id = int(meta.get("tmdb_id") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not show_id or meta.get("tmdb_kind") != "tv":
+        return None
+    hit = _ep_homes_memo.get(show_id)
+    if hit and time.monotonic() - hit[0] < 300:
+        return hit[1]
+    listing = _tmdb_disk.get(f"/tv/{show_id}/episode_groups")
+    homes: Optional[dict] = None
+    if listing:
+        groups = []
+        for row in epgroups.summarize(listing[0])[:_EP_GROUPS_MAX]:
+            d = _tmdb_disk.get(f"/tv/episode_group/{row['id']}")
+            n = epgroups.normalize(d[0]) if d else None
+            if n:
+                groups.append(n)
+        homes = epgroups.season_homes(groups, meta.get("all_seasons") or [])
+    _ep_homes_memo[show_id] = (time.monotonic(), homes)
+    return homes
+
+
 async def _tmdb_fetch_tv(show_id: int, seasons: Optional[list[int]]) -> dict:
     """Fetch show details + each requested season's episodes. Returns the
     cache-shaped dict (see _build_metadata_cache). `seasons=None` means every
@@ -4093,11 +4154,19 @@ def _reattribute_item_files(item: dict, metadata: Optional[dict]) -> bool:
               "rel_episode": int(f.get("rel_episode", 0) or 0)} for f in files]
     moved = episodes.resolve_absolute(slots, all_seasons)
     moved |= animemap.remap_slots(slots, all_seasons, _anime_entries(metadata))
-    if not moved:
-        return False
     changed = False
-    for f, slot in zip(files, slots):
-        changed |= episodes.apply_slot(f, slot)
+    if moved:
+        for f, slot in zip(files, slots):
+            changed |= episodes.apply_slot(f, slot)
+    # **Pass 4** (`epgroups.place_files`): specials TMDb's episode groups agree
+    # belong inside a numbered season, and the files a folder read left at
+    # `(season, 0)` that are those specials (Attack on Titan's "Season 4 -
+    # Finale 1/2" = S00E36/E37). Offline: reads the groups from the TMDb disk
+    # cache, which `_settle_attribution` fills. Nothing cached = no opinion.
+    if epgroups.eligible(files):
+        homes = _ep_group_homes(metadata)
+        if homes is not None:
+            changed |= epgroups.place_files(files, homes, metadata.get("title") or "")
     if changed:
         files.sort(key=episodes.sort_key)
     return changed
@@ -4142,6 +4211,13 @@ async def _settle_attribution(lib: dict, item: dict,
     write re-reads under the lock and re-applies to the fresh item, because by the
     time we get here that snapshot may predate other writers.
     """
+    if (meta or {}).get("tmdb_kind") == "tv" and meta.get("tmdb_id") \
+            and epgroups.eligible(item.get("files") or []) \
+            and _ep_group_homes(meta) is None:
+        # The groups decide pass 4 and it runs offline, so fetch them first.
+        # Only for an item with a special or a stuck `(season, 0)` file; a
+        # miss (no key, TMDb down) leaves the pass with no opinion.
+        await _ep_groups_fetch(int(meta["tmdb_id"]))
     if not _reattribute_item_files(item, meta):
         return meta
     async with mutate_library() as lib_w:
@@ -4153,6 +4229,12 @@ async def _settle_attribution(lib: dict, item: dict,
     have = {int(k) for k in (meta or {}).get("seasons", {}) if str(k).isdigit()}
     want = {int(f.get("season", 0) or 0) for f in item.get("files", [])}
     missing = sorted(s for s in want - have if s > 0)
+    # A special pass 4 homed inside a season needs season 0's names and stills,
+    # or it reads "Special 36" with a blank tile where the finale should be.
+    # Only then: season 0 is 300 entries for some shows.
+    if 0 not in have and any(isinstance(f.get("home"), dict)
+                             for f in item.get("files", [])):
+        missing.append(0)
     # Bounded: a correction shouldn't turn into an unbounded crawl of a
     # 20-season show on a single page open.
     if not missing or not (meta or {}).get("tmdb_id"):
@@ -14260,6 +14342,13 @@ class SubsConfigReq(BaseModel):
     single_option: bool = True
 
 
+class EpisodeViewReq(BaseModel):
+    # Which arrangement of a show this profile sees on the episode page: a TMDb
+    # episode group id, or None for TMDb's own seasons (the default).
+    tmdb_id: int
+    group_id: Optional[str] = None
+
+
 class ProfileSubsReq(BaseModel):
     # Per-profile override of the admin subs-on/off default.
     # None ⇒ inherit the admin default; True/False ⇒ force on/off for this profile.
@@ -14966,6 +15055,10 @@ async def _build_item_files(item: dict, profile_id: str) -> list[dict]:
             # query for a missing anime episode has to be built from: nobody
             # publishes "Hunter x Hunter S01E59", plenty publish "059".
             "abs_no": int(f.get("abs_no", 0) or 0) or None,
+            # A special TMDb's episode groups agree belongs INSIDE a numbered
+            # season: {season, after[, placed]}. The Seasons view lists it in
+            # that season's tab after episode `after`. See epgroups.py.
+            "home": f.get("home") if isinstance(f.get("home"), dict) else None,
             # What to CALL this file - "Show · S01E03" over the episode's name.
             # Every surface shows this, never `name`; the file name is only the
             # label when neither number nor name is known. See eplabel.py.
@@ -15489,6 +15582,41 @@ async def _tmdb_lookup_by_title(title: str, year: Optional[int],
         return data
 
 
+_EP_GROUP_ID_RE = re.compile(r"^[0-9a-f]{16,40}$")
+
+
+@app.get("/api/tmdb/tv/{tmdb_id}/episode-groups")
+async def tmdb_episode_groups(tmdb_id: int, profile_id: str = "") -> JSONResponse:
+    """The other arrangements TMDb has for a show (story arcs, DVD order, ...)
+    for the episode page's View picker, plus the one this profile chose.
+    `groups` is empty for most Western shows, and the picker then hides.
+    See epgroups.py."""
+    rows: list[dict] = []
+    if tmdb_id > 0 and await _tmdb_effective_key():
+        rows = epgroups.summarize(
+            await _tmdb_get(f"/tv/{tmdb_id}/episode_groups"))[:_EP_GROUPS_MAX]
+    selected = None
+    if profile_id:
+        lib = await get_library()
+        prof = next((p for p in lib.get("profiles", []) if p.get("id") == profile_id), None)
+        selected = ((prof or {}).get("episode_views") or {}).get(str(tmdb_id))
+    if selected and not any(r["id"] == selected for r in rows):
+        selected = None            # the group was deleted on TMDb: back to seasons
+    return JSONResponse({"groups": rows, "selected": selected})
+
+
+@app.get("/api/tmdb/episode-group/{group_id}")
+async def tmdb_episode_group(group_id: str) -> JSONResponse:
+    """One episode group, `epgroups.normalize`d: buckets in order, each
+    episode shaped like a `metadata.seasons[n].episodes` entry."""
+    if not _EP_GROUP_ID_RE.match(group_id or ""):
+        raise HTTPException(400, "Bad episode group id.")
+    g = epgroups.normalize(await _tmdb_get(f"/tv/episode_group/{group_id}"))
+    if not g:
+        raise HTTPException(404, "Episode group not found.")
+    return JSONResponse(g)
+
+
 @app.get("/api/tmdb/lookup")
 async def tmdb_lookup(title: str = "", year: int = 0, kind: str = "",
                      tmdb_id: int = 0) -> JSONResponse:
@@ -15882,7 +16010,11 @@ async def refresh_item_metadata(item_id: str, request: Request,
     await _anime_map_refresh()
     async with mutate_library() as lib_w:
         it = next((x for x in lib_w["items"] if x["id"] == item_id), None)
-        if it is None or not animemap.reset_files(it.get("files") or []):
+        if it is None:
+            raise LibraryUnchanged
+        files = it.get("files") or []
+        # `|`, not `or`: both rewinds must run.
+        if not (animemap.reset_files(files) | epgroups.reset_files(files)):
             raise LibraryUnchanged
         (it.get("files") or []).sort(key=episodes.sort_key)
     data = await _fetch_item_metadata(
@@ -25408,6 +25540,31 @@ async def set_profile_resume_mode(profile_id: str, req: ProfileResumeModeReq) ->
             raise HTTPException(404, "Profile not found.")
         profile["resume_mode"] = req.resume_mode
     return JSONResponse({"ok": True, "resume_mode": req.resume_mode})
+
+
+@app.post("/api/profiles/{profile_id}/episode-view")
+async def set_profile_episode_view(profile_id: str, req: EpisodeViewReq) -> JSONResponse:
+    """Remember how this profile arranges one show: an episode group id, or
+    None for TMDb's seasons. Keyed by TMDb id, so a season pack and the same
+    show merged from single episodes share one choice. A preference like
+    resume mode, so ungated."""
+    gid = (req.group_id or "").strip() or None
+    if gid and not _EP_GROUP_ID_RE.match(gid):
+        raise HTTPException(400, "Bad episode group id.")
+    if req.tmdb_id <= 0:
+        raise HTTPException(400, "tmdb_id is required.")
+    async with mutate_library() as lib:
+        profile = next((p for p in lib.get("profiles", []) if p["id"] == profile_id), None)
+        if not profile:
+            raise HTTPException(404, "Profile not found.")
+        views = profile.setdefault("episode_views", {})
+        if gid:
+            views[str(req.tmdb_id)] = gid
+        else:
+            views.pop(str(req.tmdb_id), None)
+            if not views:
+                profile.pop("episode_views", None)
+    return JSONResponse({"ok": True, "group_id": gid})
 
 
 @app.post("/api/profiles/{profile_id}/subtitles")
@@ -35054,6 +35211,9 @@ async def _bundle_meta_for_file(item: dict, file_entry: dict, tmdb: Optional[dic
         "season":        season,
         "episode":       episode,
         "episode_name":  ep_name,
+        # A special TMDb's episode groups placed inside a season (epgroups.py):
+        # the Downloads tab lists it there, after episode `after`.
+        "home":          file_entry.get("home") if isinstance(file_entry.get("home"), dict) else None,
         # The display label (eplabel.py), so the offline Downloads tab, the
         # sync-conflict modal and the lock screen name a downloaded episode the
         # same way the dashboard does, with no host to ask. Bundles downloaded

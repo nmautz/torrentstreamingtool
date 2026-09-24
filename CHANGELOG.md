@@ -1,5 +1,35 @@
 # Changelog
 
+## [18.25.0] — 2026-09-24
+### Arrange a show by story arc, DVD order, and so on
+
+- **An episode page can now show more than seasons.** TMDb has *episode groups*
+  for many shows (story arcs, DVD order, production order, a streaming
+  service's seasons, one long absolute list), and a new **View** picker above
+  the season tabs switches to any of them. Attack on Titan has twelve. Seasons
+  stay the default. The choice is remembered per profile, per show.
+- A group only rearranges the page. Every episode keeps its own number, so
+  watch progress, prep, downloads and labels are untouched. Each part shows
+  `8 of 12` like a season does, missing episodes appear in their place, and
+  the prep and download controls apply to the part you're looking at. Files a
+  group leaves out are under **Other**. The picker only appears when TMDb has
+  groups for the show.
+- **Attack on Titan's two finale specials now sit at the end of The Final
+  Season.** The release names them `Season 4 - Finale 1/2`, which gave them a
+  season but no episode, so they had no name or picture and sorted first. TMDb
+  files them as specials (S00E36/E37) after a 28-episode season. Every group
+  that arranges the show by season puts them right after episode 28, so they are
+  now named *The Final Chapters Special (1)/(2)*, listed after S04E28, and play
+  after it. This works for any show where the groups agree a special belongs
+  inside a season (Firefly's three unaired episodes close its season 1). It
+  never happens partially, and one group that disagrees stops it.
+- Fixed: opening the main part of a show that also has OVAs, movies or a spin-off
+  (from its shelf) never loaded the show's episode names.
+- New `epgroups.py` (tested in `tests/test_epgroups.py` against the real TMDb
+  data). New `GET /api/tmdb/tv/{id}/episode-groups`,
+  `GET /api/tmdb/episode-group/{id}`, `POST /api/profiles/{id}/episode-view`,
+  and `home` on every `/files` / `/series` file.
+
 ## [18.24.1] — 2026-09-24
 ### Library tiles are called by the show, not the torrent
 

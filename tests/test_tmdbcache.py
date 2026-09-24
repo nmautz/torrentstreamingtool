@@ -56,6 +56,8 @@ undated_season = {"episodes": [{"air_date": day(-400)}, {"air_date": ""}]}
 eq("settled season → 30 d", tc.ttl_for("/tv/2190/season/3", old_season, NOW), 30 * tc.DAY)
 eq("airing season → 12 h", tc.ttl_for("/tv/2190/season/28", airing_season, NOW), 12 * tc.HOUR)
 eq("undated episode → 12 h", tc.ttl_for("/tv/2190/season/28", undated_season, NOW), 12 * tc.HOUR)
+eq("episode group list → 24 h", tc.ttl_for("/tv/1429/episode_groups", {}, NOW), tc.DAY)
+eq("episode group → 7 d", tc.ttl_for("/tv/episode_group/63469b5dd34eb3007e7bce8a", {}, NOW), 7 * tc.DAY)
 eq("empty season → 12 h", tc.ttl_for("/tv/2190/season/29", {}, NOW), 12 * tc.HOUR)
 eq("running show → 12 h", tc.ttl_for("/tv/2190", {"status": "Returning Series"}, NOW), 12 * tc.HOUR)
 eq("ended show → 7 d", tc.ttl_for("/tv/2190", {"status": "Ended"}, NOW), 7 * tc.DAY)

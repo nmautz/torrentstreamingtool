@@ -5910,3 +5910,31 @@ Three traps:
   episode's `Show · S01E03` under `Show · S01E04` was the bug that distinction prevents.
 * **A film-bound item is a film whatever its file name says.** `Star.Wars.Episode.1.…`
   parses as episode 1; `label_file` checks `tmdb_kind == "movie"` before any number.
+
+### An episode group is a view, not a numbering (18.25.0)
+
+TMDb's episode groups (story arcs, DVD order, production order) never renumber anything. Every
+entry points back at a real TMDb `(season, episode)`, and that is the whole design: a file keeps
+its TMDb slot, and the group view only finds files by slot and lays them out in the group's order.
+Progress, prep, downloads, labels and the phone never learn that groups exist. Don't "convert"
+a file's `season`/`episode` into a group's numbering. The next attribution pass would read it back
+as a release label.
+
+Four traps:
+
+* **Only unbucketed files take part.** A file in an `OAD` / `Specials` folder is numbered *inside
+  that folder* (`OAD 3` is `(0, 3)` with `bucket: "OAD"`), not on TMDb's specials list. Matching
+  it to a group's S00E03 would put the wrong OVA there. That is also why a group view gives
+  season-0 entries no "Not downloaded" row: the OVA may well be on the box, in its folder.
+* **Play order is canonical, not the view's.** Next-up, auto-advance, TV Next/Prev and the
+  phone's offline order all follow `episodes.sort_key` (TMDb seasons, with `home` specials in
+  place). A group whose order differs (an "intended order", a story-arc cut that reorders) is for
+  browsing. Making play follow it would mean carrying the view into the server's next-up, the TV
+  playlist and the iOS offline sort. Not built.
+* **Only whole-season buckets vote on `home`.** A story arc that happens to end on a special says
+  nothing about which *season* the special belongs to. One whole-season bucket that disagrees
+  vetoes, because a wrong `home` moves an episode out of its tab and changes the play order.
+* **Pass 4 is offline and needs the cache.** `_ep_group_homes` reads the TMDb disk cache only. A
+  box that has never fetched the groups has no opinion (`None`) and moves nothing, and that is
+  deliberate: the attribution passes run inside `get_library` writers and must never do network
+  I/O. `_settle_attribution` does the fetch, before the pass, and only for an item with a candidate.
