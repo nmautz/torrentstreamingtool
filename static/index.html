@@ -19037,7 +19037,11 @@ function _npPayload() {
     itemId: lp.itemId || "",
     filePath: lp.filePath || "",
     profileId: (profile && profile.id) || "",
-    serverUrl: _npServerUrl(),
+    // Offline there is no host: the page origin is the loopback, which answers a
+    // progress POST with 405, and native's retries of it outlive the port. Empty
+    // makes native skip (`progress-skipped why:no-server`); the page's own
+    // OfflineStore write is what records the position.
+    serverUrl: _appOffline ? "" : _npServerUrl(),
     token: _appPairingToken() || "",
     // Cross-device sessions. While backgrounded the WebView's timers are frozen,
     // so _pbBeat stops firing and this device would vanish from every other
@@ -28797,6 +28801,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.21.5</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.21.6</div>
 </body>
 </html>

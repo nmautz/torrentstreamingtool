@@ -1,5 +1,17 @@
 # Changelog
 
+## [18.21.6] — 2026-09-24
+### Offline glasses playback stops posting progress to nobody
+
+- **Offline, the native player POSTed every progress write to the loopback page
+  origin, which answered `405`.** Each write was retried 4 times, and the last
+  retries landed after a relaunch on a port that no longer existed (`Could not
+  connect`). Nothing was lost, since the page writes the position to the on-device
+  store. But a stale retry that ever reached a live host would move the resume
+  point backwards. The offline page now arms native with no server, so native
+  skips the write (`progress-skipped why:"no-server"`) and the page's
+  OfflineStore write is the only record. Host-side only, no app rebuild.
+
 ## [18.21.5] — 2026-09-24
 ### Playing a download from the Downloads menu resumes again
 
