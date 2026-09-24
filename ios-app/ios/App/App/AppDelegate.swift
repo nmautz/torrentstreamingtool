@@ -65,3 +65,72 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
 }
+
+// MARK: - Scene lifecycle
+//
+// THE iOS 27 SDK MAKES THIS MANDATORY, AND FATAL. Apps built against SDK 27 that
+// do not adopt the UIScene lifecycle are killed the moment UIKit creates their
+// first scene — `EXC_BREAKPOINT` inside
+// `__UIApplicationEvaluateRuntimeIssueForNoSceneLifecycleAdoption_block_invoke`,
+// on the main thread, from `-[UIApplication workspace:didCreateScene:…]`. Against
+// SDK 26.5 the same source only got a console warning, so this arrives looking
+// exactly like "the new Xcode produces broken binaries": every build crashes
+// instantly, nothing is drawn, and the app dies before it can write its first
+// diagnostic row. It is not the compiler and not the optimiser — the trap is
+// UIKit's, and it is deliberate. Cost most of 2026-09-23 to find; see
+// docs/GOTCHAS.md.
+//
+// Capacitor's app template still ships the pre-scene layout (AppDelegate +
+// `UIMainStoryboardFile`), so this is ours to add and will be missing again from
+// any freshly generated iOS project.
+//
+// `UISceneStoryboardFile` in the manifest means UIKit builds the window and the
+// root `CAPBridgeViewController` itself, exactly as `UIMainStoryboardFile` used
+// to — so the bridge, the plugins and `MainViewController.capacitorDidLoad()` are
+// all untouched.
+//
+// WHAT DOES CHANGE: with scenes adopted, UIKit stops calling the app-delegate
+// lifecycle methods (`applicationDidEnterBackground` and friends). Everything in
+// this app that cares listens for the NOTIFICATIONS instead
+// (`UIApplication.didEnterBackgroundNotification`, `didBecomeActiveNotification`,
+// `willTerminateNotification`), and those are still posted under the scene
+// lifecycle — which is why the download manager, NativePlayback and the Live
+// Activity code need no changes. The one thing that genuinely moves is URL and
+// user-activity delivery, which is why they are forwarded below.
+//
+// `application(_:handleEventsForBackgroundURLSession:completionHandler:)` stays
+// on the APP delegate even under scenes — it must not be moved here, or the
+// background download session stops getting its flush callback.
+class SceneDelegate: UIResponder, UIWindowSceneDelegate {
+    var window: UIWindow?
+
+    // A cold launch opened by a URL delivers it here, not through
+    // `application(_:open:options:)`. The download Live Activity's deep link
+    // (`streamlink://downloads`) is exactly this case.
+    func scene(_ scene: UIScene, willConnectTo session: UISceneSession,
+               options connectionOptions: UIScene.ConnectionOptions) {
+        for ctx in connectionOptions.urlContexts { forward(ctx.url) }
+        if let activity = connectionOptions.userActivities.first { forward(activity) }
+    }
+
+    // …and a URL opened while already running arrives here.
+    func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
+        for ctx in URLContexts { forward(ctx.url) }
+    }
+
+    func scene(_ scene: UIScene, continue userActivity: NSUserActivity) {
+        forward(userActivity)
+    }
+
+    /// Hand it to Capacitor's proxy, which is what the app-delegate methods above
+    /// did — so plugins keep seeing opens and Universal Links unchanged.
+    private func forward(_ url: URL) {
+        _ = ApplicationDelegateProxy.shared.application(
+            UIApplication.shared, open: url, options: [:])
+    }
+
+    private func forward(_ activity: NSUserActivity) {
+        _ = ApplicationDelegateProxy.shared.application(
+            UIApplication.shared, continue: activity, restorationHandler: { _ in })
+    }
+}

@@ -3953,6 +3953,86 @@ final 17 s in which it finished). The load-bearing interval is
 used to read 32 KB/s. Zero `bundle-retry`, zero `bundle-failed`, zero stray Live
 Activities, `cpt-done held: 130`.
 
+### The iOS 27 SDK kills an app that has not adopted UIScene — and it looks like a broken compiler (18.20.1)
+The single most expensive hour of 2026-09-23. Every build made by the newly
+installed Xcode 27 crashed **instantly** on device: no UI, no first `launch` row,
+nothing to read. Same source built by Xcode 26.6 ran fine.
+
+```
+EXC_BREAKPOINT / SIGTRAP, main thread
+UIKitCore  __UIApplicationEvaluateRuntimeIssueForNoSceneLifecycleAdoption_block_invoke
+UIKitCore  -[UIApplication workspace:didCreateScene:withTransitionContext:completion:]
+```
+
+**Capacitor's app template still ships the pre-scene layout** — `AppDelegate` plus
+`UIMainStoryboardFile`, no `UIApplicationSceneManifest`. Against SDK 26.5 that is a
+console warning. Against **SDK 27.0 UIKit deliberately traps the process** as soon
+as it creates the first scene. Any freshly generated Capacitor iOS project will be
+missing this again.
+
+**Why it takes so long to diagnose, and how not to repeat it.** The trap fires
+before `UIApplicationMain` hands control to anything of ours, so:
+
+- no diagnostic row is written — `DiagLog`'s `launch` is already too late, and an
+  empty `Library/Caches` is itself the clue that the death is *pre-bootstrap*;
+- the crash is blind to every source-level variable, so a bisect over your own
+  code eliminates nothing;
+- rolling back the SDK "fixes" it, which points the finger squarely at the wrong
+  thing.
+
+Variables that were eliminated one install at a time, all of them innocent: the
+Swift optimiser (`-Onone`), the deployment target (min-iOS 15 → 27), the
+`DT*`/`DTSDKName` build stamps, `Metadata.appintents`, `Assets.car`, the launch
+nib, the on-device data (a fresh install crashes too), the free-provisioning app
+limit, and the sideloader.
+
+**GET THE CRASH REPORT FIRST. It is one command and it needs no Xcode GUI:**
+
+```bash
+xcrun devicectl list devices                     # UDID; Developer Mode must be on
+xcrun devicectl device copy from --device <UDID> \
+     --domain-type systemCrashLogs --source . --destination ./crash
+```
+
+An `.ips` is two JSON documents separated by a newline; `exception` +
+`termination` + the triggered thread's frames name the cause outright. The same
+tool reads the app's own container, which is how "did we write a log at all?" gets
+answered:
+
+```bash
+xcrun devicectl device copy from --device <UDID> --domain-type appDataContainer \
+     --domain-identifier <bundle-id> --source Library --destination ./container
+```
+
+Two traps around that workflow: the device must be **unlocked** for both
+`process launch` and container reads (a locked phone gives
+`FBSOpenApplicationErrorDomain error 7`, and an app launched while locked can exit
+without writing anything — a false negative that wasted a round here), and
+`devicectl device info processes` output is **whitespace-padded**, so an anchored
+`grep -E "App.app/App$"` reports a live app as dead.
+
+**What adopting scenes does and does not change.** `UISceneStoryboardFile = Main`
+makes UIKit build the window and root `CAPBridgeViewController` exactly as
+`UIMainStoryboardFile` did, so the bridge and plugin registration are untouched.
+But UIKit **stops calling the app-delegate lifecycle methods**
+(`applicationDidEnterBackground` and friends). This app survives that only because
+every lifecycle consumer listens for the NOTIFICATIONS —
+`UIApplication.didEnterBackgroundNotification`, `didBecomeActiveNotification`,
+`willTerminateNotification` — which still post under scenes. **Never migrate that
+code to app-delegate callbacks.** And
+`application(_:handleEventsForBackgroundURLSession:completionHandler:)` stays on
+the **app** delegate; moving it to the scene delegate silently reintroduces the
+never-flushed background session of 18.19.1.
+
+Unrelated but found alongside it, and worth knowing: Xcode 27 arrived with its
+packaged components uninstalled (`xcodebuild -checkFirstLaunchStatus` exits 69;
+`DVTCoreDeviceCore` fails to `dlopen`; "CoreSimulator is out of date").
+`xcodebuild -runFirstLaunch` fixes that **without sudo** — but it changes nothing
+about codegen: the rebuilt binary was byte-identical. It was never the cause.
+Separately, a **free developer profile allows only 3 apps per device**, which is a
+different quota from a sideloader's "signs left" (App IDs per 7 days) and fails at
+install with `ApplicationVerificationFailed`.
+
 ### Throttling a download to save battery costs MORE battery (18.20.0)
 The obvious battery setting — full speed / limited speed / off — is wrong in the
 middle, and the 2026-09-23 run measured it. Battery cost per gigabyte, by

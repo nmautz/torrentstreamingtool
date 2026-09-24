@@ -1,5 +1,52 @@
 # Changelog
 
+## [18.20.1] — 2026-09-23
+### The iOS 27 SDK makes UIScene adoption mandatory, and fatal
+
+Every build produced by Xcode 27 crashed instantly on device — no UI, no first log
+row, nothing. It looked exactly like a broken toolchain, and cost seven test builds
+and most of an afternoon to pin down. It was one missing Info.plist key.
+
+```
+EXC_BREAKPOINT / SIGTRAP, main thread
+UIKitCore  __UIApplicationEvaluateRuntimeIssueForNoSceneLifecycleAdoption_block_invoke
+UIKitCore  -[UIApplication workspace:didCreateScene:withTransitionContext:completion:]
+```
+
+Capacitor's app template still ships the **pre-scene** layout: an `AppDelegate`
+plus `UIMainStoryboardFile`, with no `UIApplicationSceneManifest`. Built against
+SDK 26.5 that was a console warning. Built against **SDK 27.0 it is a deliberate
+trap**, fired the moment UIKit creates the first scene — before the app can draw a
+frame or write a diagnostic row, which is why it presented as a compiler bug and
+survived a rollback of every other variable (optimiser, deployment target, SDK
+build stamps, AppIntents metadata, resources, device data, signing).
+
+The fix:
+
+- `Info.plist` gains a `UIApplicationSceneManifest` with `UISceneStoryboardFile
+  = Main`, so UIKit builds the window and the root `CAPBridgeViewController`
+  exactly as `UIMainStoryboardFile` used to. The bridge, the plugin registrations
+  and `capacitorDidLoad()` are untouched.
+- A `SceneDelegate` in `AppDelegate.swift` — deliberately in an existing file, so
+  no `project.pbxproj` surgery (this project is not a file-system-synchronised
+  group).
+
+Two things verified rather than assumed, because getting either wrong would be
+silent:
+
+- **`application(_:handleEventsForBackgroundURLSession:completionHandler:)` stays
+  on the APP delegate under scenes.** Moving it to the scene delegate would break
+  the background download session's flush callback — the exact bug 18.19.1 fixed.
+- **Everything else needed no change.** The lifecycle code in `BundleDownloader`
+  and `NativePlayback` observes `UIApplication.didEnterBackgroundNotification`,
+  `didBecomeActiveNotification` and `willTerminateNotification` through
+  `NotificationCenter`, and those still post under the scene lifecycle. Only URL
+  and user-activity delivery genuinely moves, so the new `SceneDelegate` forwards
+  both to `ApplicationDelegateProxy` — which is what keeps the download Live
+  Activity's `streamlink://downloads` deep link working.
+
+Verified on device: `launch build: 18.20.1`, `snap appState: "act"`.
+
 ## [18.20.0] — 2026-09-23
 ### Downloads now have a power and data policy — gates, never a throttle
 

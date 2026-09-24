@@ -49,6 +49,28 @@ public struct DownloadActivityAttributes: ActivityAttributes {
             self.fraction = fraction; self.filesDone = filesDone; self.fileCount = fileCount
             self.finished = finished; self.failed = failed; self.paused = paused
         }
+
+        // TOLERANT DECODE, because iOS restores ONGOING LIVE ACTIVITIES AT LAUNCH
+        // and their ContentState was serialised by whichever build started them.
+        // A previous build's payload has no `paused` key at all, and a synthesised
+        // decoder treats a missing key for a non-optional as an error — thrown in
+        // the launch path, before the app has drawn anything. Adding a field to a
+        // shipped ActivityAttributes is therefore a compatibility change, not an
+        // additive one: every new member needs `decodeIfPresent` and a default
+        // here, forever. Only `init(from:)` is custom, so `encode(to:)` stays
+        // synthesised and always writes the current shape.
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            title      = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
+            bytesDone  = try c.decodeIfPresent(Int64.self,  forKey: .bytesDone) ?? 0
+            bytesTotal = try c.decodeIfPresent(Int64.self,  forKey: .bytesTotal) ?? 0
+            fraction   = try c.decodeIfPresent(Double.self, forKey: .fraction) ?? 0
+            filesDone  = try c.decodeIfPresent(Int.self,    forKey: .filesDone) ?? 0
+            fileCount  = try c.decodeIfPresent(Int.self,    forKey: .fileCount) ?? 0
+            finished   = try c.decodeIfPresent(Bool.self,   forKey: .finished) ?? false
+            failed     = try c.decodeIfPresent(Bool.self,   forKey: .failed) ?? false
+            paused     = try c.decodeIfPresent(String.self, forKey: .paused) ?? ""
+        }
     }
 
     // Static attributes (fixed for the activity's life). Kept minimal — the title

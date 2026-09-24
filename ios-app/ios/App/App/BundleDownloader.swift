@@ -380,7 +380,14 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             UIDevice.current.isBatteryMonitoringEnabled = true
             BundleDownloadManager.shared.cacheBattery()
         }
-        startPathMonitor()
+        // NOT INSIDE init(). `shared` is a lazy static, so this initialiser runs
+        // inside swift_once — and `start(queue:)` immediately schedules the first
+        // pathUpdateHandler on `queue`, i.e. a callback into a half-built object
+        // from another thread while the once-token is still held. Anything on that
+        // path that touched `BundleDownloadManager.shared` would deadlock, and a
+        // 20-second launch deadlock is killed by the watchdog and reads as an
+        // instant crash. Hop out first, exactly as the battery sampling does.
+        DispatchQueue.main.async { [weak self] in self?.startPathMonitor() }
     }
 
     // MARK: - Gate (see DownloadGate / DownloadPolicy at the top of this file)
