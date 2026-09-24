@@ -1,5 +1,37 @@
 # Changelog
 
+## [18.24.0] — 2026-09-24
+### Episodes are called by their names, not their file names
+
+- **Everywhere a file was shown by its release name, it now shows what it is:**
+  `Breaking Bad · S01E03` over `...And the Bag's in the River`, instead of
+  `Breaking.Bad.S01E03.720p.BluRay.x264-DEMAND.mkv`. That covers the player's
+  title bar, the TV controls and the footer, the lock screen and Live Activity,
+  the glasses remote, the app's Downloads tab, toasts, the in-library download
+  list and every admin list (validation, repair, compression, the analyzer log,
+  the skip editor, offline cache, source eviction).
+- **The file name is only the label when nothing better is known**, meaning
+  neither the episode number nor its name. Without a name you get
+  `Show · S01E03`; without a number, `Show · Name`. As a last resort the file
+  name loses its `[Group]` tag, its `[CRC]` and its dots.
+- The show is TMDb's name for it. The episode name is TMDb's (its "Episode 7"
+  placeholders don't count), then whatever the release put after `SxxExx`.
+- Specials read `Special 5` (a folder's own `OVA 2` / `OAD 1`). A two-episode
+  file reads `S01E01-E02` with both names. Anime the release numbers absolutely
+  reads `S03E12 (148)`. A film reads `Heat (1995)`.
+- Lock screen and Live Activity: the episode's name is the big line and
+  `Show · S01E03` the small one. Both now move together when the phone advances
+  to the next episode on its own.
+- An episode tile no longer shows the grey file-name line when TMDb has no
+  description. The movie page is the one place the release name is still shown.
+- Unchanged on purpose: the file list you pick from before a torrent is added,
+  and the names of saved downloads and zips (subtitle sites and media servers
+  read those).
+- One rule for every surface: `eplabel.py` (tested in `tests/test_eplabel.py`).
+  The server attaches `label` to every file on `/files` and `/series`, writes it
+  into each downloaded bundle's meta, and sends `library_current_label` /
+  `tv_local_label` with the playback state. New `GET /api/admin/file-labels`.
+
 ## [18.23.2] — 2026-09-24
 ### Playing a downloaded episode no longer asks for your PIN
 

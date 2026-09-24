@@ -3734,6 +3734,7 @@
       </button>
       <div class="flex-1 min-w-0 text-center px-2 pointer-events-none">
         <div id="lpTitle" class="text-xs font-bold text-gray-200 truncate">—</div>
+        <div id="lpSubTitle" class="hidden text-[11px] text-gray-400 truncate"></div>
         <!-- Where the picture actually IS. Flips to "On Glasses" (indigo) while
              the native player holds an external display — _npSyncRemoteUi. A
              header that still says "On Device" during glasses playback is the
@@ -4298,7 +4299,17 @@ if(_seedTokenCookie) setProfileToken(_profileToken);
         init.headers = h;
       }
     } catch(_){}
-    return _origFetch(input, init);
+    const p = _origFetch(input, init);
+    // Remember every file label a /files or /series response carries (see
+    // fileLabel). A clone, read on the side - the caller's body is untouched.
+    try {
+      const url = (typeof input === "string") ? input : (input && input.url) || "";
+      if(/\/api\/library\/(?:series\/[^/?]+|[^/?]+\/files)(?:\?|$)/.test(url)){
+        p.then(r=>{ if(r && r.ok) r.clone().json().then(d=>_rememberLabels(d && d.files)).catch(()=>{}); })
+         .catch(()=>{});
+      }
+    } catch(_){}
+    return p;
   };
 })();
 let globalMaxVolume = 200;   // global VLC volume cap (0-200); fetched at startup
@@ -4799,9 +4810,82 @@ function _libRefreshDlStats(itemId){
 
 function pad2(n)      { return String(n).padStart(2,"0"); }
 function epLabel(f)   {
+  if(f.label && f.label.code) return f.label.code;
   if(f.season && f.episode) return `S${pad2(f.season)}E${pad2(f.episode)}`;
   if(f.episode) return `E${pad2(f.episode)}`;
-  return f.name;
+  return fileLabel(f).short;
+}
+
+// ── What to CALL a file (18.24.0) ────────────────────────────────────────────
+// The server attaches `label` (eplabel.py) to every file on /files and /series:
+//   {kind: "episode"|"movie"|"file", show, code, name, line1, line2, short}
+//   line1 "Breaking Bad · S01E03"   line2 "...And the Bag's in the River"
+//   short "Breaking Bad · S01E03"   (the one-line form - drops the name)
+// Every surface shows one of these, never `f.name`: the file name is the label
+// only when neither the episode number nor its name is known (kind "file").
+// `_fileLabels` remembers them by path - filled by the fetch hook below from
+// every /files and /series response - so the player, toasts and the lock
+// screen can name a file they only hold a path for.
+const _fileLabels = new Map();
+function _rememberLabels(files){
+  for(const f of files||[]) if(f && f.path && f.label) _fileLabels.set(f.path, f.label);
+}
+function _composeLabel(show, code, name, stem){
+  // Mirrors eplabel.compose - keep the two in step.
+  if(code){
+    const line1 = show ? `${show} \u00b7 ${code}` : code;
+    return {kind:"episode", show, code, name, line1, line2:name||"", short:line1};
+  }
+  if(name) return {kind:"episode", show, code:"", name, line1:show||name,
+                   line2:show?name:"", short:show?`${show} \u00b7 ${name}`:name};
+  return {kind:"file", show, code:"", name:"", line1:stem, line2:"", short:stem};
+}
+// Mirrors eplabel.clean_stem: the file name as a last resort, minus a leading
+// "[Group]", a trailing "[CRC32]" and dots standing in for spaces.
+function _cleanStem(name){
+  const stem = String(name||"").split(/[/\\]/).pop().replace(/\.\w{2,5}$/, "");
+  let t = stem.replace(/^\s*(?:\[[^\]]*\]\s*)+/, "").replace(/(?:\s*\[[0-9A-Fa-f]{8}\])+\s*$/, "");
+  if(!t.includes(" ")) t = t.replace(/[._]+/g, " ");
+  return t.trim() || stem;
+}
+function _labelShowFor(itemId){
+  try {
+    const it=(window._libCache||[]).find(x=>x && x.id===itemId);
+    return it ? ((it.series||"").trim() || (it.title||"").trim()) : "";
+  } catch(_){ return ""; }
+}
+// fileLabel(fileObjOrPath, itemId?) -> label. Server label when known; else the
+// same rules over what the page can see (the path's SxxExx, the library title).
+function fileLabel(f, itemId){
+  const path = (typeof f==="string") ? f : ((f && f.path) || "");
+  const lab = (f && typeof f==="object" && f.label) || _fileLabels.get(path);
+  if(lab) return lab;
+  const base = ((f && typeof f==="object" && f.name) || path.split(/[/\\]/).pop() || "");
+  const stem = _cleanStem(base);
+  const show = _labelShowFor(itemId || (f && typeof f==="object" && f.item_id) || "");
+  const info = parseEpisodeInfo(base);
+  const s = +(f && f.season) || (info ? info.season : 0);
+  const e = +(f && f.episode) || (info ? info.ep : 0);
+  const code = (s && e) ? `S${pad2(s)}E${pad2(e)}` : "";
+  return _composeLabel(show, code, (info && info.name) || "", stem);
+}
+// The lock screen / Live Activity / glasses remote: the episode's NAME is the
+// big line, "Show · S01E03" the small one (how Apple TV and Netflix do it).
+// No name -> the one line we have is the title and the subtitle is blank.
+// Inside one show's own page or card the show is already on screen: the code
+// and the name, "S01E03 · ...And the Bag's in the River".
+function labelInShow(lab){
+  if(lab.kind!=="episode") return lab.line1;
+  return [lab.code, lab.name].filter(Boolean).join(" \u00b7 ") || lab.line1;
+}
+function labelNowPlaying(lab){
+  return lab.line2 ? {title: lab.line2, series: lab.line1}
+                   : {title: lab.line1, series: lab.kind==="file" ? (lab.show||"") : ""};
+}
+// Two-line HTML for a title slot: line1 as given, line2 muted beneath it.
+function labelTwoLineHtml(lab, line2Cls){
+  return `<span>${escHtml(lab.line1)}</span>`
+    + (lab.line2 ? `<br><span class="${line2Cls||"font-normal text-gray-400"}">${escHtml(lab.line2)}</span>` : "");
 }
 
 // 8.6 — parse S01E03-style info from a raw title/filename
@@ -4826,27 +4910,40 @@ function parseEpisodeInfo(raw) {
   return { season, ep, name: epName || null };
 }
 
-// 8.6 — render episode metadata (or plain title) into #fcTitle
-// filePath = library_current_file (real filename with S01E03 pattern)
-// title    = active_title (item/torrent name — only used when no filePath)
-function setFcTitle(title, filePath) {
+// Render what is playing on the TV into #fcTitle. 18.24.0: the file's label
+// (eplabel.py - the server sends it as library_current_label / tv_local_label),
+// two lines: "Breaking Bad · S01E03" small, the episode's name large beneath.
+// With no name, the one line is the title. `title` (active_title) is used only
+// for a non-library stream, which has no file.
+function _fcTitleArgs(s) {
+  return s.tv_local_active
+    ? [s.active_title||"", s.tv_local_file_path||"", s.tv_local_label||null, s.tv_local_item_id||""]
+    : [s.active_title||"", s.library_current_file||"", s.library_current_label||null, s.library_item_id||""];
+}
+// One line for what the TV is playing: the file's label for library playback,
+// active_title for everything else (a plain stream, YouTube).
+function _nowPlayingText(s) {
+  const [title, fp, lab, iid] = _fcTitleArgs(s);
+  if ((s.is_library_playback || s.tv_local_active) && (lab || fp)) return (lab || fileLabel(fp, iid)).short;
+  return title;
+}
+function setFcTitle(title, filePath, label, itemId) {
   const el = document.getElementById("fcTitle");
   if (!el) return;
-  // Parse episode info from the file path first (has the real episode filename),
-  // then try the title for stream-only torrents that happen to include SxxExx.
-  const info = parseEpisodeInfo(filePath) || parseEpisodeInfo(title);
+  if (filePath || label) {
+    const lab = label || fileLabel(filePath, itemId);
+    el.innerHTML = lab.line2
+      ? `<span class="text-xs text-indigo-400 tracking-wide font-normal">${escHtml(lab.line1)}</span>`
+        + `<br><span>${escHtml(lab.line2)}</span>`
+      : `<span>${escHtml(lab.line1)}</span>`;
+    return;
+  }
+  // A plain stream (not the library): its torrent title may still carry SxxExx.
+  const info = parseEpisodeInfo(title);
   if (info) {
     el.innerHTML =
-      `<span class="text-xs font-mono text-indigo-400 tracking-wide font-normal">S${info.season} &middot; E${info.ep}</span>`
+      `<span class="text-xs font-mono text-indigo-400 tracking-wide font-normal">S${pad2(info.season)}E${pad2(info.ep)}</span>`
       + (info.name ? `<br><span>${escHtml(info.name)}</span>` : "");
-  } else if (filePath) {
-    // No SxxExx found — show the cleaned filename, not the item/torrent title
-    let fname = filePath;
-    try {
-      fname = decodeURIComponent(filePath.split(/[/\\]/).pop().replace(/\.\w{2,5}$/, ""));
-      fname = fname.replace(/[._]+/g, " ").trim();
-    } catch (_) {}
-    el.textContent = fname || title || "";
   } else {
     el.textContent = title || "";
   }
@@ -5141,7 +5238,7 @@ function renderPlayer(s){
   bar.style.width=`${barPct}%`;
   bar.className=`h-full transition-all duration-700 ${BAR_COLOR[s.stream_status]||BAR_COLOR.idle}`;
   dot.className=`w-2 h-2 flex-shrink-0 ${DOT_COLOR[s.stream_status]||DOT_COLOR.idle}`;
-  np.textContent=s.active_title||"No active stream";
+  np.textContent=(s.active_title && _nowPlayingText(s))||"No active stream";
   np.className=`text-sm font-bold truncate uppercase tracking-wide ${s.active_title?"text-gray-200":"text-gray-500"}`;
 
   // The status line. The TV-kiosk block below used to sit in the middle of
@@ -5165,7 +5262,7 @@ function renderPlayer(s){
     const buffering=s.stream_status==="buffering";
     tl.classList.toggle("show",buffering);
     if(buffering){
-      document.getElementById("tvLoadingTitle").textContent=s.active_title||"";
+      document.getElementById("tvLoadingTitle").textContent=s.active_title?_nowPlayingText(s):"";
       document.getElementById("tvLoadingSub").textContent=si.textContent||"Starting playback…";
     }
   }
@@ -5227,7 +5324,7 @@ function renderPlayer(s){
         fcst.textContent = "";
       }
     }
-    setFcTitle(s.active_title||"", s.library_current_file||"");
+    setFcTitle(..._fcTitleArgs(s));
     // Intentionally do NOT auto-close on stream_status==="idle" — the server can
     // take several seconds to publish the next track, and the user wants the
     // fullscreen volume slider reachable in that window. Close is manual only.
@@ -5743,7 +5840,7 @@ function openFullscreenControls(){
   _applyPhoneLandLayout();   // place relocated controls per orientation before showing
   const fc=document.getElementById("fullscreenControls");
   // Populate title and current state immediately
-  setFcTitle(app.active_title||"", app.library_current_file||"");
+  setFcTitle(..._fcTitleArgs(app));
   const fcst=document.getElementById("fcStatus");
   if(fcst) fcst.textContent=app.stream_status==="buffering"?"Buffering…":app.stream_status==="playing"?"Playing":"";
   const fct=document.getElementById("fcTime");
@@ -7371,7 +7468,7 @@ async function playSeries(seriesKey, mode, section, opts){
   const ordered=files.slice(idx), orderedItems=items.slice(idx);
   const seekTo=(mode!=="all" && resume && !resume.all_completed && (resume.position_sec||0)>5)?resume.position_sec:null;
   const rf=srcFiles[idx];
-  const label=(rf&&rf.name)||d.title||"";
+  const label=(rf&&fileLabel(rf).short)||d.title||"";
   await playLibraryWithChooser(orderedItems[0]||items[0], ordered, seekTo, label, false, "", orderedItems);
 }
 
@@ -9358,7 +9455,7 @@ function _dlFileRow(itemId, f, i){
   return `<div class="px-3 py-2">
     <div class="flex items-center gap-2">
       <div class="flex-1 min-w-0">
-        <div class="text-xs ${mode==='skip'?'line-through text-gray-600':'text-gray-300'} truncate">${escHtml(f.name)}</div>
+        <div class="text-xs ${mode==='skip'?'line-through text-gray-600':'text-gray-300'} truncate" title="${escHtml(f.name)}">${escHtml(labelInShow(fileLabel(f, itemId)))}</div>
         <div class="text-[11px] text-gray-600">${escHtml(f.size_human)}</div>
       </div>
       ${statusRight}
@@ -9403,7 +9500,7 @@ function renderDownloadFiles(itemId,files){
   el.querySelectorAll(".dl-play-btn").forEach(btn=>{
     btn.addEventListener("click",()=>{
       const f=cached[parseInt(btn.dataset.idx)]; if(!f) return;
-      playLibraryFiles(itemId,[f.path],0,f.name);
+      playLibraryFiles(itemId,[f.path],0,fileLabel(f, itemId).short);
     });
   });
   el.querySelectorAll(".dl-snow-btn").forEach(btn=>{
@@ -10892,7 +10989,9 @@ function _epOpenFilm(path){
 function _epDisplayTitle(file){
   // A file inside a Movies folder is a film with its own binding.
   if(file.film && file.film.title) return file.film.title;
-  // Priority: TMDb episode name → parsed filename name → bare label
+  // Priority: the server's label (TMDb, both names of a two-episode file,
+  // section-aware) → TMDb episode name → parsed filename name → nothing.
+  if(file.label && file.label.kind==="episode" && file.label.name) return file.label.name;
   const ep=_tmdbEpisode(file);
   if(ep?.name) return ep.name;
   // Fall back to the cleaned filename via existing parser
@@ -11005,21 +11104,27 @@ function _epCardHtml(f){
          <span class="text-2xl font-black font-mono">${escHtml(label)}</span>
        </div>`;
 
-  // Headline: "S01·E02 · Episode Title" if title present, else just "S01E02"
+  // Headline: the code + the episode's name. The show is the page, so it is not
+  // repeated here (18.24.0). The code is the server's when it has one - it knows
+  // "Special 5", "S01E01-E02" and "S03E12 (148)"; the file name appears only
+  // when there is neither a code nor a name.
+  const epCode = (f.label && f.label.code) || ((f.season&&f.episode) ? `S${pad2(f.season)}E${pad2(f.episode)}` : "");
   let headline;
-  if(f.season&&f.episode && epName){
-    headline = `<span class="text-[10px] sm:text-xs font-mono text-indigo-400 mr-1">S${pad2(f.season)}·E${pad2(f.episode)}</span><span class="ep-title text-sm sm:text-base font-bold text-gray-100">${escHtml(epName)}</span>`;
-  } else if(f.season&&f.episode){
-    headline = `<span class="ep-title text-sm sm:text-base font-mono font-bold text-gray-100">S${pad2(f.season)} · E${pad2(f.episode)}</span>`;
+  if(epCode && epName){
+    headline = `<span class="text-[10px] sm:text-xs font-mono text-indigo-400 mr-1">${escHtml(epCode)}</span><span class="ep-title text-sm sm:text-base font-bold text-gray-100">${escHtml(epName)}</span>`;
+  } else if(epCode){
+    headline = `<span class="ep-title text-sm sm:text-base font-mono font-bold text-gray-100">${escHtml(epCode)}</span>`;
   } else if(epName){
     headline = `<span class="ep-title text-sm sm:text-base font-bold text-gray-100">${escHtml(epName)}</span>`;
   } else {
-    headline = `<span class="ep-title text-sm sm:text-base text-gray-200 truncate">${escHtml(f.name)}</span>`;
+    headline = `<span class="ep-title text-sm sm:text-base text-gray-200 truncate" title="${escHtml(f.name)}">${escHtml(fileLabel(f).line1)}</span>`;
   }
 
+  // No overview → nothing. The grey file-name line that used to fill the gap is
+  // gone (18.24.0): the movie page is the one place the release name still shows.
   const subOverview = overview
     ? `<p class="text-[11px] sm:text-xs text-gray-400 mt-1 line-clamp-2">${escHtml(overview)}</p>`
-    : `<p class="text-[11px] text-gray-600 mt-1 truncate font-mono">${escHtml(f.name)}</p>`;
+    : "";
 
   // Watched recedes, everything still to watch (untouched or part-way) carries the
   // accent bar. The playing row keeps its own highlight instead.
@@ -12830,7 +12935,7 @@ async function epPlay(){
   if(firstFile?.progress && !firstFile.progress.completed && firstFile.progress.position_sec>5)
     seekTo=firstFile.progress.position_sec;
 
-  const label=firstFile?(epLabel(firstFile)+" — "+firstFile.name):"";
+  const label=firstFile?fileLabel(firstFile).short:"";
   closeEpisodeModal();
   await playLibraryWithChooser(itemId, ordered, seekTo, label, false, "", items);
 }
@@ -12874,7 +12979,7 @@ async function startShuffle(scope){
   const items=_epItemsForPaths(paths);
   const itemId=(items&&items[0])||epItemId;
   const firstFile=epFiles.find(f=>f.path===paths[0]);
-  const label=firstFile?("Shuffle · "+firstFile.name):"Shuffle";
+  const label=firstFile?("Shuffle · "+fileLabel(firstFile).short):"Shuffle";
   closeEpisodeModal();
   // Always start the first shuffled episode from the top (seek 0) — shuffle is a
   // fresh random run, not a resume. shuffle=true records the order server-side
@@ -12894,7 +12999,7 @@ async function epPlayFrom(fileIndex){
   let seekTo=null;
   if(firstFile?.progress && !firstFile.progress.completed && firstFile.progress.position_sec>5)
     seekTo=firstFile.progress.position_sec;
-  const label=firstFile?(epLabel(firstFile)+" — "+firstFile.name):"";
+  const label=firstFile?fileLabel(firstFile).short:"";
   closeEpisodeModal();
   await playLibraryWithChooser(itemId, ordered, seekTo, label, false, "", items);
 }
@@ -18343,18 +18448,27 @@ async function _appShowConflicts(list) {
   if (m) m.classList.remove("hidden");
 }
 
-// Friendly label for a conflicted file, pulled from the download's persisted meta
-// (series · SxEx · episode name) when available, else the bare file name.
+// A downloaded bundle's label (eplabel.py): the one the host wrote into its meta
+// (18.24.0+), else rebuilt by the same rules from the older fields, else what the
+// page knows about the path. `fallbackName` only when nothing else is known.
+function _bundleLabel(meta, filePath, itemId, fallbackName) {
+  meta = meta || {};
+  if (meta.label && meta.label.line1) return meta.label;
+  const fromPage = filePath ? _fileLabels.get(filePath) : null;
+  if (fromPage) return fromPage;
+  const show = (meta.title || meta.series || "").trim();
+  const code = (meta.season && meta.episode) ? `S${pad2(meta.season)}E${pad2(meta.episode)}` : "";
+  if (code || meta.episode_name) return _composeLabel(show, code, meta.episode_name || "", "");
+  if (filePath) return fileLabel(filePath, itemId);
+  return _composeLabel("", "", "", _cleanStem(fallbackName || "Download"));
+}
+
+// Friendly label for a conflicted file: the download's own label (_bundleLabel),
+// one line - "Show · S01E03".
 function _appConflictTitle(c) {
   const meta = c.meta || (c.event && c.event.meta) || null;
-  if (meta) {
-    const se = (meta.season != null && meta.episode != null)
-      ? `S${meta.season}·E${meta.episode}` : "";
-    const bits = [meta.series || meta.title, se, meta.episode_name].filter(Boolean);
-    if (bits.length) return bits.join(" — ");
-  }
   const fp = c.conflict.file_path || "";
-  return fp.split("/").pop() || fp || "Unknown file";
+  return _bundleLabel(meta, fp, c.conflict.item_id, fp.split("/").pop() || "Unknown file").short;
 }
 
 function _appRenderConflicts() {
@@ -18761,7 +18875,7 @@ async function _tvRemoteSync() {
     if (shouldShow) {
       const isYouTube = !!app.youtube_active;
       const common = {
-        title: app.active_title || (isYouTube ? "YouTube" : "Now Playing"),
+        title: (app.active_title && _nowPlayingText(app)) || (isYouTube ? "YouTube" : "Now Playing"),
         isYouTube,
         volume: parseInt(app.vlc_volume, 10) || 100,
         // The dashboard is served by the host, so its own origin IS the host.
@@ -18946,8 +19060,7 @@ function _npSyncRemoteUi() {
   // the phone awake — nothing, or the phone itself.
   _npSyncAwake();
   if (!on) return;
-  document.getElementById("lpRemoteSeries").textContent = _npSeriesName() || "On Glasses";
-  document.getElementById("lpRemoteTitle").textContent = lp.name || "";
+  _npSyncRemoteTitle();
   _lpRenderNavButtons();
   _lpCtlSync();
   _lpCtlTick();
@@ -18975,6 +19088,13 @@ function _npServerUrl() {
 // Series name for the Now Playing / Live Activity subtitle line. `lp` carries
 // only the file name, so resolve the owning item out of the library cache
 // (merged-series playback re-points lp.itemId per file, so this follows along).
+// The glasses remote's header: episode name big, "Show · S01E03" above it.
+function _npSyncRemoteTitle() {
+  const np = labelNowPlaying(lp.label || fileLabel(lp.filePath || "", lp.itemId));
+  document.getElementById("lpRemoteSeries").textContent = np.series || _npSeriesName() || "On Glasses";
+  document.getElementById("lpRemoteTitle").textContent = np.title || "";
+}
+
 function _npSeriesName() {
   try {
     const it = (window._libCache || []).find((x) => x && x.id === lp.itemId);
@@ -19000,6 +19120,11 @@ function _npPausedIntent(v) {
 // The only writer of pause INTENT. Call from real user transport actions.
 function _npSetPausedIntent(paused) { _npVisiblePaused = !!paused; }
 
+function _npTitlePair() {
+  const np = labelNowPlaying(lp.label || fileLabel(lp.filePath || "", lp.itemId));
+  return { title: np.title || "", series: np.series || "" };
+}
+
 function _npPayload() {
   const v = _lpV();
   // The project's trusted-playhead rule: currentTime reads 0 after iOS resets
@@ -19020,8 +19145,10 @@ function _npPayload() {
     duration: (v && v.duration > 0) ? v.duration : (lp.duration || 0),
     paused: _npPausedIntent(v),
     rate: (v && v.playbackRate) || 1,
-    title: lp.name || "",
-    series: _npSeriesName(),
+    // Lock screen / Live Activity: the episode's name is the title, "Show ·
+    // S01E03" the subtitle (labelNowPlaying). nextSeries rides with nextTitle so
+    // a native advance swaps both.
+    ..._npTitlePair(),
     audioName: "audio_" + (lp.pendingAudioIdx || 0),
     audioLang: (aud && aud.language) || "",
     subIndex: sub,
@@ -19053,6 +19180,7 @@ function _npPayload() {
     canNext: (lp.playlist || []).length > (lp.pi || 0) + 1,
     nextUrl: nx ? _npAbs(nx.url) : "",
     nextTitle: nx ? (nx.title || "") : "",
+    nextSeries: nx ? (nx.series || "") : "",
     nextFilePath: nx ? (nx.filePath || "") : "",
     nextItemId: nx ? (nx.itemId || "") : "",
     handoffEnabled: true,
@@ -19306,7 +19434,7 @@ function _npBindEvents() {
           lp.pi = i;
           lp.filePath = e.filePath;
           lp.itemId = (lp.playlistItems || [])[i] || lp.itemId;
-          lp.name = e.filePath.split(/[/\\]/).pop();
+          _lpSetTitle();
           lp._nextNative = null;
           // The skip windows we hold belong to the episode that just finished.
           // Native promoted the ones we armed alongside nextUrl and is already
@@ -19420,7 +19548,12 @@ function _npOnDisplayChange(connected) {
 // right after a navigation); used by the player to decide offline playback.
 async function _appLocalBundle(itemId, filePath) {
   if (!isApp) return null;
-  try { return await _cap.dl.getLocal({ itemId, filePath }); } catch (_) { return null; }
+  try {
+    const r = await _cap.dl.getLocal({ itemId, filePath });
+    // The bundle carries its label (18.24.0+) - offline, it is the only source.
+    if (r && r.meta && r.meta.label && !_fileLabels.has(filePath)) _fileLabels.set(filePath, r.meta.label);
+    return r;
+  } catch (_) { return null; }
 }
 
 // ── iOS app: online play-time handoff to the same-origin cached player ────────
@@ -19823,6 +19956,9 @@ function _appQueueClear(itemId, filePath) {
 // prompts the user via `_appChooseQuality`.
 async function appDownloadBundle(itemId, filePath, name, btn, quality) {
   if (!isApp) return;
+  // Display-only (the Downloads list, the Live Activity, iOS's background-task
+  // title): the episode's label rather than its release name (18.24.0).
+  { const lab = fileLabel(filePath, itemId); if (lab.kind !== "file" || !name) name = lab.short; }
   const key = offKey(itemId, filePath);
   const cur = offlineBundles.get(key);
   if (cur && cur.complete) {
@@ -19975,7 +20111,7 @@ async function _appSaveFiles(files, label){
     if (f.complete === false) continue;   // not on the host's disk yet
     const k = offKey(f.item_id, f.path), st = offlineBundles.get(k);
     if (st && (st.complete || st.downloading || st.queued)) continue;
-    offlineBundles.set(k, { queued:true, fraction:0, name:f.name });
+    offlineBundles.set(k, { queued:true, fraction:0, name:fileLabel(f).short });
     _appRefreshDlBtn(f.item_id, f.path);   // paint the spinner now, not after the quality probe
     toStart.push(f);
   }
@@ -20600,7 +20736,11 @@ async function _appRenderDashboard() {
   let items = [];
   try { items = (await _cap.dl.list()).items || []; } catch (_) {}
   const byKey = new Map();
-  for (const it of items) byKey.set(offKey(it.itemId, it.filePath), it);
+  for (const it of items) {
+    byKey.set(offKey(it.itemId, it.filePath), it);
+    // Offline, a bundle's own meta is the only source of its label (fileLabel).
+    if (it.meta && it.meta.label && it.filePath && !_fileLabels.has(it.filePath)) _fileLabels.set(it.filePath, it.meta.label);
+  }
 
   // 2. Ongoing downloads — anything in the offline map that isn't finished. The
   //    map carries the live fraction (host prep 0–50 %, transfer 50–100 %).
@@ -20613,9 +20753,8 @@ async function _appRenderDashboard() {
     if (st.waiting) nWaiting++;
     const it = byKey.get(key);
     const meta = st.meta || (it && it.meta) || {};
-    const label = (meta.series ? meta.series + " — " : "")
-      + (meta.season && meta.episode ? `S${String(meta.season).padStart(2,"0")}E${String(meta.episode).padStart(2,"0")} ` : "")
-      + (meta.episode_name || st.name || (it && it.name) || key.split("|").slice(1).join("|") || "Download");
+    const fp = (it && it.filePath) || key.split("|").slice(1).join("|");
+    const label = _bundleLabel(meta, fp, (it && it.itemId) || key.split("|")[0], st.name || (it && it.name));
     active.push({ key, label, st, itemId: (it && it.itemId), filePath: (it && it.filePath) });
   }
   // "Resume all" only when something is actually stalled waiting on the network.
@@ -20632,11 +20771,12 @@ async function _appRenderDashboard() {
       const _k = escHtml(JSON.stringify(key));
       return `<div style="border:1px solid #2a2a30;background:#141417;padding:11px 13px;margin-bottom:8px;">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:13px;font-weight:700;">
-          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto;min-width:0;">${escHtml(label)}</span>
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto;min-width:0;">${escHtml(label.line1)}</span>
           <span style="color:#3a7afe;flex:0 0 auto;">${pct}%</span>
           <button onclick="_appCancelDownload(${_k})" title="Stop this download" style="all:unset;cursor:pointer;flex:0 0 auto;
             color:#8a8a92;border:1px solid #2a2a30;padding:3px 9px;font-size:12px;font-weight:700;"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
         </div>
+        ${label.line2 ? `<div style="font-size:12px;color:#c8c8d0;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(label.line2)}</div>` : ""}
         <div style="font-size:11px;color:#8a8a92;margin-top:3px;">${escHtml(sub)}</div>
         <div style="height:3px;background:#26262c;margin-top:7px;"><i style="display:block;height:100%;background:#3a7afe;width:${pct}%;"></i></div>
       </div>`;
@@ -20657,7 +20797,8 @@ async function _appRenderDashboard() {
     total += bytes;
     const meta = it.meta || {};
     const gkey = (meta.series || meta.title || it.name || it.sha).trim().toLowerCase();
-    const g = groups.get(gkey) || { title: meta.series || meta.title || it.name || "Download", meta, eps: [], bytes: 0 };
+    // Grouped by the library's series (a stable key); headed by TMDb's name for it.
+    const g = groups.get(gkey) || { title: meta.title || meta.series || it.name || "Download", meta, eps: [], bytes: 0 };
     g.eps.push(it); g.bytes += bytes;
     groups.set(gkey, g);
   }
@@ -20718,11 +20859,14 @@ async function _appRenderDashboard() {
       const _gk = escHtml(JSON.stringify(g.eps.map((ep) => offKey(ep.itemId, ep.filePath))));
       const epRow = (ep) => {
         const m = ep.meta || {};
-        // Under a season divider the season is implicit — just the episode number.
-        const num = divided
-          ? (m.episode ? `E${pad2(m.episode)} ` : "")
-          : (m.season && m.episode) ? `S${pad2(m.season)}·E${pad2(m.episode)} ` : (m.episode ? `E${pad2(m.episode)} ` : "");
-        const nm = m.episode_name || ep.name || ep.sha;
+        const lab = _bundleLabel(m, ep.filePath, ep.itemId, ep.name);
+        // Under a season divider the season is implicit — just the episode number
+        // (the code's own "E01-E02" / "(148)" / "Special 5" kept).
+        const code = lab.code || ((m.season && m.episode) ? `S${pad2(m.season)}E${pad2(m.episode)}` : (m.episode ? `E${pad2(m.episode)}` : ""));
+        const num = code ? (divided ? code.replace(/^S\d+(?=E)/, "") : code) + " " : "";
+        // The show is the group header; the row is code + name. The file name
+        // only when neither is known.
+        const nm = lab.name || (code ? "" : lab.line1) || ep.sha;
         const _id = escHtml(JSON.stringify(ep.itemId)), _p = escHtml(JSON.stringify(ep.filePath));
         const key = offKey(ep.itemId, ep.filePath);
         const _k = escHtml(JSON.stringify(key));
@@ -21795,7 +21939,7 @@ async function _appAutoApply(byKey, keep, toStart, q) {
   if (removed) _appRenderDashboard();
   if (toStart.length && hlsAvailable) {
     for (const f of toStart)
-      offlineBundles.set(offKey(f.item_id, f.path), { queued: true, fraction: 0, name: f.name });
+      offlineBundles.set(offKey(f.item_id, f.path), { queued: true, fraction: 0, name: fileLabel(f).short });
     _appRunPooled(toStart, 2, (f) => appDownloadBundle(f.item_id, f.path, f.name, null, q));
   }
 }
@@ -21961,7 +22105,7 @@ async function prepForStreaming(itemId, filePath, fileName) {
     }
     prepFileState.set(k, "ready");
     if (epItemId === itemId) renderEpList();
-    showAlert(`"${fileName||"Episode"}" is ready to stream.`, "success");
+    showAlert(`${fileLabel(filePath, itemId).short} is ready to stream.`, "success");
   } catch (err) {
     prepFileState.delete(k);
     if (epItemId === itemId) renderEpList();
@@ -23739,6 +23883,27 @@ function _lpFallBackToLocal(filePath, seekTo) {
   return true;
 }
 
+// What the player calls the file it is on (18.24.0): the label (eplabel.py),
+// never the file name unless nothing better is known. `lp.name` is the one-line
+// form every other surface reads (the session banner, the kiosk heartbeat);
+// the header gets both lines. Re-run whenever a better label may have arrived.
+function _lpSetTitle() {
+  const lab = fileLabel(lp.filePath || "", lp.itemId);
+  lp.label = lab;
+  lp.name = lab.short;
+  const t = document.getElementById("lpTitle"), sub = document.getElementById("lpSubTitle");
+  if (t) t.textContent = lab.line1 || "\u2014";
+  if (sub) { sub.textContent = lab.line2 || ""; sub.classList.toggle("hidden", !lab.line2); }
+  const rt = document.getElementById("lpRemoteTitle");
+  if (rt && rt.offsetParent !== null) _npSyncRemoteTitle();
+}
+// The next episode's lock-screen lines, armed ahead so a native advance can
+// swap both without the page (its timers are frozen while locked).
+function _lpNextTitle(path, itemId) {
+  const np = labelNowPlaying(fileLabel(path, itemId));
+  return { title: np.title, series: np.series };
+}
+
 async function _lpLoadIndex(seekTo) {
   const filePath = lp.playlist[lp.pi];
   if (!filePath) { lpStop(); return; }
@@ -23747,7 +23912,7 @@ async function _lpLoadIndex(seekTo) {
   // prep / stream-ondemand / progress / saved-tracks all target its owning item
   // as playback crosses episode-torrent boundaries. No-op for single-item plays.
   if (lp.playlistItems && lp.playlistItems[lp.pi]) lp.itemId = lp.playlistItems[lp.pi];
-  lp.name = filePath.split(/[/\\]/).pop();
+  _lpSetTitle();
   // A new file gets a fresh fallback budget — the guard exists to stop ONE
   // failing file ping-ponging, not to disable fallback for the rest of the run.
   _tvFallbackDoneFor = "";
@@ -23768,8 +23933,6 @@ async function _lpLoadIndex(seekTo) {
   // window would hand off to the wrong file. `_npOk()` goes false meanwhile, so
   // a lock mid-load simply doesn't hand off.
   lp._nativeMaster = null; lp._nextNative = null;
-
-  document.getElementById("lpTitle").textContent = lp.name;
 
   let prep;
   lp._localBase = null;
@@ -23803,6 +23966,7 @@ async function _lpLoadIndex(seekTo) {
     try {
       const local = await _appLocalBundle(lp.itemId, filePath);
       if (lp.filePath !== filePath) return;     // raced with a stop/advance
+      _lpSetTitle();                            // the bundle may know its label when nothing else did
       if (local && local.complete && local.dir) {
         _lpShowPreparing("Loading offline copy…");
         // Remembered track picks live on the host; fetch them alongside the
@@ -27331,7 +27495,7 @@ function _lpArmNextNative(itemId, nextPath) {
         return;
       }
       lp._nextNative = { url: prep.native_master_url, filePath: nextPath, itemId,
-                         title: nextPath.split(/[/\\]/).pop(), skip: null };
+                         ..._lpNextTitle(nextPath, itemId), skip: null };
       _npArm();
       _lpAttachNextSkip(itemId, nextPath);
       _npLog("next-armed", { file: nextPath, via: "already-ready" }, "play");
@@ -27419,7 +27583,7 @@ function _lpWarmNextEp() {
       // having moved under us while we awaited.
       if (ready.native_master_url && lp.playlist[lp.pi + 1] === nextPath) {
         lp._nextNative = { url: ready.native_master_url, filePath: nextPath, itemId,
-                           title: nextPath.split(/[/\\]/).pop(), skip: null };
+                           ..._lpNextTitle(nextPath, itemId), skip: null };
         _npArm();
         _lpAttachNextSkip(itemId, nextPath);
         _npLog("next-armed", { file: nextPath, via: "warmed" }, "play");
@@ -28809,6 +28973,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.23.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.24.0</div>
 </body>
 </html>

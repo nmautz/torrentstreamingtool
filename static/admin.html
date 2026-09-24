@@ -2025,6 +2025,39 @@ function escHtml(s){
     .replace(/"/g,"&quot;").replace(/'/g,"&#039;");
 }
 
+// 18.24.0 — episode labels. Every admin list that reports a file shows what the
+// file IS ("Breaking Bad · S01E03") rather than its release name; the raw name
+// stays on hover. One fetch serves them all (/api/admin/file-labels, eplabel.py),
+// resolved by path, then by basename where that is unique. Refreshed at most
+// once a minute; a list rendered before it lands shows plain names until its
+// next render.
+let _fileLabels = {by_path:{}, by_name:{}};
+let _fileLabelsAt = 0, _fileLabelsP = null;
+function _ensureFileLabels(){
+  // Callers await the SAME in-flight fetch, so a list opened while switchTab's
+  // fetch is still out waits for it instead of rendering plain names.
+  if(_fileLabelsP && Date.now() - _fileLabelsAt < 60000) return _fileLabelsP;
+  _fileLabelsAt = Date.now();
+  _fileLabelsP = (async()=>{
+    try{
+      const r = await fetch("/api/admin/file-labels", {headers: authHeader()});
+      if(r.ok) _fileLabels = await r.json();
+    }catch(_){}
+  })();
+  return _fileLabelsP;
+}
+function _fileLabel(pathOrName){
+  const raw = String(pathOrName||"");
+  const base = raw.split(/[\\/]/).pop();
+  return (_fileLabels.by_path||{})[raw] || (_fileLabels.by_name||{})[base] || base;
+}
+// Escaped label, raw file name as the tooltip. Pass the path when the row has
+// one (exact), else the bare name.
+function _fileLabelHtml(pathOrName){
+  const base = String(pathOrName||"").split(/[\\/]/).pop();
+  return `<span title="${escHtml(base)}">${escHtml(_fileLabel(pathOrName))}</span>`;
+}
+
 function showToast(msg, isErr=false){
   const el=document.getElementById("toast");
   el.textContent=msg;
@@ -2163,6 +2196,7 @@ async function loadOfflineEncoder(){
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 function switchTab(tab){
   activeTab = tab;
+  _ensureFileLabels();
   ["activity","indexers","content","profiles","skip","offline","storage","cleanup","background","system","updates"].forEach(t=>{
     document.getElementById(`tab-${t}`).className =
       t===tab ? "tab-active px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors"
@@ -3194,7 +3228,7 @@ function _amRenderBundle(ba){
   const dmg = (ba.damaged || []).length;
   if(ba.running){
     const t = ba.total || 0, n = ba.scanned || 0;
-    el.textContent = `Scanning ${n}/${t || "?"}` + (ba.current_name ? ` · ${ba.current_name}` : "")
+    el.textContent = `Scanning ${n}/${t || "?"}` + (ba.current_name ? ` · ${_fileLabel(ba.current_name)}` : "")
       + (dmg ? ` · ${dmg} damaged` : "");
     return;
   }
@@ -3208,6 +3242,7 @@ function _amRenderBundle(ba){
 // Run the audit right now over every prepped bundle. Unlike the idle sweep this
 // re-checks bundles that already have a verdict — it is the "look again" button.
 async function runBundleAudit(){
+  await _ensureFileLabels();
   const btn = document.getElementById("amBundleRunBtn");
   if(btn) btn.disabled = true;
   try{
@@ -3628,7 +3663,7 @@ function _renderFileValidation(d){
   const missing = (d && d.missing) || [];
 
   if(running){
-    const cur = d.current_name ? ` · ${escHtml(d.current_name)}` : "";
+    const cur = d.current_name ? ` · ${escHtml(_fileLabel(d.current_name))}` : "";
     status.innerHTML = `<span class="text-emerald-400 font-bold">Checking</span> · `
       + `${scanned}/${total}${cur} · ${damaged.length} damaged`;
   } else if(d && d.error){
@@ -3654,13 +3689,13 @@ function _renderFileValidation(d){
     results.classList.remove("hidden");
     const dmg = damaged.map(f=>`
       <div class="border border-red-900 bg-red-950/30 px-3 py-2">
-        <div class="text-xs font-bold text-red-300 break-all">${escHtml(f.name)}</div>
+        <div class="text-xs font-bold text-red-300 break-all">${_fileLabelHtml(f.path||f.name)}</div>
         <div class="text-[10px] text-gray-500 break-all mt-0.5">${escHtml(f.item_title || "")}</div>
         ${f.error ? `<div class="text-[10px] text-red-400/80 font-mono break-all mt-1">${escHtml(f.error)}</div>` : ""}
       </div>`).join("");
     const mis = missing.map(f=>`
       <div class="border border-gray-700 bg-gray-950/40 px-3 py-2">
-        <div class="text-xs font-bold text-gray-400 break-all">${escHtml(f.name)}</div>
+        <div class="text-xs font-bold text-gray-400 break-all">${_fileLabelHtml(f.path||f.name)}</div>
         <div class="text-[10px] text-gray-600 break-all mt-0.5">${escHtml(f.item_title || "")} · not on disk</div>
       </div>`).join("");
     results.innerHTML =
@@ -3777,7 +3812,7 @@ function _renderFileRepair(d){
   const scanned = (d && d.scanned) || 0;
 
   if(_frRunning){
-    const cur = d.current_name ? ` · ${escHtml(d.current_name)}` : "";
+    const cur = d.current_name ? ` · ${escHtml(_fileLabel(d.current_name))}` : "";
     status.innerHTML = `<span class="text-amber-400 font-bold">Repairing</span> · ${scanned}/${total}${cur}`
       + ` · ${repaired.length} fixed, ${failed.length} failed`;
   } else if(d && d.error){
@@ -3796,12 +3831,12 @@ function _renderFileRepair(d){
     results.classList.remove("hidden");
     const ok = repaired.map(f=>`
       <div class="border border-emerald-900 bg-emerald-950/20 px-3 py-2">
-        <div class="text-xs font-bold text-emerald-300 break-all">${escHtml(f.name)}</div>
+        <div class="text-xs font-bold text-emerald-300 break-all">${_fileLabelHtml(f.path||f.name)}</div>
         <div class="text-[10px] text-gray-500 break-all mt-0.5">Fixed by ${escHtml(f.method || "repair")}${f.torrent ? " · was torrent-backed — seeding will stop" : ""}</div>
       </div>`).join("");
     const bad = failed.map(f=>`
       <div class="border border-red-900 bg-red-950/20 px-3 py-2">
-        <div class="text-xs font-bold text-red-300 break-all">${escHtml(f.name)}</div>
+        <div class="text-xs font-bold text-red-300 break-all">${_fileLabelHtml(f.path||f.name)}</div>
         ${f.error ? `<div class="text-[10px] text-red-400/80 font-mono break-all mt-0.5">${escHtml(f.error)}</div>` : ""}
       </div>`).join("");
     results.innerHTML =
@@ -3951,7 +3986,7 @@ function _renderCompression(d){
   const freed = (d && d.bytes_freed) || 0;
   const okN = res.filter(x=>x.status === "compressed").length;
   if(running){
-    const cur = d.current_name ? ` · ${escHtml(d.current_name)}` : "";
+    const cur = d.current_name ? ` · ${escHtml(_fileLabel(d.current_name))}` : "";
     status.innerHTML = `<span class="text-emerald-400 font-bold">Compressing</span> · ${scanned}/${total}${cur} · ${okN} done · ${_fmtBytes(freed)} freed`;
   } else if(d && d.error){
     status.innerHTML = `<span class="text-red-400 font-bold">Error:</span> ${escHtml(d.error)}`;
@@ -3971,7 +4006,7 @@ function _renderCompression(d){
           + (f.torrent ? " · was torrent-backed — seeding stopped" : "")
         : escHtml(f.detail || f.status);
       return `<div class="border border-${bc} bg-${bg} px-3 py-2">
-        <div class="text-xs font-bold text-${tc} break-all">${escHtml(f.name)}</div>
+        <div class="text-xs font-bold text-${tc} break-all">${_fileLabelHtml(f.path||f.name)}</div>
         <div class="text-[10px] text-gray-500 break-all mt-0.5">${detail}</div>
       </div>`;
     }).join("");
@@ -5405,6 +5440,7 @@ function _renderSkipRow(it, job){
 }
 
 async function loadAnalyzerLog(btn){
+  await _ensureFileLabels();
   const el = document.getElementById("skipLogList");
   if(!el) return;
   _markLoading(btn, true);
@@ -5432,7 +5468,7 @@ async function loadAnalyzerLog(btn){
           ${code}
           <span class="text-[10px] uppercase tracking-widest font-bold ${tone}">${escHtml(e.level||"")}</span>
         </div>
-        ${fname?`<div class="text-xs text-gray-400 font-mono truncate" title="${escHtml(e.file_path||'')}">${escHtml(fname)}</div>`:''}
+        ${fname?`<div class="text-xs text-gray-400 truncate" title="${escHtml(e.file_path||'')}">${escHtml(_fileLabel(e.file_path))}</div>`:''}
         <div class="text-xs ${tone} mt-0.5">${escHtml(e.message||"")}</div>
       </div>`;
     }).join("");
@@ -5572,6 +5608,7 @@ function _skipProvenance(f){
 }
 
 async function openSkipEditor(itemId, title){
+  await _ensureFileLabels();
   _skipEditorItemId = itemId;
   document.getElementById("skipEditorTitle").textContent = `Edit Skip Times — ${title}`;
   document.getElementById("skipEditor").classList.remove("hidden");
@@ -5597,7 +5634,7 @@ async function openSkipEditor(itemId, title){
       : '';
     return `
     <div class="px-5 py-4 space-y-2">
-      <div class="text-sm font-bold text-gray-200 truncate">${escHtml(f.name)}</div>
+      <div class="text-sm font-bold text-gray-200 truncate">${_fileLabelHtml(f.path||f.name)}</div>
       ${f.source ? `<div class="text-[10px] text-gray-600 uppercase tracking-widest">Source: ${escHtml(f.source)}${f.method?` · ${escHtml(f.method)}`:''}</div>` : ''}
       ${_skipProvenance(f)}
       ${errBlock}
@@ -6177,6 +6214,7 @@ function _fmtAgo(epochSecs){
 // forceRefresh=true re-walks the cache directory on the server (the Refresh
 // button). A plain call serves the server's cached snapshot for an instant open.
 async function loadOfflineCache(forceRefresh){
+  await _ensureFileLabels();
   const list = document.getElementById("offItemList");
   const totalEl = document.getElementById("offTotal");
   const genEl = document.getElementById("offGeneratedAt");
@@ -6361,6 +6399,7 @@ async function saveSourceEviction(btn){
 }
 
 async function runSourceEvictionDryRun(btn){
+  await _ensureFileLabels();
   const status = document.getElementById("seStatus");
   const out    = document.getElementById("seResult");
   if(btn){ btn.disabled = true; btn.classList.add("opacity-50"); _markLoading(btn, true); }
@@ -6386,7 +6425,7 @@ function _seRenderPlan(d){
   const rows = (list) => list.map(c => `
     <div class="flex items-baseline justify-between gap-3 px-5 py-1.5 border-t border-gray-800/60">
       <div class="min-w-0">
-        <div class="truncate text-gray-300">${_esc(c.name)}</div>
+        <div class="truncate text-gray-300">${_fileLabelHtml(c.path||c.name)}</div>
         <div class="truncate text-[10px] text-gray-600">${_esc(c.item_title)}</div>
       </div>
       <div class="flex-shrink-0 text-right">
@@ -6577,7 +6616,7 @@ function _renderOffFile(f){
         <div class="min-w-0 flex-1">
           <div class="flex items-center gap-2 flex-wrap">
             ${_offStatusBadge(f.status)}
-            <span class="text-xs text-gray-300 truncate">${escHtml(f.name)}</span>
+            <span class="text-xs text-gray-300 truncate">${_fileLabelHtml(f.file_path||f.name)}</span>
           </div>
           <div class="text-[10px] font-mono text-gray-600 mt-0.5 truncate">${escHtml(f.cache_key)}/</div>
           ${subLine}

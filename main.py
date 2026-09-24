@@ -55,6 +55,7 @@ import bundlecheck
 import clientlog
 import refiner
 import dvprobe
+import eplabel
 import episodes
 import racerules
 import relquality
@@ -1843,6 +1844,10 @@ def state_snapshot() -> dict:
         "library_nav_count": nav_count,
         "library_nav_index": nav_idx,
         "library_current_file": current,
+        # What to call it (eplabel.py): {line1, line2, short, ...}, or null when
+        # no dashboard has labelled that file since the host started - the page
+        # then falls back to parsing the path. Same for the kiosk's own player.
+        "library_current_label": _LABEL_MEMO.get(current) if current else None,
         "library_playlist": list(playlist),
         # Merged-series playback: path→owning-item map (empty for a normal play).
         # Lets a TV→device handoff carry the per-file item so the device re-targets
@@ -1912,6 +1917,8 @@ def state_snapshot() -> dict:
         "tv_local_active": state.tv_local_active,
         "tv_local_item_id": state.tv_local_item_id,
         "tv_local_file_path": state.tv_local_file_path,
+        "tv_local_label": (_LABEL_MEMO.get(state.tv_local_file_path)
+                           if state.tv_local_file_path else None),
         "tv_local_playback": state.tv_local_playback,
         # "device" | "vlc" — which surface a TV play opens on. Mirrored here (the
         # night-mode precedent) so the More-panel toggle stays in sync everywhere.
@@ -11937,7 +11944,15 @@ async def _run_series_analysis(series_key: str) -> None:
             finished_at=None,
         )
 
+        # The analyzer reports the file it is on by basename; the admin job chip
+        # shows the episode's label instead (eplabel.py - never the file name
+        # when the episode is known).
+        labels = {Path(f.get("path", "")).name: _file_label(it, f)["short"]
+                  for it in ready_items for f in it.get("files") or []}
+
         async def _on_progress(**kw):
+            if kw.get("episode_name"):
+                kw["episode_name"] = labels.get(kw["episode_name"], kw["episode_name"])
             await _set_analysis_status(series_key, status="running", **kw)
 
         # Fingerprint only the files the user actually downloaded — exclude "skip"
@@ -14783,6 +14798,40 @@ async def _probe_item_video_async(item_id: str) -> None:
         await broadcast("library_update", {"item_id": item_id})
 
 
+def _file_label_show(item: dict) -> str:
+    """The library's own name for an item's show - what `eplabel` falls back on
+    when TMDb has no series name (no key, a custom binding, not matched yet)."""
+    return (item.get("series") or item.get("title") or "").strip()
+
+
+def _file_label(item: dict, f: dict) -> dict:
+    """`eplabel.label_file` for one stored file of `item`. Also remembered by
+    path in `_LABEL_MEMO`, so `state_snapshot` (sync, no library read) can name
+    whatever the TV is playing."""
+    lab = eplabel.label_file(f, item.get("metadata") or {}, _file_label_show(item))
+    path = f.get("path", "")
+    if path:
+        if len(_LABEL_MEMO) > 20000:
+            _LABEL_MEMO.clear()
+        _LABEL_MEMO[path] = lab
+    return lab
+
+
+# path -> label (eplabel.py). Filled wherever a label is computed: every /files
+# and /series build, and every library play for the whole show it starts. Only a
+# cache: a path missing here means the dashboard falls back to its own parse.
+_LABEL_MEMO: dict[str, dict] = {}
+
+
+def _remember_show_labels(lib: dict, item: dict) -> None:
+    """Label every file of the show `item` belongs to - a merged series plays
+    across items, and prev/next reaches all of them."""
+    key = _series_key(item)
+    for it in (_items_for_series_key(lib, key) if key else [item]) or [item]:
+        for f in it.get("files") or []:
+            _file_label(it, f)
+
+
 async def _build_item_files(item: dict, profile_id: str) -> list[dict]:
     """Build the per-file payload (progress + live download/prep state) for one
     library item. Shared by the single-item `/files` endpoint and the merged
@@ -14882,6 +14931,10 @@ async def _build_item_files(item: dict, profile_id: str) -> list[dict]:
             # query for a missing anime episode has to be built from: nobody
             # publishes "Hunter x Hunter S01E59", plenty publish "059".
             "abs_no": int(f.get("abs_no", 0) or 0) or None,
+            # What to CALL this file - "Show · S01E03" over the episode's name.
+            # Every surface shows this, never `name`; the file name is only the
+            # label when neither number nor name is known. See eplabel.py.
+            "label": _file_label(item, f),
             "progress": progress,
             "mode": mode,                               # now | low | mid | high | idle | skip
             "dl_priority": _dl_priority_of(mode),       # low | mid | high — download-order tier (mid default)
@@ -18087,6 +18140,8 @@ async def _library_play_launch(
 async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     lib = await get_library()
     item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if item:
+        _remember_show_labels(lib, item)    # the TV's title bar names it (state_snapshot)
     if not item:
         raise HTTPException(404, "Item not found.")
     # A normal play supersedes any stream-while-downloading focus — this path
@@ -26761,6 +26816,35 @@ def _bundle_audit_status() -> dict:
     return ba
 
 
+@app.get("/api/admin/file-labels")
+async def admin_file_labels(request: Request) -> JSONResponse:
+    """Every library file's display label (eplabel.py), for the admin panel.
+
+    The admin lists (validation, repair, compression, the analyzer log, the
+    skip editor, offline cache, source eviction) come from a dozen endpoints
+    that each report a file by path or bare name. Rather than teach each one,
+    the panel fetches this once and resolves a row through it: by path, then by
+    basename where the basename is unique. One line per file - "Show · S01E03" -
+    since every admin row is one line; the raw file name stays on hover."""
+    _require_admin(request)
+    lib = await get_library()
+    by_path: dict = {}
+    names: dict = {}
+    for it in lib["items"]:
+        for f in it.get("files") or []:
+            path = f.get("path", "")
+            if not path:
+                continue
+            lab = _file_label(it, f)
+            if lab["kind"] == "file":
+                continue            # the label IS the file name - nothing to add
+            by_path[path] = lab["short"]
+            base = re.split(r"[\\/]", path)[-1]
+            names.setdefault(base, []).append(lab["short"])
+    by_name = {k: v[0] for k, v in names.items() if len(v) == 1}
+    return JSONResponse({"by_path": by_path, "by_name": by_name})
+
+
 @app.get("/api/admin/bundle-audit")
 async def admin_get_bundle_audit(request: Request) -> JSONResponse:
     """Current/last HLS bundle audit (progress + the damaged list it repaired)."""
@@ -34930,6 +35014,12 @@ async def _bundle_meta_for_file(item: dict, file_entry: dict, tmdb: Optional[dic
         "season":        season,
         "episode":       episode,
         "episode_name":  ep_name,
+        # The display label (eplabel.py), so the offline Downloads tab, the
+        # sync-conflict modal and the lock screen name a downloaded episode the
+        # same way the dashboard does, with no host to ask. Bundles downloaded
+        # before 18.24.0 lack it; readers fall back to series/season/episode_name.
+        "label":         eplabel.label_file(file_entry, tmdb or item.get("metadata") or {},
+                                            _file_label_show(item)),
         "overview":      ep_overview or tmdb.get("overview") or "",
         "tmdb_kind":     tmdb.get("tmdb_kind") or ("tv" if season else ""),
         "poster_path":   poster_path,

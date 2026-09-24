@@ -270,6 +270,31 @@ Both the footer bar (`#seekBarWrapper`) and the fullscreen-controls bar share th
 
 The whole lock is opt-out per device via **Settings → This Device → Locked Progress Bar** (`psSeekLock`, `toggleSeekLock`). The preference lives in `localStorage` (`streamlink_seeklock`, defaults ENABLED — only an explicit `"0"` disables) and is held in `_seekLockEnabled`. When disabled, `lockSeekBar()` keeps the bar permanently `unlocked` (single tap seeks, no gesture); `init`/`DOMContentLoaded` calls `lockSeekBar()` once so a page opened mid-playback honours a disabled lock immediately.
 
+### File labels — what a file is called (18.24.0)
+
+No surface shows a file's release name as its title. The server attaches `label`
+(`eplabel.py`) to every file on `/files` and `/series`; the page's helpers:
+
+- `fileLabel(fileOrPath, itemId)` → `{kind, show, code, name, line1, line2, short}`. The
+  file's own `label`, else `_fileLabels` (path → label, filled by the **fetch wrapper** from
+  every `/files` / `/series` response and by `_appLocalBundle` / the Downloads tab from each
+  bundle's `meta.label`), else `_composeLabel` over what the page can see (the path's
+  `SxxExx`, the library title, `_cleanStem`). Mirrors `eplabel.compose` / `clean_stem`.
+- Layouts: **two lines** (`line1` "Breaking Bad · S01E03", `line2` the name) for the player
+  header (`#lpTitle` + `#lpSubTitle`, via `_lpSetTitle`), the TV controls (`setFcTitle`,
+  fed `library_current_label` / `tv_local_label` by `_fcTitleArgs`) and the Downloads tab's
+  in-progress list; **one line** (`short`, "Breaking Bad · S01E03") for the footer
+  (`_nowPlayingText`), toasts, the session banner (`lp.name`) and the iOS TV remote;
+  **in-show** (`labelInShow`, "S01E03 · Name", no show) for episode tiles, the in-library
+  download list and the Downloads tab's grouped rows; **now playing**
+  (`labelNowPlaying` — name big, `Show · S01E03` small) for the lock screen, Live Activity
+  and the glasses remote.
+- `_bundleLabel(meta, filePath, itemId, fallbackName)` — a downloaded bundle's label: its
+  `meta.label`, else rebuilt from `series/season/episode/episode_name` (pre-18.24.0 bundles).
+- Kept as file names on purpose: the pre-download torrent picker, `download=` / zip entry
+  names, the movie page's grey release line. See [GOTCHAS.md](GOTCHAS.md) § A file's name
+  is not what it is called.
+
 ### Episode page (`#episodePage`, full-screen)
 
 Replaces the legacy `#episodeModal` (Milestone 12). `openEpisodePicker(itemId, title)` opens it; under the hood it now reveals a full-screen view. Key DOM:

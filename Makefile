@@ -20,6 +20,7 @@ test:
 	python3 tests/test_packslice.py
 	python3 tests/test_reaper.py
 	python3 tests/test_clientlog.py
+	python3 tests/test_eplabel.py
 
 clean:
 	rm -rf .venv __pycache__ .env

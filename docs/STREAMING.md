@@ -1419,6 +1419,15 @@ switchable off in ☰ App → Settings → Playback (`streamlink_app_bgplay`,
 They're orthogonal: keep-awake doesn't disable the handoff, it just prevents the
 *auto-lock* that would trigger it. Pressing the power button still hands off.
 
+**What the lock screen calls it (18.24.0).** The arm carries `title` and `series` from the
+file's label (`labelNowPlaying`, see `eplabel.py`): the episode's **name** is `title` (Now
+Playing's title, the Live Activity's big line) and `Show · S01E03` is `series` (Now
+Playing's artist, the Live Activity's small line). No episode name ⇒ `title` is
+`Show · S01E03` and `series` is empty. `nextTitle` **and `nextSeries`** are armed together,
+because the native side advances on its own while the page is frozen; Swift keeps
+`nextSeries` optional so an older page (no key) keeps the old line, while an empty string
+clears it. See [GOTCHAS.md](GOTCHAS.md) § A file's name is not what it is called.
+
 **TV Mode was the old name for the mirroring row, and it is gone (18.13.2).** It
 bundled five behaviours behind one switch — backlight to 0, a transparent
 tap-swallowing shield with double-tap to exit, force-hiding the transport, a

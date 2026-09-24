@@ -5873,3 +5873,35 @@ page heard none of `nativeStarted` / `nativeProgress` / `nativeEnded` /
 When you add an init step, decide explicitly whether the offline boot needs it too.
 In the transcript the tell is `startNative reason:"early"` with no `hold-start`
 after it.
+
+
+### A file's name is not what it is called (18.24.0)
+
+A person thinks "Breaking Bad, season one, episode three, ...And the Bag's in the
+River", not `Breaking.Bad.S01E03.720p.BluRay.x264-DEMAND.mkv`. **Never render a file's
+`name` (or a path's basename) as its title.** Use its label: `f.label` on anything from
+`/files` / `/series`, `fileLabel(pathOrFile, itemId)` in the page (server label from the
+`_fileLabels` cache, else the same rules over what the page can see), `_bundleLabel(meta, …)`
+for a downloaded bundle, `library_current_label` / `tv_local_label` for what the TV is
+playing, `_fileLabel()` / `_fileLabelHtml()` in the admin panel. The rules live in
+`eplabel.py` and are mirrored by `_composeLabel` / `_cleanStem` in `static/index.html`;
+change one, change both.
+
+Where the name deliberately survives: the pre-download torrent file picker (nothing is
+attributed yet), the `download=` / zip entry names of saved files (media servers and
+subtitle sites parse those), the movie page's small grey release line (the one place to see
+which release you have), and hover tooltips in the admin panel.
+
+Three traps:
+
+* **The server label memo is a cache, not a record.** `_LABEL_MEMO` fills when something
+  labels a path (a `/files` or `/series` build, a library play). A box restarted mid-playback
+  sends `library_current_label: null` until then; the page must fall back to `fileLabel(path)`,
+  never to an empty title.
+* **Lock screen lines swap together.** The native player advances without the page (its
+  timers are frozen while locked), so the page arms `nextSeries` alongside `nextTitle`. Swift
+  treats a *missing* `nextSeries` (an older page) as "keep the old line" and an *empty* one
+  as "clear it" — an episode with no name has no small line, and keeping the previous
+  episode's `Show · S01E03` under `Show · S01E04` was the bug that distinction prevents.
+* **A film-bound item is a film whatever its file name says.** `Star.Wars.Episode.1.…`
+  parses as episode 1; `label_file` checks `tmdb_kind == "movie"` before any number.

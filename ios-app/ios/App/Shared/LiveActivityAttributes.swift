@@ -90,7 +90,7 @@ public struct DownloadActivityAttributes: ActivityAttributes {
 public struct PlaybackAttributes: ActivityAttributes {
     public struct ContentState: Codable, Hashable {
         public var title: String        // episode / movie title
-        public var series: String       // series name ("" for a movie)
+        public var series: String       // small line: "Show · S01E03" (18.24.0), or "" (a movie, or no episode name)
         public var isPaused: Bool
         public var position: Double     // seconds, as sampled at `stamp`
         public var duration: Double     // seconds (0 ⇒ unknown)

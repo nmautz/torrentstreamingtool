@@ -104,6 +104,10 @@ struct ArmedPlayback {
     var canNext = false
     var nextUrl: URL?
     var nextTitle = ""
+    /// The next episode's small line ("Show · S01E03"), swapped in with
+    /// nextTitle. nil from a page older than 18.24.0 (it never sends the key),
+    /// which keeps `series` as before; "" is real and clears it.
+    var nextSeries: String?
     var nextFilePath = ""
     var nextItemId = ""
     var handoffEnabled = true
@@ -1030,6 +1034,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         a.canNext        = call.getBool("canNext") ?? false
         a.nextUrl        = URL(string: call.getString("nextUrl") ?? "")
         a.nextTitle      = call.getString("nextTitle") ?? ""
+        a.nextSeries     = call.getString("nextSeries")
         a.nextFilePath   = call.getString("nextFilePath") ?? ""
         a.nextItemId     = call.getString("nextItemId") ?? ""
         a.handoffEnabled = call.getBool("handoffEnabled") ?? true
@@ -1881,6 +1886,8 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         armed.position = 0
         armed.armedAt = Date()
         armed.title = armed.nextTitle
+        // The small line carries the episode code now, so it moves too.
+        if let ns = armed.nextSeries { armed.series = ns }
         armed.filePath = armed.nextFilePath
         if !armed.nextItemId.isEmpty { armed.itemId = armed.nextItemId }
         armed.url = next
