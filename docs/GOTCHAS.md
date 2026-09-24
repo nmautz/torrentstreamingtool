@@ -1558,6 +1558,27 @@ FlareSolverr binds via the **`HOST`/`PORT` environment variables**, not CLI flag
 
 ## Library
 
+### Hide is per SHOW, delete returns before the files are gone (18.22.0)
+
+A bulk-downloaded show is one item **per episode**. Hide/unhide/delete used to loop
+one request per item from the browser — each a full read-migrate-rewrite-fsync of
+`library.json` under the global lock — so a 300-episode show took minutes to leave
+the grid and queued every other viewer behind the lock 300 times. Now:
+
+- **Hide** lives on the profile as `hidden_series` (by `_series_key`), not on items.
+  A hide survives new episodes arriving. It does **not** survive a series *rename*
+  (the key is the lowercased `series` name) — a renamed show reappears. The old
+  per-item `hidden_by_profiles` is folded in on every load by `_fold_item_hides`;
+  don't write it.
+- **Delete** (`_delete_items`) drops the rows in one write and returns; bundles,
+  torrents and files go in a throttled `_spawn_bg` job. So a 200 from delete means
+  "gone from the library", **not** "gone from disk". A restart mid-job leaves the
+  rest as Cleanup-tab orphans, and `qreq` doesn't raise on an HTTP error status, so
+  a qBit that answers 4xx/5xx is only caught by that same orphan sweep.
+- The frontend edits `window._libCache` and repaints **before** the request
+  (`_libSetHidden` / `_libDelete`), then reloads to reconcile. Any new hide/delete
+  button should go through those two, never loop per-item requests again.
+
 ### Every library mutation goes through `mutate_library()` — `get_library` + `put_library` is a lost-update race
 
 `get_library()` and `put_library()` each take `_lib_lock`, but **neither holds it across your mutation**. So the pattern that was used nearly everywhere —

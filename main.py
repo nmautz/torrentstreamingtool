@@ -1026,7 +1026,28 @@ def _load_lib_raw() -> dict:
         if raw is None:
             return {"profiles": [], "items": []}
     raw["items"] = [_migrate_item(it) for it in raw.get("items", [])]
+    _fold_item_hides(raw)
     return raw
+
+
+def _fold_item_hides(raw: dict) -> None:
+    """Pre-18.22 hiding was per ITEM (`hidden_by_profiles`); it is per SERIES now
+    (`profile.hidden_series`). Fold any per-item hide into its series — one hidden
+    episode hides the show, which is what the old UI's fan-out meant anyway — and
+    clear the item flag so this is a no-op from the next load on."""
+    profs = {p.get("id"): p for p in raw.get("profiles", [])}
+    for it in raw.get("items", []):
+        hb = it.get("hidden_by_profiles")
+        if not hb:
+            continue
+        key = _series_key(it)
+        for pid in hb:
+            p = profs.get(pid)
+            if p is not None:
+                hs = p.setdefault("hidden_series", [])
+                if key not in hs:
+                    hs.append(key)
+        it["hidden_by_profiles"] = []
 
 
 # A transient Windows file-lock costs one library write. Retry rather than lose it.
@@ -14430,10 +14451,16 @@ async def delete_profile(request: Request, profile_id: str) -> JSONResponse:
 
 # ── Routes: Library ───────────────────────────────────────────────────────────
 
-def _item_hidden_for_profile(item: dict, profile_id: str) -> bool:
-    """Return True if this item should appear in the user's hidden tab."""
+def _item_hidden_for_profile(item: dict, profile_id: str,
+                             hidden_series: frozenset = frozenset()) -> bool:
+    """Return True if this item should appear in the user's hidden tab.
+
+    `hidden_series` is the profile's per-show hide list (see _set_series_hidden);
+    `hidden_by_profiles` is the pre-18.22 per-item flag, folded into it on load."""
     if not profile_id:
         return False
+    if hidden_series and _series_key(item) in hidden_series:
+        return True
     if profile_id in item.get("hidden_by_profiles", []):
         return True
     dvp = item.get("default_visible_profiles", [])
@@ -14447,6 +14474,8 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
     # Elevation needs a PIN-verified session, not just the claimed profile_id —
     # those UUIDs are public (GET /api/profiles is unauthenticated). See _is_elevated.
     is_elevated  = _is_elevated(request, lib, profile_id)
+    _prof = next((p for p in lib.get("profiles", []) if p["id"] == profile_id), None)
+    hidden_series = frozenset((_prof or {}).get("hidden_series") or ())
     items = []
     for it in lib["items"]:
         if it.get("admin_only") and not is_admin and not is_elevated:
@@ -14504,7 +14533,7 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
             # the group page instead of the episode picker. See _section_summary.
             "sections": sections,
             "first_file": first_file,
-            "hidden": _item_hidden_for_profile(it, profile_id),
+            "hidden": _item_hidden_for_profile(it, profile_id, hidden_series),
             **{f"skip_{k}": v for k, v in _item_skip_summary(it).items()},  # skip_status, skip_affected, skip_total
             "download_mode": _download_cfg(it)["mode"],   # now | idle — drives the card's Pause/Resume control
             "download_partial": any(m == "skip" for m in _download_cfg(it)["files"].values()),  # some files deselected → "Partial" badge
@@ -16732,71 +16761,186 @@ async def _purge_offline_bundles(paths: list[str]) -> int:
     return removed
 
 
-@app.delete("/api/library/{item_id}")
-async def delete_library_item(request: Request, item_id: str,
-                              delete_file: bool = True) -> JSONResponse:
-    # Drop the item under the library lock, then talk to qBit OUTSIDE it — a
-    # qBit round trip is network IO, and `mutate_library` holds the single global
-    # library lock for its whole body, so awaiting a delete in there stalls every
-    # other reader/writer (the 2 s stat broadcaster included) for its duration.
-    # A torrent left behind by a failed qBit call surfaces in the admin Cleanup
-    # tab as an orphan, which is the recoverable side of the trade.
-    async with mutate_library() as lib:
-        _require_delete_auth(request, lib)
-        item = next((it for it in lib["items"] if it["id"] == item_id), None)
-        if not item:
-            raise HTTPException(404, "Item not found.")
-        hashes = _item_all_torrent_hashes(item)
-        file_paths = [f.get("path", "") for f in item.get("files", []) if f.get("path")]
-        lib["items"] = [it for it in lib["items"] if it["id"] != item_id]
-    # Deleting what is on screen: stop first, outside the library lock.
+# ── Delete / hide, a whole show at a time ─────────────────────────────────────
+#
+# A bulk-downloaded show is one library item PER EPISODE, so "delete South Park"
+# used to be 300 sequential requests from the browser, each one a full
+# read-migrate-rewrite-fsync of library.json under the single global lock, then a
+# bundle purge and a qBit round trip. Minutes of wall clock, the tile sitting
+# there the whole time, and every other viewer queued behind the lock 300 times.
+#
+# Now: ONE library write drops every row (the tile is gone the moment it lands),
+# and the slow part — bundles, torrents, files — is a throttled background job.
+# A torrent the job fails to remove surfaces in the admin Cleanup tab as an
+# orphan, the same recoverable trade the single delete has always made.
+
+_DELETE_CHUNK = 20          # items whose bundles + torrents go per step
+_DELETE_CHUNK_PAUSE = 0.5   # s between steps — let playback + page loads breathe
+
+
+def _drop_orphan_hidden_series(lib: dict) -> None:
+    """Forget a hidden series nothing in the library belongs to any more, so a
+    show deleted and later downloaded again comes back visible."""
+    live = {_series_key(it) for it in lib["items"]}
+    for p in lib.get("profiles", []):
+        hs = p.get("hidden_series")
+        if hs:
+            p["hidden_series"] = [k for k in hs if k in live]
+
+
+async def _cleanup_deleted_items(doomed: list[dict], delete_file: bool,
+                                 profile_id: str, title: str) -> None:
+    """Background half of a delete: stop playback on it, then purge bundles and
+    torrents a chunk at a time. `doomed` = [{id, hashes, paths}] captured under the
+    lock; the rows themselves are already gone."""
+    ids = {d["id"] for d in doomed}
+    # Deleting what is on screen: stop first.
     #
     # Nothing used to check, so "delete the thing I am watching" pulled the file
     # out from under VLC — it wedged or errored with no explanation, and
-    # state.library_item_id went on pointing at an item that no longer exists,
-    # which is why the logs carry runs of 404s from the player still trying to
-    # save progress for it.
-    #
+    # state.library_item_id went on pointing at an item that no longer exists.
     # It also makes the delete WORK on the primary target: Windows refuses to
     # unlink a file another process holds open, so deleting the playing episode
     # failed on the file itself and left the media behind with the library row
-    # gone — the one combination the Cleanup tab calls an orphan.
-    if state.library_item_id == item_id:
+    # gone — the one combination the Cleanup tab calls an orphan. A merged series
+    # playlist spans items, so any of them being in the run counts.
+    playing = state.library_item_id in ids or any(
+        iid in ids for iid in (state.library_series_map or {}).values())
+    if playing:
         try:
             await stop()
         except Exception as exc:              # never let teardown block the delete
-            log.warning("stop() before delete of %s failed: %s", item_id, exc)
-    # Bundles first — their cache key needs the media files to still be on disk.
-    if delete_file:
-        await _purge_offline_bundles(file_paths)
-    for _h in hashes:
-        await qbit_delete(_h, delete_files=delete_file)
+            log.warning("stop() before delete of %s failed: %s", sorted(ids)[:3], exc)
+    failed = 0
+    for i in range(0, len(doomed), _DELETE_CHUNK):
+        chunk = doomed[i:i + _DELETE_CHUNK]
+        # Bundles first — their cache key needs the media files to still be on disk.
+        if delete_file:
+            try:
+                await _purge_offline_bundles([p for d in chunk for p in d["paths"]])
+            except Exception as exc:
+                log.warning("bundle purge during delete failed: %s", exc)
+        hashes = [h for d in chunk for h in d["hashes"]]
+        if hashes:
+            try:
+                # qBit takes a `|`-joined list: one round trip for the chunk.
+                await qbit_delete("|".join(hashes), delete_files=delete_file)
+            except Exception as exc:
+                failed += len(hashes)
+                log.warning("qBit delete of %d torrent(s) failed: %s", len(hashes), exc)
+        if i + _DELETE_CHUNK < len(doomed):
+            await asyncio.sleep(_DELETE_CHUNK_PAUSE)
+    if failed:
+        await broadcast("library_cleanup", {"profile_id": profile_id, "title": title,
+                                            "failed": failed})
+
+
+async def _delete_items(request: Request, item_ids: list[str], delete_file: bool,
+                        profile_id: str = "") -> list[str]:
+    """Drop every row in ONE write, then hand the file work to the background.
+    Returns the ids actually removed."""
+    want = set(item_ids)
+    async with mutate_library() as lib:
+        _require_delete_auth(request, lib)
+        gone = [it for it in lib["items"] if it["id"] in want]
+        if not gone:
+            raise HTTPException(404, "Item not found.")
+        doomed = [{"id": it["id"],
+                   "hashes": _item_all_torrent_hashes(it),
+                   "paths": [f.get("path", "") for f in it.get("files", []) if f.get("path")]}
+                  for it in gone]
+        lib["items"] = [it for it in lib["items"] if it["id"] not in want]
+        _drop_orphan_hidden_series(lib)
+    title = (gone[0].get("series") or gone[0].get("title") or "") if gone else ""
+    _spawn_bg(_cleanup_deleted_items(doomed, delete_file, profile_id, title))
+    removed = [d["id"] for d in doomed]
+    # Every other open dashboard drops the tile too, not just the deleter's.
+    await broadcast("library_update", {"item_id": "", "status": "removed",
+                                       "item_ids": removed})
+    return removed
+
+
+@app.delete("/api/library/{item_id}")
+async def delete_library_item(request: Request, item_id: str,
+                              delete_file: bool = True,
+                              profile_id: str = "") -> JSONResponse:
+    await _delete_items(request, [item_id], delete_file, profile_id)
     return JSONResponse({"ok": True})
+
+
+class BulkDeleteReq(BaseModel):
+    item_ids: list[str]
+    delete_file: bool = True
+    profile_id: str = ""
+
+
+@app.post("/api/library/bulk-delete")
+async def bulk_delete_library_items(request: Request, req: BulkDeleteReq) -> JSONResponse:
+    """Delete many items (a whole show, a shelf selection) in one transaction.
+    Returns as soon as the rows are gone; files follow in the background."""
+    if not req.item_ids:
+        raise HTTPException(400, "item_ids required.")
+    removed = await _delete_items(request, req.item_ids, req.delete_file, req.profile_id)
+    return JSONResponse({"ok": True, "removed": removed})
+
+
+def _set_series_hidden(lib: dict, profile_id: str, item_ids: list[str],
+                       hidden: bool) -> int:
+    """Hide/unhide, for one profile, every SERIES the given items belong to.
+
+    Hiding is a per-show act: the key goes on the profile (`hidden_series`), so an
+    episode that downloads later is hidden too and the write is the same size for
+    one episode or three hundred. Unhiding also clears the legacy per-item flag
+    and grants the profile any per-item default-visibility restriction, across
+    every item of the series. A film's key is `item:<id>`, so it hides alone.
+    Returns how many series changed."""
+    prof = next((p for p in lib.get("profiles", []) if p["id"] == profile_id), None)
+    if not prof:
+        raise HTTPException(404, "Profile not found.")
+    want = set(item_ids)
+    keys = {_series_key(it) for it in lib["items"] if it["id"] in want}
+    if not keys:
+        raise HTTPException(404, "Item not found.")
+    hs: list = prof.setdefault("hidden_series", [])
+    for k in keys:
+        if hidden and k not in hs:
+            hs.append(k)
+        elif not hidden and k in hs:
+            hs.remove(k)
+    if not hidden:
+        for it in lib["items"]:
+            if _series_key(it) not in keys:
+                continue
+            hb = it.get("hidden_by_profiles") or []
+            if profile_id in hb:
+                hb.remove(profile_id)
+            dvp = it.get("default_visible_profiles") or []
+            if dvp and profile_id not in dvp:
+                dvp.append(profile_id)
+    return len(keys)
+
+
+class BulkVisibilityReq(BaseModel):
+    profile_id: str
+    item_ids: list[str]
+    hidden: bool
+
+
+@app.post("/api/library/visibility")
+async def set_series_visibility(req: BulkVisibilityReq) -> JSONResponse:
+    """Hide/unhide the whole show(s) behind `item_ids`, in one write."""
+    if not req.item_ids:
+        raise HTTPException(400, "item_ids required.")
+    async with mutate_library() as lib:
+        n = _set_series_hidden(lib, req.profile_id, req.item_ids, req.hidden)
+    return JSONResponse({"ok": True, "series": n})
 
 
 @app.post("/api/library/{item_id}/visibility")
 async def set_item_visibility(item_id: str, req: VisibilityReq) -> JSONResponse:
-    """Toggle per-profile visibility. hidden=true moves item to the user's hidden tab;
-    hidden=false restores it to the main list."""
+    """Legacy single-item form. Acts on the item's whole series, like the bulk one."""
     async with mutate_library() as lib:
-        item = next((it for it in lib["items"] if it["id"] == item_id), None)
-        if not item:
-            raise HTTPException(404, "Item not found.")
-        pid = req.profile_id
-        hidden_by: list = item.setdefault("hidden_by_profiles", [])
-        default_visible: list = item.setdefault("default_visible_profiles", [])
-        if req.hidden:
-            # Move to hidden: remove from explicit visible list (if present), else add to hidden list
-            if default_visible and pid in default_visible:
-                default_visible.remove(pid)
-            elif pid not in hidden_by:
-                hidden_by.append(pid)
-        else:
-            # Move to visible: remove from hidden list; if still restricted by default, grant access
-            if pid in hidden_by:
-                hidden_by.remove(pid)
-            if default_visible and pid not in default_visible:
-                default_visible.append(pid)
+        _set_series_hidden(lib, req.profile_id, [item_id], req.hidden)
     return JSONResponse({"ok": True})
 
 

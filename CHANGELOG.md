@@ -1,5 +1,26 @@
 # Changelog
 
+## [18.22.0] — 2026-09-24
+### Hiding or deleting a whole show is instant, and stops blocking everyone else
+
+- **A bulk-downloaded show went one episode at a time.** Each episode is its own
+  library item, and hide, unhide and delete sent one request per item, one after
+  another. Each request was a full `library.json` rewrite under the global lock. A
+  300-episode show took minutes to leave the grid, and every other viewer waited
+  behind the lock the whole time.
+- **Now it is one request.** The tile changes the moment you click (the cache is
+  edited and repainted first). Then `POST /api/library/visibility` or
+  `POST /api/library/bulk-delete` carries every id in a single write.
+- **Hide is per show.** The hide is kept on the profile (`hidden_series`), so
+  episodes that download later are hidden too. Old per-item hides are folded in
+  on load. Deleting the last item of a show forgets its hide, so a re-download
+  comes back visible.
+- **Delete cleans up in the background.** The rows go at once. Bundles, torrents
+  and files follow in throttled chunks (20 items per step, one `|`-joined qBit call
+  each). Playback of the show is still stopped first. A qBit failure alerts the
+  person who deleted it, and the leftovers show as Cleanup-tab orphans. Other open
+  dashboards drop the tile too, through `library_update {status:"removed"}`.
+
 ## [18.21.7] — 2026-09-24
 ### An episode watched offline with the phone locked is remembered
 

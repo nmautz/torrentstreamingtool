@@ -7041,16 +7041,19 @@ async function loadDiskSpace(){
 
 function watchPctOf(prog){ return (!prog||!prog.duration_sec)?0:Math.round(prog.position_sec/prog.duration_sec*100); }
 
-// Hide / unhide for this profile. Guarded because the only feedback is the card
-// disappearing once loadLibrary() comes back — until then the button looks
-// ignored, and a second tap sends the OPPOSITE intent (hide, then unhide), so an
-// impatient double-tap used to land the item back where it started.
-// Every item of a show shares one visibility bucket: a show is hidden or it is
-// not, never half of each. A show downloaded episode-by-episode is 32 items
-// (South Park, on the live box) and hiding it one item at a time was never the
-// intent — so a single item's eye icon fans out to every sibling sharing its
-// `series:` key. An item with no series (a film) has no siblings and behaves
-// exactly as before.
+// Hide / unhide and delete are per SHOW and optimistic (18.22.0).
+//
+// A bulk-downloaded show is one library item per episode, and each of these used
+// to loop one request per item — 300 serial round trips for South Park, each a
+// full library.json rewrite under the server's global lock, with the tile sitting
+// unchanged until the last one came back. Now the cache is edited and repainted
+// at once, then ONE request carries every id; the server resolves them to their
+// series (hide) or drops every row in one write and cleans files up behind
+// (delete). A failure reloads the truth and says so.
+//
+// A show is hidden or it is not, never half of each: the server keeps the hide on
+// the profile by series key, so an episode that downloads later is hidden too. A
+// film's key is `item:<id>`, so it hides alone.
 function _libSeriesSiblings(itemId){
   const items=window._libCache||[];
   const me=items.find(x=>x.id===itemId);
@@ -7060,20 +7063,57 @@ function _libSeriesSiblings(itemId){
   return ids.length?ids:[itemId];
 }
 
+// Repaint the grid from an edited copy of the cache, without a server trip.
+function _libApplyLocal(fn){
+  if(!window._libCache) return;
+  window._libCache=fn(window._libCache);
+  if(activeTab==="library") renderLibrary(window._libCache);
+}
+
+async function _libSetHidden(ids,makeHidden){
+  if(!profile.id){ showAlert("Select a profile first.","warn"); return false; }
+  ids=ids||[];
+  if(!ids.length) return true;
+  const want=new Set(ids);
+  const keys=new Set((window._libCache||[]).filter(x=>want.has(x.id)).map(x=>x.series_key));
+  _libApplyLocal(items=>items.map(x=>(want.has(x.id)||keys.has(x.series_key))?{...x,hidden:makeHidden}:x));
+  let ok=false;
+  try{
+    const r=await fetch("/api/library/visibility",{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({profile_id:profile.id,item_ids:ids,hidden:makeHidden}),
+    });
+    ok=r.ok;
+  }catch(_){}
+  if(!ok) showAlert("Could not update visibility.","error");
+  loadLibrary();   // reconcile (and undo the optimistic edit on failure)
+  return ok;
+}
+
+async function _libDelete(ids){
+  ids=ids||[];
+  if(!ids.length) return true;
+  const want=new Set(ids);
+  _libApplyLocal(items=>items.filter(x=>!want.has(x.id)));
+  for(const id of ids){ expandedDownloads.delete(id); downloadFilesData.delete(id); }
+  let ok=false, why="";
+  try{
+    const r=await fetch("/api/library/bulk-delete",{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({item_ids:ids,delete_file:true,profile_id:profile.id||""}),
+    });
+    ok=r.ok;
+    // Surface the server's reason — a 403 here means "no PIN-verified
+    // profile", which is actionable in a way "could not delete" isn't.
+    if(!ok){ const e=await r.json().catch(()=>null); why=(e&&e.detail)||""; }
+  }catch(_){}
+  if(!ok) showAlert(why||"Could not delete.","error");
+  loadLibrary();
+  return ok;
+}
+
 async function toggleItemVisibility(itemId,makeHidden,btn){
-  if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
-  await withInflight(`vis_${itemId}`, btn||null, async () => {
-    let ok=true;
-    for(const id of _libSeriesSiblings(itemId)){
-      const r=await fetch(`/api/library/${id}/visibility`,{
-        method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({profile_id:profile.id,hidden:makeHidden}),
-      });
-      if(!r.ok) ok=false;
-    }
-    if(ok) await loadLibrary();
-    else showAlert("Could not update visibility.","error");
-  });
+  await withInflight(`vis_${itemId}`, btn||null, () => _libSetHidden([itemId],makeHidden));
 }
 
 function toggleLibHiddenView(){
@@ -7081,21 +7121,9 @@ function toggleLibHiddenView(){
   loadLibrary();
 }
 
-// Hide/unhide every item in a merged series show tile in one action — so a
-// multi-episode show (including one still downloading) can be hidden/restored
-// just like a single item. Fans out to the per-item visibility endpoint.
+// Hide/unhide a merged series show tile (every item, one request).
 async function toggleSeriesVisibility(ids,makeHidden){
-  if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
-  let ok=true;
-  for(const id of (ids||[])){
-    const r=await fetch(`/api/library/${id}/visibility`,{
-      method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({profile_id:profile.id,hidden:makeHidden}),
-    });
-    if(!r.ok) ok=false;
-  }
-  if(ok) loadLibrary();
-  else showAlert("Could not update visibility.","error");
+  await _libSetHidden(ids,makeHidden);
 }
 
 // Delete an entire merged series (every item + its files) — the show-tile
@@ -7104,23 +7132,7 @@ async function deleteSeries(ids,title,btn){
   ids=ids||[];
   const n=ids.length;
   if(!confirm(`Remove "${title||"this show"}" (${n} download${n===1?"":"s"}) from the library and delete the file(s)?`)) return;
-  await withInflight(`delseries_${ids.join("_")}`, btn, async () => {
-    let ok=true, why="";
-    for(const id of ids){
-      const r=await fetch(`/api/library/${id}?delete_file=true`,{method:"DELETE"});
-      if(r.ok){
-        expandedDownloads.delete(id);
-        downloadFilesData.delete(id);
-      } else {
-        ok=false;
-        // Surface the server's reason — a 403 here means "no PIN-verified
-        // profile", which is actionable in a way "could not delete" isn't.
-        if(!why){ const e=await r.json().catch(()=>null); why=(e&&e.detail)||""; }
-      }
-    }
-    loadLibrary();
-    if(!ok) showAlert(why||"Some episodes could not be deleted.","error");
-  });
+  await withInflight(`delseries_${ids.join("_")}`, btn, () => _libDelete(ids));
 }
 
 // Hide + delete icon cluster shared by the list and card show-tile renderers, so
@@ -8469,22 +8481,10 @@ async function grpBulkHide(btn){
   if(!ids.length) return;
   const makeHidden = (document.getElementById("grpBulkHideBtn").textContent||"")==="Hide";
   await withInflight("grp_bulk_hide", btn, async () => {
-    let ok=true;
-    for(const id of ids){
-      try{
-        const r=await fetch(`/api/library/${id}/visibility`,{
-          method:"POST",headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({profile_id:profile.id,hidden:makeHidden}),
-        });
-        if(!r.ok) ok=false;
-      }catch(_){ ok=false; }
-    }
     grpSel.clear();
-    await loadLibrary();
+    const ok=await _libSetHidden(ids,makeHidden);
     await refreshGroupPage();
-    showAlert(ok
-      ? (makeHidden?"Hidden from your list.":"Restored to your list.")
-      : "Some titles could not be updated.", ok?"success":"error");
+    if(ok) showAlert(makeHidden?"Hidden from your list.":"Restored to your list.","success");
   });
 }
 
@@ -8501,23 +8501,14 @@ async function grpBulkDelete(btn){
 
 ${shown}`)) return;
   await withInflight("grp_bulk_del", btn, async () => {
-    let ok=true, why="";
-    for(const id of ids){
-      try{
-        const r=await fetch(`/api/library/${id}?delete_file=true`,{method:"DELETE"});
-        if(r.ok){ expandedDownloads.delete(id); downloadFilesData.delete(id); }
-        else { ok=false; if(!why){ const e=await r.json().catch(()=>null); why=(e&&e.detail)||""; } }
-      }catch(_){ ok=false; }
-    }
     grpSel.clear();
-    await loadLibrary();
+    const ok=await _libDelete(ids);
     // Deleting a shelf's last members dissolves it — there is nothing to come
     // back to, so close rather than showing an empty page or a 404.
     const gs=await _libFetchGroups();
     const still=(gs.groups||[]).find(g=>g.id===(grpData&&grpData.id));
     if(still) await refreshGroupPage(); else closeGroupPage();
-    if(!ok) showAlert(why||"Some titles could not be deleted.","error");
-    else showAlert("Deleted.","success");
+    if(ok) showAlert("Deleted.","success");
   });
 }
 
@@ -9097,17 +9088,7 @@ function _revertOptimistic(){
 
 async function deleteLibraryItem(itemId, btn){
   if(!confirm("Remove from library and delete the file(s)?")) return;
-  await withInflight(`del_${itemId}`, btn, async () => {
-    const r=await fetch(`/api/library/${itemId}?delete_file=true`,{method:"DELETE"});
-    if(r.ok){
-      expandedDownloads.delete(itemId);
-      downloadFilesData.delete(itemId);
-      loadLibrary();
-    } else {
-      const e=await r.json().catch(()=>null);
-      showAlert((e&&e.detail)||"Could not delete item.","error");
-    }
-  });
+  await withInflight(`del_${itemId}`, btn, () => _libDelete([itemId]));
 }
 
 async function queuePlay(itemId, btn){
@@ -28338,6 +28319,15 @@ function connectSSE(){
     // series and a new member is by definition not in the list yet.
     if(_epConcerns(d.item_id, true)) _epLiveRefresh();
   });
+  // A delete returns as soon as the rows are gone; the files follow in the
+  // background. If qBit then refuses some torrents, tell whoever deleted them —
+  // the leftovers show up in the admin Cleanup tab as orphans.
+  es.addEventListener("library_cleanup",e=>{
+    _noteSSEMsg();
+    const d=JSON.parse(e.data||"{}");
+    if(d.profile_id && d.profile_id!==profile.id) return;
+    showAlert(`${d.title?`"${d.title}": `:""}${d.failed} torrent${d.failed===1?"":"s"} could not be removed — see the admin Cleanup tab.`,"warn");
+  });
   // Discrete race transitions. Separate from library_progress because a 5 s
   // sampler cannot express "a candidate was dropped" or "the upgrade landed" -
   // those want a toast and a repaint, not a moved bar.
@@ -28805,6 +28795,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.21.7</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.22.0</div>
 </body>
 </html>

@@ -132,6 +132,11 @@ The only persistent server-side state. Lives at the project root. Accessed via `
   "auto_skip_credits": true,            // optional; default false
   "resume_mode": "auto|prompt|off",     // default "auto"
   "subtitles_on": true,                 // optional; per-profile override of settings.subtitles.on_by_default. absent/null = inherit; true/false = force
+  "hidden_series": ["series:south park", "item:<id>"], // optional (18.22.0); shows this profile hid, by `_series_key`.
+                                        // Hiding is per SHOW: an episode that downloads later is hidden too. A film's
+                                        // key is `item:<id>`, so it hides alone. Pre-18.22 per-item `hidden_by_profiles`
+                                        // is folded in on load (`_fold_item_hides`: one hidden episode hides the show).
+                                        // A key whose last item is deleted is dropped, so a re-download comes back visible.
   "allowed_indexers": ["idx_a","idx_b"],// optional; Jackett indexer IDs this profile may search. Absent/empty = unrestricted (all configured indexers). Admin-set via Profile PINs tab; enforced by /api/search
   "series_subtitle_prefs": {            // optional; remembered subtitle pick per series (this profile).
                                         // Key = item.series, or "item:<item id>" for untagged items (_series_of_item)
@@ -262,7 +267,7 @@ or HDR content — the browser path downmixes to AAC stereo and does no tone map
   "ondemand_only": false,               // optional; on-device playback uses JIT only — no permanent HLS bundle is built. User- or admin-settable (Storage tab + episode page). VLC unaffected
   "ondemand_only_locked": false,        // optional; admin lock — when true, non-admin dashboard users can't change ondemand_only (server 403s, UI toggle disabled)
   "default_visible_profiles": [],       // optional; if non-empty, only these profile IDs see item by default
-  "hidden_by_profiles": [],            // optional; profile IDs that personally hid this item
+  "hidden_by_profiles": [],            // LEGACY (pre-18.22). Folded into profile.hidden_series on load and emptied; nothing writes it now
   "skip_data": { /* per-file; see below */ },
   "attrib_v": 2,                        // optional (14.1.0). Which structural-attribution pass this item has
                                         // been through. `_migrate_item` re-runs `episodes.attribute_paths`
