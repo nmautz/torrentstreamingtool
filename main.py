@@ -3978,9 +3978,18 @@ def _ep_group_homes(metadata: Optional[dict]) -> Optional[dict]:
         for row in epgroups.summarize(listing[0])[:_EP_GROUPS_MAX]:
             d = _tmdb_disk.get(f"/tv/episode_group/{row['id']}")
             n = epgroups.normalize(d[0]) if d else None
-            if n:
-                groups.append(n)
-        homes = epgroups.season_homes(groups, meta.get("all_seasons") or [])
+            if n is None:
+                if show_id in _ep_groups_tried:
+                    continue     # fetched this run and still absent: gone on TMDb
+                # The list is cached but this group isn't (the View picker
+                # fetched the list alone). A missing group could be the one
+                # that votes or vetoes, so a partial set is no opinion at all:
+                # None sends `_settle_attribution` to fetch the lot.
+                groups = None
+                break
+            groups.append(n)
+        if groups is not None:
+            homes = epgroups.season_homes(groups, meta.get("all_seasons") or [])
     _ep_homes_memo[show_id] = (time.monotonic(), homes)
     return homes
 

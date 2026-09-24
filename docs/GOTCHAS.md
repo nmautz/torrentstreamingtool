@@ -5938,3 +5938,7 @@ Four traps:
   box that has never fetched the groups has no opinion (`None`) and moves nothing, and that is
   deliberate: the attribution passes run inside `get_library` writers and must never do network
   I/O. `_settle_attribution` does the fetch, before the pass, and only for an item with a candidate.
+  **A half-filled cache is no opinion either.** The View picker caches a show's group *list*
+  without any group *details*. Reading that as "no group places anything" (`{}`) stopped the fetch
+  from ever happening, and it did on the box. `_ep_group_homes` returns `None` until every listed
+  group is cached, or has been fetched this run and is gone.
