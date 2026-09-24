@@ -3050,14 +3050,16 @@ hangs). Two paths keep page and media same-origin:
   filePath, seekTo)`**: if the episode **and** the player snapshot (`__player__`) are
   both fully downloaded, it starts the LMS in **proxy mode** — `lms.start({playerRoot,
   proxyHost: location.origin, proxyToken})` — and `location.replace`s to the loopback
-  page with `?proxied=1&host=<origin>&item=&file=&seek=&profile=&am=<automanage prefs>`.
+  page with `?proxied=1&host=<origin>&item=&file=&seek=&profile=&am=<automanage prefs>&did=&dnm=&tok=`.
   In proxy mode the native `LocalMediaServer` serves the snapshot + bundles locally and
   **reverse-proxies every non-local request (`/api/*`, SSE, server-stream media) to the
   host** with the bearer token injected (see below + [GOTCHAS.md](GOTCHAS.md)). On the
   loopback page `_appProxied` is set but **`_appOffline` stays false**, so it takes the
   **normal online boot** — SSE, library, Play-to-TV, auto-manage, and real `/api` sync
-  all run, just served from the loopback. `_appProxiedSeedStorage` seeds the profile +
-  auto-manage prefs (the loopback origin's localStorage is empty); `_appProxiedAutoPlay`
+  all run, just served from the loopback. `_appProxiedSeedStorage` seeds the profile,
+  auto-manage prefs, device identity and the **PIN token** (`tok=`, 18.23.2 — without
+  it a PIN-protected profile boots unverified and is asked for its PIN mid-episode;
+  stripped from the URL once seeded) — the loopback origin's localStorage is empty; `_appProxiedAutoPlay`
   starts the handed-off episode after the profile restores; `lpStop` →
   **`_appProxiedReturnHost()`** navigates back to the direct host origin (progress
   already synced live via the proxied `/api`). Prev/Next spans the **full series** —

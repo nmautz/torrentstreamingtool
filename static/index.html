@@ -18646,6 +18646,17 @@ function _appProxiedSeedStorage() {
     const did = p.get("did") || "", dnm = p.get("dnm") || "";
     if (did) localStorage.setItem("streamlink_device_id", did);
     if (dnm) localStorage.setItem("streamlink_device_name", dnm);
+    // The PIN proof. Without it a PIN-protected profile boots here unverified
+    // and `_maybePromptForPin` asks for the PIN mid-episode — once per fresh
+    // loopback storage, which is every app update that wipes it. Seeded
+    // unconditionally like `did`: the host's token is the current one. Then
+    // dropped from the address bar so it doesn't sit in the page's URL.
+    const tok = p.get("tok") || "";
+    if (tok) {
+      setProfileToken(tok);
+      p.delete("tok");
+      try { history.replaceState(history.state, "", location.pathname + "?" + p.toString() + location.hash); } catch (_) {}
+    }
     const am = p.get("am");
     if (am) {
       const o = JSON.parse(am);
@@ -19472,6 +19483,9 @@ async function _appTryLocalHandoff(itemId, filePath, seekTo) {
       // chosen name) the moment a proxied session starts — appearing to the
       // household as a different device halfway through an episode.
       did: _pbDeviceId(), dnm: _pbDeviceName(),
+      // PIN proof, so a PIN-protected profile isn't asked again on the loopback
+      // origin (see _appProxiedSeedStorage).
+      tok: _profileToken || "",
     });
     window.location.replace(base + "/index.html?" + q.toString());
     return true;
@@ -28795,6 +28809,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.23.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.23.2</div>
 </body>
 </html>

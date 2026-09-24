@@ -1,5 +1,15 @@
 # Changelog
 
+## [18.23.2] — 2026-09-24
+### Playing a downloaded episode no longer asks for your PIN
+
+- **Starting a downloaded episode could pop the PIN prompt over the player.** The
+  on-phone player page keeps its own storage, and the handoff carried your
+  profile, device and settings there, but not your PIN login. So a PIN-protected
+  profile was asked again the first time, and again whenever an update wiped
+  that storage. The handoff now carries the PIN token too (`tok=`), and removes
+  it from the page address once it's saved.
+
 ## [18.23.1] — 2026-09-24
 ### A live torrent's `.parts` is no longer "stray"
 
