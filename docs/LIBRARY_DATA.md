@@ -739,7 +739,12 @@ reads that as `(4, 0)`: a season, no episode number it trusts.
 
 It is **offline**: the groups come from the TMDb disk cache (`_ep_group_homes`, sync, memoised
 5 min). `_settle_attribution` fetches them first (`_ep_groups_fetch`), but only for an item that
-has a candidate (`epgroups.eligible`). Nothing cached means no opinion and nothing moves. The admin
+has a candidate (`epgroups.eligible`). Nothing cached means no opinion and nothing moves.
+A cached `/metadata` open never settles attribution by itself, so existing items get there two
+ways: `_nudge_metadata_health` (condition 3, `_ep_groups_pending`: a candidate whose groups are
+unknown or would still move something) on every open, and `episode_group_backfill`, a one-shot
+boot sweep ~75 s after start. A show whose group list can't be fetched is tried once per run
+(`_ep_groups_tried`). The admin
 **Refresh** rewinds it with `epgroups.reset_files` beside `animemap.reset_files`. Measured on the
 real data (`tests/test_epgroups.py`): Attack on Titan's specials land after S04E28, Firefly's three
 unaired episodes after S01E11, and Breaking Bad, Game of Thrones and Hunter x Hunter move nothing.

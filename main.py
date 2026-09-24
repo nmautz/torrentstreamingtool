@@ -3931,11 +3931,13 @@ async def _tmdb_fetch_one_season(show_id: int, sn: int) -> Optional[dict]:
 # disk cache is the store. See epgroups.py.
 _EP_GROUPS_MAX = 24                  # One Piece has 18; past this is noise
 _ep_homes_memo: dict[int, tuple[float, Optional[dict]]] = {}
+_ep_groups_tried: set[int] = set()  # shows fetched this run: never re-nudge an unanswerable one
 
 
 async def _ep_groups_fetch(show_id: int) -> tuple[list[dict], dict[str, dict]]:
     """Every episode group of a show: `(picker rows, {id: normalized})`.
     Also what fills the disk cache `_ep_group_homes` reads."""
+    _ep_groups_tried.add(int(show_id))
     listing = await _tmdb_get(f"/tv/{show_id}/episode_groups")
     if listing is None:
         # No answer (no key, a 404, TMDb down with nothing cached). Remember
@@ -4951,11 +4953,33 @@ def _nudge_metadata_health(item: dict) -> None:
     diff, so the show reads as complete no matter how many seasons are absent.
     See `_movie_binding_is_stale` — manual picks are never touched, and the
     re-check is stamped so it can't loop.
+
+    **3 — episode groups that would place a special (18.25.0).** A cached
+    open never settles attribution, so without this an existing library would
+    never reach pass 4: Attack on Titan's `Season 4 - Finale 1/2` stayed at
+    `(4, 0)` on the box after the release. Fires when the item has a candidate
+    and the groups are either unknown here or would still move something. It
+    stops matching once placed, because `place_files` is idempotent.
     """
     meta = item.get("metadata") or {}
     if ((meta.get("tmdb_kind") == "tv" and "all_seasons" not in meta)
-            or _movie_binding_is_stale(item, meta)):
+            or _movie_binding_is_stale(item, meta)
+            or _ep_groups_pending(item, meta)):
         _spawn_metadata_fetch(item["id"])
+
+
+def _ep_groups_pending(item: dict, meta: dict) -> bool:
+    """Would settling this item's attribution change anything for pass 4?
+    Cheap: `eligible` rules out nearly every item, and the homes are memoised."""
+    files = item.get("files") or []
+    if meta.get("tmdb_kind") != "tv" or not meta.get("tmdb_id") \
+            or not epgroups.eligible(files):
+        return False
+    homes = _ep_group_homes(meta)
+    if homes is None:
+        return int(meta.get("tmdb_id") or 0) not in _ep_groups_tried
+    trial = [dict(f) for f in files]
+    return epgroups.place_files(trial, homes, meta.get("title") or "")
 
 
 def _spawn_metadata_fetch(item_id: str) -> "asyncio.Task[Optional[dict]]":
@@ -10312,6 +10336,29 @@ async def anime_map_backfill() -> None:
         log.warning("Anime season backfill aborted: %s", exc)
 
 
+async def episode_group_backfill() -> None:
+    """Run attribution pass 4 over the library once per start (18.25.0).
+
+    A cached item never re-settles on its own, so a show downloaded before
+    episode groups were read would keep its stuck `(season, 0)` finales for
+    ever. One `_fetch_item_metadata` per item that has a candidate: a cache hit
+    there fetches the groups, places, persists and tops up season 0's names.
+    Sequential and late, so it never competes with boot."""
+    await asyncio.sleep(ANIME_BACKFILL_START_DELAY + 30)
+    try:
+        lib = await get_library()
+        targets = [it["id"] for it in lib["items"]
+                   if _ep_groups_pending(it, it.get("metadata") or {})]
+        for item_id in targets:
+            await _spawn_metadata_fetch(item_id)
+        if targets:
+            log.info("Episode-group backfill: settled %d item(s).", len(targets))
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.warning("Episode-group backfill aborted: %s", exc)
+
+
 _empty_ready_checked: dict = {}      # item id → last repair attempt (epoch)
 _EMPTY_READY_RETRY_SEC = 120
 
@@ -13651,6 +13698,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     _spawn_bg(_race_orphan_sweep())
     dvbackfill  = asyncio.create_task(video_probe_backfill())
     animefill   = asyncio.create_task(anime_map_backfill())
+    _spawn_bg(episode_group_backfill())
     vlc_tracker = asyncio.create_task(vlc_progress_tracker())
     bg_loop     = asyncio.create_task(background_video_loop())
     jackett_mon = asyncio.create_task(jackett_health_monitor())

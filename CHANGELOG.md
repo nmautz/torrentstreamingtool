@@ -23,6 +23,8 @@
   after it. This works for any show where the groups agree a special belongs
   inside a season (Firefly's three unaired episodes close its season 1). It
   never happens partially, and one group that disagrees stops it.
+- Existing shows are fixed without a refresh: a sweep ~75 s after start
+  settles every item the groups would change, and opening a show does too.
 - Fixed: opening the main part of a show that also has OVAs, movies or a spin-off
   (from its shelf) never loaded the show's episode names.
 - New `epgroups.py` (tested in `tests/test_epgroups.py` against the real TMDb
