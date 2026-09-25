@@ -977,6 +977,21 @@ final class AirPlayDoor {
         guard parts.count >= 2, !token.isEmpty, let up = upstream else { refuse(conn, 404); return }
         let method = String(parts[0]).uppercased()
         let target = String(parts[1])
+        // A Cast receiver is a web page on another origin, so a request that
+        // carries a non-simple header (Range, on some segments) is preflighted.
+        // Answer it without the token: it grants nothing, it only says which
+        // methods the real, token-checked request may use.
+        if method == "OPTIONS" {
+            let head = "HTTP/1.1 204 No Content\r\n"
+                + "Access-Control-Allow-Origin: *\r\n"
+                + "Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n"
+                + "Access-Control-Allow-Headers: *\r\n"
+                + "Access-Control-Max-Age: 600\r\n"
+                + "Content-Length: 0\r\nConnection: close\r\n\r\n"
+            conn.send(content: Data(head.utf8), contentContext: .finalMessage, isComplete: true,
+                      completion: .contentProcessed { _ in conn.cancel() })
+            return
+        }
         guard method == "GET" || method == "HEAD" else { refuse(conn, 405); return }
         guard target.hasPrefix(prefix),
               let url = URL(string: up.absoluteString + "/" + String(target.dropFirst(prefix.count))) else {
@@ -1005,6 +1020,7 @@ final class AirPlayDoor {
 
     private func refuse(_ conn: NWConnection, _ code: Int) {
         let head = "HTTP/1.1 \(code) \(HTTPURLResponse.localizedString(forStatusCode: code))\r\n"
+            + "Access-Control-Allow-Origin: *\r\n"
             + "Content-Length: 0\r\nConnection: close\r\n\r\n"
         conn.send(content: Data(head.utf8), contentContext: .finalMessage, isComplete: true,
                   completion: .contentProcessed { _ in conn.cancel() })

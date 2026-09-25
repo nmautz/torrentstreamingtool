@@ -1725,6 +1725,66 @@ returns to the phone at the native playhead. `stopNative` closes the door.
 - Does a hotel Wi-Fi with client isolation block it? Almost certainly, because
   discovery fails before the door matters.
 
+**Test attempt, 2026-09-25 (still untested).** On an Xfinity gateway network (10.0.0.x),
+an LG TV with AirPlay switched on was not visible to the phone or a Mac: no
+`_airplay._tcp`, no `_raop._tcp`, and no SSDP/DLNA reply from the TV. Only the gateway
+answered. Nothing is broken on our side; the TV was not reachable on that Wi-Fi at all.
+Check the TV's own IP (Settings → Network) against the phone's before blaming the door.
+
+#### Chromecast / Google TV (18.27.0 — spike, not yet verified on a device)
+
+The **Cast** button (`#lpCastBtn`) sits next to AirPlay and is shown under the same
+condition. `lpCast()` calls `NativePlayback.castScan()`, which browses Bonjour
+`_googlecast._tcp` for 3 s (`CastDiscovery`), and lists the devices in `#castModal`.
+Picking one calls `cast({deviceId})`.
+
+**No Google Cast SDK.** `CastSession.swift` implements the Cast v2 protocol directly: TLS
+to port 8009 (self-signed; accepted), a hand-rolled six-field `CastMessage` protobuf with
+a JSON payload, heartbeats, and launching Google's stock **Default Media Receiver**
+(`CC1AD845`). It uses LOAD / PLAY / PAUSE / SEEK / EDIT_TRACKS_INFO and a 1 Hz media
+`GET_STATUS`. That means no pod, no registered receiver app, and no Google developer
+account. Discovery is Bonjour, which needs only `NSBonjourServices` and the local-network
+prompt. SSDP (DLNA) would need Apple's multicast entitlement, which a sideloaded build
+cannot get.
+
+**A second transport, not a second player.** The Cast session sits in
+`NativePlaybackManager` beside the AVPlayer. `isNativeActive` is true for either, and
+`castStatus` is the Cast session's version of the time observer: it writes `armed.position`
+and `paused` (the receiver is the authority, since the TV's own remote can pause it), and
+emits `nativeProgress`. It also runs `maybePostProgress` / `maybePostSession` /
+`maybeAutoSkip`. `setPaused`, `seekTo`, `replaceItem` (advance and file switch) and
+`reachedEnd` branch on `cast`. So progress, cross-device sessions, Smart Skip and
+auto-advance are the code the glasses already use. The page becomes the remote on
+`nativeStarted {reason: "cast", name}` (the header reads "On <TV name>"). That event only
+fires once the receiver reports our media playing. Until then the phone keeps playing.
+
+**What the TV loads.** It gets the same `master-native.m3u8` as AirPlay, through
+`AirPlayDoor`, with `hlsSegmentFormat`/`hlsVideoSegmentFormat: "fmp4"` (the receiver
+otherwise assumes MPEG-TS). Audio and subtitles are picked from the tracks the receiver
+reports after load (`applyCastTracks`). Its TEXT and AUDIO tracks come in manifest order,
+the same order as `subIndex` / `audio_<n>`. The door answers CORS preflights (`OPTIONS`)
+without the token, because the receiver is a web page on another origin.
+
+**Staying alive.** The TV fetches every segment through the phone, and nothing plays
+locally. So `SilentKeepAlive` loops silence (mixable) under the `audio` background mode
+for the whole session. Without it, a locked phone is a stalled TV one buffer's length
+later. If the TLS link drops anyway, `rejoin()` finds the running receiver app and joins
+its transport rather than reloading: up to 3 tries in the foreground, or on the next
+foreground.
+
+**Ending.** Stop on the phone (`stopNative`) also stops the receiver app on the TV. A
+failure before the TV went live emits `castEnded {live: false}`; the page re-arms and
+says so. A failure or stop from the TV while live emits `castEnded {live: true}` and the
+page takes the episode back through `_npHandBack()`.
+
+**Unverified (the spike's questions):**
+- Does the Default Media Receiver load plain-HTTP HLS from a LAN address? Its page is
+  HTTPS, so mixed content is the main risk. `cast-end why:load_failed` in the log is
+  the tell.
+- Does it handle our CMAF fMP4, the separate audio rendition, and the WebVTT subtitle
+  playlists in `master-native.m3u8`? `cast-tracks` lists what it found.
+- Does the keep-alive hold with the phone locked for a whole episode?
+
 ### 2c. Subtitle image packs (styled ASS + PGS/VOBSUB)
 
 **The problem.** An HLS subtitle rendition may carry WebVTT or IMSC1 and nothing else, so

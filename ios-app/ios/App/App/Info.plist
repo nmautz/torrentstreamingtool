@@ -51,7 +51,11 @@
 		</dict>
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>StreamLink shares the episode you are watching with an AirPlay TV on this Wi-Fi.</string>
+	<string>StreamLink finds TVs on this Wi-Fi and shares the episode you are watching with the one you pick (AirPlay or Chromecast).</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_googlecast._tcp</string>
+	</array>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>

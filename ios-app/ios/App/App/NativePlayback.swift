@@ -42,8 +42,12 @@
 //    displays()        -> { connected, name, externalPlayback, ownWindow }
 //    airplay()         -> { ok, error?, url? }   send THIS playback to an AirPlay
 //                         receiver (18.26.0 spike — see "AirPlay" below)
+//    castScan()        -> { devices: [{id, name, model}] }   Chromecasts on the Wi-Fi
+//    cast({deviceId})  -> { ok, error? }   send THIS playback to one (18.27.0
+//                         spike — see "Chromecast" below and CastSession.swift)
 //  Events: nativeStarted, nativeEnded, nativeAdvanced, displayChanged,
 //          airplayEnded (the route was never picked, or was dropped),
+//          castEnded (the Cast session failed or was stopped from the TV),
 //          nativeYielded (another device pulled this playback over — see
 //          maybePostSession / honourYield)
 //
@@ -64,7 +68,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "18.26.0"
+let NP_BUILD = "18.27.0"
 
 // MARK: - Armed state
 
@@ -176,6 +180,8 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "log",       returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "logStats",  returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "airplay",   returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "castScan",  returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "cast",      returnType: CAPPluginReturnPromise),
     ]
 
     private let mgr = NativePlaybackManager.shared
@@ -302,6 +308,16 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
 
     @objc func airplay(_ call: CAPPluginCall) {
         mgr.startAirPlay { call.resolve($0) }
+    }
+
+    @objc func castScan(_ call: CAPPluginCall) {
+        CastDiscovery.shared.scan(seconds: call.getDouble("seconds") ?? 3) {
+            call.resolve(["devices": $0])
+        }
+    }
+
+    @objc func cast(_ call: CAPPluginCall) {
+        mgr.startCast(deviceId: call.getString("deviceId") ?? "") { call.resolve($0) }
     }
 }
 
@@ -873,11 +889,22 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private var airplayEngaged = false
     private var airplayWatchdog: DispatchWorkItem?
     private var routePicker: AVRoutePickerView?
+    /// Chromecast transport (18.27.0 spike). Non-nil from the tap until
+    /// teardown; `castLive` once the receiver is actually playing our media,
+    /// which is when the page becomes the remote.
+    private var cast: CastSession?
+    private var castLive = false
+    private var castReady = false
+    /// Tracks are picked once per LOAD, from the first status that lists them.
+    private var castTracksApplied = false
+    /// The link dropped while backgrounded; rejoin on the way back.
+    private var castNeedsRejoin = false
 
     /// Whether we are currently holding the idle timer open. See setAwake.
     private(set) var awakeOn = false
 
-    var isNativeActive: Bool { player != nil }
+    /// "We are the transport" — an AVPlayer, or a Cast session driving a TV.
+    var isNativeActive: Bool { player != nil || cast != nil }
 
     // MARK: Lifecycle
 
@@ -1070,7 +1097,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // The page arms with the URLs IT can reach (loopback / the box). While
         // AirPlay is up the receiver is fetching, so every URL the player could
         // load — this one or the next episode's — goes through the door.
-        if airplayOn {
+        if airplayOn || cast != nil {
             if let u = a.url { a.url = AirPlayDoor.shared.lanURL(for: u) ?? u }
             if let u = a.nextUrl { a.nextUrl = AirPlayDoor.shared.lanURL(for: u) ?? u }
         }
@@ -1281,6 +1308,15 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     /// Drive the native player directly. Only meaningful while it is the
     /// presentation; a no-op otherwise, so the page can call it unconditionally.
     func setPaused(_ paused: Bool, source: String = "unknown") {
+        if let c = cast {
+            lastTransportRequest = (src: source, at: Date())
+            DiagLog.shared.write("setPaused", ["paused": paused, "src": source,
+                                               "was": armed.paused, "pos": armed.position,
+                                               "cast": true], cat: "play")
+            armed.paused = paused
+            if paused { c.pause() } else { c.play() }
+            return
+        }
         guard let p = player else { return }
         // WHO ASKED. `armed.paused` is the flag the whole handoff reads, and for
         // the life of the feature nothing recorded who set it — so a player found
@@ -1302,6 +1338,14 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     /// while native holds the display; acting on the parked <video> would move a
     /// player nobody is watching.
     func seekTo(_ t: Double) {
+        if let c = cast {
+            let clamped = armed.duration > 1 ? min(max(t, 0), armed.duration - 0.5) : max(t, 0)
+            armed.position = clamped
+            armed.armedAt = Date()
+            c.seek(clamped)
+            maybePostProgress(clamped, force: true)
+            return
+        }
         guard let p = player else { return }
         let clamped = armed.duration > 1 ? min(max(t, 0), armed.duration - 0.5) : max(t, 0)
         armed.position = clamped
@@ -1317,7 +1361,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
 
     /// True while the native player is the presentation and the page must not
     /// touch its own element.
-    var isHolding: Bool { isNativeActive && (extWindow != nil || airplayOn) }
+    var isHolding: Bool { isNativeActive && (extWindow != nil || airplayOn || castLive) }
 
     func disarm(reason: String = "unspecified") {
         // ORDER IS LOAD-BEARING: flush, then stop, then wipe.
@@ -1806,7 +1850,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if !armed.token.isEmpty { req.setValue(armed.token, forHTTPHeaderField: "X-Device-Token") }
         req.timeoutInterval = 8
-        let paused = (player?.timeControlStatus != .playing)
+        let paused = cast != nil ? armed.paused : (player?.timeControlStatus != .playing)
         // No continuity payload: the web player sent its playlist / shuffle on the
         // beat that opened this session and the host keeps the last value it was
         // given, so a pull still gets the whole run. Nothing about it can change
@@ -1886,7 +1930,9 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         ], cat: "play")
     }
 
-    @objc private func itemDidEnd(_ note: Notification) {
+    @objc private func itemDidEnd(_ note: Notification) { reachedEnd() }
+
+    private func reachedEnd() {
         maybePostProgress(armed.duration, force: true)
 
         // Advance in place if the web player armed a next episode — it already
@@ -1961,7 +2007,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // `.readyToPlay` the position is not yet the position. The second is
         // manners — someone who paused inside the intro did not ask to be moved.
         guard isNativeActive, !armed.paused,
-              player?.currentItem?.status == .readyToPlay else { return }
+              cast != nil ? castReady : player?.currentItem?.status == .readyToPlay else { return }
 
         if armed.autoSkipIntro, !armed.introDone,
            armed.introStart >= 0, armed.introEnd > armed.introStart {
@@ -2007,7 +2053,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     /// and the audio session do not. That is the whole point: releasing them is
     /// what drops the picture back onto the phone.
     private func swapNativeItem(to url: URL, at start: Double, play: Bool) {
-        guard isNativeActive, player != nil else { return }
+        guard isNativeActive, player != nil || cast != nil else { return }
         DiagLog.shared.write("native-swap", [
             "to": armed.filePath, "item": armed.itemId,
             "at": start, "play": play,
@@ -2017,6 +2063,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     }
 
     private func replaceItem(with url: URL, at start: Double = 0, play: Bool = true) {
+        if cast != nil { castLoad(url, at: start, play: play); return }
         guard let p = player else { return }
         if let old = item {
             for n in [Notification.Name.AVPlayerItemDidPlayToEndTime,
@@ -2082,7 +2129,12 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // on the display with it. That is the "showed a frame for a second or two,
         // black otherwise" symptom. While our window is up, the native player IS
         // the presentation; only disarm/stop ends it.
-        if extWindow != nil || airplayOn { return }
+        if castNeedsRejoin, let c = cast {
+            castNeedsRejoin = false
+            DiagLog.shared.write("cast-rejoin", ["pos": armed.position], cat: "cast")
+            c.rejoin()
+        }
+        if extWindow != nil || airplayOn || castLive { return }
 
         // If the webview never calls resume() — it reloaded, crashed, or the
         // page was replaced — we'd be left playing invisible audio with no UI.
@@ -2153,6 +2205,17 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         }
         detachExternalWindow()      // mirroring resumes; TV Mode gets its screen back
         detachFallbackLayer()
+        if let c = cast {
+            // Stopping playback stops the TV too; the receiver would otherwise
+            // play on with nothing on the phone that knows about it.
+            c.onStatus = nil; c.onDropped = nil; c.onFailed = nil
+            c.stop(stopApp: true)
+            cast = nil
+            castLive = false
+            castReady = false
+            castNeedsRejoin = false
+            SilentKeepAlive.shared.stop()
+        }
         endAirPlaySession()
         player?.pause()
         player?.replaceCurrentItem(with: nil)
@@ -2704,6 +2767,181 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         onMain { pv?.removeFromSuperview() }
     }
 
+    // MARK: Chromecast (18.27.0 spike)
+
+    // A Cast session is a TRANSPORT, the same role the AVPlayer plays: `armed`
+    // stays the single record of what is playing, and progress, session beats,
+    // auto-skip and advance all run off the receiver's clock exactly as they run
+    // off the AVPlayer's (castStatus is this transport's time observer). The
+    // branches live in setPaused / seekTo / replaceItem / maybeAutoSkip.
+    //
+    // Like AirPlay the TV fetches the stream itself, through AirPlayDoor; unlike
+    // AirPlay nothing plays on the phone, so SilentKeepAlive holds the process up
+    // with the phone locked — the door dies with it otherwise.
+
+    private var castRejoins = 0
+
+    func startCast(deviceId: String, _ done: @escaping ([String: Any]) -> Void) {
+        onMain { [weak self] in
+            guard let self = self else { return }
+            guard self.armed.active, let url = self.armed.url else {
+                done(["ok": false, "error": "Nothing is playing that can be cast."]); return
+            }
+            guard !self.isNativeActive else {
+                done(["ok": false, "error": "Already playing on another screen."]); return
+            }
+            guard let dev = CastDiscovery.shared.device(deviceId) else {
+                done(["ok": false, "error": "That TV is no longer on this Wi-Fi."]); return
+            }
+            AirPlayDoor.shared.open(for: url, bearer: self.armed.token) { [weak self] result in
+                guard let self = self else { return }
+                if case .failure(let err) = result {
+                    DiagLog.shared.write("cast-refused", ["err": err.localizedDescription], cat: "cast")
+                    done(["ok": false, "error": err.localizedDescription]); return
+                }
+                guard let lan = AirPlayDoor.shared.lanURL(for: url) else {
+                    done(["ok": false, "error": "Could not share this stream."]); return
+                }
+                self.armed.url = lan
+                if let n = self.armed.nextUrl { self.armed.nextUrl = AirPlayDoor.shared.lanURL(for: n) ?? n }
+                let c = CastSession(device: dev)
+                self.cast = c
+                self.castLive = false
+                self.castReady = false
+                self.castTracksApplied = false
+                self.castRejoins = 0
+                c.onStatus  = { [weak self] st in self?.castStatus(st) }
+                c.onDropped = { [weak self] why in self?.castDropped(why) }
+                c.onFailed  = { [weak self] why in self?.castFailed(why) }
+                SilentKeepAlive.shared.start()
+                let at = self.extrapolatedPosition()
+                DiagLog.shared.write("cast-start", [
+                    "device": dev.name, "model": dev.model, "at": at, "title": self.armed.title,
+                    "upstream": "\(url.scheme ?? "?")://\(url.host ?? "?")",
+                    "lanHost": AirPlayDoor.shared.host ?? "",
+                ], cat: "cast")
+                c.start(.init(url: lan, position: at, autoplay: !self.armed.paused,
+                              title: self.armed.title, subtitle: self.armed.series))
+                done(["ok": true, "name": dev.name])
+            }
+        }
+    }
+
+    /// Load a (native-master) URL into the running receiver: the advance and
+    /// file-switch paths, reached through replaceItem.
+    private func castLoad(_ url: URL, at start: Double, play: Bool) {
+        guard let c = cast else { return }
+        castReady = false
+        castTracksApplied = false
+        let lan = AirPlayDoor.shared.lanURL(for: url) ?? url
+        c.load(.init(url: lan, position: max(start, 0), autoplay: play,
+                     title: armed.title, subtitle: armed.series))
+    }
+
+    /// The receiver's clock. Mirrors installTimeObserver's body.
+    private func castStatus(_ st: CastMediaStatus) {
+        guard let c = cast else { return }
+        castRejoins = 0
+        if st.idleReason == "ERROR" { castFailed("media-error"); return }
+        let loaded = st.playerState == "PLAYING" || st.playerState == "PAUSED"
+            || st.playerState == "BUFFERING"
+        if loaded {
+            castReady = true
+            if !castLive {
+                castLive = true
+                DiagLog.shared.write("cast-live", ["device": c.device.name, "at": st.currentTime,
+                                                   "dur": st.duration,
+                                                   "tracks": st.tracks.count], cat: "cast")
+                emit("nativeStarted", ["reason": "cast", "position": st.currentTime,
+                                       "name": c.device.name, "extWindow": false,
+                                       "display": false])
+            }
+            if !castTracksApplied, !st.tracks.isEmpty {
+                castTracksApplied = true
+                applyCastTracks(st)
+            }
+        }
+        if st.playerState == "PLAYING" || st.playerState == "PAUSED" {
+            let t = st.currentTime
+            armed.position = t
+            armed.armedAt = Date()
+            if st.duration > 0 { armed.duration = st.duration }
+            // The TV's own remote can pause it, so the receiver is the authority.
+            armed.paused = st.playerState == "PAUSED"
+            PlaybackLiveActivity.shared.update(state: liveActivityState(), force: false)
+            emit("nativeProgress", ["position": t, "duration": armed.duration,
+                                    "paused": armed.paused])
+            maybePostProgress(t)
+            maybePostSession(t)
+            maybeAutoSkip(t)      // last, as in the AVPlayer observer
+        } else if st.playerState == "IDLE", castReady, st.idleReason == "FINISHED" {
+            // Polled at 1 Hz, so the same FINISHED arrives repeatedly; castReady
+            // is the latch, and a fresh load re-arms it.
+            castReady = false
+            reachedEnd()
+        }
+    }
+
+    /// Audio and subtitle picks, from the tracks the receiver found in the
+    /// native master. Its TEXT tracks are our SUBTITLES renditions in manifest
+    /// order, which is `subIndex` order; AUDIO likewise follows `audio_<n>`.
+    private func applyCastTracks(_ st: CastMediaStatus) {
+        let audio = st.tracks.filter { ($0["type"] as? String) == "AUDIO" }
+        let text  = st.tracks.filter { ($0["type"] as? String) == "TEXT" }
+        var ids: [Int] = []
+        let aIdx = Int((armed.audioName ?? "audio_0").replacingOccurrences(of: "audio_", with: "")) ?? 0
+        if aIdx < audio.count, let id = audio[aIdx]["trackId"] as? Int {
+            ids.append(id)
+        } else {
+            // Keep whatever audio is on: an EDIT replaces the whole active set.
+            let audioIds = Set(audio.compactMap { $0["trackId"] as? Int })
+            ids.append(contentsOf: st.activeTrackIds.filter { audioIds.contains($0) })
+        }
+        if armed.subIndex >= 0, armed.subIndex < text.count, let id = text[armed.subIndex]["trackId"] as? Int {
+            ids.append(id)
+        }
+        DiagLog.shared.write("cast-tracks", ["audio": audio.count, "text": text.count,
+                                             "want": ids, "active": st.activeTrackIds], cat: "cast")
+        if Set(ids) != Set(st.activeTrackIds) { cast?.setActiveTracks(ids) }
+    }
+
+    private func castDropped(_ why: String) {
+        guard let c = cast else { return }
+        if UIApplication.shared.applicationState != .active {
+            // Suspended anyway (keep-alive lost?) — try again on the way back.
+            castNeedsRejoin = true
+            return
+        }
+        castRejoins += 1
+        if castRejoins > 3 { castFailed("lost: \(why)"); return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Double(castRejoins)) { [weak self] in
+            guard let self = self, self.cast === c else { return }
+            c.rejoin()
+        }
+    }
+
+    /// The session is over. Before it went live the page is still playing and
+    /// only needs telling; after, the page is a remote and its resume() takes
+    /// the episode back (reclaim -> stopNative tears the rest down).
+    private func castFailed(_ why: String) {
+        guard let c = cast else { return }
+        SilentKeepAlive.shared.stop()
+        sessionActivated = false          // the keep-alive re-categorised it
+        DiagLog.shared.write("cast-end", ["why": why, "live": castLive, "pos": armed.position,
+                                          "device": c.device.name], cat: "cast")
+        if castLive {
+            castLive = false
+            emit("castEnded", ["reason": why, "position": armed.position, "live": true])
+            return
+        }
+        c.onStatus = nil; c.onDropped = nil; c.onFailed = nil
+        c.stop(stopApp: false)
+        cast = nil
+        castReady = false
+        endAirPlaySession()               // closes the door
+        emit("castEnded", ["reason": why, "live": false])
+    }
+
     // MARK: Displays
 
     @objc private func screenDidChange() {
@@ -2992,6 +3230,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             "awake":    awakeOn,
             "holding":  isHolding,
             "airplay":  airplayOn,
+            "cast":     castLive,
         ]
     }
 

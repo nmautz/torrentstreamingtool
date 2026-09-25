@@ -2695,6 +2695,26 @@ reached through Tailscale is on no network the TV can see. So AirPlay always goe
   that Tailscale routes (both `192.168.0.x`), the phone's traffic to the TV may be sent
   into the tunnel. Untested.
 
+### Chromecast: we speak Cast v2 ourselves, and the phone must stay awake while the TV plays
+
+- **The TV fetches through the phone.** As with AirPlay, the stream goes through
+  `AirPlayDoor`, so a suspended phone means a stalled TV. Unlike AirPlay, nothing plays
+  locally to keep the process up, so `SilentKeepAlive` does. Removing it "because
+  nothing is playing" breaks casting with the phone locked.
+- **No Google Cast SDK, on purpose** (`CastSession.swift`). If you change the protobuf,
+  change it in both `encode` and `decode`. There are six fields, and the field numbers
+  and wire types are the protocol.
+- **Tell the receiver `fmp4`.** The Default Media Receiver assumes MPEG-TS for HLS. Our
+  CMAF bundles fail to load without `hlsSegmentFormat`/`hlsVideoSegmentFormat: "fmp4"`.
+- **`EDIT_TRACKS_INFO` replaces the whole active set.** Sending only a subtitle id turns
+  the audio off. `applyCastTracks` always includes an audio track.
+- **FINISHED is polled, not pushed once.** Status is read at 1 Hz, so an IDLE/FINISHED
+  arrives repeatedly. `castReady` is the latch, and without it one episode end would
+  advance several times.
+- **Discovery is Bonjour, not SSDP.** Multicast needs an Apple entitlement a sideloaded
+  build can't get. Bonjour needs only `NSBonjourServices: _googlecast._tcp`, and a new
+  service type must be added there or the browser finds nothing.
+
 ### iOS drops a showing `<track>`'s cues when the WKWebView is suspended — re-showing won't re-fetch, recreate the element
 
 On iOS (Safari and the Capacitor app), backgrounding the app / opening another app while a subtitle `<track>` is set to `mode="showing"` makes WebKit discard that track's parsed cues. On return the element reports `readyState === 2` (LOADED) but `track.cues` is empty (or `readyState === 3` ERROR) — and setting `mode="showing"` again does **not** trigger a re-fetch, because WebKit considers the resource already loaded. The active subtitle therefore renders nothing while every other track still works: tracks that weren't showing at suspend time are untouched (they fetch fresh on first selection), which is exactly why "switch to the AI track and it appears" and "stop + resume fixes it" (a full reload rebuilds every `<track>`). The only reliable recovery is to **remove the `<track>` element and append a fresh one** so the browser re-fetches the VTT — re-assigning `.src` or toggling `.mode` is not enough. `_lpSubTrackBroken` / `_lpRecreateSubTrack` / `_lpRecoverActiveSub` in `static/index.html` do this for the active track on `visibilitychange`→visible (and when the user re-selects a dropped track); they guard on cues actually being empty so healthy tracks never flicker. See [STREAMING.md](STREAMING.md).

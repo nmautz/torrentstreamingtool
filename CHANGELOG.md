@@ -1,5 +1,23 @@
 # Changelog
 
+## [18.27.0] — 2026-09-25
+### Cast to a Chromecast or Google TV (spike)
+
+- **The iOS app's player has a Cast button.** It lists the Chromecasts and
+  Google TVs on this Wi-Fi. Pick one and the episode plays on it, with the
+  phone as the remote. Progress, Smart Skip and auto-advance keep working,
+  exactly as on the glasses. This works for downloaded episodes and for box
+  streams, including over Tailscale.
+- The TV gets the stream through the same one-time Wi-Fi share as AirPlay.
+  While casting, the app keeps itself awake with silent audio, because the
+  TV stalls if the phone is suspended.
+- The app talks to the TV directly, not through Google's Cast library, so
+  nothing new is installed and no Google registration is needed.
+- Audio and subtitle choices carry over to the TV (text subtitles only).
+  Stopping on the phone stops the TV. If the TV stops or the connection is
+  lost, the episode comes back to the phone.
+- Not yet verified on a real Chromecast.
+
 ## [18.26.0] — 2026-09-25
 ### AirPlay to a TV (spike)
 

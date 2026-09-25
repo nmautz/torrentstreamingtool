@@ -3577,6 +3577,27 @@
 <!-- ── Pause Stream-Prep chooser modal ───────────────────────────────────────
      Lets the user pick how the in-flight encode is handled when pausing.
 -->
+<!-- Cast-to picker (18.27.0 spike). Filled by lpCast from NativePlayback.castScan:
+     the Chromecasts / Google TVs on this Wi-Fi. Above the player, which it opens
+     from. -->
+<div id="castModal"
+  class="hidden fixed inset-0 z-[90] bg-black/70 flex items-end sm:items-center justify-center sm:px-4"
+  onclick="if (event.target === this) _lpCastClose()">
+  <div class="bg-gray-900 w-full sm:max-w-sm fade-in border-t-[3px] border-indigo-600">
+    <div class="px-5 pt-5 pb-3 border-b border-gray-800">
+      <h2 class="text-lg font-black uppercase tracking-wide">Cast to</h2>
+      <p id="castModalSub" class="text-xs text-gray-500 mt-0.5">Looking for Chromecasts on this Wi-Fi…</p>
+    </div>
+    <div id="castModalList" class="p-4 grid grid-cols-1 gap-2"></div>
+    <div class="px-4 pb-4 safe-bottom grid grid-cols-2 gap-2">
+      <button onclick="lpCast()"
+        class="bg-gray-800 hover:bg-gray-700 py-3 text-sm font-bold uppercase tracking-wide transition-colors">Rescan</button>
+      <button onclick="_lpCastClose()"
+        class="bg-gray-800 hover:bg-gray-700 py-3 text-sm font-bold uppercase tracking-wide transition-colors">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <div id="prepPauseModal"
   class="hidden fixed inset-0 z-[60] bg-black/70 flex items-end sm:items-center justify-center sm:px-4">
   <div class="bg-gray-900 w-full sm:max-w-sm fade-in border-t-[3px] border-amber-500">
@@ -3953,6 +3974,14 @@
             <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" d="M6 17H4V5h16v12h-2"/>
               <path stroke-linejoin="round" d="M12 14l5 6H7z"/>
+            </svg>
+          </button>
+          <!-- Chromecast / Google TV (app only, 18.27.0 spike) — lpCast. -->
+          <button id="lpCastBtn" class="lp-ctl-sm hidden" onclick="lpCast()" title="Cast to a Chromecast or Google TV">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 8V5h18v14h-7"/>
+              <path stroke-linecap="round" d="M3 12a7 7 0 017 7M3 16a3 3 0 013 3"/>
+              <path d="M3 19h.01"/>
             </svg>
           </button>
           <button id="lpRotBtn" class="lp-ctl-sm" onclick="lpToggleOrientLock()"
@@ -19295,7 +19324,7 @@ function _npStartPoll() {
     if (!_npHolding || Date.now() - _npLastProgressAt < 4000) return;
     let st = null;
     try { st = await _cap.np.state(); } catch (_) { return; }
-    if (!st || !st.native) { _npStopPoll(); _npHolding = false; _npAirplay = false; _npSyncRemoteUi(); return; }
+    if (!st || !st.native) { _npStopPoll(); _npHolding = false; _npAirplay = false; _npCastName = ""; _npSyncRemoteUi(); return; }
     _npApplyNativeTransport(st.position, st.paused, _npNativeDur);
   }, 2000);
 }
@@ -19345,7 +19374,7 @@ function _npSyncRemoteUi() {
   // way out too — this runs at every _npHolding write, both directions.
   const where = document.getElementById("lpWhere");
   if (where) {
-    where.textContent = on ? (_npAirplay ? "On AirPlay" : "On Glasses") : "On Device";
+    where.textContent = on ? _npWhereLabel() : "On Device";
     where.classList.toggle("text-indigo-400", on);
     where.classList.toggle("text-emerald-500", !on);
   }
@@ -19356,7 +19385,7 @@ function _npSyncRemoteUi() {
   // directions run here because this is the only function that knows the page
   // stopped being a remote; there is no event for it.
   const banner = document.getElementById("lpRemoteBannerTxt");
-  if (banner) banner.textContent = _npAirplay ? "Playing on AirPlay" : "Playing on Glasses";
+  if (banner) banner.textContent = "Playing " + _npWhereLabel().replace(/^On /, "on ");
   _npSyncAirplayBtn();
   const bar  = document.getElementById("lpSeekBar");
   const skip = document.getElementById("lpSkipOffer");
@@ -19383,6 +19412,13 @@ function _npSyncRemoteUi() {
 
 let _npExternal = false;     // an external display / AirPlay route is present
 let _npAirplay = false;      // the hold is an AirPlay session, not a wired display
+let _npCastName = "";        // non-empty: the hold is a Chromecast session, on this TV
+
+// Where the picture is while native holds it — the header, the remote banner.
+function _npWhereLabel() {
+  if (_npCastName) return "On " + _npCastName;
+  return _npAirplay ? "On AirPlay" : "On Glasses";
+}
 
 // AirPlay (18.26.0 spike). The web player is hls.js over MSE, which AirPlay can
 // only MIRROR — and mirroring dies at the lock. So AirPlay goes through the same
@@ -19391,8 +19427,55 @@ let _npAirplay = false;      // the hold is an AirPlay session, not a wired disp
 // phone opens on its Wi-Fi (AirPlayDoor in LocalMediaServer.swift), which is how
 // a downloaded bundle and a box stream over Tailscale both reach it.
 function _npSyncAirplayBtn() {
-  const b = document.getElementById("lpAirplayBtn");
-  if (b) b.classList.toggle("hidden", !(_npOk() && !_npHolding));
+  const show = _npOk() && !_npHolding;
+  for (const id of ["lpAirplayBtn", "lpCastBtn"]) {
+    const b = document.getElementById(id);
+    if (b) b.classList.toggle("hidden", !show);
+  }
+}
+
+// Chromecast / Google TV (18.27.0 spike). Same shape as AirPlay: the native side
+// takes the playback and this page becomes its remote — but the transport is a
+// Cast session (CastSession.swift) driving the TV's own player, and the TV
+// fetches through the same Wi-Fi door. Scan, pick, cast.
+function _lpCastClose() { document.getElementById("castModal")?.classList.add("hidden"); }
+async function lpCast() {
+  if (!_npOk()) return;
+  const modal = document.getElementById("castModal");
+  const list = document.getElementById("castModalList");
+  const sub = document.getElementById("castModalSub");
+  sub.textContent = "Looking for Chromecasts on this Wi-Fi…";
+  list.innerHTML = "";
+  modal.classList.remove("hidden");
+  let devs = [];
+  try { devs = ((await _cap.np.castScan({ seconds: 3 })) || {}).devices || []; }
+  catch (_) { sub.textContent = "Casting needs an updated app build."; return; }
+  _npLog("cast-scan", { found: devs.length }, "cast");
+  if (!devs.length) {
+    sub.textContent = "No Chromecast or Google TV found. It must be on the same Wi-Fi as this phone.";
+    return;
+  }
+  sub.textContent = "Pick a TV. The phone becomes the remote.";
+  for (const d of devs) {
+    const b = document.createElement("button");
+    b.className = "bg-gray-800 hover:bg-gray-700 px-4 py-4 text-left transition-colors border-l-4 border-indigo-600";
+    const n = document.createElement("div");
+    n.className = "text-sm font-black uppercase tracking-wide"; n.textContent = d.name || "TV";
+    const m = document.createElement("div");
+    m.className = "text-[11px] text-gray-500 mt-0.5"; m.textContent = d.model || "";
+    b.append(n, m);
+    b.onclick = () => _lpCastTo(d);
+    list.appendChild(b);
+  }
+}
+async function _lpCastTo(d) {
+  _lpCastClose();
+  _npArm();                     // the TV starts from THIS playhead
+  let r = null;
+  try { r = await _cap.np.cast({ deviceId: d.id }); } catch (e) { r = { ok: false, error: (e && e.message) || "" }; }
+  _npLog("cast-tap", { ok: !!(r && r.ok), err: (r && r.error) || "", device: d.name }, "cast");
+  if (!r || !r.ok) { showAlert((r && r.error) || "Couldn’t cast to that TV.", "error"); return; }
+  showAlert(`Connecting to ${d.name}…`, "info");
 }
 async function lpAirPlay() {
   if (!_npOk()) return;
@@ -19428,7 +19511,7 @@ function _npServerUrl() {
 // The glasses remote's header: episode name big, "Show · S01E03" above it.
 function _npSyncRemoteTitle() {
   const np = labelNowPlaying(lp.label || fileLabel(lp.filePath || "", lp.itemId));
-  document.getElementById("lpRemoteSeries").textContent = np.series || _npSeriesName() || (_npAirplay ? "On AirPlay" : "On Glasses");
+  document.getElementById("lpRemoteSeries").textContent = np.series || _npSeriesName() || _npWhereLabel();
   document.getElementById("lpRemoteTitle").textContent = np.title || "";
 }
 
@@ -19664,7 +19747,7 @@ async function _npHandBack() {
   // rather than at each call site is what makes the display-lost hand-back
   // below safe: while it stayed true, every control kept reading _npNativePos
   // from a player that no longer exists and the element was left parked.
-  _npHolding = false; _npAirplay = false; _npStopPoll(); _npSyncRemoteUi();
+  _npHolding = false; _npAirplay = false; _npCastName = ""; _npStopPoll(); _npSyncRemoteUi();
   const v = _lpV(); if (!v) return;
 
   // Native auto-advanced into the next episode while we were away — resync the
@@ -19703,8 +19786,9 @@ function _npBindEvents() {
     // Intent stays "playing" — the user did not pause anything, and if this were
     // recorded as a pause the native side would inherit it on the next handoff.
     _cap.np.addListener("nativeStarted", (e) => {
-      if (!e || (e.reason !== "early" && e.reason !== "airplay")) return;
+      if (!e || (e.reason !== "early" && e.reason !== "airplay" && e.reason !== "cast")) return;
       _npAirplay = e.reason === "airplay";
+      _npCastName = e.reason === "cast" ? (e.name || "TV") : "";
       // No player on this page means the arm native just played is not ours —
       // it outlived the page that made it. Becoming a remote for it would draw
       // controls for an episode this page never opened; release it instead.
@@ -19747,6 +19831,7 @@ function _npBindEvents() {
       const wasHolding = _npHolding;
       _npHolding = false;
       _npAirplay = false;
+      _npCastName = "";
       _npSyncRemoteUi();
       _npStopPoll();
       // Only meaningful if we're still backgrounded; on return _npHandBack's
@@ -19797,6 +19882,21 @@ function _npBindEvents() {
       _npLog("airplay-ended", { reason: (e && e.reason) || "", at: (e && e.position) || 0,
                                 holding: _npHolding }, "ext");
       if (_npHolding) _npHandBack().catch(() => {});
+    });
+    // The Cast session ended: failed before it went live (the page is still
+    // playing — just say so and re-arm with the page's own URLs, which the
+    // native side had swapped for the door's), or ended while live (stopped
+    // from the TV, lost) — then take the episode back like airplayEnded does.
+    _cap.np.addListener("castEnded", (e) => {
+      _npLog("cast-ended", { reason: (e && e.reason) || "", live: !!(e && e.live),
+                             at: (e && e.position) || 0, holding: _npHolding }, "cast");
+      if (e && e.live) {
+        if (_npHolding) _npHandBack().catch(() => {});
+        showAlert("Casting ended — playing on this phone.", "info");
+      } else {
+        _npArm();
+        showAlert("Couldn’t cast: " + ((e && e.reason) || "the TV refused the stream") + ".", "error");
+      }
     });
     _cap.np.addListener("displayChanged", (e) => {
       const was = _npExternal;
@@ -29322,6 +29422,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.26.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.27.0</div>
 </body>
 </html>
