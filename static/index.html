@@ -3787,7 +3787,7 @@
          row — because the middle of the stage belongs to the transport
          cluster; see the LAYOUT RULE on .lp-remote in the stylesheet. -->
     <div id="lpRemote">
-      <div id="lpRemoteBanner"><span class="lp-rm-dot"></span><span>Playing on Glasses</span></div>
+      <div id="lpRemoteBanner"><span class="lp-rm-dot"></span><span id="lpRemoteBannerTxt">Playing on Glasses</span></div>
       <!-- What's playing + the clock, one fixed row. No poster: in a grid that
            claims every pixel there is no void left for artwork to fill, and a
            dimmed image under flat tiles is decoration Metro does not do. -->
@@ -3944,6 +3944,15 @@
             <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
               <circle cx="12" cy="12" r="3"/>
+            </svg>
+          </button>
+          <!-- AirPlay (app only, 18.26.0 spike). Hands THIS playback to the native
+               player and opens the system route sheet; see lpAirPlay. Shown only
+               when the file has a native master (_npSyncAirplayBtn). -->
+          <button id="lpAirplayBtn" class="lp-ctl-sm hidden" onclick="lpAirPlay()" title="AirPlay to a TV">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M6 17H4V5h16v12h-2"/>
+              <path stroke-linejoin="round" d="M12 14l5 6H7z"/>
             </svg>
           </button>
           <button id="lpRotBtn" class="lp-ctl-sm" onclick="lpToggleOrientLock()"
@@ -19286,7 +19295,7 @@ function _npStartPoll() {
     if (!_npHolding || Date.now() - _npLastProgressAt < 4000) return;
     let st = null;
     try { st = await _cap.np.state(); } catch (_) { return; }
-    if (!st || !st.native) { _npStopPoll(); _npHolding = false; _npSyncRemoteUi(); return; }
+    if (!st || !st.native) { _npStopPoll(); _npHolding = false; _npAirplay = false; _npSyncRemoteUi(); return; }
     _npApplyNativeTransport(st.position, st.paused, _npNativeDur);
   }, 2000);
 }
@@ -19336,7 +19345,7 @@ function _npSyncRemoteUi() {
   // way out too — this runs at every _npHolding write, both directions.
   const where = document.getElementById("lpWhere");
   if (where) {
-    where.textContent = on ? "On Glasses" : "On Device";
+    where.textContent = on ? (_npAirplay ? "On AirPlay" : "On Glasses") : "On Device";
     where.classList.toggle("text-indigo-400", on);
     where.classList.toggle("text-emerald-500", !on);
   }
@@ -19346,6 +19355,9 @@ function _npSyncRemoteUi() {
   // (Same technique, and the same reason, as _applyPhoneLandLayout.) Both
   // directions run here because this is the only function that knows the page
   // stopped being a remote; there is no event for it.
+  const banner = document.getElementById("lpRemoteBannerTxt");
+  if (banner) banner.textContent = _npAirplay ? "Playing on AirPlay" : "Playing on Glasses";
+  _npSyncAirplayBtn();
   const bar  = document.getElementById("lpSeekBar");
   const skip = document.getElementById("lpSkipOffer");
   if (on) {
@@ -19370,6 +19382,28 @@ function _npSyncRemoteUi() {
 }
 
 let _npExternal = false;     // an external display / AirPlay route is present
+let _npAirplay = false;      // the hold is an AirPlay session, not a wired display
+
+// AirPlay (18.26.0 spike). The web player is hls.js over MSE, which AirPlay can
+// only MIRROR — and mirroring dies at the lock. So AirPlay goes through the same
+// door as the glasses: the native player takes the playback, the page becomes
+// its remote. The receiver fetches the stream itself, from a token-gated door the
+// phone opens on its Wi-Fi (AirPlayDoor in LocalMediaServer.swift), which is how
+// a downloaded bundle and a box stream over Tailscale both reach it.
+function _npSyncAirplayBtn() {
+  const b = document.getElementById("lpAirplayBtn");
+  if (b) b.classList.toggle("hidden", !(_npOk() && !_npHolding));
+}
+async function lpAirPlay() {
+  if (!_npOk()) return;
+  _npArm();                     // native starts from THIS playhead, not the last tick
+  let r = null;
+  try { r = await _cap.np.airplay(); } catch (e) { r = { ok: false, error: (e && e.message) || "" }; }
+  _npLog("airplay-tap", { ok: !!(r && r.ok), err: (r && r.error) || "", file: lp.filePath }, "ext");
+  if (!r || !r.ok) {
+    showAlert((r && r.error) || "AirPlay needs an updated app build.", "error");
+  }
+}
 let _npArmed = false;        // we've told native a session is live
 let _npLastTick = 0;
 
@@ -19394,7 +19428,7 @@ function _npServerUrl() {
 // The glasses remote's header: episode name big, "Show · S01E03" above it.
 function _npSyncRemoteTitle() {
   const np = labelNowPlaying(lp.label || fileLabel(lp.filePath || "", lp.itemId));
-  document.getElementById("lpRemoteSeries").textContent = np.series || _npSeriesName() || "On Glasses";
+  document.getElementById("lpRemoteSeries").textContent = np.series || _npSeriesName() || (_npAirplay ? "On AirPlay" : "On Glasses");
   document.getElementById("lpRemoteTitle").textContent = np.title || "";
 }
 
@@ -19559,9 +19593,11 @@ function _npArm() {
                                    bg: _appPlaybackPrefs().bg }, "ext");
     }
     _npDisarm("not-armable");
+    _npSyncAirplayBtn();
     return;
   }
   try { _cap.np.arm(_npPayload()); _npArmed = true; } catch (_) {}
+  _npSyncAirplayBtn();
 }
 
 // Position-only refresh, throttled to ~1 Hz. Driven from _lpClockTick, which
@@ -19628,7 +19664,7 @@ async function _npHandBack() {
   // rather than at each call site is what makes the display-lost hand-back
   // below safe: while it stayed true, every control kept reading _npNativePos
   // from a player that no longer exists and the element was left parked.
-  _npHolding = false; _npStopPoll(); _npSyncRemoteUi();
+  _npHolding = false; _npAirplay = false; _npStopPoll(); _npSyncRemoteUi();
   const v = _lpV(); if (!v) return;
 
   // Native auto-advanced into the next episode while we were away — resync the
@@ -19667,7 +19703,8 @@ function _npBindEvents() {
     // Intent stays "playing" — the user did not pause anything, and if this were
     // recorded as a pause the native side would inherit it on the next handoff.
     _cap.np.addListener("nativeStarted", (e) => {
-      if (!e || e.reason !== "early") return;
+      if (!e || (e.reason !== "early" && e.reason !== "airplay")) return;
+      _npAirplay = e.reason === "airplay";
       // No player on this page means the arm native just played is not ours —
       // it outlived the page that made it. Becoming a remote for it would draw
       // controls for an episode this page never opened; release it instead.
@@ -19709,6 +19746,7 @@ function _npBindEvents() {
                                holding: _npHolding }, "play");
       const wasHolding = _npHolding;
       _npHolding = false;
+      _npAirplay = false;
       _npSyncRemoteUi();
       _npStopPoll();
       // Only meaningful if we're still backgrounded; on return _npHandBack's
@@ -19751,6 +19789,14 @@ function _npBindEvents() {
           _npArm();
         }
       }
+    });
+    // The AirPlay route was never picked (sheet dismissed) or was dropped from
+    // Control Centre. Native has let go of the hold; resume() puts the episode
+    // back on the phone at the native playhead.
+    _cap.np.addListener("airplayEnded", (e) => {
+      _npLog("airplay-ended", { reason: (e && e.reason) || "", at: (e && e.position) || 0,
+                                holding: _npHolding }, "ext");
+      if (_npHolding) _npHandBack().catch(() => {});
     });
     _cap.np.addListener("displayChanged", (e) => {
       const was = _npExternal;
@@ -29276,6 +29322,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.25.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.26.0</div>
 </body>
 </html>

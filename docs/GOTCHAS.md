@@ -2674,6 +2674,27 @@ Two more, on the JS side:
   the common case (playing a *downloaded* episode online, which always routes through
   a proxied session). Same trap as the auto-manage prefs.
 
+### AirPlay receivers fetch the URL themselves — loopback and Tailscale URLs are dead to them
+
+AirPlay video is not mirroring. The receiver is handed the player item's URL and
+downloads the HLS itself. A URL on `127.0.0.1` is the **receiver's** loopback, and a box
+reached through Tailscale is on no network the TV can see. So AirPlay always goes through
+`AirPlayDoor` (phone Wi-Fi IP + a per-session token prefix, see
+[STREAMING.md § 2b AirPlay](STREAMING.md)). Also:
+- **The web player cannot AirPlay video.** hls.js/MSE only goes out as mirroring, and
+  mirroring dies at the lock. The native player has to own the session.
+- **The route needs a presenting layer.** A layerless AVPlayer is audio-only and
+  never enters external playback. This is the same rule as for a wired display, so
+  `attachFallbackLayer` runs for AirPlay even with no external screen.
+- **Arms keep arriving with page-reachable URLs.** Every `arm()` during a session
+  rewrites `url`/`nextUrl` through the door. Skip that step and the next re-arm or
+  advance hands the receiver a loopback URL.
+- **Networks with client isolation** (most hotels) block AirPlay discovery outright.
+  Nothing on our side can fix that. Use wired HDMI there.
+- **Address overlap:** if the network the TV is on uses the same subnet as the home LAN
+  that Tailscale routes (both `192.168.0.x`), the phone's traffic to the TV may be sent
+  into the tunnel. Untested.
+
 ### iOS drops a showing `<track>`'s cues when the WKWebView is suspended — re-showing won't re-fetch, recreate the element
 
 On iOS (Safari and the Capacitor app), backgrounding the app / opening another app while a subtitle `<track>` is set to `mode="showing"` makes WebKit discard that track's parsed cues. On return the element reports `readyState === 2` (LOADED) but `track.cues` is empty (or `readyState === 3` ERROR) — and setting `mode="showing"` again does **not** trigger a re-fetch, because WebKit considers the resource already loaded. The active subtitle therefore renders nothing while every other track still works: tracks that weren't showing at suspend time are untouched (they fetch fresh on first selection), which is exactly why "switch to the AI track and it appears" and "stop + resume fixes it" (a full reload rebuilds every `<track>`). The only reliable recovery is to **remove the `<track>` element and append a fresh one** so the browser re-fetches the VTT — re-assigning `.src` or toggling `.mode` is not enough. `_lpSubTrackBroken` / `_lpRecreateSubTrack` / `_lpRecoverActiveSub` in `static/index.html` do this for the active track on `visibilitychange`→visible (and when the user re-selects a dropped track); they guard on cues actually being empty so healthy tracks never flicker. See [STREAMING.md](STREAMING.md).

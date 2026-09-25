@@ -40,7 +40,10 @@
 //                            awake }
 //    setAwake({on})    -> { on }
 //    displays()        -> { connected, name, externalPlayback, ownWindow }
+//    airplay()         -> { ok, error?, url? }   send THIS playback to an AirPlay
+//                         receiver (18.26.0 spike — see "AirPlay" below)
 //  Events: nativeStarted, nativeEnded, nativeAdvanced, displayChanged,
+//          airplayEnded (the route was never picked, or was dropped),
 //          nativeYielded (another device pulled this playback over — see
 //          maybePostSession / honourYield)
 //
@@ -50,6 +53,7 @@
 import Foundation
 import Capacitor
 import AVFoundation
+import AVKit
 import MediaPlayer
 import UIKit
 
@@ -60,7 +64,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "18.21.7"
+let NP_BUILD = "18.26.0"
 
 // MARK: - Armed state
 
@@ -171,6 +175,7 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "clearLog",  returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "log",       returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "logStats",  returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "airplay",   returnType: CAPPluginReturnPromise),
     ]
 
     private let mgr = NativePlaybackManager.shared
@@ -293,6 +298,10 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
 
     @objc func logStats(_ call: CAPPluginCall) {
         call.resolve(DiagLog.shared.stats())
+    }
+
+    @objc func airplay(_ call: CAPPluginCall) {
+        mgr.startAirPlay { call.resolve($0) }
     }
 }
 
@@ -856,6 +865,14 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private var audioEverActivated = false
     private var endedFlag = false
     private var handBackDeadline: DispatchWorkItem?
+    /// An AirPlay session is up: the player's URLs point at AirPlayDoor, and the
+    /// native player is the presentation exactly as it is on the glasses.
+    private(set) var airplayOn = false
+    /// The route actually engaged at least once this session. Until it has, a
+    /// false `isExternalPlaybackActive` is "not picked yet", not "dropped".
+    private var airplayEngaged = false
+    private var airplayWatchdog: DispatchWorkItem?
+    private var routePicker: AVRoutePickerView?
 
     /// Whether we are currently holding the idle timer open. See setAwake.
     private(set) var awakeOn = false
@@ -1050,6 +1067,13 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         a.nextIntroEnd     = call.getDouble("nextIntroEnd") ?? -1
         a.nextCreditsStart = call.getDouble("nextCreditsStart") ?? -1
         a.armedAt        = Date()
+        // The page arms with the URLs IT can reach (loopback / the box). While
+        // AirPlay is up the receiver is fetching, so every URL the player could
+        // load — this one or the next episode's — goes through the door.
+        if airplayOn {
+            if let u = a.url { a.url = AirPlayDoor.shared.lanURL(for: u) ?? u }
+            if let u = a.nextUrl { a.nextUrl = AirPlayDoor.shared.lanURL(for: u) ?? u }
+        }
 
         let wasActive = armed.active
 
@@ -1293,7 +1317,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
 
     /// True while the native player is the presentation and the page must not
     /// touch its own element.
-    var isHolding: Bool { isNativeActive && extWindow != nil }
+    var isHolding: Bool { isNativeActive && (extWindow != nil || airplayOn) }
 
     func disarm(reason: String = "unspecified") {
         // ORDER IS LOAD-BEARING: flush, then stop, then wipe.
@@ -1421,8 +1445,11 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             self.applyTrackSelection(on: obs)
             self.seekAndPlay(to: startAt, play: shouldPlay)
         }
-        externalObs = p.observe(\.isExternalPlaybackActive, options: [.new]) { [weak self] _, _ in
+        externalObs = p.observe(\.isExternalPlaybackActive, options: [.new]) { [weak self] pl, _ in
             guard let self = self else { return }
+            // KVO lands on whatever queue flipped it; airplay state is main-only.
+            let ext = pl.isExternalPlaybackActive
+            self.onMain { self.airplayRouteChanged(ext) }
             self.emit("displayChanged", self.displayInfo())
             PlaybackLiveActivity.shared.update(state: self.liveActivityState(), force: true)
         }
@@ -2055,7 +2082,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // on the display with it. That is the "showed a frame for a second or two,
         // black otherwise" symptom. While our window is up, the native player IS
         // the presentation; only disarm/stop ends it.
-        if extWindow != nil { return }
+        if extWindow != nil || airplayOn { return }
 
         // If the webview never calls resume() — it reloaded, crashed, or the
         // page was replaced — we'd be left playing invisible audio with no UI.
@@ -2083,7 +2110,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // Same reasoning as the deadline above: a foreground JS hand-back would
         // stop the player that is currently feeding the external display. Tell the
         // page we are holding it and let it leave the web element alone.
-        if extWindow != nil, isNativeActive {
+        if isHolding {
             return ["holding": true, "active": true, "position": armed.position,
                     "paused": armed.paused, "ended": false,
                     "itemId": armed.itemId, "filePath": armed.filePath]
@@ -2126,6 +2153,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         }
         detachExternalWindow()      // mirroring resumes; TV Mode gets its screen back
         detachFallbackLayer()
+        endAirPlaySession()
         player?.pause()
         player?.replaceCurrentItem(with: nil)
         player = nil
@@ -2428,7 +2456,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             // second is the degradation that matters — without it, a Direct-mode
             // handoff on a device that never offers the scene attaches NO surface at
             // all, which is the audio-only bug 14.1.1 fixed.
-            if self.extLayer == nil, self.externalScreen != nil {
+            if self.extLayer == nil, self.externalScreen != nil || self.airplayOn {
                 self.attachFallbackLayer()
             }
         }
@@ -2531,6 +2559,149 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             self.mainLayer?.removeFromSuperlayer()
             self.mainLayer = nil
         }
+    }
+
+    // MARK: AirPlay (18.26.0 spike)
+
+    // WHAT IS DIFFERENT FROM THE GLASSES
+    // The glasses are a SCREEN: we draw into a window on it, and the bytes never
+    // leave the phone. An AirPlay receiver is a separate computer that is handed
+    // the URL and fetches the stream itself, so the whole question is whether it
+    // can reach that URL — and none of ours are reachable from it (loopback, or
+    // the box behind Tailscale). AirPlayDoor answers that; everything here is
+    // the same takeover the glasses use: native becomes the presentation, the
+    // page becomes the remote, progress/skip/advance run off the native clock.
+    //
+    // WHY THE WEB PLAYER CANNOT DO THIS ITSELF
+    // It is hls.js over ManagedMediaSource. AirPlay carries MSE only as
+    // mirroring, and mirroring dies with the lock — the exact failure the
+    // native handoff exists to escape.
+    //
+    // The route needs a PRESENTING player (same rule as the monitor: a layerless
+    // AVPlayer is audio-only and never enters external playback), so the
+    // fallback layer behind the webview is attached for the session.
+
+    func startAirPlay(_ done: @escaping ([String: Any]) -> Void) {
+        onMain { [weak self] in
+            guard let self = self else { return }
+            guard self.armed.active, let url = self.armed.url else {
+                done(["ok": false, "error": "Nothing is playing that AirPlay can take."]); return
+            }
+            if self.extWindow != nil {
+                done(["ok": false, "error": "Already playing on a connected display."]); return
+            }
+            AirPlayDoor.shared.open(for: url, bearer: self.armed.token) { [weak self] result in
+                guard let self = self else { return }
+                if case .failure(let err) = result {
+                    DiagLog.shared.write("airplay-refused", ["err": err.localizedDescription], cat: "ext")
+                    done(["ok": false, "error": err.localizedDescription]); return
+                }
+                guard let lan = AirPlayDoor.shared.lanURL(for: url) else {
+                    done(["ok": false, "error": "Could not share this stream."]); return
+                }
+                self.airplayOn = true
+                self.airplayEngaged = false
+                self.armed.url = lan
+                if let n = self.armed.nextUrl { self.armed.nextUrl = AirPlayDoor.shared.lanURL(for: n) ?? n }
+                DiagLog.shared.write("airplay-start", [
+                    "native": self.isNativeActive, "at": self.armed.position,
+                    "title": self.armed.title,
+                    // Scheme + host only: the token in the path is the door's key.
+                    "upstream": "\(url.scheme ?? "?")://\(url.host ?? "?")",
+                    "lanHost": AirPlayDoor.shared.host ?? "",
+                ], cat: "ext")
+                if self.isNativeActive {
+                    // Already native (backgrounded earlier and came back): move
+                    // the running player onto the door without dropping the playhead.
+                    let at = self.player.map { CMTimeGetSeconds($0.currentTime()) } ?? self.armed.position
+                    self.replaceItem(with: lan, at: at, play: !self.armed.paused)
+                    self.attachFallbackLayer()
+                } else {
+                    self.startNative(reason: "airplay")
+                }
+                self.presentRoutePicker()
+                self.armAirPlayWatchdog()
+                done(["ok": true])
+            }
+        }
+    }
+
+    /// The system route sheet, with video receivers first. AVRoutePickerView has
+    /// no "present" API — it is a button — so it lives invisibly in the app's
+    /// window and we press it.
+    private func presentRoutePicker() {
+        guard let root = UIApplication.shared.connectedScenes
+                .compactMap({ $0 as? UIWindowScene })
+                .first(where: { $0.session.role == .windowApplication })?
+                .windows.first?.rootViewController?.view else {
+            DiagLog.shared.write("airplay-picker-missing", ["why": "no-root"], cat: "ext")
+            return
+        }
+        let pv = routePicker ?? AVRoutePickerView(frame: CGRect(x: root.bounds.midX, y: root.bounds.midY,
+                                                                width: 1, height: 1))
+        pv.prioritizesVideoDevices = true
+        pv.alpha = 0.02
+        if pv.superview == nil { root.addSubview(pv) }
+        routePicker = pv
+        func button(in v: UIView) -> UIButton? {
+            if let b = v as? UIButton { return b }
+            for s in v.subviews { if let b = button(in: s) { return b } }
+            return nil
+        }
+        if let b = button(in: pv) {
+            b.sendActions(for: .touchUpInside)
+        } else {
+            DiagLog.shared.write("airplay-picker-missing", ["why": "no-button"], cat: "ext")
+        }
+    }
+
+    /// A picker dismissed without a choice leaves native playing through the
+    /// phone's speaker behind a page that thinks it is a remote. Give the viewer
+    /// time to choose, then hand back.
+    private func armAirPlayWatchdog() {
+        airplayWatchdog?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self, self.airplayOn, !self.airplayEngaged else { return }
+            self.endAirPlay(reason: "never-picked")
+        }
+        airplayWatchdog = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 45, execute: work)
+    }
+
+    private func airplayRouteChanged(_ external: Bool) {
+        guard airplayOn else { return }
+        DiagLog.shared.write("airplay-route", ["external": external,
+                                               "engaged": airplayEngaged,
+                                               "pos": armed.position], cat: "ext")
+        if external {
+            airplayEngaged = true
+            airplayWatchdog?.cancel(); airplayWatchdog = nil
+        } else if airplayEngaged {
+            endAirPlay(reason: "route-lost")
+        }
+    }
+
+    /// The session is over but the player is not: tell the page, whose resume()
+    /// flushes, stops native and puts the episode back on the phone.
+    private func endAirPlay(reason: String) {
+        guard airplayOn else { return }
+        airplayOn = false
+        airplayWatchdog?.cancel(); airplayWatchdog = nil
+        DiagLog.shared.write("airplay-end", ["reason": reason, "pos": armed.position,
+                                             "engaged": airplayEngaged], cat: "ext")
+        emit("airplayEnded", ["reason": reason, "position": armed.position])
+    }
+
+    /// Teardown half, from stopNative. Closing the door is what makes the
+    /// receiver's URLs dead, so it happens only once no player needs them.
+    private func endAirPlaySession() {
+        airplayOn = false
+        airplayEngaged = false
+        airplayWatchdog?.cancel(); airplayWatchdog = nil
+        AirPlayDoor.shared.close()
+        let pv = routePicker
+        routePicker = nil
+        onMain { pv?.removeFromSuperview() }
     }
 
     // MARK: Displays
@@ -2820,6 +2991,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             "extWindow": extWindow != nil,
             "awake":    awakeOn,
             "holding":  isHolding,
+            "airplay":  airplayOn,
         ]
     }
 

@@ -37,6 +37,7 @@
 import Foundation
 import Capacitor
 import Network
+import Security
 import UIKit
 
 @objc(LocalMediaServer)
@@ -831,6 +832,220 @@ final class HLSStaticServer {
                 then?()
             }
         })
+    }
+}
+
+// MARK: - AirPlay door (18.26.0 spike)
+
+/// The one way an AirPlay receiver can reach what the phone is playing.
+///
+/// WHY IT EXISTS. An AirPlay receiver does not take frames from the phone: it is
+/// handed the HLS URL and FETCHES IT ITSELF. Every URL the native player holds is
+/// unreachable from an Apple TV — `http://127.0.0.1:<port>/…` is the Apple TV's
+/// own loopback, and the box behind Tailscale is on no network the TV is on. So
+/// the phone opens a second listener on its Wi-Fi interface and reverse-proxies
+/// ONE upstream origin (the loopback server, or the box) under a secret prefix:
+///
+///     http://<wifi-ip>:<port>/ap/<token>/<upstream path + query>
+///
+/// Relative URIs inside the playlists resolve against the playlist's own URL, so
+/// every rendition, segment and subtitle a master names stays under the prefix
+/// with no playlist rewriting. Offline bundles (loopback upstream) and box
+/// streams over Tailscale (box upstream) are the same code path.
+///
+/// Safety: GET/HEAD only, and nothing is answered without the 128-bit token,
+/// which is minted per open and never leaves the AirPlay session. The loopback
+/// server stays loopback-only; this is the only thing on the LAN, and only while
+/// an AirPlay session is up.
+final class AirPlayDoor {
+    static let shared = AirPlayDoor()
+
+    private let queue = DispatchQueue(label: "com.streamlink.airplaydoor", attributes: .concurrent)
+    private var listener: NWListener?
+    private(set) var port: UInt16?
+    private(set) var host: String?
+    private var token = ""
+    private var upstream: URL?     // scheme://host:port, no path
+    private var bearer: String?
+
+    var isOpen: Bool { listener != nil && port != nil }
+
+    enum DoorError: Error, LocalizedError {
+        case noWifi, badUpstream, listener(Error)
+        var errorDescription: String? {
+            switch self {
+            case .noWifi: return "No Wi-Fi address — AirPlay needs the phone on the same Wi-Fi as the TV."
+            case .badUpstream: return "Nothing playable to share."
+            case .listener(let e): return e.localizedDescription
+            }
+        }
+    }
+
+    /// Open (or re-point) the door at the origin of `media`. Completion on main.
+    func open(for media: URL, bearer: String?, completion: @escaping (Result<Void, DoorError>) -> Void) {
+        guard let origin = Self.origin(of: media) else {
+            DispatchQueue.main.async { completion(.failure(.badUpstream)) }
+            return
+        }
+        guard let ip = Self.wifiIPv4() else {
+            DispatchQueue.main.async { completion(.failure(.noWifi)) }
+            return
+        }
+        upstream = origin
+        self.bearer = bearer
+        host = ip
+        if isOpen {
+            DispatchQueue.main.async { completion(.success(())) }
+            return
+        }
+        token = Self.mintToken()
+        let params = NWParameters.tcp
+        // Wi-Fi only: the receiver is on the Wi-Fi, and cellular must never
+        // expose anything.
+        params.requiredInterfaceType = .wifi
+        params.allowLocalEndpointReuse = true
+        let l: NWListener
+        do { l = try NWListener(using: params) } catch {
+            DispatchQueue.main.async { completion(.failure(.listener(error))) }
+            return
+        }
+        listener = l
+        var finished = false
+        l.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .ready:
+                self?.port = l.port?.rawValue
+                if !finished { finished = true; DispatchQueue.main.async { completion(.success(())) } }
+            case .failed(let err):
+                l.cancel()
+                if self?.listener === l { self?.listener = nil; self?.port = nil }
+                DiagLog.shared.write("airplay-door-failed", ["err": err.localizedDescription], cat: "ext")
+                if !finished { finished = true; DispatchQueue.main.async { completion(.failure(.listener(err))) } }
+            default: break
+            }
+        }
+        l.newConnectionHandler = { [weak self] conn in self?.handle(conn) }
+        l.start(queue: queue)
+    }
+
+    func close() {
+        guard listener != nil else { return }
+        listener?.cancel()
+        listener = nil
+        port = nil
+        upstream = nil
+        bearer = nil
+        token = ""
+        DiagLog.shared.write("airplay-door-closed", [:], cat: "ext")
+    }
+
+    /// The receiver-reachable form of `url`, or nil when it is not under the
+    /// origin the door is pointed at (the caller then keeps the original).
+    func lanURL(for url: URL) -> URL? {
+        guard isOpen, let port = port, let host = host, let up = upstream,
+              Self.origin(of: url) == up else { return nil }
+        var tail = url.path
+        if let q = url.query { tail += "?" + q }
+        return URL(string: "http://\(host):\(port)/ap/\(token)\(tail)")
+    }
+
+    // MARK: request handling
+
+    private func handle(_ conn: NWConnection) {
+        conn.start(queue: queue)
+        receive(conn, buffer: Data())
+    }
+
+    private func receive(_ conn: NWConnection, buffer: Data) {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024) { [weak self] data, _, done, err in
+            guard let self = self else { conn.cancel(); return }
+            var buf = buffer
+            if let data = data { buf.append(data) }
+            if let end = buf.range(of: Data("\r\n\r\n".utf8)) {
+                self.respond(conn, header: buf.subdata(in: 0..<end.lowerBound))
+                return
+            }
+            if err != nil || done || buf.count > 16 * 1024 { conn.cancel(); return }
+            self.receive(conn, buffer: buf)
+        }
+    }
+
+    private func respond(_ conn: NWConnection, header: Data) {
+        let lines = (String(data: header, encoding: .utf8) ?? "").components(separatedBy: "\r\n")
+        let parts = (lines.first ?? "").split(separator: " ")
+        let prefix = "/ap/\(token)/"
+        guard parts.count >= 2, !token.isEmpty, let up = upstream else { refuse(conn, 404); return }
+        let method = String(parts[0]).uppercased()
+        let target = String(parts[1])
+        guard method == "GET" || method == "HEAD" else { refuse(conn, 405); return }
+        guard target.hasPrefix(prefix),
+              let url = URL(string: up.absoluteString + "/" + String(target.dropFirst(prefix.count))) else {
+            refuse(conn, 404); return
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = method
+        // Range is the one header that matters (fmp4 byte ranges); User-Agent
+        // and Accept ride along so the host's access log can tell who asked.
+        for line in lines.dropFirst() {
+            guard let i = line.firstIndex(of: ":") else { continue }
+            let name = line[..<i].trimmingCharacters(in: .whitespaces)
+            let value = line[line.index(after: i)...].trimmingCharacters(in: .whitespaces)
+            if ["range", "user-agent", "accept", "if-range"].contains(name.lowercased()) {
+                req.setValue(value, forHTTPHeaderField: name)
+            }
+        }
+        req.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        if let b = bearer, !b.isEmpty { req.setValue("Bearer \(b)", forHTTPHeaderField: "Authorization") }
+        let fwd = ProxyForwarder(conn: conn)
+        conn.stateUpdateHandler = { state in
+            switch state { case .failed, .cancelled: fwd.clientGone(); default: break }
+        }
+        fwd.start(req)
+    }
+
+    private func refuse(_ conn: NWConnection, _ code: Int) {
+        let head = "HTTP/1.1 \(code) \(HTTPURLResponse.localizedString(forStatusCode: code))\r\n"
+            + "Content-Length: 0\r\nConnection: close\r\n\r\n"
+        conn.send(content: Data(head.utf8), contentContext: .finalMessage, isComplete: true,
+                  completion: .contentProcessed { _ in conn.cancel() })
+    }
+
+    // MARK: helpers
+
+    private static func origin(of url: URL) -> URL? {
+        guard let scheme = url.scheme, let host = url.host else { return nil }
+        let port = url.port.map { ":\($0)" } ?? ""
+        return URL(string: "\(scheme)://\(host)\(port)")
+    }
+
+    private static func mintToken() -> String {
+        var bytes = [UInt8](repeating: 0, count: 16)
+        if SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) != errSecSuccess {
+            return UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        }
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The phone's IPv4 on Wi-Fi (`en0`). IPv4 because every AirPlay receiver
+    /// speaks it and a literal needs no brackets in a URL.
+    static func wifiIPv4() -> String? {
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let first = head else { return nil }
+        defer { freeifaddrs(head) }
+        var found: String?
+        for p in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let ifa = p.pointee
+            guard let sa = ifa.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET),
+                  String(cString: ifa.ifa_name) == "en0",
+                  (ifa.ifa_flags & UInt32(IFF_UP)) != 0 else { continue }
+            var buf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(sa, socklen_t(sa.pointee.sa_len), &buf, socklen_t(buf.count),
+                           nil, 0, NI_NUMERICHOST) == 0 {
+                found = String(cString: buf)
+                break
+            }
+        }
+        return found
     }
 }
 

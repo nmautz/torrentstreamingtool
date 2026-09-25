@@ -1,5 +1,24 @@
 # Changelog
 
+## [18.26.0] — 2026-09-25
+### AirPlay to a TV (spike)
+
+- **The iOS app's player has an AirPlay button.** Tapping it hands the episode
+  to the native player, opens the system AirPlay sheet, and turns the phone
+  into the remote. This is the same arrangement as the glasses, so progress,
+  Smart Skip and auto-advance keep running. It works for downloaded episodes
+  and for streams from the box, including over Tailscale when you are away.
+- An AirPlay TV fetches the stream itself, and it can reach neither the phone's
+  internal server nor the box behind Tailscale. So while a session is up, the
+  phone serves the stream on its Wi-Fi address behind a one-time secret, and
+  closes it when playback stops.
+- If no TV is picked within 45 seconds, or the TV disconnects, the episode goes
+  back to the phone where it was.
+- Text subtitles go to the TV. Styled (ASS) and image subtitles don't. Audio
+  and subtitle choices apply when AirPlay starts but cannot be changed during
+  it yet.
+- Not yet verified on a real AirPlay receiver.
+
 ## [18.25.0] — 2026-09-24
 ### Arrange a show by story arc, DVD order, and so on
 

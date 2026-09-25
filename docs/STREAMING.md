@@ -1684,6 +1684,47 @@ volume buttons already drive the glasses.
 Native side: `ios-app/ios/App/App/NativePlayback.swift` (+ `PlaybackLiveActivity.swift`,
 `Shared/PlaybackIntents.swift`, `StreamLinkLiveActivities/PlaybackWidget.swift`).
 
+#### AirPlay (18.26.0 — spike, not yet verified on a receiver)
+
+AirPlay is a third route for the same takeover. The **AirPlay** button in the player's
+control row (`#lpAirplayBtn`, app only, shown when the file has a native master) calls
+`lpAirPlay()` → `NativePlayback.airplay()`. The native player takes the playback (a
+`nativeStarted` with `reason: "airplay"`), the page becomes the remote exactly as it does
+for the glasses (`#lpWhere` reads "On AirPlay"), and the system route sheet opens.
+
+**Why this needs more than `allowsExternalPlayback`.** An AirPlay receiver is not a
+screen. It is handed the HLS URL and **fetches the stream itself**. None of the native
+player's URLs are reachable from a TV. `http://127.0.0.1:<port>/…` is the TV's own
+loopback, and the box over Tailscale is on no network the TV is on. So `AirPlayDoor`
+(in `LocalMediaServer.swift`) opens a second listener on the phone's **Wi-Fi**
+interface. It reverse-proxies the one upstream origin the player was using (the loopback
+server or the box) under a per-session secret prefix:
+
+    http://<wifi-ip>:<port>/ap/<128-bit token>/<upstream path + query>
+
+Relative URIs inside the playlists resolve against the playlist's URL, so no playlist is
+rewritten. Offline bundles and box streams share the one path. While a session is up,
+`arm()` passes every armed URL (`url`, `nextUrl`) through `lanURL(for:)`, so auto-advance
+also stays on the door. The door only answers GET/HEAD, and only with the token. It
+closes in `stopNative`. The loopback server stays loopback-only.
+
+Subtitles reach the TV through `master-native.m3u8`'s subtitle group (text subtitles
+only; ASS styling and image subtitles don't). Audio and subtitles are chosen when the item
+loads, from the armed selection. As with the glasses, the remote cannot switch them
+mid-play yet.
+
+**Ending.** If no route engages within 45 s (the sheet was dismissed), native emits
+`airplayEnded {reason: "never-picked"}`. A route that engaged and then dropped emits
+`reason: "route-lost"`. The page answers both with `_npHandBack()`, so the episode
+returns to the phone at the native playhead. `stopNative` closes the door.
+
+**Unverified (the spike's questions):**
+- Does a receiver really fetch from the door? Watch for `airplay-route external:true` in
+  the client log, then segment GETs.
+- Does the process stay alive with the phone locked while AirPlay plays?
+- Does a hotel Wi-Fi with client isolation block it? Almost certainly, because
+  discovery fails before the door matters.
+
 ### 2c. Subtitle image packs (styled ASS + PGS/VOBSUB)
 
 **The problem.** An HLS subtitle rendition may carry WebVTT or IMSC1 and nothing else, so
