@@ -2741,7 +2741,17 @@ reached through Tailscale is on no network the TV can see. So AirPlay always goe
   position in the receiver's TEXT list.
 - **The phone's volume buttons are captured by parking the volume at 50%**
   (`startVolumeCapture`). If you remove the restore in `stopVolumeCapture`, the
-  viewer's phone is left at 50% after every cast.
+  viewer's phone is left at 50% after every cast. **Both run on main, always.**
+  `stopNative` reaches `stopVolumeCapture` straight from Capacitor's plugin queue
+  (`resume` → `reclaim`, `disarm`). Moving the hidden `UISlider` there leaves an
+  implicit `CATransaction` on a GCD worker thread. iOS 27 commits it when that worker
+  *exits*, which can be seconds or minutes later, and UIKit's animation tick queue
+  traps. The crash report shows `EXC_BREAKPOINT` on
+  `com.apple.UIKit.inProcessAnimationManagerTickQueue` under
+  `CA::Transaction::release_thread`, with none of our frames. Four crashes on
+  2026-09-25 (18.29.0–18.30.1), each 15 s–6 min after a cast ended. That delay is
+  the tell for any future `release_thread` crash: the bad touch happened earlier,
+  somewhere off main, so look at what ran on a background queue *before* it.
 - **Discovery is Bonjour, not SSDP.** Multicast needs an Apple entitlement a sideloaded
   build can't get. Bonjour needs only `NSBonjourServices: _googlecast._tcp`, and a new
   service type must be added there or the browser finds nothing.

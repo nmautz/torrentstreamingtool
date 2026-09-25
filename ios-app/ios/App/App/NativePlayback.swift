@@ -74,7 +74,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "18.30.1"
+let NP_BUILD = "18.30.3"
 
 // MARK: - Armed state
 
@@ -3038,17 +3038,30 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         }
     }
 
+    // MAIN THREAD, ALWAYS. stopNative reaches here straight from Capacitor's
+    // plugin queue (resume -> reclaim, disarm), and moving the slider there left
+    // an implicit CATransaction on a GCD worker. iOS 27 commits it when that
+    // worker exits — seconds to minutes later — and UIKit's animation tick
+    // queue traps (`CA::Transaction::release_thread` -> AnimationKit, SIGTRAP).
+    // Four crashes on 2026-09-25, each after a cast ended. See GOTCHAS.md.
     private func stopVolumeCapture() {
-        volObs?.invalidate(); volObs = nil
-        guard let v = volView else { return }
-        if volPhoneOriginal >= 0 { setPhoneVolume(volPhoneOriginal) }
-        volPhoneOriginal = -1
-        // Let the restore land before the slider it goes through disappears.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { v.removeFromSuperview() }
-        volView = nil
+        onMain { [weak self] in
+            guard let self = self else { return }
+            self.volObs?.invalidate(); self.volObs = nil
+            guard let v = self.volView else { return }
+            if self.volPhoneOriginal >= 0 { self.setPhoneVolume(self.volPhoneOriginal) }
+            self.volPhoneOriginal = -1
+            // Let the restore land before the slider it goes through disappears.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { v.removeFromSuperview() }
+            self.volView = nil
+        }
     }
 
     private func setPhoneVolume(_ level: Float) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.setPhoneVolume(level) }
+            return
+        }
         guard let slider = volView?.subviews.compactMap({ $0 as? UISlider }).first else { return }
         slider.setValue(level, animated: false)
         slider.sendActions(for: .valueChanged)

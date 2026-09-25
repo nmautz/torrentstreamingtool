@@ -1,5 +1,16 @@
 # Changelog
 
+## [18.30.3] — 2026-09-25
+### No more crash after casting
+
+- **The app no longer crashes a little while after a Chromecast session
+  ends.** When you tapped Back to phone or stopped playback during a cast,
+  the app put the phone's volume back from a background thread. iOS 27
+  crashes the app for that, but only when the thread is later cleaned up,
+  15 seconds to 6 minutes afterwards. That's why the crashes seemed random.
+  All four crashes on 2026-09-25 were this. The volume is now restored on
+  the main thread. Needs an app rebuild (Swift only).
+
 ## [18.30.2] — 2026-09-25
 ### Pulling playback from a TV starts where the TV is
 
