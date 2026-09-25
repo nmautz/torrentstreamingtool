@@ -2723,6 +2723,11 @@ reached through Tailscale is on no network the TV can see. So AirPlay always goe
   INVALID_MEDIA_SESSION_ID`. That killed the first Chromecast advance on device.
   `replacedMediaSessionId` filters those statuses, and INVALID_REQUEST is recoverable
   (forget the id, `GET_STATUS`), never fatal.
+- **While native holds the picture, EVERY page reader of the playhead is stale.**
+  The page's `<video>` is parked at the handoff position. `lpStop` used `_npNativePos`
+  from the start, but the cross-device beat and yield (`_pbBeatOnce` / `_pbYieldNow`)
+  read the element. A Chromecast at 779 s was pulled onto a Mac at 184 s, where
+  casting began. Both now go through `_pbPlayhead()`. Any new reader must too.
 - **While native plays, an arm's position is stale.** The page arms from its parked
   element. `arm()` keeps `armed.position` unless the arm switches files; otherwise a
   hand-back resumes at the handoff time.

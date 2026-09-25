@@ -1,5 +1,14 @@
 # Changelog
 
+## [18.30.2] — 2026-09-25
+### Pulling playback from a TV starts where the TV is
+
+- **Pulling an episode onto another device while it's on a Chromecast,
+  AirPlay or the glasses now resumes where the TV is.** It used to resume
+  where casting started (184 s instead of 779 s). The phone kept reporting
+  its own paused player's position to other devices, and handed that over
+  when playback was pulled. Page-only fix; no app rebuild needed.
+
 ## [18.30.1] — 2026-09-25
 ### Chromecast advances to the next episode
 

@@ -23225,10 +23225,29 @@ async function _pbBeat(){
   try { await _pbBeatOnce(); } finally { _pbBeatInflight = false; }
 }
 
-async function _pbBeatOnce(){
+// The playhead this device should ADVERTISE and hand over. While native holds
+// the picture (glasses, AirPlay, Chromecast — _npHolding) the page's <video> is
+// parked at the handoff position, so reading it is reading the past: measured
+// 2026-09-25, a Chromecast at 779 s was pulled onto the Mac at 184 s — the
+// moment casting began — because both the beat and the yield read the parked
+// element. The native clock (_npNativePos, pushed at 1 Hz) is the truth then;
+// lpStop has used it for the same reason since the glasses.
+function _pbPlayhead(){
   const v = document.getElementById("lpVideo");
-  const t = (v && v.currentTime > 2) ? v.currentTime : (lp.lastKnownT || 0);
-  const d = (v && v.duration > 0) ? v.duration : (lp.duration || 0);
+  if(_npHolding && _npNativePos > 2){
+    return { t: _npNativePos, d: _npNativeDur || lp.duration || (v && v.duration) || 0,
+             state: _npNativePaused ? "paused" : "playing" };
+  }
+  return {
+    t: (v && v.currentTime > 2) ? v.currentTime : (lp.lastKnownT || 0),
+    d: (v && v.duration > 0) ? v.duration : (lp.duration || 0),
+    state: (v && v.readyState < 2) ? "buffering" : ((v && v.paused) ? "paused" : "playing"),
+  };
+}
+
+async function _pbBeatOnce(){
+  const ph = _pbPlayhead();
+  const t = ph.t, d = ph.d;
   const body = {
     device_id:    _pbDeviceId(),
     device_name:  _pbDeviceName(),
@@ -23239,7 +23258,7 @@ async function _pbBeatOnce(){
     title:        lp.name || "",
     position_sec: t,
     duration_sec: d,
-    playback:     (v && v.readyState < 2) ? "buffering" : ((v && v.paused) ? "paused" : "playing"),
+    playback:     ph.state,
     // "offline" = the iOS app is playing its OWN downloaded bundle while still on
     // the LAN. Still pullable (the host has the same file), but the banner says
     // so, because stopping it frees nothing on the host.
@@ -23280,8 +23299,7 @@ async function _pbYieldNow(toName){
   _pbYielding = true;
   if(_pbBeatTimer){ clearInterval(_pbBeatTimer); _pbBeatTimer = null; }
   const v = document.getElementById("lpVideo");
-  const t = (v && v.currentTime > 2) ? v.currentTime : (lp.lastKnownT || 0);
-  const d = (v && v.duration > 0) ? v.duration : (lp.duration || 0);
+  const { t, d } = _pbPlayhead();        // native's clock while it holds the TV
   try { if(v) v.pause(); } catch(_){}
   try {
     await fetch(`/api/playback/session/${encodeURIComponent(_pbDeviceId())}/yield`, {
@@ -29666,6 +29684,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.30.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.30.2</div>
 </body>
 </html>
