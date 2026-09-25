@@ -2722,6 +2722,9 @@ reached through Tailscale is on no network the TV can see. So AirPlay always goe
   advance several times.
 - **The receiver ignores an HLS master's SUBTITLES group.** Measured `text:0` with
   subtitles present. They must be sidecar tracks in the LOAD (`CastSession.Load.subs`).
+  On another bundle it listed the renditions as well: `text:4` for 2 subs. So a
+  subtitle pick maps to OUR track id (`subIndex + 1`, `castSubCount`), never to a
+  position in the receiver's TEXT list.
 - **The phone's volume buttons are captured by parking the volume at 50%**
   (`startVolumeCapture`). If you remove the restore in `stopVolumeCapture`, the
   viewer's phone is left at 50% after every cast.

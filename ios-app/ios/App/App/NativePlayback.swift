@@ -74,7 +74,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "18.29.0"
+let NP_BUILD = "18.30.0"
 
 // MARK: - Armed state
 
@@ -925,6 +925,13 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private var castReady = false
     /// Tracks are picked once per LOAD, from the first status that lists them.
     private var castTracksApplied = false
+    /// The receiver's last status that listed tracks — what a live pick maps onto.
+    private var lastCastTracks: CastMediaStatus?
+    /// How many sidecar subtitle tracks the current LOAD carried. Ours are
+    /// trackId 1...n; the receiver ALSO exposes the master's subtitle renditions
+    /// under ids of its own (measured: text:4 for 2 subs), so position in its
+    /// TEXT list is not a safe index.
+    private var castSubCount = 0
     /// The link dropped while backgrounded; rejoin on the way back.
     private var castNeedsRejoin = false
     private var castVolLevel: Double = 0.5
@@ -1213,7 +1220,14 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
                 "nativePos": player.map { CMTimeGetSeconds($0.currentTime()) } ?? -1,
             ], cat: "play")
         }
+        // A TRACK PICK FROM THE REMOTE is an arm like any other (every pick goes
+        // through the page's _lpSaveLocalTracks, which re-arms) — so this is where
+        // it has to reach the RUNNING transport. Before 18.30.0 the new picks only
+        // took effect on the next item load.
+        let tracksChanged = isNativeActive && !switchingFile && a.filePath == armed.filePath
+            && (a.audioName != armed.audioName || a.subIndex != armed.subIndex)
         armed = a
+        if tracksChanged { applyTracksLive() }
 
         // AND NOW MOVE THE PLAYER, NOT JUST THE PAPERWORK.
         //
@@ -2892,6 +2906,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
                 let title = self.armed.title, series = self.armed.series
                 let sub = self.armed.subIndex
                 self.castSubs(for: lan) { subs in
+                    self.castSubCount = subs.count
                     c.start(.init(url: lan, position: at, autoplay: true,
                                   title: title, subtitle: series,
                                   subs: subs, activeSub: sub, fmp4: Self.isFmp4(lan)))
@@ -2909,7 +2924,9 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         castTracksApplied = false
         let lan = AirPlayDoor.shared.lanURL(for: url) ?? url
         let title = armed.title, series = armed.series, sub = armed.subIndex
-        castSubs(for: lan) { subs in
+        castSubs(for: lan) { [weak self] subs in
+            self?.castSubCount = subs.count
+            self?.lastCastTracks = nil
             c.load(.init(url: lan, position: max(start, 0), autoplay: play,
                          title: title, subtitle: series,
                          subs: subs, activeSub: sub, fmp4: Self.isFmp4(lan)))
@@ -3087,6 +3104,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
                                        "name": c.device.name, "extWindow": false,
                                        "display": false])
             }
+            if !st.tracks.isEmpty { lastCastTracks = st }
             if !castTracksApplied, !st.tracks.isEmpty {
                 castTracksApplied = true
                 applyCastTracks(st)
@@ -3128,12 +3146,28 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             let audioIds = Set(audio.compactMap { $0["trackId"] as? Int })
             ids.append(contentsOf: st.activeTrackIds.filter { audioIds.contains($0) })
         }
-        if armed.subIndex >= 0, armed.subIndex < text.count, let id = text[armed.subIndex]["trackId"] as? Int {
-            ids.append(id)
+        if armed.subIndex >= 0 {
+            if armed.subIndex < castSubCount {
+                ids.append(armed.subIndex + 1)            // our sidecar track
+            } else if castSubCount == 0, armed.subIndex < text.count,
+                      let id = text[armed.subIndex]["trackId"] as? Int {
+                ids.append(id)                            // no sidecars: the master's own
+            }
         }
         DiagLog.shared.write("cast-tracks", ["audio": audio.count, "text": text.count,
                                              "want": ids, "active": st.activeTrackIds], cat: "cast")
         if Set(ids) != Set(st.activeTrackIds) { cast?.setActiveTracks(ids) }
+    }
+
+    /// Re-apply the armed audio/subtitle picks to whatever is playing now.
+    private func applyTracksLive() {
+        DiagLog.shared.write("tracks-live", ["audio": armed.audioName ?? "", "sub": armed.subIndex,
+                                             "cast": cast != nil], cat: "play")
+        if cast != nil {
+            if let st = lastCastTracks { applyCastTracks(st) }
+        } else if let it = item, it.status == .readyToPlay {
+            onMain { self.applyTrackSelection(on: it) }
+        }
     }
 
     private func castDropped(_ why: String) {

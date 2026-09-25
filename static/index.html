@@ -3582,6 +3582,32 @@
 <!-- ── Pause Stream-Prep chooser modal ───────────────────────────────────────
      Lets the user pick how the in-flight encode is handled when pausing.
 -->
+<!-- Audio & subtitles for the REMOTE (18.30.0). The on-phone player's options
+     panel addresses the parked <video> and is hidden in remote mode, so the
+     remote gets its own sheet. Picks go through lpSetAudio / lpSetSubtitle like
+     the panel's, whose _lpSaveLocalTracks re-arms native — and native switches
+     the running transport (AVPlayer media selection, or the Chromecast's
+     active tracks). Filled by lpRemoteTracks. -->
+<div id="trackModal"
+  class="hidden fixed inset-0 z-[90] bg-black/70 flex items-end sm:items-center justify-center sm:px-4"
+  onclick="if (event.target === this) _lpTracksClose()">
+  <div class="bg-gray-900 w-full sm:max-w-sm fade-in border-t-[3px] border-indigo-600 max-h-[85vh] flex flex-col">
+    <div class="px-5 pt-5 pb-3 border-b border-gray-800 flex-shrink-0">
+      <h2 class="text-lg font-black uppercase tracking-wide">Audio &amp; Subtitles</h2>
+    </div>
+    <div class="p-4 overflow-y-auto">
+      <div id="trackModalAudioHdr" class="text-[9px] font-black uppercase tracking-widest text-gray-500 mb-2">Audio</div>
+      <div id="trackModalAudio" class="grid grid-cols-1 gap-2 mb-4"></div>
+      <div class="text-[9px] font-black uppercase tracking-widest text-gray-500 mb-2">Subtitles</div>
+      <div id="trackModalSubs" class="grid grid-cols-1 gap-2"></div>
+    </div>
+    <div class="px-4 pb-4 safe-bottom flex-shrink-0">
+      <button onclick="_lpTracksClose()"
+        class="w-full bg-gray-800 hover:bg-gray-700 py-3 text-sm font-bold uppercase tracking-wide transition-colors">Done</button>
+    </div>
+  </div>
+</div>
+
 <!-- Cast-to picker (18.27.0 spike). Filled by lpCast from NativePlayback.castScan:
      the Chromecasts / Google TVs on this Wi-Fi. Above the player, which it opens
      from. -->
@@ -3934,6 +3960,13 @@
             class="hold-btn fc-tile flex flex-1 border-r border-gray-800 bg-red-950/15 hover:bg-red-950/45 active:bg-red-950/70 text-red-500 transition-colors">
             <svg class="w-8 h-8 mb-1" fill="currentColor" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14"/></svg>
             <span class="lp-rm-label text-xs font-bold">Stop</span>
+          </button>
+          <button id="lpRemoteTracksBtn" onclick="lpRemoteTracks()" title="Audio and subtitles"
+            class="fc-tile flex-1 border-r border-gray-800 hover:bg-gray-800/60 active:bg-gray-700/80 text-gray-300 transition-colors" style="display:none">
+            <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+              <rect x="3" y="5" width="18" height="14"/><path stroke-linecap="round" d="M7 13h4M13 13h4M7 16h7"/>
+            </svg>
+            <span class="lp-rm-label text-xs font-bold">Audio &amp; Subs</span>
           </button>
           <!-- Back to phone replaces To TV while the picture is on AirPlay or a
                Chromecast: the TV the viewer is looking at IS the destination, so
@@ -19444,6 +19477,8 @@ function _npSyncRemoteUi() {
   const toTv = document.getElementById("lpRemoteToTv");
   if (toPhone) toPhone.style.display = onTv ? "flex" : "none";
   if (toTv) toTv.style.display = onTv ? "none" : "";
+  const trk = document.getElementById("lpRemoteTracksBtn");
+  if (trk) trk.style.display = (on && _lpRemoteTrackChoices()) ? "flex" : "none";
   const hdr = document.getElementById("lpToTvBtn");
   const hdrLbl = hdr && hdr.querySelector(".lp-btn-label");
   if (hdrLbl) hdrLbl.textContent = onTv ? "To Phone" : "To TV";
@@ -19513,6 +19548,44 @@ async function lpCastVol(dir) {
 async function lpCastMute() {
   if (!_npCastName) return;
   try { const r = await _cap.np.castVolume({ muted: !_npCastVol.muted }); if (r && r.ok) { _npCastVol = r; _npPaintCastVol(); } } catch (_) {}
+}
+
+// ── Audio & subtitles from the remote (18.30.0) ──────────────────────────────
+// Only what the native transport can switch: the bundle's audio renditions and
+// its text subtitles. Downloaded sidecar subs (lp.sidecarSubs) live only on the
+// phone's <track> elements, so they are not offered here. On-demand sessions
+// mux ONE audio track and switching it re-encodes via the web player, which is
+// parked — so no audio list there.
+function _lpRemoteAudioChoices() {
+  return lp.mode === "ondemand" ? [] : (lp.audios || []);
+}
+function _lpRemoteTrackChoices() {
+  return _lpRemoteAudioChoices().length > 1 || (lp.subtitles || []).length > 0;
+}
+function _lpTracksClose() { document.getElementById("trackModal")?.classList.add("hidden"); }
+function lpRemoteTracks() {
+  const mk = (label, on, fn) => {
+    const b = document.createElement("button");
+    b.className = "px-4 py-3 text-left text-sm font-bold uppercase tracking-wide transition-colors border-l-4 "
+      + (on ? "bg-indigo-900/40 border-indigo-500 text-indigo-200" : "bg-gray-800 hover:bg-gray-700 border-gray-700 text-gray-300");
+    b.textContent = label;
+    b.onclick = () => { fn(); lpRemoteTracks(); };
+    return b;
+  };
+  const aud = document.getElementById("trackModalAudio");
+  const subs = document.getElementById("trackModalSubs");
+  aud.innerHTML = ""; subs.innerHTML = "";
+  const auds = _lpRemoteAudioChoices();
+  document.getElementById("trackModalAudioHdr").style.display = auds.length > 1 ? "" : "none";
+  aud.style.display = auds.length > 1 ? "" : "none";
+  const curA = Number(lp.pendingAudioIdx || 0);
+  auds.forEach((a, i) => aud.appendChild(
+    mk(a.label || ("Audio " + (i + 1)), i === curA, () => lpSetAudio(i))));
+  const curS = String(lp.pendingSubtitleIdx ?? -1);
+  subs.appendChild(mk("Off", curS === "-1" || curS.startsWith("sidecar:"), () => lpSetSubtitle(-1)));
+  (lp.subtitles || []).forEach((t, i) => subs.appendChild(
+    mk(t.label || ("Subtitles " + (i + 1)), curS === String(i), () => lpSetSubtitle(i))));
+  document.getElementById("trackModal").classList.remove("hidden");
 }
 
 // Where the picture is while native holds it — the header, the remote banner.
@@ -29593,6 +29666,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.29.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.30.0</div>
 </body>
 </html>

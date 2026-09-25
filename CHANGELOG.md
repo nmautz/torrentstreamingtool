@@ -1,5 +1,20 @@
 # Changelog
 
+## [18.30.0] — 2026-09-25
+### Change audio and subtitles from the remote
+
+- **The phone remote has an Audio & Subs button** on the glasses, AirPlay
+  and Chromecast. It lists the episode's audio tracks and subtitles, and a
+  pick changes the TV straight away. The choice is saved as usual, for the
+  episode and the series. Subtitles you downloaded separately to the phone
+  aren't listed there, because they only exist on the phone.
+- On a Chromecast, the selected subtitle is now always the one you picked.
+  Some episodes' subtitles appeared on the TV twice, and picking by position
+  could land on a duplicate.
+- Confirmed on device: auto-advance on AirPlay with the phone **locked** now
+  loads the next episode in about 3 seconds (18.29.0's fix). Chromecast
+  volume and box streams over Tailscale (AirPlay and Chromecast) work too.
+
 ## [18.29.0] — 2026-09-25
 ### Remote seek lock, sound back after AirPlay, advance while locked
 

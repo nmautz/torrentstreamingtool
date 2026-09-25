@@ -1684,10 +1684,18 @@ AirPlay and Chromecast alike.
 
 What the remote can drive is what `NativePlayback` exposes: `lpTogglePlay` →
 `np.setPaused`, `_lpCommitSeek` → `np.seekTo`, plus the existing episode-advance path.
-**There is deliberately no volume row and no audio/subtitle row** — the plugin has no
-volume method, and switching tracks needs the native item reloaded. AVPlayer could switch
-`AVMediaSelectionOption`s mid-play; nothing wires the menu to it yet. The phone's hardware
-volume buttons already drive the glasses.
+**There is deliberately no volume row on the glasses:** the phone's hardware volume
+buttons already drive them. A Chromecast gets one (see the Chromecast section).
+
+**Audio & Subs** (18.30.0). The remote has a tile (`#lpRemoteTracksBtn`, shown when
+there are at least 2 audio tracks or any text subtitles) that opens `#trackModal`. It
+lists the bundle's audio renditions and its text subtitles; downloaded sidecar subtitles
+live only on the phone's `<track>`s and are not offered. On-demand shows no audio list,
+because switching there re-encodes through the parked web player. Picks go through
+`lpSetAudio` / `lpSetSubtitle`, whose `_lpSaveLocalTracks` re-arms. `arm()` notices
+`audioName`/`subIndex` changing for the same file and calls `applyTracksLive()`: an
+AVPlayer (glasses, AirPlay) re-runs `applyTrackSelection` on the live item, and a
+Chromecast re-runs `applyCastTracks` against the last status that listed tracks.
 
 Native side: `ios-app/ios/App/App/NativePlayback.swift` (+ `PlaybackLiveActivity.swift`,
 `Shared/PlaybackIntents.swift`, `StreamLinkLiveActivities/PlaybackWidget.swift`).
