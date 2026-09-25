@@ -1,5 +1,27 @@
 # Changelog
 
+## [18.28.0] — 2026-09-25
+### Casting: subtitles, TV volume, Back to phone
+
+- **AirPlay and Chromecast both work on real TVs** (tested on an LG TV over
+  AirPlay and two Chromecasts). The earlier AirPlay failure was the phone
+  being on a different Wi-Fi from the TV.
+- **Subtitles now show on a Chromecast.** The TV ignores the subtitles listed
+  inside the stream, so the app now sends them as separate subtitle tracks,
+  with the one you had selected turned on. After an auto-advance, the next
+  episode's subtitles come from its own prepped files.
+- **Casting starts playing.** AirPlay and Chromecast used to start paused if
+  the phone's player had been paused, for example by an audio interruption.
+- **TV volume while casting.** The remote has Vol −, Mute (showing the TV's
+  level) and Vol + buttons, and the phone's own volume buttons control the TV
+  as well.
+- **Back to phone.** On AirPlay or a Chromecast, the remote's To TV button
+  becomes To Phone. It stops the TV and carries on on the phone from the same
+  spot. After AirPlay, the sound may stay on the TV until you pick iPhone in
+  Control Centre, and the app says so.
+- Episodes that haven't been prepped yet (on-demand streams) now tell the
+  Chromecast the correct segment format.
+
 ## [18.27.0] — 2026-09-25
 ### Cast to a Chromecast or Google TV (spike)
 

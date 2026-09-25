@@ -949,6 +949,19 @@ final class AirPlayDoor {
         return URL(string: "http://\(host):\(port)/ap/\(token)\(tail)")
     }
 
+    /// The inverse of `lanURL`: the upstream URL a door URL stands for. The
+    /// phone reads through this rather than through the door itself — the door
+    /// listens on Wi-Fi only, and a connection to our own address arrives on
+    /// loopback.
+    func upstreamURL(for url: URL) -> URL? {
+        guard isOpen, let up = upstream else { return nil }
+        let prefix = "/ap/\(token)"
+        guard url.path.hasPrefix(prefix + "/") else { return nil }
+        var tail = String(url.path.dropFirst(prefix.count))
+        if let q = url.query { tail += "?" + q }
+        return URL(string: up.absoluteString + tail)
+    }
+
     // MARK: request handling
 
     private func handle(_ conn: NWConnection) {

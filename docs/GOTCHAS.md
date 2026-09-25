@@ -2711,6 +2711,11 @@ reached through Tailscale is on no network the TV can see. So AirPlay always goe
 - **FINISHED is polled, not pushed once.** Status is read at 1 Hz, so an IDLE/FINISHED
   arrives repeatedly. `castReady` is the latch, and without it one episode end would
   advance several times.
+- **The receiver ignores an HLS master's SUBTITLES group.** Measured `text:0` with
+  subtitles present. They must be sidecar tracks in the LOAD (`CastSession.Load.subs`).
+- **The phone's volume buttons are captured by parking the volume at 50%**
+  (`startVolumeCapture`). If you remove the restore in `stopVolumeCapture`, the
+  viewer's phone is left at 50% after every cast.
 - **Discovery is Bonjour, not SSDP.** Multicast needs an Apple entitlement a sideloaded
   build can't get. Bonjour needs only `NSBonjourServices: _googlecast._tcp`, and a new
   service type must be added there or the browser finds nothing.

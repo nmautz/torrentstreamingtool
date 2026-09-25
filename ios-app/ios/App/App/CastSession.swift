@@ -106,12 +106,27 @@ final class CastSession {
         static let media      = "urn:x-cast:com.google.cast.media"
     }
 
+    struct Sub {
+        var url: URL
+        var name: String
+        var lang: String
+    }
+
     struct Load {
         var url: URL
         var position: Double
         var autoplay: Bool
         var title: String
         var subtitle: String
+        /// Sidecar WebVTT tracks. The receiver does NOT expose the SUBTITLES
+        /// renditions of an HLS master as text tracks (measured: `text:0` on the
+        /// first device test), so subtitles ride in the LOAD as their own tracks,
+        /// trackId = index + 1.
+        var subs: [Sub] = []
+        var activeSub = -1
+        /// Prepped bundles are CMAF fMP4; on-demand (JIT) sessions are MPEG-TS,
+        /// which is the receiver's default.
+        var fmp4 = true
     }
 
     let device: CastDiscovery.Device
@@ -121,6 +136,8 @@ final class CastSession {
     var onDropped: ((String) -> Void)?
     /// The receiver refused or ended the session for good.
     var onFailed: ((String) -> Void)?
+    /// The TV's volume (0...1) and mute, whenever the receiver reports them.
+    var onVolume: ((Double, Bool) -> Void)?
 
     private let queue = DispatchQueue(label: "com.streamlink.castsession")
     private var conn: NWConnection?
@@ -173,6 +190,16 @@ final class CastSession {
     func pause() { mediaCommand("PAUSE", [:]) }
     func seek(_ t: Double) { mediaCommand("SEEK", ["currentTime": t, "resumeState": "PLAYBACK_UNCHANGED"]) }
     func setActiveTracks(_ ids: [Int]) { mediaCommand("EDIT_TRACKS_INFO", ["activeTrackIds": ids]) }
+
+    /// Device volume, not stream volume: this is the TV's own level.
+    func setVolume(_ level: Double) {
+        queue.async { self.send(NS.receiver, to: "receiver-0",
+                                ["type": "SET_VOLUME", "volume": ["level": min(max(level, 0), 1)]]) }
+    }
+    func setMuted(_ muted: Bool) {
+        queue.async { self.send(NS.receiver, to: "receiver-0",
+                                ["type": "SET_VOLUME", "volume": ["muted": muted]]) }
+    }
 
     /// End the session. `stopApp` also closes the receiver on the TV, which is
     /// what "stop casting" means; a plain disconnect would leave it playing.
@@ -321,6 +348,11 @@ final class CastSession {
 
     private func receiverStatus(_ obj: [String: Any]) {
         let status = obj["status"] as? [String: Any] ?? [:]
+        if let vol = status["volume"] as? [String: Any],
+           let level = (vol["level"] as? NSNumber)?.doubleValue {
+            let muted = vol["muted"] as? Bool ?? false
+            DispatchQueue.main.async { self.onVolume?(level, muted) }
+        }
         let apps = status["applications"] as? [[String: Any]] ?? []
         let ours = apps.first { ($0["appId"] as? String) == Self.defaultReceiver }
         guard let app = ours, let tr = app["transportId"] as? String else {
@@ -368,21 +400,37 @@ final class CastSession {
     private func sendLoad(_ l: Load) {
         guard let tr = transportId else { pendingLoad = l; return }
         mediaSessionId = nil
-        let media: [String: Any] = [
+        var media: [String: Any] = [
             "contentId": l.url.absoluteString,
             "contentUrl": l.url.absoluteString,
             "contentType": "application/x-mpegurl",
             "streamType": "BUFFERED",
-            // Our bundles are fmp4 CMAF, and the receiver assumes MPEG-TS for
-            // HLS unless told otherwise.
-            "hlsSegmentFormat": "fmp4",
-            "hlsVideoSegmentFormat": "fmp4",
             "metadata": ["metadataType": 0, "title": l.title, "subtitle": l.subtitle],
         ]
-        send(NS.media, to: tr, ["type": "LOAD", "media": media,
-                                "autoplay": l.autoplay, "currentTime": l.position])
+        if l.fmp4 {
+            // Our bundles are fmp4 CMAF, and the receiver assumes MPEG-TS for
+            // HLS unless told otherwise.
+            media["hlsSegmentFormat"] = "fmp4"
+            media["hlsVideoSegmentFormat"] = "fmp4"
+        }
+        if !l.subs.isEmpty {
+            media["tracks"] = l.subs.enumerated().map { i, sub -> [String: Any] in
+                ["trackId": i + 1, "type": "TEXT", "subtype": "SUBTITLES",
+                 "trackContentId": sub.url.absoluteString, "trackContentType": "text/vtt",
+                 "name": sub.name, "language": sub.lang]
+            }
+            // White on a translucent box: the receiver's default is small and
+            // unboxed, which vanishes over bright scenes on a big TV.
+            media["textTrackStyle"] = ["backgroundColor": "#00000099", "foregroundColor": "#FFFFFFFF",
+                                       "fontScale": 1.1, "edgeType": "NONE"]
+        }
+        var body: [String: Any] = ["type": "LOAD", "media": media,
+                                   "autoplay": l.autoplay, "currentTime": l.position]
+        if l.activeSub >= 0, l.activeSub < l.subs.count { body["activeTrackIds"] = [l.activeSub + 1] }
+        send(NS.media, to: tr, body)
         DiagLog.shared.write("cast-load", ["at": l.position, "autoplay": l.autoplay,
-                                           "title": l.title,
+                                           "title": l.title, "subs": l.subs.count,
+                                           "activeSub": l.activeSub, "fmp4": l.fmp4,
                                            "host": l.url.host ?? ""], cat: "cast")
     }
 

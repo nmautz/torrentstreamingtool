@@ -3778,7 +3778,7 @@
              one label the eye lands on, and it was wrong. -->
         <div id="lpWhere" class="text-[10px] uppercase tracking-widest text-emerald-500 font-bold">On Device</div>
       </div>
-      <button id="lpToTvBtn" onclick="lpHandoffToVlc(this)" title="Hand off to the TV (VLC) — resume there at the same time"
+      <button id="lpToTvBtn" onclick="_npOnCastOrTv() ? lpBackToPhone() : lpHandoffToVlc(this)" title="Hand off to the TV (VLC) — resume there at the same time"
         class="h-full px-4 flex items-center gap-1.5 text-indigo-400 hover:text-indigo-200 hover:bg-indigo-950/40 active:bg-indigo-950/70 transition-colors text-xs font-bold uppercase tracking-wide">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
           <rect x="2" y="4" width="20" height="14" rx="0"/><path stroke-linecap="round" d="M8 20h8M12 18v2"/>
@@ -3891,6 +3891,34 @@
             <span class="lp-rm-label text-xs font-bold">Next</span>
           </button>
         </div>
+        <!-- Cast volume (18.27.1). A Chromecast is its own computer with its own
+             volume, and nothing plays on the phone, so this row is the TV's
+             volume — the glasses have none (the phone's buttons drive them
+             directly). The phone's hardware buttons drive it too, natively.
+             Shown only while casting (_npSyncRemoteUi). -->
+        <div id="lpRemoteVolRow" class="flex-1 border-b border-gray-800 min-h-0" style="display:none">
+          <button onclick="lpCastVol(-1)" title="TV volume down"
+            class="fc-tile flex flex-1 border-r border-gray-800 hover:bg-gray-800/60 active:bg-gray-700/80 transition-colors text-gray-300">
+            <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M11 5L6 9H2v6h4l5 4V5zM16 12h5"/>
+            </svg>
+            <span class="lp-rm-label text-xs font-bold">Vol −</span>
+          </button>
+          <button onclick="lpCastMute()" title="Mute the TV"
+            class="fc-tile flex flex-1 border-r border-gray-800 hover:bg-gray-800/60 active:bg-gray-700/80 transition-colors text-gray-300">
+            <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M11 5L6 9H2v6h4l5 4V5zM16 9l6 6M22 9l-6 6"/>
+            </svg>
+            <span id="lpRemoteVolLabel" class="lp-rm-label text-xs font-bold tabular-nums">Mute</span>
+          </button>
+          <button onclick="lpCastVol(1)" title="TV volume up"
+            class="fc-tile flex flex-1 hover:bg-gray-800/60 active:bg-gray-700/80 transition-colors text-gray-300">
+            <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M11 5L6 9H2v6h4l5 4V5zM18.5 9.5v5M16 12h5"/>
+            </svg>
+            <span class="lp-rm-label text-xs font-bold">Vol +</span>
+          </button>
+        </div>
         <!-- Row C: where the picture goes next. Both exist in the header too,
              as small icon buttons; the TV grid duplicates its Stop the same way,
              because on a remote these are destinations, not chrome. -->
@@ -3902,7 +3930,17 @@
             <svg class="w-8 h-8 mb-1" fill="currentColor" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14"/></svg>
             <span class="lp-rm-label text-xs font-bold">Stop</span>
           </button>
-          <button onclick="lpHandoffToVlc(this)" title="Hand off to the TV (VLC)"
+          <!-- Back to phone replaces To TV while the picture is on AirPlay or a
+               Chromecast: the TV the viewer is looking at IS the destination, so
+               the useful move is the other way. _npSyncRemoteUi swaps them. -->
+          <button id="lpRemoteToPhone" onclick="lpBackToPhone()" title="Stop on the TV and keep watching on this phone"
+            class="fc-tile flex-1 hover:bg-emerald-950/40 active:bg-emerald-950/70 text-emerald-400 transition-colors" style="display:none">
+            <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+              <rect x="7" y="2" width="10" height="20"/><path stroke-linecap="round" d="M11 18h2"/>
+            </svg>
+            <span class="lp-rm-label text-xs font-bold">To Phone</span>
+          </button>
+          <button id="lpRemoteToTv" onclick="lpHandoffToVlc(this)" title="Hand off to the TV (VLC)"
             class="fc-tile flex flex-1 hover:bg-indigo-950/40 active:bg-indigo-950/70 text-indigo-400 transition-colors">
             <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
               <rect x="2" y="4" width="20" height="14"/><path stroke-linecap="round" d="M8 20h8M12 18v2"/>
@@ -19386,6 +19424,19 @@ function _npSyncRemoteUi() {
   // stopped being a remote; there is no event for it.
   const banner = document.getElementById("lpRemoteBannerTxt");
   if (banner) banner.textContent = "Playing " + _npWhereLabel().replace(/^On /, "on ");
+  // Casting / AirPlay: TV volume row, and To Phone in place of To TV (header too).
+  const onTv = on && _npOnCastOrTv();
+  const volRow = document.getElementById("lpRemoteVolRow");
+  if (volRow) volRow.style.display = (on && _npCastName) ? "flex" : "none";
+  const toPhone = document.getElementById("lpRemoteToPhone");
+  const toTv = document.getElementById("lpRemoteToTv");
+  if (toPhone) toPhone.style.display = onTv ? "flex" : "none";
+  if (toTv) toTv.style.display = onTv ? "none" : "";
+  const hdr = document.getElementById("lpToTvBtn");
+  const hdrLbl = hdr && hdr.querySelector(".lp-btn-label");
+  if (hdrLbl) hdrLbl.textContent = onTv ? "To Phone" : "To TV";
+  if (hdr) hdr.title = onTv ? "Stop on the TV and keep watching on this phone"
+                            : "Hand off to the TV (VLC) — resume there at the same time";
   _npSyncAirplayBtn();
   const bar  = document.getElementById("lpSeekBar");
   const skip = document.getElementById("lpSkipOffer");
@@ -19413,6 +19464,40 @@ function _npSyncRemoteUi() {
 let _npExternal = false;     // an external display / AirPlay route is present
 let _npAirplay = false;      // the hold is an AirPlay session, not a wired display
 let _npCastName = "";        // non-empty: the hold is a Chromecast session, on this TV
+
+// True while the hold is a TV the phone streams to (AirPlay / Chromecast), as
+// opposed to a wired display — the case where "back to phone" means something.
+function _npOnCastOrTv() { return !!(_npHolding && (_npCastName || _npAirplay)); }
+
+// Stop on the TV, keep watching here. Native lets go (release), then the usual
+// hand-back resumes the page's own element at the native playhead.
+async function lpBackToPhone() {
+  if (!_npOnCastOrTv()) return;
+  const was = _npWhereLabel();
+  try { await _cap.np.release(); } catch (_) {}
+  _npLog("back-to-phone", { from: was, at: _npNativePos, file: lp.filePath }, "ext");
+  await _npHandBack().catch(() => {});
+  // AirPlay's audio route is the system's, not ours: the phone's own player can
+  // keep sending SOUND to the TV until the route is changed back, and there is
+  // no API to change it for the user. Say where.
+  if (/AirPlay/.test(was)) showAlert("Back on the phone. If the sound stays on the TV, pick iPhone in Control Centre.", "info");
+}
+
+// TV volume (Chromecast). Steps are 5%; the label shows the level the receiver
+// reports back, so it is the TV's truth, not our guess.
+let _npCastVol = { level: 0.5, muted: false };
+function _npPaintCastVol() {
+  const l = document.getElementById("lpRemoteVolLabel");
+  if (l) l.textContent = _npCastVol.muted ? "Muted" : Math.round(_npCastVol.level * 100) + "%";
+}
+async function lpCastVol(dir) {
+  if (!_npCastName) return;
+  try { const r = await _cap.np.castVolume({ step: dir * 0.05 }); if (r && r.ok) { _npCastVol = r; _npPaintCastVol(); } } catch (_) {}
+}
+async function lpCastMute() {
+  if (!_npCastName) return;
+  try { const r = await _cap.np.castVolume({ muted: !_npCastVol.muted }); if (r && r.ok) { _npCastVol = r; _npPaintCastVol(); } } catch (_) {}
+}
 
 // Where the picture is while native holds it — the header, the remote banner.
 function _npWhereLabel() {
@@ -19573,6 +19658,14 @@ function _npPayload() {
     audioLang: (aud && aud.language) || "",
     subIndex: sub,
     subLang: (sMeta && sMeta.language) || "",
+    // The file's text subs as sidecar WebVTT URLs. A Chromecast ignores the
+    // native master's subtitle group, so a Cast LOAD carries them as tracks of
+    // their own (CastSession.Load.subs). Same order as subIndex.
+    subs: (lp.subtitles || []).map((s, i) => ({
+      url: _npAbs((lp.subBase || "") + (s.file || `sub_${i}.vtt`)),
+      name: s.label || ("Subtitles " + (i + 1)),
+      lang: s.language || "und",
+    })),
     itemId: lp.itemId || "",
     filePath: lp.filePath || "",
     profileId: (profile && profile.id) || "",
@@ -19887,6 +19980,11 @@ function _npBindEvents() {
     // playing — just say so and re-arm with the page's own URLs, which the
     // native side had swapped for the door's), or ended while live (stopped
     // from the TV, lost) — then take the episode back like airplayEnded does.
+    _cap.np.addListener("castVolume", (e) => {
+      if (!e || typeof e.level !== "number") return;
+      _npCastVol = { level: e.level, muted: !!e.muted };
+      _npPaintCastVol();
+    });
     _cap.np.addListener("castEnded", (e) => {
       _npLog("cast-ended", { reason: (e && e.reason) || "", live: !!(e && e.live),
                              at: (e && e.position) || 0, holding: _npHolding }, "cast");
@@ -29422,6 +29520,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.27.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.28.0</div>
 </body>
 </html>

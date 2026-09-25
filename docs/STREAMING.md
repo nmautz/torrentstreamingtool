@@ -1718,7 +1718,17 @@ mid-play yet.
 `reason: "route-lost"`. The page answers both with `_npHandBack()`, so the episode
 returns to the phone at the native playhead. `stopNative` closes the door.
 
-**Unverified (the spike's questions):**
+**Verified on device, 2026-09-25:** an LG TV on the parents' 192.168.86.x Wi-Fi,
+playing a downloaded bundle. The route engaged (`airplay-route external:true`), the
+episode resumed at the right position, and its final progress was written. The earlier
+failure had the phone on a different network (10.0.0.x) from the TVs. Since 18.28.0
+AirPlay always starts playing; before that it inherited a paused intent.
+
+**Back to phone** (18.28.0): see the Chromecast section. For AirPlay there is one
+caveat. The audio **route** belongs to the system, so the phone's own player can keep
+sending sound to the TV until the viewer picks iPhone in Control Centre. The page says so.
+
+**Still open:**
 - Does a receiver really fetch from the door? Watch for `airplay-route external:true` in
   the client log, then segment GETs.
 - Does the process stay alive with the phone locked while AirPlay plays?
@@ -1784,6 +1794,41 @@ page takes the episode back through `_npHandBack()`.
 - Does it handle our CMAF fMP4, the separate audio rendition, and the WebVTT subtitle
   playlists in `master-native.m3u8`? `cast-tracks` lists what it found.
 - Does the keep-alive hold with the phone locked for a whole episode?
+
+**First device test, 2026-09-25: it works.** A Chromecast ("Ansel's room TV") was found
+by the scan, loaded a downloaded HxH episode through the door at the right position
+(1178 s) about 8 s after LOAD, and play/pause from the phone reached it. Progress POSTs
+went to the host at 200 throughout, and Stop stopped the TV. So **plain-HTTP HLS from a
+LAN door is accepted** by the Default Media Receiver, and our CMAF fMP4 plays. Three
+observations:
+- `cast-tracks audio:2 text:0`. The dual-audio rendition was recognised, but the
+  receiver exposed **no text tracks** from `master-native.m3u8`'s subtitle group.
+- The cast started **paused** (`cast-load autoplay:false`). The page's `armed.paused` was
+  true after an audio interruption, and the load inherited it.
+- `cast-live` / `hold-start` report position 0: the first status is BUFFERING, before
+  the seek lands. This is cosmetic.
+Not yet exercised: seek, auto-skip, advance, and a locked phone.
+
+**18.28.0, from that test:**
+- **Subtitles ride in the LOAD** as sidecar WebVTT tracks (`trackId = index + 1`, a
+  boxed `textTrackStyle`), with `activeTrackIds` set from `subIndex`. The page puts the
+  current file's list in every arm (`subs`, tagged `subsFile`). After a native advance
+  the list describes the previous episode, so `castSubs(for:)` reads the next bundle's
+  `meta.json` through `AirPlayDoor.upstreamURL`. The phone can't read through its own
+  door, because the door is Wi-Fi-only and a self-connection arrives on loopback.
+  On-demand sessions have no `meta.json`, so an advance into one casts without subs.
+- **`fmp4` only for bundles.** On-demand (`/ondemand/`) segments are MPEG-TS, the
+  receiver's default.
+- **Always autoplay.** Sending it to the TV is pressing play.
+- **TV volume.** The remote shows a Vol − / Mute (level %) / Vol + row while casting
+  (`castVolume`, the receiver's `SET_VOLUME`; the label is the level the receiver
+  reports back). The phone's **hardware buttons** drive it too: a hidden `MPVolumeView`
+  parks the phone's volume at 50%, each move away from it becomes one ±5% TV step, and
+  the phone's own level is restored when the cast ends.
+- **Back to phone.** It replaces **To TV** in the remote's last row and in the header
+  while on AirPlay or a Chromecast. `release()` drops the hold, and the usual
+  `_npHandBack()` → `reclaim` → `stopNative` stops the TV and resumes the page's element
+  at the native playhead.
 
 ### 2c. Subtitle image packs (styled ASS + PGS/VOBSUB)
 
