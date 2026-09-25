@@ -2717,6 +2717,15 @@ reached through Tailscale is on no network the TV can see. So AirPlay always goe
   CMAF bundles fail to load without `hlsSegmentFormat`/`hlsVideoSegmentFormat: "fmp4"`.
 - **`EDIT_TRACKS_INFO` replaces the whole active set.** Sending only a subtitle id turns
   the audio off. `applyCastTracks` always includes an audio track.
+- **A LOAD's old session keeps talking.** After a LOAD (episode advance), statuses from
+  the session it replaced can still arrive. Adopting their `mediaSessionId` makes the
+  next poll ask about a dead session, and the receiver answers `INVALID_REQUEST
+  INVALID_MEDIA_SESSION_ID`. That killed the first Chromecast advance on device.
+  `replacedMediaSessionId` filters those statuses, and INVALID_REQUEST is recoverable
+  (forget the id, `GET_STATUS`), never fatal.
+- **While native plays, an arm's position is stale.** The page arms from its parked
+  element. `arm()` keeps `armed.position` unless the arm switches files; otherwise a
+  hand-back resumes at the handoff time.
 - **FINISHED is polled, not pushed once.** Status is read at 1 Hz, so an IDLE/FINISHED
   arrives repeatedly. `castReady` is the latch, and without it one episode end would
   advance several times.

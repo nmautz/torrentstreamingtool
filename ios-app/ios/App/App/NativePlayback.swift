@@ -74,7 +74,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "18.30.0"
+let NP_BUILD = "18.30.1"
 
 // MARK: - Armed state
 
@@ -1178,6 +1178,18 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // across a file switch too: pressing Next is not pressing Pause, so the
         // transport the user left running is what the new episode inherits.
         if isNativeActive {
+            // THE POSITION IS OURS TOO. The page arms from its parked element,
+            // which sits wherever the handoff left it. Taking that let a Cast
+            // advance file the NEW episode at the OLD episode's handoff time,
+            // and when the session then ended the phone resumed there (measured
+            // 2026-09-25: next episode resumed at 888 s). The AVPlayer path hid
+            // it by overwriting within a second; a Cast session whose status
+            // stream had just died never did. A file switch is the page's to
+            // position (it knows the new file's resume point).
+            if !switchingFile {
+                a.position = armed.position
+                a.armedAt = armed.armedAt
+            }
             a.paused = armed.paused
             // The item knows its own duration better than a page whose element is
             // parked; never let an arm overwrite a good value with 0.

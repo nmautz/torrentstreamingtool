@@ -146,6 +146,12 @@ final class CastSession {
     private var transportId: String?
     private var appSessionId: String?
     private(set) var mediaSessionId: Int?
+    /// The media session a LOAD replaced. The receiver can still deliver its
+    /// statuses AFTER the load goes out, and adopting one put the OLD id back:
+    /// the next 1 Hz poll then asked about a session that no longer exists and
+    /// the receiver answered INVALID_MEDIA_SESSION_ID — measured 2026-09-25 as
+    /// "the Chromecast didn't advance to the next episode".
+    private var replacedMediaSessionId: Int?
     private var pendingLoad: Load?
     private var launched = false
     private var joining = false
@@ -337,8 +343,18 @@ final class CastSession {
             failed("launch-error: \(obj["reason"] as? String ?? "?")")
         case (NS.media, "MEDIA_STATUS"):
             mediaStatus(obj)
-        case (NS.media, "LOAD_FAILED"), (NS.media, "LOAD_CANCELLED"),
-             (NS.media, "INVALID_REQUEST"), (NS.media, "ERROR"):
+        case (NS.media, "INVALID_REQUEST"):
+            // A request the receiver could not act on is not the end of the
+            // session. A stale media session id is the known one: forget it and
+            // ask for whatever is current.
+            let reason = obj["reason"] as? String ?? ""
+            DiagLog.shared.write("cast-invalid-request", ["reason": reason,
+                                                          "msid": mediaSessionId ?? -1], cat: "cast")
+            if reason == "INVALID_MEDIA_SESSION_ID", let tr = transportId {
+                mediaSessionId = nil
+                send(NS.media, to: tr, ["type": "GET_STATUS"])
+            }
+        case (NS.media, "LOAD_FAILED"), (NS.media, "LOAD_CANCELLED"), (NS.media, "ERROR"):
             let detail = (obj["detailedErrorCode"] as? Int).map { " \($0)" } ?? ""
             failed("\(type.lowercased())\(detail) \(obj["reason"] as? String ?? "")")
         default:
@@ -383,6 +399,8 @@ final class CastSession {
         guard let s = (obj["status"] as? [[String: Any]])?.first else { return }
         var st = CastMediaStatus()
         st.mediaSessionId = s["mediaSessionId"] as? Int
+        // A late status from the session the last LOAD replaced: not ours any more.
+        if let id = st.mediaSessionId, id == replacedMediaSessionId { return }
         st.playerState = s["playerState"] as? String ?? ""
         st.idleReason = s["idleReason"] as? String ?? ""
         st.currentTime = (s["currentTime"] as? NSNumber)?.doubleValue ?? 0
@@ -399,6 +417,7 @@ final class CastSession {
 
     private func sendLoad(_ l: Load) {
         guard let tr = transportId else { pendingLoad = l; return }
+        if let old = mediaSessionId { replacedMediaSessionId = old }
         mediaSessionId = nil
         var media: [String: Any] = [
             "contentId": l.url.absoluteString,

@@ -1,5 +1,18 @@
 # Changelog
 
+## [18.30.1] — 2026-09-25
+### Chromecast advances to the next episode
+
+- **The Chromecast now moves on to the next episode.** It loaded the next
+  episode, then a late status update from the old one confused the phone,
+  and the TV rejected the phone's next request. The phone ended casting
+  because of it. Late updates from a replaced episode are now ignored, and
+  that kind of rejection no longer ends the session.
+- **The phone no longer comes back at the wrong spot.** After an advance the
+  page reported the old handoff time as the position. When casting then
+  ended, the phone resumed the new episode there (888 s in). While the TV or
+  glasses are playing, the phone now keeps the TV's own position.
+
 ## [18.30.0] — 2026-09-25
 ### Change audio and subtitles from the remote
 
