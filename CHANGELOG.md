@@ -1,5 +1,23 @@
 # Changelog
 
+## [18.29.0] — 2026-09-25
+### Remote seek lock, sound back after AirPlay, advance while locked
+
+- **The phone remote's seek bar is locked, like the TV remote's.** On the
+  glasses, AirPlay and Chromecast you hold it for half a second, release, and
+  it unlocks. It locks again 5 seconds after you last touch it, so a brushed
+  tap in a pocket can't jump the TV. The existing seek-lock setting in This
+  Device covers it too, and the on-phone player is unchanged.
+- **To Phone after AirPlay brings the sound back.** Stopping AirPlay left
+  iOS sending the phone's sound to the TV. If the sound is still going to
+  AirPlay, the AirPlay sheet now opens so one tap on iPhone fixes it (iOS
+  doesn't let the app switch it by itself).
+- **Auto-advance with the phone locked** no longer waits for you to unlock.
+  Between two episodes nothing was playing, so iOS put the app to sleep, and
+  the TV couldn't fetch the next episode through the phone. The app now stays
+  awake until the next episode is ready.
+- Chromecast volume changes are now logged.
+
 ## [18.28.0] — 2026-09-25
 ### Casting: subtitles, TV volume, Back to phone
 

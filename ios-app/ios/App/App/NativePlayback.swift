@@ -48,6 +48,8 @@
 //    castVolume({step?, muted?}) -> { ok, level, muted }   the TV's own volume
 //    release()         -> { ok }   AirPlay/Cast: let go of the TV so the page's
 //                         resume() takes the episode back ("Back to phone")
+//    routeCheck()      -> { airplay, shown }   after Back to phone: if the system
+//                         audio route is still AirPlay, open the route sheet
 //  Events: nativeStarted, nativeEnded, nativeAdvanced, displayChanged,
 //          airplayEnded (the route was never picked, or was dropped),
 //          castEnded (the Cast session failed or was stopped from the TV),
@@ -72,7 +74,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "18.28.0"
+let NP_BUILD = "18.29.0"
 
 // MARK: - Armed state
 
@@ -194,6 +196,7 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "cast",      returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "castVolume", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "release",   returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "routeCheck", returnType: CAPPluginReturnPromise),
     ]
 
     private let mgr = NativePlaybackManager.shared
@@ -339,6 +342,10 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
 
     @objc func release(_ call: CAPPluginCall) {
         call.resolve(mgr.releaseToPhone())
+    }
+
+    @objc func routeCheck(_ call: CAPPluginCall) {
+        mgr.routeCheck { call.resolve($0) }
     }
 }
 
@@ -2105,15 +2112,38 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             }
         }
         statusObs?.invalidate()
+        // HOLD THE PROCESS ACROSS THE SWAP. Between the old item ending and the
+        // new one playing, nothing is playing — and the `audio` background mode
+        // only keeps a process up while audio IS playing. Measured 2026-09-25
+        // (AirPlay, phone locked): a credits auto-skip swapped the item, the new
+        // one sat `itemStatus=unknown` for 12 s, and became ready the moment the
+        // phone was unlocked. The door the TV fetches through had gone to sleep
+        // with the app. startNative always held a task for exactly this; the
+        // swap never did.
+        beginBgTask()
+        let swapAt = Date()
         let it = AVPlayerItem(url: url)
         item = it
         statusObs = it.observe(\.status, options: [.new]) { [weak self] obs, _ in
-            guard let self = self, obs.status == .readyToPlay else { return }
+            guard let self = self else { return }
+            if obs.status == .failed {
+                DiagLog.shared.write("swap-failed", ["err": obs.error?.localizedDescription ?? "?",
+                                                     "file": self.armed.filePath], cat: "play")
+                self.endBgTask()
+                return
+            }
+            guard obs.status == .readyToPlay else { return }
+            DiagLog.shared.write("swap-ready", [
+                "ms": Int(Date().timeIntervalSince(swapAt) * 1000),
+                "app": Self.stateName(UIApplication.shared.applicationState),
+                "file": self.armed.filePath,
+            ], cat: "play")
             self.adoptDuration(from: obs)
             self.applyTrackSelection(on: obs)
             // A fresh item already starts at 0, so only a real resume needs the
             // seek — and it has to wait for readiness like startNative's does.
-            if start > 1 { self.seekAndPlay(to: start, play: play) }
+            // seekAndPlay ends the task; without a seek, end it here.
+            if start > 1 { self.seekAndPlay(to: start, play: play) } else { self.endBgTask() }
         }
         NotificationCenter.default.addObserver(
             self, selector: #selector(itemDidEnd(_:)),
@@ -2926,6 +2956,8 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     func castVolume(step: Double?, muted: Bool?) -> [String: Any] {
         return onMainSync {
             guard let c = cast, castLive else { return ["ok": false] }
+            DiagLog.shared.write("cast-volume", ["step": step ?? 0, "muted": muted.map { $0 ? 1 : 0 } ?? -1,
+                                                 "was": castVolLevel], cat: "cast")
             if let m = muted {
                 castMuted = m
                 c.setMuted(m)
@@ -3002,6 +3034,21 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     }
 
     // MARK: Back to phone
+
+    /// The AirPlay AUDIO route is the system's, not the player's: stopping our
+    /// AVPlayer leaves it selected, so the page's own <video> goes on sending
+    /// sound to the TV (confirmed on device, 2026-09-25). There is no API to
+    /// pick a route for the user, so open the sheet and let them tap iPhone.
+    func routeCheck(_ done: @escaping ([String: Any]) -> Void) {
+        onMain { [weak self] in
+            guard let self = self else { return }
+            let airplay = AVAudioSession.sharedInstance().currentRoute.outputs
+                .contains { $0.portType == .airPlay }
+            DiagLog.shared.write("route-check", ["airplay": airplay], cat: "ext")
+            if airplay { self.presentRoutePicker() }
+            done(["airplay": airplay, "shown": airplay])
+        }
+    }
 
     /// Let go of the TV. The page's resume() then does the real work, exactly as
     /// when a route drops: reclaim() sees nothing holding, flushes, stops (which

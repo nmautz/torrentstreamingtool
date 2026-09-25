@@ -306,7 +306,7 @@
        badge, not a greyed-out track, is the lock indicator — and the badge
        background is translucent so the progress line shows through it. */
     .seekBar:not(.unlocked) .seekTrack { opacity:.75; }
-    .seekBar.unlocked .seekLockBadge { display:none; }
+    .seekBar.unlocked .seekLockBadge, #lpSeekBar.unlocked .seekLockBadge { display:none; }
     .seekLockBadge {
       position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
       display:flex; align-items:center; gap:5px; z-index:1; pointer-events:none;
@@ -315,25 +315,25 @@
       padding:3px 8px; white-space:nowrap;
     }
     .seekLockIcon { width:11px; height:11px; flex-shrink:0; }
-    .seekBar.holding  .seekLockBadge { color:#818cf8; border-color:#6366f1; }
+    .seekBar.holding .seekLockBadge, #lpSeekBar.holding .seekLockBadge { color:#818cf8; border-color:#6366f1; }
     /* "ready" = hold satisfied, now WAITING for the user to lift: badge turns
        green and pulses "RELEASE" so it's obvious to let go (no timer runs yet,
        so gripping the whole time can't lead to an accidental seek). */
-    .seekBar.ready    .seekLockBadge {
+    .seekBar.ready .seekLockBadge, #lpSeekBar.ready .seekLockBadge {
       color:#22c55e; border-color:#22c55e;
       animation:seekBadgePulse .55s ease-in-out infinite;
     }
-    .seekBar.settling .seekLockBadge { color:#22c55e; border-color:#22c55e; }
+    .seekBar.settling .seekLockBadge, #lpSeekBar.settling .seekLockBadge { color:#22c55e; border-color:#22c55e; }
     @keyframes seekBadgePulse {
       0%,100% { transform:translate(-50%,-50%) scale(1); }
       50%     { transform:translate(-50%,-50%) scale(1.16); }
     }
     /* Label: HOLD TO UNLOCK (hold) → RELEASE (ready) → UNLOCKING… (settle). */
     .seekLabelRelease, .seekLabelUnlock { display:none; }
-    .seekBar.ready    .seekLabelHold    { display:none; }
-    .seekBar.ready    .seekLabelRelease { display:inline; }
-    .seekBar.settling .seekLabelHold    { display:none; }
-    .seekBar.settling .seekLabelUnlock  { display:inline; }
+    .seekBar.ready .seekLabelHold, #lpSeekBar.ready .seekLabelHold { display:none; }
+    .seekBar.ready .seekLabelRelease, #lpSeekBar.ready .seekLabelRelease { display:inline; }
+    .seekBar.settling .seekLabelHold, #lpSeekBar.settling .seekLabelHold { display:none; }
+    .seekBar.settling .seekLabelUnlock, #lpSeekBar.settling .seekLabelUnlock { display:inline; }
     /* Unlock fill: grows left→right over the 0.5s hold; holds full + green while
        waiting for release; then re-fills green over the 0.5s post-release settle.
        A too-short tap aborts and the fill snaps back to 0. */
@@ -342,12 +342,12 @@
       height:100%; width:0; background:rgba(99,102,241,.22);
       pointer-events:none; z-index:0;
     }
-    .seekBar.holding  .seekUnlockProgress { animation:seekUnlockFill .5s linear forwards; }
-    .seekBar.ready    .seekUnlockProgress {
+    .seekBar.holding .seekUnlockProgress, #lpSeekBar.holding .seekUnlockProgress { animation:seekUnlockFill .5s linear forwards; }
+    .seekBar.ready .seekUnlockProgress, #lpSeekBar.ready .seekUnlockProgress {
       width:100%; background:rgba(34,197,94,.28);
       animation:seekUnlockGlow .55s ease-in-out infinite;
     }
-    .seekBar.settling .seekUnlockProgress {
+    .seekBar.settling .seekUnlockProgress, #lpSeekBar.settling .seekUnlockProgress {
       background:rgba(34,197,94,.28); animation:seekUnlockFill .5s linear forwards;
     }
     @keyframes seekUnlockFill { from { width:0; } to { width:100%; } }
@@ -990,6 +990,11 @@
        target; everything inside it is centre-anchored, so height is the only
        thing to say. */
     #localPlayer.lp-remote #lpSeekBar { height: 44px; }
+    /* The remote's seek bar is LOCKED like the TV remote's (.seekBar above,
+       whose state rules are mirrored onto #lpSeekBar): a remote is operated
+       without looking, often from a pocket. Outside remote mode the bar
+       carries .unlocked permanently, so the on-phone player is untouched. */
+    #localPlayer.lp-remote #lpSeekBar:not(.unlocked) .lp-seek-track { opacity: .75; }
 
     /* Episode counter cell — a label between the Prev/Next tiles, not a tile. */
     #lpRemoteEpCount {
@@ -3987,12 +3992,18 @@
       </div>
       <!-- Bottom strip: seek bar + time / mute / fullscreen -->
       <div class="lp-ctl-bottom">
-        <div id="lpSeekBar">
+        <div id="lpSeekBar" class="unlocked">
           <div class="lp-seek-track">
             <div id="lpSeekBuf"></div>
             <div id="lpSeekFill"></div>
           </div>
           <div id="lpSeekDot"></div>
+          <!-- Remote-mode lock (18.29.0): same badge + fill as the TV remote's. -->
+          <div class="seekUnlockProgress"></div>
+          <div class="seekLockBadge">
+            <svg class="seekLockIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="11" width="14" height="9"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+            <span class="seekLabelHold">HOLD TO UNLOCK</span><span class="seekLabelRelease">RELEASE</span><span class="seekLabelUnlock">UNLOCKING…</span>
+          </div>
         </div>
         <div class="lp-ctl-row">
           <span id="lpTimeCur" class="lp-ctl-time">0:00</span>
@@ -19422,6 +19433,7 @@ function _npSyncRemoteUi() {
   // (Same technique, and the same reason, as _applyPhoneLandLayout.) Both
   // directions run here because this is the only function that knows the page
   // stopped being a remote; there is no event for it.
+  _lpRmLockSync();
   const banner = document.getElementById("lpRemoteBannerTxt");
   if (banner) banner.textContent = "Playing " + _npWhereLabel().replace(/^On /, "on ");
   // Casting / AirPlay: TV volume row, and To Phone in place of To TV (header too).
@@ -19477,10 +19489,14 @@ async function lpBackToPhone() {
   try { await _cap.np.release(); } catch (_) {}
   _npLog("back-to-phone", { from: was, at: _npNativePos, file: lp.filePath }, "ext");
   await _npHandBack().catch(() => {});
-  // AirPlay's audio route is the system's, not ours: the phone's own player can
-  // keep sending SOUND to the TV until the route is changed back, and there is
-  // no API to change it for the user. Say where.
-  if (/AirPlay/.test(was)) showAlert("Back on the phone. If the sound stays on the TV, pick iPhone in Control Centre.", "info");
+  // AirPlay's audio route is the system's, not ours: the phone's own player
+  // keeps sending SOUND to the TV (confirmed on device) and no API picks a route
+  // for the user. So if it is still AirPlay, native opens the route sheet.
+  if (/AirPlay/.test(was)) {
+    let r = null;
+    try { r = await _cap.np.routeCheck(); } catch (_) {}
+    if (r && r.airplay) showAlert("Tap iPhone to bring the sound back to this phone.", "info");
+  }
 }
 
 // TV volume (Chromecast). Steps are 5%; the label shows the level the receiver
@@ -27529,6 +27545,7 @@ function _lpSeekBarInit() {
   const bar = document.getElementById("lpSeekBar");
   const c = document.getElementById("localPlayer");
   bar.addEventListener("pointerdown", e => {
+    if (_lpRmLockDown(e)) return;
     const v = _lpV();
     const d = v.duration || lp.duration || 0;
     if (!d) return;
@@ -27546,15 +27563,71 @@ function _lpSeekBarInit() {
     _lpCtlTick();
   });
   const end = commit => e => {
+    if (_lpRmLockUp(commit)) return;
     if (!_lpScrub) return;
     const t = _lpScrub.t;
     _lpScrub = null;
     c.classList.remove("lp-scrub");
     if (commit) _lpCommitSeek(t);
+    if (_npHolding) _lpRmLockArmRelock();   // every real seek pushes the re-lock back
     _lpCtlShow(); _lpCtlTick();
   };
   bar.addEventListener("pointerup", end(true));
   bar.addEventListener("pointercancel", end(false));
+}
+
+// ── Remote seek-bar lock (18.29.0) ───────────────────────────────────────────
+// While the phone is a REMOTE (glasses, AirPlay, Chromecast — _npHolding) its
+// seek bar gets the TV remote's guard: hold 0.5 s → RELEASE → 0.5 s settle →
+// unlocked, re-locking 5 s after the last touch. A remote is used without
+// looking and lives in a pocket; one brushed tap on a bar is a jump of minutes
+// on a TV across the room. Same three phases, badge and device setting
+// (_seekLockEnabled) as the .seekBar lock, but its own state — the two bars can
+// be on screen for different players at once.
+let _lpRmUnlocked = false, _lpRmPhase = 0, _lpRmHold = null, _lpRmSettle = null, _lpRmRelock = null;
+function _lpRmBar() { return document.getElementById("lpSeekBar"); }
+function _lpRmClasses(on) {
+  const b = _lpRmBar(); if (!b) return;
+  for (const k of ["holding", "ready", "settling"]) b.classList.toggle(k, on === k);
+}
+function _lpRmLockActive() { return _npHolding && _seekLockEnabled && !_lpRmUnlocked; }
+// Called from _npSyncRemoteUi: entering remote mode locks, leaving unlocks for good.
+function _lpRmLockSync() {
+  const b = _lpRmBar(); if (!b) return;
+  clearTimeout(_lpRmHold); clearTimeout(_lpRmSettle); clearTimeout(_lpRmRelock);
+  _lpRmPhase = 0; _lpRmClasses(null);
+  _lpRmUnlocked = !(_npHolding && _seekLockEnabled);
+  b.classList.toggle("unlocked", _lpRmUnlocked);
+}
+function _lpRmLockArmRelock() {
+  clearTimeout(_lpRmRelock);
+  _lpRmRelock = setTimeout(() => { if (_npHolding) { _lpRmUnlocked = false; _lpRmLockSync(); } }, 5000);
+}
+// True = the event belonged to the lock gesture and must not seek.
+function _lpRmLockDown(e) {
+  if (!_lpRmLockActive()) return false;
+  e.preventDefault();
+  if (_lpRmPhase) return true;
+  _lpRmPhase = 1; _lpRmClasses("holding");
+  clearTimeout(_lpRmHold);
+  _lpRmHold = setTimeout(() => { _lpRmPhase = 2; _lpRmClasses("ready"); }, 500);
+  return true;
+}
+function _lpRmLockUp(commit) {
+  if (!_lpRmLockActive()) return false;
+  if (_lpRmPhase === 1 || !commit) {           // let go too early, or cancelled
+    clearTimeout(_lpRmHold); _lpRmPhase = 0; _lpRmClasses(null);
+  } else if (_lpRmPhase === 2) {
+    _lpRmPhase = 3; _lpRmClasses("settling");
+    clearTimeout(_lpRmSettle);
+    _lpRmSettle = setTimeout(() => {
+      _lpRmPhase = 0; _lpRmClasses(null);
+      _lpRmUnlocked = true;
+      _lpRmBar()?.classList.add("unlocked");
+      _lpRmLockArmRelock();
+    }, 500);
+  }
+  return true;
 }
 
 // ── Dev-mode diagnostics HUD ───────────────────────────────────────────────
@@ -29520,6 +29593,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.28.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.29.0</div>
 </body>
 </html>

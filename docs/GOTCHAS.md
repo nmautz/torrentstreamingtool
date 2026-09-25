@@ -2686,6 +2686,15 @@ reached through Tailscale is on no network the TV can see. So AirPlay always goe
 - **The route needs a presenting layer.** A layerless AVPlayer is audio-only and
   never enters external playback. This is the same rule as for a wired display, so
   `attachFallbackLayer` runs for AirPlay even with no external screen.
+- **Stopping the player does not un-pick the AirPlay route.** The audio route is the
+  system's. After Back to phone, the web `<video>` keeps playing sound on the TV.
+  `routeCheck()` opens the route sheet; no API does it silently.
+- **Hold a background task across an item swap.** The `audio` background mode keeps
+  the process alive only while audio is playing, and between two episodes nothing is.
+  With the phone locked, the app (and the door the TV fetches through) went to sleep
+  mid-advance, and the next episode only loaded on unlock. `replaceItem` now calls
+  `beginBgTask()`; `swap-ready` logs how long the load took and whether the app was
+  backgrounded.
 - **Arms keep arriving with page-reachable URLs.** Every `arm()` during a session
   rewrites `url`/`nextUrl` through the door. Skip that step and the next re-arm or
   advance hands the receiver a loopback URL.

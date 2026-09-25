@@ -1674,6 +1674,14 @@ untouched; the restore branch runs on every `_npHolding` write, both directions,
 nothing else knows the page stopped being a remote. The header's location line
 (`#lpWhere`) flips to "On Glasses" and back in the same function.
 
+**The remote's seek bar is locked** (18.29.0), exactly like the TV remote's `.seekBar`:
+hold for 0.5 s, then RELEASE, then a 0.5 s settle before it unlocks, and it re-locks 5 s
+after the last touch. It honours the same device setting (`_seekLockEnabled`). The state
+is its own (`_lpRmLock*`); the badge and fill reuse the `.seekBar` CSS, whose state rules
+are mirrored onto `#lpSeekBar`. Outside remote mode the bar carries `.unlocked`
+permanently, so the on-phone player still seeks with a tap. This applies to glasses,
+AirPlay and Chromecast alike.
+
 What the remote can drive is what `NativePlayback` exposes: `lpTogglePlay` →
 `np.setPaused`, `_lpCommitSeek` → `np.seekTo`, plus the existing episode-advance path.
 **There is deliberately no volume row and no audio/subtitle row** — the plugin has no
@@ -1725,8 +1733,15 @@ failure had the phone on a different network (10.0.0.x) from the TVs. Since 18.2
 AirPlay always starts playing; before that it inherited a paused intent.
 
 **Back to phone** (18.28.0): see the Chromecast section. For AirPlay there is one
-caveat. The audio **route** belongs to the system, so the phone's own player can keep
-sending sound to the TV until the viewer picks iPhone in Control Centre. The page says so.
+catch. The audio **route** belongs to the system, not the player, so after the hand-back
+the page's own `<video>` keeps sending sound to the TV (confirmed on device). No API
+picks a route for the user. Since 18.29.0, `routeCheck()` looks at
+`currentRoute.outputs`, and if they are still AirPlay it opens the route sheet so one tap
+on iPhone fixes it.
+
+**Auto-advance while locked** (18.29.0): see the "hold across the swap" note under
+GOTCHAS. `replaceItem` now holds a background task from the swap until the new item is
+ready, and writes `swap-ready {ms, app}` (or `swap-failed`).
 
 **Still open:**
 - Does a receiver really fetch from the door? Watch for `airplay-route external:true` in
