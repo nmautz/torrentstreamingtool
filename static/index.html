@@ -10057,6 +10057,29 @@ function _epGroupByItem(paths){
   });
   return m;
 }
+// Every item behind the open page: the one item, or each item a merged series is
+// built from. For the item-wide actions (whole-torrent schedule, prep default).
+function _epAllItemIds(){
+  if(!epSeriesKey) return epItemId ? [epItemId] : [];
+  return [...new Set(Object.values(epFileItem).filter(Boolean))];
+}
+// POST `body(paths)` to `/api/library/<item>/<endpoint>` once per owning item.
+// A merged series page has NO `epItemId` (it is null), so a bare
+// `/api/library/${epItemId}/…` there answers "Item not found." — Hunter x Hunter
+// became two items the day its S02 pack arrived, and its priority buttons all 404'd.
+// Resolves to the parsed JSON bodies; throws the first error's detail.
+async function _epPostPerItem(endpoint, paths, body){
+  const out=[];
+  for(const [iid,ps] of _epGroupByItem(paths)){
+    const r=await fetch(`/api/library/${iid}/${endpoint}`,{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(body(ps)),
+    });
+    if(!r.ok){ const e=await r.json().catch(()=>({detail:"Failed."})); throw new Error(e.detail||"Failed."); }
+    out.push({itemId:iid, data:await r.json().catch(()=>({}))});
+  }
+  return out;
+}
 
 // Apply a /metadata response to the open episode page — repaints hero, season
 // tabs and episode rows (names/stills/overviews) once metadata is available.
@@ -12241,14 +12264,14 @@ function _visibleSeasonPrepMode(){
 async function epSchedSeason(mode, btn){
   const paths=_visibleSeasonPaths();
   if(!paths.length) return;
-  await setFileSchedule(epItemId, paths, mode, btn);
+  for(const [iid,ps] of _epGroupByItem(paths)) await setFileSchedule(iid, ps, mode, btn);
   refreshEpFiles();
 }
 // Whole-torrent download schedule. reset_files=true so EVERY file (including any
 // previously skipped) inherits the mode — "now" grabs the entire torrent, "idle"
 // defers all of it.
 async function epSchedItem(mode, btn){
-  await setDownloadSchedule(epItemId, mode, true, btn);
+  for(const iid of _epAllItemIds()) await setDownloadSchedule(iid, mode, true, btn);
   refreshEpFiles();
 }
 
@@ -12259,12 +12282,10 @@ async function epSchedPrep(mode, btn){
   if(!paths.length) return;
   await withInflight(`epprep_${mode}`, btn, async () => {
     try{
-      const r=await fetch(`/api/library/${epItemId}/prep-schedule`,{
-        method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({file_paths:paths,mode}),
-      });
-      if(!r.ok){ const e=await r.json().catch(()=>({detail:"Failed."})); showAlert(e.detail||"Failed.","error"); return; }
-      const d=await r.json().catch(()=>({}));
+      let res;
+      try{ res=await _epPostPerItem("prep-schedule", paths, ps=>({file_paths:ps,mode})); }
+      catch(e){ showAlert(e.message,"error"); return; }
+      const d={started:res.reduce((n,x)=>n+(+x.data.started||0),0)};
       // Optimistically reflect the new prep mode so the bar's highlight updates at once.
       const set=new Set(paths); epFiles.forEach(f=>{ if(set.has(f.path)) f.prep_mode=mode; });
       showAlert(
@@ -12273,7 +12294,9 @@ async function epSchedPrep(mode, btn){
         :                "These files won't be auto-prepped (existing bundles kept).",
         "success");
       // Live-update the per-row Prep icons while the new jobs encode.
-      if(mode==="now" && d.started){ try{ _startPrepPolling(epItemId); }catch(_){} }
+      if(mode==="now" && d.started){
+        for(const x of res) if(x.data.started){ try{ _startPrepPolling(x.itemId); }catch(_){} }
+      }
       refreshEpFiles();
     }catch(_){ showAlert("Failed to set stream-prep schedule.","error"); }
   });
@@ -12307,11 +12330,8 @@ async function epDlPrio(level, paths, btn){
   if(!paths||!paths.length) return;
   await withInflight(`epdlp_${level}_${paths.join(",")}`, btn, async () => {
     try{
-      const r=await fetch(`/api/library/${epItemId}/file-schedule`,{
-        method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({file_paths:paths,mode:level}),
-      });
-      if(!r.ok){ const e=await r.json().catch(()=>({detail:"Failed."})); showAlert(e.detail||"Failed.","error"); return; }
+      try{ await _epPostPerItem("file-schedule", paths, ps=>({file_paths:ps,mode:level})); }
+      catch(e){ showAlert(e.message,"error"); return; }
       const set=new Set(paths);
       epFiles.forEach(f=>{ if(set.has(f.path)){ f.mode=level; f.dl_priority=level; } });
       renderEpList();
@@ -12331,14 +12351,22 @@ async function epPrepPrio(level, opts){
   const paths=o.paths||[];
   await withInflight(`eppp_${scope}_${level}_${paths.join(",")}`, o.btn, async () => {
     try{
-      const body={priority:level, scope};
-      if(scope!=="item") body.file_paths=paths;
-      const r=await fetch(`/api/library/${epItemId}/prep-priority`,{
-        method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify(body),
-      });
-      if(!r.ok){ const e=await r.json().catch(()=>({detail:"Failed."})); showAlert(e.detail||"Failed.","error"); return; }
-      const d=await r.json().catch(()=>({}));
+      let d={};
+      try{
+        if(scope==="item"){
+          // The series-wide default lives on each item, so write it to all of them.
+          for(const iid of _epAllItemIds()){
+            const r=await fetch(`/api/library/${iid}/prep-priority`,{
+              method:"POST",headers:{"Content-Type":"application/json"},
+              body:JSON.stringify({priority:level, scope}),
+            });
+            if(!r.ok){ const e=await r.json().catch(()=>({detail:"Failed."})); throw new Error(e.detail||"Failed."); }
+            d=await r.json().catch(()=>({}));
+          }
+        } else {
+          await _epPostPerItem("prep-priority", paths, ps=>({priority:level, scope, file_paths:ps}));
+        }
+      }catch(e){ showAlert(e.message,"error"); return; }
       if(scope==="item"){
         epPrepPrioDefault=d.priority_default||level;
       } else {
@@ -12369,12 +12397,12 @@ async function epRecheckSelected(btn){
   showAlert(`Rechecking ${paths.length} file(s)… this may take a while.`,"success");
   await withInflight("ep_recheck", btn, async () => {
     try{
-      const r=await fetch(`/api/library/${epItemId}/recheck`,{
-        method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({file_paths:paths}),
-      });
-      if(!r.ok){ const e=await r.json().catch(()=>({detail:"Recheck failed."})); showAlert(e.detail||"Recheck failed.","error"); return; }
-      const d=await r.json();
+      let res;
+      try{ res=await _epPostPerItem("recheck", paths, ps=>({file_paths:ps})); }
+      catch(e){ showAlert(e.message||"Recheck failed.","error"); return; }
+      const d={checked:res.every(x=>x.data.checked),
+               damaged_count:res.reduce((n,x)=>n+(+x.data.damaged_count||0),0),
+               cache_purged:res.reduce((n,x)=>n+(+x.data.cache_purged||0),0)};
       if(!d.checked){
         showAlert("Recheck started but didn't finish in time — check qBittorrent.","warn");
       } else if(d.damaged_count>0){
@@ -29693,6 +29721,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.30.4</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.30.5</div>
 </body>
 </html>

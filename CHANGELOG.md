@@ -1,5 +1,14 @@
 # Changelog
 
+## [18.30.5] — 2026-09-26
+### Priority buttons work on a show made of several downloads
+
+- **Download priority, prep priority, the download and prep schedules, and
+  Recheck no longer fail with "Item not found."** on a show page built from
+  more than one download. Hunter x Hunter became one when its Season 2 pack
+  arrived. Those buttons sent the request to no download at all. Each one
+  now goes to the download that owns each episode.
+
 ## [18.30.4] — 2026-09-26
 ### Hunter x Hunter season 2 gets its episode names
 

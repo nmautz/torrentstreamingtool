@@ -73,6 +73,15 @@ The show-detail **Downloads** list flattens **every** group from one broad `/api
 
 The **−0.7 different-year** penalty is still the key lever for *cross-franchise* junk: same-franchise-different-film releases almost always carry a different year, and it alone drives the wrong result below every legit match. Don't drop the year signal to "just token overlap" — `Star Wars` overlap alone still scored the Mandalorian result positive. Groups also order by best-member `rel`. Nothing is filtered out — low-`rel` results still render, just lower.
 
+### On a merged series page `epItemId` is null: route per file
+
+A show built from several downloads (Hunter x Hunter once its S02 pack arrived) opens as a
+**merged series**: `epSeriesKey` is set and `epItemId` is `null`. Any
+`/api/library/${epItemId}/…` built there goes to `/api/library/null/…` and answers
+**"Item not found."** Per-file actions group their paths by owner with `_epGroupByItem` or
+`_epPostPerItem`. Item-wide ones loop over `_epAllItemIds()`. Before 18.30.5, the download and
+prep priority buttons, both schedules and Recheck all 404'd on such a page.
+
 ### A TMDb season doesn't always start at episode 1
 
 TMDb numbers Hunter x Hunter's season 2 **63–136**, not 1–74: the episode numbers carry on from
