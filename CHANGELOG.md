@@ -1,5 +1,14 @@
 # Changelog
 
+## [18.30.6] — 2026-09-26
+### Download selected works on a show made of several downloads
+
+- **Download selected now works on a show page built from more than one
+  download** (like Hunter x Hunter's two packs). It used to do nothing. In a
+  browser, a selection from one pack still comes as one ZIP. A selection
+  across both packs comes as one ZIP per pack, one after the other. In the
+  app, each episode saves to the device as before.
+
 ## [18.30.5] — 2026-09-26
 ### Priority buttons work on a show made of several downloads
 

@@ -10906,7 +10906,6 @@ function epDownloadViewTab(){
   const title=document.getElementById("epTitle")?.textContent||"download";
   const label=`${title} ${_epScopeLabel()}`;
   if(isApp && epSeriesKey) return _appSaveFiles(files, label);
-  if(!epItemId) return;
   epDownloadPaths(files.map(f=>f.path), label);
 }
 
@@ -13094,7 +13093,6 @@ async function _triggerZipDownload(itemId, filePaths, label){
 
 async function epDownloadSelected(){
   if(!epChecked.size){ showAlert("Select at least one episode.","warn"); return; }
-  if(!epItemId) return;
   const paths=[...epChecked];
   // In the app, mass download saves each selected episode as an offline bundle on
   // the device (same path as the per-row app download button), not a host ZIP.
@@ -13103,52 +13101,53 @@ async function epDownloadSelected(){
     // Mark every selected episode as "queued" up front and paint its spinner
     // immediately (targeted, no list rebuild) so the user sees instant feedback —
     // appDownloadBundle's per-file manifest fetch otherwise delayed the icon by a
-    // few seconds. Then start the actual downloads sequentially.
+    // few seconds. Then start the actual downloads sequentially. Each file is
+    // saved under the item that OWNS it: a merged series has no `epItemId`.
     const toStart=[];
     for(const p of paths){
       const f=epFiles.find(fi=>fi.path===p);
-      if(!f) continue;
-      const st=offlineBundles.get(offKey(epItemId, f.path));
+      const iid=_epItemFor(p);
+      if(!f || !iid) continue;
+      const st=offlineBundles.get(offKey(iid, f.path));
       if(st && (st.complete||st.downloading||st.queued)) continue;   // already saved/in-flight/queued
-      offlineBundles.set(offKey(epItemId, f.path), { queued:true, fraction:0 });
-      _appRefreshDlBtn(epItemId, f.path);
-      toStart.push(f);
+      offlineBundles.set(offKey(iid, f.path), { queued:true, fraction:0 });
+      _appRefreshDlBtn(iid, f.path);
+      toStart.push({f, iid});
     }
     if(!toStart.length){ showAlert("Selected episodes are already saved or downloading.","info"); return; }
     // Ask which quality once for the whole batch, then apply it to every episode.
-    const q=await _appBatchQuality(epItemId, toStart[0].path,
+    const q=await _appBatchQuality(toStart[0].iid, toStart[0].f.path,
       document.getElementById("epTitle")?.textContent||"");
     if(q===null){   // cancelled — clear the queued markers we painted above
-      for(const f of toStart){ offlineBundles.delete(offKey(epItemId, f.path)); _appRefreshDlBtn(epItemId, f.path); }
+      for(const {f,iid} of toStart){ offlineBundles.delete(offKey(iid, f.path)); _appRefreshDlBtn(iid, f.path); }
       return;
     }
-    await _appRunPooled(toStart, 3, (f) => appDownloadBundle(epItemId, f.path, f.name, null, q));
+    await _appRunPooled(toStart, 3, ({f,iid}) => appDownloadBundle(iid, f.path, f.name, null, q));
     return;
   }
-  if(paths.length===1){
-    const f=epFiles.find(fi=>fi.path===paths[0]);
-    if(f){
-      const a=document.createElement("a");
-      a.href=`/api/library/${epItemId}/download?file_path=${encodeURIComponent(f.path)}`;
-      a.download=f.name; document.body.appendChild(a); a.click(); a.remove(); return;
-    }
-  }
-  const label=document.getElementById("epTitle")?.textContent||"download";
-  _triggerZipDownload(epItemId, paths, label);
+  epDownloadPaths(paths, document.getElementById("epTitle")?.textContent||"download");
 }
 
-function epDownloadPaths(paths, label){
-  if(!epItemId) return;
+// Host download of `paths`: one file straight, several as a ZIP. The ZIP
+// endpoint serves ONE item's files, so a selection spanning a merged series
+// (Hunter x Hunter's S01 and S02 packs) becomes one ZIP per item, in turn.
+async function epDownloadPaths(paths, label){
+  const byItem=_epGroupByItem(paths);
+  if(!byItem.size) return;
   // In the app a lone file is still a device save, not a raw host download.
   if(paths.length===1 && !isApp){
     const f=epFiles.find(fi=>fi.path===paths[0]);
     if(f){
       const a=document.createElement("a");
-      a.href=`/api/library/${epItemId}/download?file_path=${encodeURIComponent(f.path)}`;
+      a.href=`/api/library/${[...byItem.keys()][0]}/download?file_path=${encodeURIComponent(f.path)}`;
       a.download=f.name; document.body.appendChild(a); a.click(); a.remove(); return;
     }
   }
-  _triggerZipDownload(epItemId, paths, label);
+  const parts=[...byItem];
+  for(let i=0;i<parts.length;i++){
+    const [iid,ps]=parts[i];
+    await _triggerZipDownload(iid, ps, parts.length>1 ? `${label} (${i+1} of ${parts.length})` : label);
+  }
 }
 
 function epDownloadSeason(season){
@@ -29721,6 +29720,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.30.5</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.30.6</div>
 </body>
 </html>

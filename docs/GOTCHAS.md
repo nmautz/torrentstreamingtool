@@ -80,7 +80,8 @@ A show built from several downloads (Hunter x Hunter once its S02 pack arrived) 
 `/api/library/${epItemId}/…` built there goes to `/api/library/null/…` and answers
 **"Item not found."** Per-file actions group their paths by owner with `_epGroupByItem` or
 `_epPostPerItem`. Item-wide ones loop over `_epAllItemIds()`. Before 18.30.5, the download and
-prep priority buttons, both schedules and Recheck all 404'd on such a page.
+prep priority buttons, both schedules and Recheck all 404'd on such a page. Download selected did nothing
+there until 18.30.6. It now makes one ZIP per item, because `download-zip` serves only one item's files.
 
 ### A TMDb season doesn't always start at episode 1
 
