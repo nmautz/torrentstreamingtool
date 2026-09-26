@@ -762,7 +762,7 @@ live on the indexers on 2026-09-18:
 
 | Source | Seasons | `S02E01` means |
 |---|---|---|
-| TMDb | 3 — 62 / 74 / 12 | absolute 63 |
+| TMDb | 3 — 62 / 74 / 12, season 2 numbered **63–136** | nothing (TMDb has no S02E01) |
 | iAHD (Blu-ray) | 3 — 58 / 78 / 12 | absolute **59** |
 | ZigZag (Netflix) | 6, numbered **absolute** | its files are `S02E27`…`S02E38` = absolute 27–38 |
 | scene (W4F) | one season, forever | `S01E59` = absolute 59 |
@@ -791,6 +791,18 @@ two shapes out of it:
 * **A folded cour** (`tmdboffset`) — the release's season N is a real cour that TMDb merged into a
   bigger season. OSHI NO KO's S2 is TMDb S1 from episode 12; Frieren's is S1 from episode 29.
 
+**TMDb doesn't always number a season from 1 (18.30.4).** Hunter x Hunter's season 2 is episodes
+63–136: TMDb carries the count on from season 1. `/tv/{id}` gives only `episode_count`, so the grid
+takes each season's first number off its fetched episode list (`main._season_grid`, derived per call
+so old metadata needs no migration; an unfetched season is assumed to start at 1). Every piece of
+grid arithmetic honours it: `animemap.from_absolute`/`to_absolute`/`_checked`/`release_packs`,
+`episodes.resolve_absolute`, and the frontend's `_animeAbsNo`. A pack already numbered on TMDb's
+63–136 is left where it is and only stamped. Because the pass is one-shot, a pack decoded before a
+season's numbering was known would stay wrong for good, so `animemap.stale_files` spots a moved file
+whose `abs_no` no longer lands where it sits and `_reattribute_item_files` rewinds and re-decodes it.
+Before this, the iAHD S2 pack went onto S02E01–74: the first 62 files had no names, and episodes
+125–136 carried the names of 63–74.
+
 Every decode is **all-or-nothing**: if any file would land outside TMDb's grid the whole pack is
 refused, because a half-remapped season is worse than an honestly mislabelled one. Where the two
 grids agree (Code Geass, Attack on Titan, Demon Slayer) nothing moves.
@@ -818,7 +830,7 @@ expressed as TMDb ranges, and **empty whenever the two grids agree**. That empti
 feature: Code Geass, Attack on Titan and Demon Slayer say nothing, because their season 2 and
 TMDb's season 2 are the same episodes. Where they disagree, each entry is
 `{grid_season, label, from:[season,episode], to:[season,episode]}` — Hunter x Hunter's season 2
-pack is `from [1,59] to [2,74]`, which is exactly the sentence the episode page needs: *the four
+pack is `from [1,59] to [2,136]`, which is exactly the sentence the episode page needs: *the four
 episodes missing off the end of season 1 are in the season 2 pack.* `animemap.pack_for` (mirrored
 in the frontend as `_animePackFor`) does the lookup by ordinary tuple comparison, because a pack
 spans a season boundary and neither number decides on its own.

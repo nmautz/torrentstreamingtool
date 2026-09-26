@@ -174,26 +174,39 @@ def cour_target(entries: list[dict], grid_season: int) -> Optional[tuple[int, in
 
 
 # ── TMDb's own grid ──────────────────────────────────────────────────────────
+#
+# A TMDb season is `episode_count` episodes numbered from `first_episode`, and
+# that is NOT always 1. TMDb numbers Hunter x Hunter's season 2 **63-136** — its
+# episode numbers carry on from season 1 — so "S02E01" is not an episode TMDb
+# has, and every name, still and overview for the season lives under 63..136.
+# `/tv/{id}` gives only the count; the first number comes from the season's own
+# episode list (`main._season_grid` stamps it). Missing means 1, which is every
+# show that restarts its numbering.
 
-def _grid(all_seasons: Iterable[dict]) -> list[tuple[int, int]]:
-    """`[(season, episode_count), …]` for the positive seasons, in order. Season
-    0 is excluded: specials are not part of the absolute run."""
+def _grid(all_seasons: Iterable[dict]) -> list[tuple[int, int, int]]:
+    """`[(season, episode_count, first_episode), …]` for the positive seasons,
+    in order. Season 0 is excluded: specials are not part of the absolute run."""
     out = []
     for s in all_seasons or []:
         n, c = _int(s.get("season"), 0) or 0, _int(s.get("episode_count"), 0) or 0
         if n > 0 and c > 0:
-            out.append((n, c))
+            out.append((n, c, max(1, _int(s.get("first_episode"), 1) or 1)))
     out.sort()
     return out
+
+
+def _ranges(all_seasons: Iterable[dict]) -> dict[int, tuple[int, int]]:
+    """`{season: (first, last)}` — the episode numbers TMDb actually lists."""
+    return {n: (first, first + count - 1) for n, count, first in _grid(all_seasons)}
 
 
 def from_absolute(n: int, all_seasons: Iterable[dict]) -> Optional[tuple[int, int]]:
     """Series-absolute number → `(tmdb season, episode)`, or None when it runs
     off the end of what TMDb lists."""
     run = 0
-    for season, count in _grid(all_seasons):
+    for season, count, first in _grid(all_seasons):
         if n <= run + count:
-            return season, n - run
+            return season, first + (n - run) - 1
         run += count
     return None
 
@@ -203,15 +216,15 @@ def to_absolute(season: int, episode: int, all_seasons: Iterable[dict]) -> Optio
     `from_absolute`, and what a search query for an anime episode wants: no
     indexer has "S01E59", plenty have "059"."""
     run = 0
-    for s, count in _grid(all_seasons):
+    for s, count, first in _grid(all_seasons):
         if s == season:
-            return run + episode if 0 < episode <= count else None
+            return run + episode - first + 1 if first <= episode < first + count else None
         run += count
     return None
 
 
 def total_episodes(all_seasons: Iterable[dict]) -> int:
-    return sum(c for _, c in _grid(all_seasons))
+    return sum(c for _, c, _ in _grid(all_seasons))
 
 
 # ── What the release groups actually ship ────────────────────────────────────
@@ -219,7 +232,7 @@ def total_episodes(all_seasons: Iterable[dict]) -> int:
 def _tmdb_bounds(all_seasons: Iterable[dict]) -> list[int]:
     """Cumulative absolute number each TMDb season ends on."""
     run, out = 0, []
-    for _, count in _grid(all_seasons):
+    for _, count, _ in _grid(all_seasons):
         run += count
         out.append(run)
     return out
@@ -250,7 +263,7 @@ def release_packs(entries: list[dict],
 
     Where they disagree, each entry is
     `{grid_season, label, from: [season, episode], to: [season, episode]}` —
-    for Hunter x Hunter, the season 2 pack reads `from [1, 59] to [2, 74]`,
+    for Hunter x Hunter, the season 2 pack reads `from [1, 59] to [2, 136]`,
     which is precisely the sentence the episode page needs: *the four episodes
     missing off the end of season 1 are in the season 2 pack.*
 
@@ -258,8 +271,8 @@ def release_packs(entries: list[dict],
     shapes below land in the same coordinate system and neither caller has to
     know which shape it is looking at.
     """
-    counts = dict(_grid(all_seasons))
-    if not counts or not entries:
+    ranges = _ranges(all_seasons)
+    if not ranges or not entries:
         return []
 
     if is_absolute_run(entries):
@@ -289,8 +302,10 @@ def release_packs(entries: list[dict],
         for i, c in enumerate(cours):
             season, offset = c["tmdb_season"], c["offset"]
             nxt = cours[i + 1] if i + 1 < len(cours) else None
+            # `tmdboffset` is on TMDb's own numbering, so a cour starts at
+            # offset + 1 whatever number the season itself opens on.
             last = (nxt["offset"] if nxt and nxt["tmdb_season"] == season
-                    else counts.get(season, 0))
+                    else ranges.get(season, (1, 0))[1])
             if offset + 1 > last:
                 continue              # an announced cour TMDb hasn't listed yet
             packs.append({"grid_season": c["grid_season"],
@@ -340,6 +355,12 @@ def decode_pack(entries: list[dict], all_seasons: Iterable[dict],
     if not is_absolute_run(entries):
         return None                      # real seasons, agreed on both sides
 
+    # A pack numbered the way TMDb numbers this very season, where that isn't
+    # from 1 (Hunter x Hunter S02E63-136): already TMDb slots, nothing to decode.
+    first, last = _ranges(all_seasons).get(rel_season, (1, 0))
+    if first > 1 and first <= nums[0] and nums[-1] <= last:
+        return [(rel_season, n) for n in nums]
+
     # 2) An absolute run. Either the numbers are already absolute and the season
     #    label comes from some grid we don't have (a Netflix six-season split),
     #    or they restart at 1 inside the release's own season.
@@ -365,9 +386,10 @@ def _pair(v: Optional[tuple[int, int]]) -> tuple[int, int]:
 def _checked(pairs: list[tuple[int, int]],
              all_seasons: Iterable[dict]) -> Optional[list[tuple[int, int]]]:
     """Accept a decode only if every file lands on a real TMDb episode."""
-    counts = dict(_grid(all_seasons))
+    ranges = _ranges(all_seasons)
     for season, episode in pairs:
-        if season <= 0 or episode <= 0 or episode > counts.get(season, 0):
+        first, last = ranges.get(season, (1, 0))
+        if season <= 0 or not first <= episode <= last:
             return None
     return pairs
 
@@ -447,6 +469,29 @@ def remap_slots(slots: list[dict], all_seasons: Iterable[dict],
                 sl["abs"] = False
                 changed = True
     return changed
+
+
+def stale_files(files: list[dict], all_seasons: Iterable[dict]) -> bool:
+    """True when a remapped file no longer sits where its `abs_no` says on
+    today's grid — the grid it was decoded against was wrong or incomplete.
+
+    The remap is one-shot (the `abs_no` guard), so without this a pack decoded
+    before TMDb's numbering was known stays wherever it first landed: Hunter x
+    Hunter's S2 pack went onto S02E01-74 while TMDb's season 2 is 63-136, and
+    the one-shot guard kept it there. Only files the remap MOVED (`rel_*` on
+    the record) are judged, because only those can be rewound by `reset_files`;
+    a pass-2 file carries `abs_no` too but has nothing to rewind to.
+    """
+    if not _grid(all_seasons):
+        return False
+    for f in files:
+        abs_no = _int(f.get("abs_no"), 0) or 0
+        if not abs_no or ("rel_season" not in f and "rel_episode" not in f):
+            continue
+        where = from_absolute(abs_no, all_seasons)
+        if where and where != (_int(f.get("season"), 0), _int(f.get("episode"), 0)):
+            return True
+    return False
 
 
 def reset_files(files: list[dict]) -> bool:

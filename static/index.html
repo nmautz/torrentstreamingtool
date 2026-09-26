@@ -11321,15 +11321,24 @@ function _animeForeignPack(meta, season, episode){
 // Series-absolute episode number for a TMDb (season, episode), or 0 when the
 // show isn't an anime whose seasons are subdivisions of one continuous run.
 // The mirror of animemap.to_absolute — same cumulative walk over the season
-// inventory, so both sides agree on what "episode 59" means.
+// inventory, so both sides agree on what "episode 59" means. A season's first
+// number is read off its episode list, as `main._season_grid` does: TMDb numbers
+// Hunter x Hunter's season 2 63-136, not 1-74.
 function _animeAbsNo(meta, season, episode){
   const f=_animeFacts(meta);
   if(!f || !f.absolute || +season<=0 || +episode<=0) return 0;
+  const first=n=>{
+    const nums=(((meta.seasons||{})[String(n)]||{}).episodes||[]).map(e=>+e.episode||0).filter(x=>x>0);
+    return nums.length ? Math.min(...nums) : 1;
+  };
   const grid=(meta.all_seasons||[]).map(x=>({n:+x.season||0, c:+x.episode_count||0}))
                                    .filter(x=>x.n>0 && x.c>0).sort((a,b)=>a.n-b.n);
   let run=0;
   for(const s of grid){
-    if(s.n===+season) return +episode<=s.c ? run + +episode : 0;
+    if(s.n===+season){
+      const e=+episode - first(s.n) + 1;
+      return (e>=1 && e<=s.c) ? run + e : 0;
+    }
     run+=s.c;
   }
   return 0;
@@ -29684,6 +29693,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.30.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.30.4</div>
 </body>
 </html>

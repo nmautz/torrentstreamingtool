@@ -23,6 +23,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import animemap as am            # noqa: E402
+import episodes as ep            # noqa: E402
 
 _PASS = 0
 _FAIL = []
@@ -317,6 +318,49 @@ eq("a mixed item remaps only the run", am.remap_slots(s, HXH_SEASONS, HXH), True
 eq("special stayed put", (s[-1]["season"], s[-1]["episode"]), (0, 1))
 
 eq("no table, no change", am.remap_slots(slots(2, range(1, 79)), HXH_SEASONS, []), False)
+
+# ── A season TMDb numbers on from the last ───────────────────────────────────
+# TMDb's HxH season 2 is episodes 63-136, not 1-74 (on the box, 2026-09-26).
+# Decoding the iAHD S2 pack onto S02E01-74 put episode 63's name on episode 125
+# and left the first 62 files nameless.
+HXH_CONT = [dict(s, first_episode=63) if s["season"] == 2 else s for s in HXH_SEASONS]
+eq("abs 63 is TMDb's S02E63", am.from_absolute(63, HXH_CONT), (2, 63))
+eq("abs 136 is TMDb's S02E136", am.from_absolute(136, HXH_CONT), (2, 136))
+eq("abs 137 opens season 3", am.from_absolute(137, HXH_CONT), (3, 1))
+eq("round trip S02E63", am.to_absolute(2, 63, HXH_CONT), 63)
+eq("S02E01 isn't an episode TMDb has", am.to_absolute(2, 1, HXH_CONT), None)
+s = slots(2, range(1, 79))
+eq("continuous remap", am.remap_slots(s, HXH_CONT, HXH), True)
+eq("the seam still lands in season 1", (s[3]["season"], s[3]["episode"]), (1, 62))
+eq("first of TMDb S2 keeps TMDb's number",
+   (s[4]["season"], s[4]["episode"], s[4]["abs_no"]), (2, 63, 63))
+eq("last file", (s[-1]["season"], s[-1]["episode"], s[-1]["abs_no"]), (2, 136, 136))
+eq("the S02 pack spans the seam",
+   am.release_packs(HXH, HXH_CONT)[1]["from"] + am.release_packs(HXH, HXH_CONT)[1]["to"],
+   [1, 59, 2, 136])
+s = slots(2, range(63, 137))
+eq("a pack already on TMDb's numbers is stamped", am.remap_slots(s, HXH_CONT, HXH), True)
+eq("and stays put", [(x["season"], x["episode"], x["abs_no"]) for x in (s[0], s[-1])],
+   [(2, 63, 63), (2, 136, 136)])
+
+# Decoded before TMDb's numbering was known: stale, rewound, decoded again.
+files = [dict(x, rel_season=2, rel_episode=i + 1) for i, x in enumerate(slots(2, range(1, 79)))]
+am.remap_slots(files, HXH_SEASONS, HXH)
+eq("right for the grid it was decoded on", am.stale_files(files, HXH_SEASONS), False)
+eq("stale on the real one", am.stale_files(files, HXH_CONT), True)
+am.reset_files(files)
+am.remap_slots(files, HXH_CONT, HXH)
+eq("redecoded onto TMDb's numbers", (files[4]["season"], files[4]["episode"]), (2, 63))
+eq("and settles", am.stale_files(files, HXH_CONT), False)
+
+# Pass 2 with the same grid: `Season 2/Show - 63.mkv` is already TMDb's slot.
+s = [{"season": 2, "episode": n, "bucket": "", "abs": True} for n in range(63, 70)]
+eq("pass 2 keeps TMDb's own numbers", ep.resolve_absolute(s, HXH_CONT), False)
+eq("still S02E63", (s[0]["season"], s[0]["episode"]), (2, 63))
+s = [{"season": 0, "episode": n, "bucket": "", "abs": True} for n in (62, 63, 136)]
+ep.resolve_absolute(s, HXH_CONT)
+eq("pass 2, no season: absolute onto TMDb's numbers",
+   [(x["season"], x["episode"]) for x in s], [(1, 62), (2, 63), (2, 136)])
 
 
 # ── the file store ───────────────────────────────────────────────────────────

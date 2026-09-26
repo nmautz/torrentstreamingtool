@@ -73,6 +73,15 @@ The show-detail **Downloads** list flattens **every** group from one broad `/api
 
 The **−0.7 different-year** penalty is still the key lever for *cross-franchise* junk: same-franchise-different-film releases almost always carry a different year, and it alone drives the wrong result below every legit match. Don't drop the year signal to "just token overlap" — `Star Wars` overlap alone still scored the Mandalorian result positive. Groups also order by best-member `rel`. Nothing is filtered out — low-`rel` results still render, just lower.
 
+### A TMDb season doesn't always start at episode 1
+
+TMDb numbers Hunter x Hunter's season 2 **63–136**, not 1–74: the episode numbers carry on from
+season 1. `/tv/{id}` reports only `episode_count`, so any arithmetic that turns a count into episode
+numbers (`first + n - 1` with `first = 1`) makes up slots TMDb doesn't have: `S02E01` has no name,
+no still, no overview. The actual numbers come only from the season's own episode list. Grid math
+goes through `main._season_grid`, which adds `first_episode`. Never rebuild the grid from
+`all_seasons` alone. See [LIBRARY_DATA.md § Anime season mapping](LIBRARY_DATA.md).
+
 ### Don't put the year in the indexer query, and score anime against its romaji name — else seasons and bulk packs vanish
 
 Anime-specific traps in the show page's searches (`_ssBroadSearch`, `ssSearchEpisode`):

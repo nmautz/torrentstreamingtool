@@ -114,6 +114,8 @@ L = el.label_file(F("HxH - 074.mkv", 2, 12, abs_no=74), HXH, "")
 eq("absolute number rides along", L["code"], "S02E12 (74)")
 L = el.label_file(F("HxH - 012.mkv", 1, 12, abs_no=12), HXH, "")
 eq("absolute equal to S01 number is not repeated", L["code"], "S01E12")
+L = el.label_file(F("HxH S02E05.mkv", 2, 63, abs_no=63), HXH, "")
+eq("a season TMDb numbers on from the last doesn't repeat it", L["code"], "S02E63")
 
 # ── Movies ──────────────────────────────────────────────────────────────────
 HEAT = {"tmdb_kind": "movie", "title": "Heat", "release_date": "1995-12-15"}

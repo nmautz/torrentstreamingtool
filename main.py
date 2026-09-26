@@ -3384,13 +3384,33 @@ def _anime_facts(metadata: Optional[dict]) -> Optional[dict]:
     entries = _anime_entries(metadata)
     if not entries:
         return None
-    all_seasons = (metadata or {}).get("all_seasons") or []
+    all_seasons = _season_grid(metadata)
     return {
         "mapped":   True,
         "absolute": animemap.is_absolute_run(entries),
         "total":    animemap.total_episodes(all_seasons),
         "packs":    animemap.release_packs(entries, all_seasons),
     }
+
+
+def _season_grid(metadata: Optional[dict]) -> list:
+    """`metadata.all_seasons` with each season's `first_episode` filled in.
+
+    `/tv/{id}` says how MANY episodes a season has, never what they are
+    numbered, and TMDb does not always restart at 1: Hunter x Hunter's season 2
+    is episodes 63-136. The number is read off the season's own episode list
+    wherever that has been fetched (it has for every season the item has files
+    in); a season we hold no list for is taken to start at 1. Derived on every
+    call rather than stored, so metadata cached before this existed needs no
+    migration and a season list that arrives later is picked up at once.
+    """
+    seasons = (metadata or {}).get("seasons") or {}
+    out = []
+    for s in (metadata or {}).get("all_seasons") or []:
+        eps = ((seasons.get(str(s.get("season"))) or {}).get("episodes")) or []
+        nums = [int(e.get("episode") or 0) for e in eps if int(e.get("episode") or 0) > 0]
+        out.append({**s, "first_episode": min(nums)} if nums else s)
+    return out
 
 
 def _anime_entries(metadata: Optional[dict]) -> list:
@@ -4152,10 +4172,14 @@ def _reattribute_item_files(item: dict, metadata: Optional[dict]) -> bool:
     """
     if not metadata or metadata.get("tmdb_kind") != "tv":
         return False
-    all_seasons = metadata.get("all_seasons")
-    if not isinstance(all_seasons, list) or not all_seasons:
+    if not isinstance(metadata.get("all_seasons"), list) or not metadata["all_seasons"]:
         return False
+    all_seasons = _season_grid(metadata)
     files = item.get("files") or []
+    # A pack decoded against a grid since corrected (a season's episode list
+    # arrived and TMDb numbers it from 63, not 1) is rewound and decoded again;
+    # the pass is one-shot otherwise. See animemap.stale_files.
+    rewound = animemap.stale_files(files, all_seasons) and animemap.reset_files(files)
     slots = [{"season": int(f.get("season", 0) or 0),
               "episode": int(f.get("episode", 0) or 0),
               "bucket": f.get("bucket", "") or "",
@@ -4165,7 +4189,7 @@ def _reattribute_item_files(item: dict, metadata: Optional[dict]) -> bool:
               "rel_episode": int(f.get("rel_episode", 0) or 0)} for f in files]
     moved = episodes.resolve_absolute(slots, all_seasons)
     moved |= animemap.remap_slots(slots, all_seasons, _anime_entries(metadata))
-    changed = False
+    changed = bool(rewound)
     if moved:
         for f, slot in zip(files, slots):
             changed |= episodes.apply_slot(f, slot)

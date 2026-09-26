@@ -1,5 +1,15 @@
 # Changelog
 
+## [18.30.4] — 2026-09-26
+### Hunter x Hunter season 2 gets its episode names
+
+- **The Hunter x Hunter Season 2 pack now lands on the right episodes.** TMDb
+  numbers season 2 as episodes 63–136, not 1–74. The app assumed every season
+  starts at 1, so the pack went onto S02E01–74. The first 62 episodes had no
+  names, and episodes 125–136 showed the names of 63–74. Episodes now show
+  as S02E63–S02E136 with the right names and pictures. A pack that was already
+  placed the old way corrects itself.
+
 ## [18.30.3] — 2026-09-25
 ### No more crash after casting
 

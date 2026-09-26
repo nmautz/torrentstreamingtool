@@ -374,6 +374,11 @@ def resolve_absolute(slots: list[dict], all_seasons: list[dict]) -> bool:
     if not counts:
         return False
     offsets = season_offsets(all_seasons)
+    # The number TMDb gives a season's first episode. Usually 1, but a season
+    # TMDb numbers on from the last (Hunter x Hunter's S2 is 63-136) keeps its
+    # absolute numbers — they ARE the TMDb slots. `first - 1` is the shift.
+    shift = {int(s.get("season", 0) or 0): max(1, int(s.get("first_episode", 1) or 1)) - 1
+             for s in all_seasons or [] if int(s.get("season", 0) or 0) > 0}
     changed = False
 
     # Case A — the season is known (it came from the folder) but the numbers are
@@ -386,15 +391,16 @@ def resolve_absolute(slots: list[dict], all_seasons: list[dict]) -> bool:
             by_season.setdefault(int(sl["season"]), []).append(sl)
     for season, group in by_season.items():
         count, offset = counts.get(season, 0), offsets.get(season, 0)
+        first = shift.get(season, 0) + 1
         if not count or not offset:
             continue
         nums = [int(s["episode"]) for s in group]
-        if max(nums) <= count:
-            continue                                  # already within-season
+        if all(first <= n < first + count for n in nums):
+            continue                                  # already TMDb's numbers
         if not all(offset < n <= offset + count for n in nums):
             continue                                  # not the absolute window
         for sl in group:
-            sl["episode"] = int(sl["episode"]) - offset
+            sl["episode"] = int(sl["episode"]) - offset + first - 1
             sl["abs"] = False
             # Transient, for the anime pass that runs straight after: these
             # numbers are now TMDb slots, not the release's own labels, so it
@@ -415,7 +421,7 @@ def resolve_absolute(slots: list[dict], all_seasons: list[dict]) -> bool:
             for season in sorted(counts):
                 if n <= counts[season] + offsets[season]:
                     sl["season"] = season
-                    sl["episode"] = n - offsets[season]
+                    sl["episode"] = n - offsets[season] + shift.get(season, 0)
                     sl["abs"] = False
                     sl["abs_resolved"] = True      # see Case A
                     changed = True

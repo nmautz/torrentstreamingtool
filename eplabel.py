@@ -229,7 +229,9 @@ def label_file(f: dict, meta: Optional[dict], fallback_show: str = "") -> dict:
         last = episode_span(file_name, season, episode)
         code = f"S{season:02d}E{episode:02d}" + (f"-E{last:02d}" if last > episode else "")
         abs_no = int(f.get("abs_no") or 0)
-        if abs_no and (abs_no != episode or season != 1):
+        # Only when it says something the code doesn't: TMDb numbers some
+        # seasons on from the last (Hunter x Hunter S02E63 IS episode 63).
+        if abs_no and abs_no != episode:
             code += f" ({abs_no})"
         eps = ((seasons.get(str(season)) or {}).get("episodes")) or []
         name = _join_names(_episode_names(eps, episode, last)) or name_from_file(file_name)
