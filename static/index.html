@@ -7549,6 +7549,18 @@ function _libShowIconBtns(gItems){
   return h;
 }
 
+// Has this profile started a show made of several downloads? Only the button's
+// LABEL rides on this — Play itself always follows the series resume hint (see
+// playSeries), which is already the next unwatched episode, or the first one
+// when nothing or everything has been watched. Per-item `pct>3` can't answer it:
+// finishing an episode leaves the next one's hint at 0%, and a download watched
+// to the end reports all_completed — Hunter x Hunter with S01 done and S02E03
+// next matched neither, read as unstarted, and Play went back to S01E01.
+function _showStarted(gItems, doneCount){
+  if(gItems.length && doneCount===gItems.length) return false;
+  return doneCount>0 || gItems.some(it=>it.last_watched_at || (it.resume&&it.resume.pct>3));
+}
+
 // One cohesive show tile for a series made of multiple items (e.g. episodes
 // downloaded individually). Opens the merged episode page; Play resumes across
 // the episodes on the TV.
@@ -7560,7 +7572,7 @@ function _libShowTileHtml(seriesTitle, gItems){
   const anyDownloading=gItems.some(it=>it.status==="downloading");
   const anyError=gItems.some(it=>it.status==="error");
   const doneCount=gItems.filter(it=>it.resume&&it.resume.all_completed).length;
-  const inProgress=gItems.some(it=>it.resume&&it.resume.pct>3&&!it.resume.all_completed);
+  const inProgress=_showStarted(gItems, doneCount);
   const accent=anyError?"border-l-red-600":anyDownloading?"border-l-yellow-600":"border-l-indigo-800";
   const bits=[`${totalEps} episode${totalEps===1?"":"s"}`];
   if(seasons.length) bits.push(`${seasons.length} season${seasons.length>1?"s":""}`);
@@ -7581,7 +7593,7 @@ function _libShowTileHtml(seriesTitle, gItems){
       </div>
       <div class="lib-card-actions flex items-center gap-2 flex-wrap mt-2.5">
         <button class="lib-show-open flex-1 min-h-[40px] bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white text-xs font-black uppercase tracking-wide px-3 transition-colors" data-series-key="${kAttr}" data-title="${tAttr}">Episodes</button>
-        <button class="lib-show-play flex-[1.4] min-h-[40px] bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-black uppercase tracking-wide px-3 transition-colors" data-series-key="${kAttr}" data-mode="${inProgress?"resume":"all"}"><svg class="ic" aria-hidden="true"><use href="#i-play"/></svg> ${inProgress?"Resume":"Play"}</button>
+        <button class="lib-show-play flex-[1.4] min-h-[40px] bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-black uppercase tracking-wide px-3 transition-colors" data-series-key="${kAttr}" data-mode="resume"><svg class="ic" aria-hidden="true"><use href="#i-play"/></svg> ${inProgress?"Resume":"Play"}</button>
         <div class="flex items-center gap-1">${_libShowIconBtns(gItems)}</div>
       </div>
     </div>
@@ -8024,7 +8036,7 @@ function _libShowCardHtml(seriesTitle, gItems){
   const anyDownloading=gItems.some(it=>it.status==="downloading");
   const anyError=gItems.some(it=>it.status==="error");
   const doneCount=gItems.filter(it=>it.resume&&it.resume.all_completed).length;
-  const inProgress=gItems.some(it=>it.resume&&it.resume.pct>3&&!it.resume.all_completed);
+  const inProgress=_showStarted(gItems, doneCount);
   const bits=[`${totalEps} ep`];
   if(seasons.length) bits.push(`${seasons.length} season${seasons.length>1?"s":""}`);
   if(doneCount) bits.push(`${doneCount}/${gItems.length} watched`);
@@ -8047,10 +8059,10 @@ function _libShowCardHtml(seriesTitle, gItems){
       <img class="lib-poster-img hidden" data-item-id="${gItems[0].id}" alt="">
       <div class="lib-poster-ph">${escHtml(title)}</div>
       <button class="lib-cardv-more" title="More actions" onclick="event.stopPropagation();_libCardMore(this)"><svg class="ic" aria-hidden="true"><use href="#i-dots"/></svg></button>
-      <button class="lib-cardv-play lib-show-play" data-series-key="${kAttr}" data-mode="${inProgress?"resume":"all"}" title="${inProgress?'Resume':'Play'}">${inProgress?'<svg class="ic" aria-hidden="true"><use href="#i-resume"/></svg>':'<svg class="ic" aria-hidden="true"><use href="#i-play"/></svg>'}</button>
+      <button class="lib-cardv-play lib-show-play" data-series-key="${kAttr}" data-mode="resume" title="${inProgress?'Resume':'Play'}">${inProgress?'<svg class="ic" aria-hidden="true"><use href="#i-resume"/></svg>':'<svg class="ic" aria-hidden="true"><use href="#i-play"/></svg>'}</button>
       ${badges?`<div class="lib-cardv-badges">${badges}</div>`:''}
       ${TV_MODE?`<div class="tv-card-ov" data-tv-group>
-        <button class="tv-card-btn tv-card-play lib-show-play" data-tv-default data-series-key="${kAttr}" data-mode="${inProgress?"resume":"all"}"
+        <button class="tv-card-btn tv-card-play lib-show-play" data-tv-default data-series-key="${kAttr}" data-mode="resume"
           onkeydown="if(event.key==='Enter'||event.key===' ')event.stopPropagation()">${inProgress?'<svg class="ic" aria-hidden="true"><use href="#i-resume"/></svg> Resume':'<svg class="ic" aria-hidden="true"><use href="#i-play"/></svg> Play'}</button>
         <button class="tv-card-btn lib-show-open" data-series-key="${kAttr}" data-title="${tAttr}"
           onkeydown="if(event.key==='Enter'||event.key===' ')event.stopPropagation()" onclick="event.stopPropagation()">Episodes</button>
@@ -8064,7 +8076,7 @@ function _libShowCardHtml(seriesTitle, gItems){
     <div class="lib-cardv-drawer hidden">
       <div class="lib-card-actions flex items-center gap-2 flex-wrap">
         <button class="lib-show-open flex-1 min-h-[40px] bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white text-xs font-black uppercase tracking-wide px-3 transition-colors" data-series-key="${kAttr}" data-title="${tAttr}">Episodes</button>
-        <button class="lib-show-play flex-[1.4] min-h-[40px] bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-black uppercase tracking-wide px-3 transition-colors" data-series-key="${kAttr}" data-mode="${inProgress?"resume":"all"}"><svg class="ic" aria-hidden="true"><use href="#i-play"/></svg> ${inProgress?"Resume":"Play"}</button>
+        <button class="lib-show-play flex-[1.4] min-h-[40px] bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-black uppercase tracking-wide px-3 transition-colors" data-series-key="${kAttr}" data-mode="resume"><svg class="ic" aria-hidden="true"><use href="#i-play"/></svg> ${inProgress?"Resume":"Play"}</button>
         <div class="flex items-center gap-1">${_libShowIconBtns(gItems)}</div>
       </div>
     </div>
@@ -8809,7 +8821,10 @@ function _grpOpenRow(row){
 
 function _grpPlayRow(row){
   if(!row) return;
-  const mode = (row.resume && !row.resume.all_completed && (row.resume.pct||0)>3) ? "resume" : "all";
+  // Always follow the resume hint: it is the next unwatched episode, or the
+  // first one when nothing or everything has been watched. Gating on pct>3 sent
+  // a row whose last episode was just finished (next one at 0%) back to the start.
+  const mode = "resume";
   if(row._member){
     const m=row._member;
     if(m.key.indexOf("series:")===0) playSeries(m.key, mode);
@@ -29720,6 +29735,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.30.6</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.30.7</div>
 </body>
 </html>

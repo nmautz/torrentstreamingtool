@@ -1,5 +1,17 @@
 # Changelog
 
+## [18.30.7] — 2026-09-26
+### Play on a show made of several downloads continues where you are
+
+- **Play on a show tile now picks up at your next episode.** On a show made of
+  more than one download (like Hunter x Hunter's two packs), finishing the
+  whole first pack and starting the second made the tile read "Play" and
+  start over at S01E01. The tile only counted a show as started when some
+  episode was stopped part-way through, so a just-finished episode (next one
+  at 0%) or a fully watched pack didn't count. Play now always follows the
+  show's resume point, and the button says Resume as soon as anything has
+  been watched. The same fix applies to a row on a group page.
+
 ## [18.30.6] — 2026-09-26
 ### Download selected works on a show made of several downloads
 
