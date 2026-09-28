@@ -5146,6 +5146,18 @@ So a `reboot:true` deploy shortly after anyone has freed disk space can leave a 
 looking broken on the dashboard. Check the admin Cleanup tab for `missingFiles` after a
 reboot, and prefer `reboot:false` for frontend-only changes.
 
+**Healed automatically since 19.1.1.** It bit again on 2026-09-28: Delete Watched on
+Hunter x Hunter at 09:04, an updater reboot at 09:15, and both season packs were
+`missingFiles`. Seventy-four unwatched, prepped episodes read "not downloaded" and the
+user reported that the purge had deleted unwatched episodes. It hadn't. Every one was still on disk.
+`_heal_freed_torrents` (on the download scheduler's tick) now rechecks such a torrent
+when `reaper.freed_only` says the only missing files are skip-marked ones. Priorities go
+to qBit **before** the recheck, because after a failed restore qBit reported every file
+at priority 6, freed ones included, and a recheck + resume with those priorities would
+re-download everything the purge had just freed. It settles the item status only after
+qBit has left `checking*`, which sidesteps the Recover race above. Recover is still the
+tool for a torrent missing a file the schedule wants.
+
 ## A broadcast can't reach a sleeping phone — its own request can (17.8.0)
 
 The cross-device pull-over has to tell one specific device to stop. The obvious

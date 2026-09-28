@@ -8648,7 +8648,9 @@ async def download_scheduler_loop() -> None:
     """Honour per-item download schedules: only fetch 'idle'-scheduled files/torrents
     during the idle/night window (reusing the admin prep windows), and keep 'now'
     files downloading. Runs every 15 s and is the single writer of scheduled items'
-    qBit file priorities + pause state. See _reconcile_item_downloads."""
+    qBit file priorities + pause state. See _reconcile_item_downloads. Every fourth
+    tick it also heals torrents condemned by our own deletes (_heal_freed_torrents)."""
+    tick = 0
     while True:
         await asyncio.sleep(15)
         try:
@@ -8668,10 +8670,113 @@ async def download_scheduler_loop() -> None:
                 await asyncio.sleep(0)
             if prev_open != idle_open:
                 await broadcast("state", state_snapshot())
+            tick += 1
+            if tick % 4 == 0:
+                await _heal_freed_torrents(lib, idle_open)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             print(f"[dlsched] download_scheduler_loop error: {exc}")
+
+
+# ── Freed files vs qBit's resume data ─────────────────────────────────────────
+# Delete Watched / delete-files take episodes off the disk and leave qBit holding
+# them at priority 0 — fine until qBit restarts. It then re-reads resume data that
+# still calls those files complete, finds them gone, and drops the WHOLE torrent
+# into `missingFiles` at 0 %: every episode still on disk reads "not downloaded"
+# (HxH, 2026-09-28: a purge at 09:04, an updater restart at 09:15, and 74 unwatched
+# prepped episodes looked deleted). Nothing re-examined a `ready` item, so it
+# stayed that way until someone pressed Recover. `reaper.freed_only` decides
+# whether the damage is only ours; if so a recheck is the whole cure.
+
+_FREED_HEAL_COOLDOWN = 3600.0          # one heal per torrent per hour, at most
+_freed_heal_at: dict[str, float] = {}  # hash → monotonic time of the last heal
+_freed_heal_settle: set[str] = set()   # healed, recheck not yet seen to finish
+
+
+def _freed_heal_facts_sync(item: dict, qfiles: list, sp: str) -> list[dict]:
+    """`reaper.freed_only` input for one torrent. Stats every file, so thread it."""
+    cfg = _download_cfg(item)
+    out = []
+    for qf in qfiles:
+        full = str(Path(sp) / qf.get("name", ""))
+        try:
+            present = Path(full).stat().st_size == int(qf.get("size", -1))
+        except (OSError, ValueError, TypeError):
+            present = False
+        out.append({"wanted": _effective_file_mode(cfg, full) != "skip", "present": present})
+    return out
+
+
+async def _heal_freed_torrents(lib: dict, idle_open: bool) -> None:
+    """Recheck + resume every torrent qBit has condemned only because we freed
+    some of its files. Priorities go first, so the recheck can't make qBit fetch a
+    freed file back.
+
+    The item's status is settled on a LATER tick, once qBit has left both the
+    broken and the checking states: qBit keeps saying `missingFiles` for several
+    seconds after a recheck starts, and an item handed back to `downloading` in
+    that window is errored straight back by the monitor (the Recover race in
+    docs/GOTCHAS.md)."""
+    candidates = [it for it in lib.get("items", [])
+                  if it.get("torrent_hash") and it.get("status") in ("ready", "error")
+                  and not _item_has_compressed(it)]
+    if not candidates:
+        return
+    infos = await qbit_info_all()
+    if not infos:
+        return
+    by_hash = {(t.get("hash") or "").lower(): t for t in infos}
+    now = time.monotonic()
+    for it in candidates:
+        h = it["torrent_hash"].lower()
+        info = by_hash.get(h)
+        if not info:
+            continue
+        qstate = info.get("state", "")
+        if h in _freed_heal_settle:
+            if qstate in _BROKEN_TORRENT_STATES or qstate.startswith("checking"):
+                continue
+            _freed_heal_settle.discard(h)
+            async with mutate_library() as lib2:
+                cur = next((x for x in lib2["items"] if x.get("id") == it.get("id")), None)
+                if cur is None:
+                    continue
+                if cur.get("status") == "error":
+                    cur["status"] = "downloading"      # the monitor flips it to ready
+                    cur.pop("stalled_since", None)
+                    state.downloading_count += 1
+                    if not cur.get("admin_only"):
+                        state.downloading_count_visible += 1
+                else:
+                    # A piece straddling a freed file and a kept one fails the
+                    # recheck; this hands the item to the monitor while qBit
+                    # re-fetches it, and leaves it ready when nothing is short.
+                    await _apply_item_schedule(cur, lib2)
+                new_status = cur.get("status")
+            log.info("freed-heal: %s recheck finished — %s", it.get("title", h), new_status)
+            _invalidate_cleanup_inventory()
+            await broadcast("library_update", {"item_id": it.get("id"), "status": new_status})
+            continue
+        if qstate not in _BROKEN_TORRENT_STATES:
+            continue
+        if now - _freed_heal_at.get(h, -_FREED_HEAL_COOLDOWN) < _FREED_HEAL_COOLDOWN:
+            continue
+        qfiles = await qbit_files(h)
+        if not qfiles:
+            continue
+        sp = info.get("save_path", settings.qbit_download_path)
+        facts = await asyncio.to_thread(_freed_heal_facts_sync, it, qfiles, sp)
+        if not reaper.freed_only(facts):
+            continue
+        _freed_heal_at[h] = now
+        _freed_heal_settle.add(h)
+        freed = sum(1 for f in facts if not f["present"])
+        log.info("freed-heal: %s is %s only because %d freed file(s) are gone — rechecking",
+                 it.get("title", h), qstate, freed)
+        await _reconcile_item_downloads(it, idle_open)   # freed files → priority 0 first
+        await qbit_recheck(h)
+        await qbit_resume(h)
 
 
 # ── System resource monitor ───────────────────────────────────────────────────
@@ -15520,9 +15625,17 @@ async def _build_item_files(item: dict, profile_id: str) -> list[dict]:
     # torrent was removed).
     qmap: dict[str, float] = {}     # full path → progress
     qbase: dict[str, float] = {}    # basename → progress (fallback if path keys drift)
+    # qBit is blind while it rechecks or after it condemned the torrent
+    # (`missingFiles` once a freed file is gone at restart — see
+    # _heal_freed_torrents): every file reads 0 %. For an item that was already
+    # ready, a file on disk at its full size is the better answer.
+    qbit_blind = False
     if has_torrent:
         info = await qbit_info(item["torrent_hash"])
         qfiles = await qbit_files(item["torrent_hash"])
+        qstate = (info or {}).get("state", "")
+        qbit_blind = is_ready and (qstate in ("error", "missingFiles")
+                                   or qstate.startswith("checking"))
         if info and qfiles:
             sp = info.get("save_path", settings.qbit_download_path)
             for i, qf in enumerate(qfiles):
@@ -15575,6 +15688,12 @@ async def _build_item_files(item: dict, profile_id: str) -> list[dict]:
                 dl_pct, complete = round(qp * 100, 1), True
             else:
                 dl_pct, complete = 0.0, False
+        elif qbit_blind and qp is not None and qp < 0.999:
+            try:
+                on_disk = Path(path).stat().st_size == int(f.get("size_bytes") or -1)
+            except OSError:
+                on_disk = False
+            dl_pct, complete = (100.0, True) if on_disk else (round(qp * 100, 1), False)
         elif qp is not None:
             dl_pct = round(qp * 100, 1)
             complete = qp >= 0.999

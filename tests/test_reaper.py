@@ -79,6 +79,23 @@ def test_prunable_parents():
     assert reaper.prunable_parents(J(R2, "x", "y.mkv"), [R]) == []
 
 
+def test_freed_only():
+    W = lambda present: {"wanted": True, "present": present}
+    S = lambda present: {"wanted": False, "present": present}
+    # Delete Watched took the skip-marked ones; everything wanted is still there
+    assert reaper.freed_only([S(False), S(False), W(True), W(True)]) is True
+    # every file freed but one wanted episode left (HxH S01 after the purge)
+    assert reaper.freed_only([S(False)] * 57 + [W(True)]) is True
+    # a freed file that happens to still be on disk changes nothing
+    assert reaper.freed_only([S(True), W(True)]) is True
+    # a WANTED file is gone: not ours to paper over
+    assert reaper.freed_only([S(False), W(False), W(True)]) is False
+    # nothing on disk at all: could be an unplugged drive
+    assert reaper.freed_only([S(False), S(False)]) is False
+    assert reaper.freed_only([W(False)]) is False
+    assert reaper.freed_only([]) is False
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in sorted(globals().items()):

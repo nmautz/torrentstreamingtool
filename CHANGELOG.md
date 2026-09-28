@@ -1,5 +1,26 @@
 # Changelog
 
+## [19.1.1] — 2026-09-28
+### A show you freed space on no longer looks deleted after a restart
+
+- **What happened.** Delete Watched on Hunter x Hunter took only the episodes
+  Nathan had finished (58 from season 1, 4 from season 2). But the box restarted
+  for an update 11 minutes later. qBittorrent reloaded both season packs, found
+  files it remembered as complete were gone, and marked the **whole** torrent
+  "missing files" at 0 %. So every unwatched episode, all still on disk and
+  still prepped, showed as not downloaded. Nothing looked at it again until
+  someone pressed Recover in the admin Cleanup tab.
+- **It heals itself now.** About once a minute the box looks for a torrent in
+  that state. If the only files missing are ones StreamLink deleted on purpose,
+  it sets those to "don't download", rechecks the torrent against the disk and
+  resumes it. Nothing you deleted comes back. A torrent missing a file you
+  still want (or missing everything, like an unplugged drive) is left for the
+  Cleanup tab, as before.
+- **While qBittorrent is blind** (rechecking, or before the heal runs), an
+  episode that's on disk at its full size shows as downloaded instead of 0 %.
+- New: `reaper.freed_only` (with tests), `_heal_freed_torrents` on the download
+  scheduler's tick.
+
 ## [19.1.0] — 2026-09-28
 ### Bookmarks: remember a show or movie for later, and hear when it's out
 

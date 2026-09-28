@@ -23,6 +23,8 @@ anything is unlinked, so it is pure and tested:
 * `is_sidecar` — the exact names StreamLink writes beside a video.
 * `parts_hash` — recognise qBit's `.parts` file and the torrent it belongs to.
 * `retry_delay` — backoff for a file something still has open.
+* `freed_only` — is a torrent in qBit's `missingFiles` only because WE freed some
+  of its files (Delete Watched, delete-files)? Then a recheck is the whole cure.
 
 Stdlib only; no `main` import. Tests: tests/test_reaper.py.
 """
@@ -118,3 +120,25 @@ def prunable_parents(path: str, roots: Iterable[str]) -> list[str]:
             break
         cur = nxt
     return out
+
+
+def freed_only(files: Iterable[dict]) -> bool:
+    """Is a `missingFiles` torrent missing only what StreamLink freed on purpose?
+
+    `files` is one entry per torrent file: `{"wanted": bool, "present": bool}` --
+    wanted = the library's schedule still wants it (not skip, not compressed),
+    present = on disk at its full size. Freeing a file leaves qBit's resume data
+    claiming it complete, so the next qBit restart drops the WHOLE torrent into
+    `missingFiles` at 0 %: every episode still on disk reads "not downloaded".
+    A recheck re-derives the pieces from disk and fixes that, and with the freed
+    files at priority 0 nothing comes back.
+
+    True only when every wanted file is present AND at least one file is. A
+    wanted file gone is somebody else's deletion (or a half-download); nothing
+    present at all is indistinguishable from an unplugged drive, where a recheck
+    would throw away the whole torrent's progress. Missing evidence never heals.
+    """
+    rows = list(files or ())
+    if not rows or not any(r.get("present") for r in rows):
+        return False
+    return all(r.get("present") for r in rows if r.get("wanted"))
