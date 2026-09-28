@@ -1150,6 +1150,7 @@
   <symbol id="i-ext" viewBox="0 0 24 24"><path d="M13.5 2.5h8v8h-2.3V6.4l-8.1 8.1-1.6-1.6 8.1-8.1h-4.1zM4 5h6v2.3H6.3v10.4h10.4V13H19v7H4z"/></symbol>
   <symbol id="i-monitor" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M2 3.5h20v13.5H13.2v2.3H17v2.2H7v-2.2h3.8V17H2zm2.2 2.2v9.1h15.6V5.7z"/></symbol>
   <symbol id="i-search" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M10.5 2a8.5 8.5 0 1 0 5.05 15.34l4.55 4.55 1.7-1.7-4.55-4.55A8.5 8.5 0 0 0 10.5 2zm0 2.3a6.2 6.2 0 1 1 0 12.4 6.2 6.2 0 0 1 0-12.4z"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M9 2h6l1 2h5v2H3V4h5l1-2zM5 8h14l-1.2 14H6.2L5 8zm4 3v8h2v-8H9zm4 0v8h2v-8h-2z"/></symbol>
 </svg>
 
 
@@ -3580,6 +3581,35 @@
      Shown before a user-triggered "Prep for Streaming" so they know the host
      will get heavy while ffmpeg transcodes. Resolves confirmStreamPrepWarning().
 -->
+<!-- ── Delete Watched preview ─────────────────────────────────────────────────
+     Lists exactly which of this show's episodes the signed-in profile has
+     finished and would be deleted from the host (source + bundle), and which
+     are kept and why. Filled by openDeleteWatched().
+-->
+<div id="watchedPurgeModal"
+  class="hidden fixed inset-0 z-[60] bg-black/70 flex items-end sm:items-center justify-center sm:px-4">
+  <div class="bg-gray-900 w-full sm:max-w-md fade-in border-t-[3px] border-red-600 flex flex-col max-h-[90vh]">
+    <div class="px-5 pt-5 pb-3 border-b border-gray-800 flex items-center gap-3 flex-shrink-0">
+      <svg class="ic text-2xl text-red-400" aria-hidden="true"><use href="#i-trash"/></svg>
+      <div class="min-w-0">
+        <h2 class="text-lg font-black uppercase tracking-wide text-red-300">Delete watched</h2>
+        <p id="wpSub" class="text-xs text-gray-500 mt-0.5 truncate"></p>
+      </div>
+    </div>
+    <div id="wpBody" class="px-5 py-4 text-sm text-gray-300 overflow-y-auto flex-1 min-h-0"></div>
+    <div class="px-4 pb-4 pt-2 safe-bottom grid grid-cols-1 gap-2 flex-shrink-0 border-t border-gray-800">
+      <button id="wpGoBtn" onclick="confirmDeleteWatched(this)" disabled
+        class="w-full bg-red-700 hover:bg-red-600 text-white py-3 text-sm font-black uppercase tracking-wide transition-colors disabled:opacity-40">
+        Delete
+      </button>
+      <button onclick="closeDeleteWatched()"
+        class="w-full bg-gray-800 hover:bg-gray-700 py-3 text-sm font-bold uppercase tracking-wide transition-colors">
+        Cancel
+      </button>
+    </div>
+  </div>
+</div>
+
 <div id="prepWarnModal"
   class="hidden fixed inset-0 z-[60] bg-black/70 flex items-end sm:items-center justify-center sm:px-4">
   <div class="bg-gray-900 w-full sm:max-w-sm fade-in border-t-[3px] border-amber-500">
@@ -12885,14 +12915,24 @@ function renderEpList(){
   // would otherwise leave someone who wants to rewatch a series un-ticking
   // thirty episodes one at a time. One button, scoped to whatever the page is
   // showing (this season, or the whole show when it has no seasons).
-  if(SIMPLE && !TV_MODE && visibleFiles.length && visibleFiles.some(f=>f.progress?.completed)){
+  //
+  // Delete Watched sits beside it in both modes: it is about the whole show (not
+  // the visible season), so it only needs one finished episode anywhere in it.
+  const _startOver=SIMPLE && visibleFiles.length && visibleFiles.some(f=>f.progress?.completed);
+  const _delWatched=!!profile.id && epFiles.some(f=>f.progress?.completed);
+  if(!TV_MODE && (_startOver || _delWatched)){
     const scopeLbl=(inView||epSeasonList.length)?_epScopeLabel():"this show";
-    html += `<div class="px-3 sm:px-5 py-2 border-b border-gray-800 flex justify-end bg-gray-900/40">
-      <button onclick="epStartOver(this)"
+    html += `<div class="px-3 sm:px-5 py-2 border-b border-gray-800 flex justify-end gap-1.5 flex-wrap bg-gray-900/40">
+      ${_delWatched?`<button onclick="openDeleteWatched(this)"
+        title="Free space: delete the episodes you've finished from the host. They stay watched and can be downloaded again."
+        class="text-[11px] font-bold uppercase tracking-wide px-2.5 py-1.5 bg-gray-800 hover:bg-red-900/60 text-gray-400 hover:text-red-300 transition-colors flex items-center gap-1.5 min-h-[34px]">
+        ${ic("trash")} Delete watched
+      </button>`:""}
+      ${_startOver?`<button onclick="epStartOver(this)"
         title="Mark every episode here unwatched so it plays from the start again. Nothing is deleted."
         class="text-[11px] font-bold uppercase tracking-wide px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors flex items-center gap-1.5 min-h-[34px]">
         ${ic("resume")} Watch ${escHtml(scopeLbl)} again
-      </button>
+      </button>`:""}
     </div>`;
   }
 
@@ -13256,6 +13296,103 @@ async function epDeleteFiles(paths, btn){
 function epDeleteSelected(btn){
   if(!epChecked.size){ showAlert("Select at least one episode.","warn"); return; }
   epDeleteFiles([...epChecked], btn);
+}
+
+// ── Delete Watched ───────────────────────────────────────────────────────────
+// Frees space by deleting, from the host, every episode of this show the
+// signed-in profile has FINISHED (completed — never merely started): source and
+// bundle both. Rows stay (Skip, re-downloadable) and stay watched. The server
+// keeps anything someone else is part-way through, anything in use, and
+// compressed files; the preview names each kept one and why. What is deleted is
+// exactly the preview's list — the server re-checks each before it goes.
+const _WP_KEEP={
+  "in-progress":"someone is part-way through",
+  "in-use":"playing or being prepped right now",
+  "compressed":"compressed — can't be downloaded again",
+};
+let _wpPlan=null;
+
+function _wpItemIds(){
+  return [...new Set(epFiles.map(f=>_epItemFor(f.path)).filter(Boolean))];
+}
+
+async function openDeleteWatched(btn){
+  if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
+  await withInflight("ep_del_watched", btn, async () => {
+    let r;
+    try{
+      r=await fetch("/api/library/watched-purge/preview",{method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({profile_ids:[profile.id], item_ids:_wpItemIds()})});
+    }catch(_){ showAlert("Network error.","error"); return; }
+    if(!r.ok){
+      const d=await r.json().catch(()=>({}));
+      showAlert(d.detail||`Couldn't check (HTTP ${r.status}).`,"error"); return;
+    }
+    _wpPlan=await r.json();
+    _wpRender();
+    document.getElementById("watchedPurgeModal").classList.remove("hidden");
+  });
+}
+
+function closeDeleteWatched(){
+  document.getElementById("watchedPurgeModal").classList.add("hidden");
+  _wpPlan=null;
+}
+
+function _wpRender(){
+  const p=_wpPlan||{groups:[]};
+  const del=p.groups.flatMap(g=>g.delete), keep=p.groups.flatMap(g=>g.keep);
+  document.getElementById("wpSub").textContent=
+    `${document.getElementById("epTitle")?.textContent||""} · ${profile.name||""}`;
+  const row=(r,right)=>`<div class="flex items-baseline justify-between gap-3 py-1 border-b border-gray-800/60">
+      <span class="truncate">${escHtml(r.label)}</span>
+      <span class="flex-shrink-0 text-[11px] ${right[1]}">${right[0]}</span></div>`;
+  let h="";
+  if(!del.length && !keep.length){
+    h=`<p class="text-gray-400">Nothing to delete — none of the episodes you've finished are on the host any more.</p>`;
+  }else{
+    if(del.length) h+=`<p class="text-xs text-gray-400 mb-2">These <strong class="text-gray-200">${del.length}</strong> episode${del.length>1?"s":""} you've finished will be deleted from the host — the file and its streaming copy. They stay marked watched and can be downloaded again. Copies saved on a phone are not touched.</p>
+      <div class="text-xs mb-3">${del.map(r=>row(r,[escHtml(_fmtBytes(r.bytes)),"text-red-300 font-mono"])).join("")}</div>`;
+    if(keep.length) h+=`<p class="text-[10px] font-bold uppercase tracking-widest text-gray-500 mt-2 mb-1">Kept</p>
+      <div class="text-xs text-gray-500">${keep.map(r=>row(r,[escHtml(r.verdict==="in-progress"&&r.in_progress_by.length
+          ?`${r.in_progress_by.join(", ")} ${r.in_progress_by.length>1?"are":"is"} part-way through`
+          :(_WP_KEEP[r.verdict]||r.verdict)),"text-gray-500"])).join("")}</div>`;
+  }
+  document.getElementById("wpBody").innerHTML=h;
+  const go=document.getElementById("wpGoBtn");
+  go.disabled=!del.length;
+  go.textContent=del.length?`Delete ${del.length} episode${del.length>1?"s":""} · free ${_fmtBytes(p.bytes)}`:"Delete";
+}
+
+async function confirmDeleteWatched(btn){
+  const p=_wpPlan; if(!p) return;
+  const paths=p.groups.flatMap(g=>g.delete.map(r=>r.path));
+  if(!paths.length) return;
+  await withInflight("ep_del_watched_go", btn, async () => {
+    btn.disabled=true;
+    let r;
+    try{
+      r=await fetch("/api/library/watched-purge",{method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({profile_ids:[profile.id], item_ids:_wpItemIds(), paths})});
+    }catch(_){ r=null; }
+    closeDeleteWatched();
+    if(!r){ showAlert("Network error — nothing was confirmed deleted.","error"); }
+    else if(!r.ok){
+      const d=await r.json().catch(()=>({}));
+      showAlert(d.detail||`Delete failed (HTTP ${r.status}).`,"error");
+    }else{
+      const d=await r.json();
+      const extra=[(d.kept||[]).length?`${d.kept.length} kept (changed since the preview)`:"",
+                   (d.failed||[]).length?`${d.failed.length} still in use on the host`:""].filter(Boolean).join(", ");
+      showAlert(d.deleted
+        ? `Deleted ${d.deleted} episode${d.deleted>1?"s":""} — freed ${_fmtBytes(d.freed_bytes)}.${extra?` ${extra}.`:""}`
+        : `Nothing deleted.${extra?` ${extra}.`:""}`, d.deleted?"success":"warn");
+    }
+    await refreshEpFiles();
+    loadLibrary();
+  });
 }
 
 async function epMarkWatched(watched, btn){
@@ -29870,6 +30007,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.33.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.34.0</div>
 </body>
 </html>

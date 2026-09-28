@@ -2988,6 +2988,10 @@ is busy is kept and counted under **Kept**. Deletion goes through the same
 immediately before the delete), and progress rides on `state.source_eviction`,
 so the status line and Stop work unchanged.
 
+> **Delete Watched (18.34.0) is not a reclaim.** It removes the source *and* the
+> bundle of finished episodes (`_delete_files_now`), including the bundle of an
+> already-evicted file. See [ADMIN.md](ADMIN.md) and [API.md](API.md).
+
 > **The record is written BEFORE the file is deleted, and the order is not
 > negotiable.** The two crash windows are not symmetric:
 >

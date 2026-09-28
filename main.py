@@ -71,6 +71,7 @@ import tmdbcache
 import updater
 import vpncheck
 import watchrule
+import watchpurge
 import winaccept_patch
 
 # Harden the Windows Proactor accept loop before uvicorn starts serving: a
@@ -17945,33 +17946,29 @@ async def _unlink_resilient(src: Path, attempts: int = 4) -> Optional[str]:
     return last or "unknown error"
 
 
-@app.post("/api/library/{item_id}/delete-files")
-async def delete_item_files(request: Request, item_id: str,
-                            req: DeleteFilesReq) -> JSONResponse:
-    """Delete specific files from disk to reclaim space, keeping them re-downloadable.
-    Each file is marked "skip" (so qBit drops it to priority 0 and never refetches),
-    its bytes are removed from disk, and its cached HLS bundle is purged. The file's
-    metadata stays in the item, so the episode picker shows it as "not downloaded"
-    with a Download button to grab it again later.
+async def _delete_files_now(item_id: str, targets: list[str]) -> dict:
+    """Take `targets` (paths in one item) off the host: source AND bundle.
 
-    EXCEPTION: a compressed-in-place file is no longer torrent-backed and CANNOT be
-    re-downloaded — deleting it here would lose it permanently. Such paths are refused
-    and returned in `blocked`; remove the whole item if you really want them gone."""
-    if not req.file_paths:
-        raise HTTPException(400, "file_paths required.")
+    The shared core of `delete-files` and Delete Watched. Callers own auth and the
+    choice of what may go (compressed files, playback) — this only deletes. Each
+    file is marked "skip" first (so qBit drops it to priority 0 and never
+    refetches), then its bytes and its co-located bundle are removed. The file's
+    metadata and progress stay, so the row reads "not downloaded" with a Download
+    button, and a watched episode stays watched.
+
+    A **source-evicted** file (see docs/STREAMING.md § Source eviction) has only
+    its bundle left: that bundle is removed and the eviction record cleared, so
+    nothing keeps claiming it plays. Reclaim keeps the bundle on purpose; this
+    is the path that doesn't.
+
+    Returns `{deleted, freed_bytes, failed: [{name, path, reason}], status}`.
+    """
     async with mutate_library() as lib:
-        _require_delete_auth(request, lib)
         item = next((it for it in lib["items"] if it["id"] == item_id), None)
         if not item:
             raise HTTPException(404, "Item not found.")
-
-        # Map paths → declared sizes so we can report how much space was freed.
-        sizes = {f.get("path", ""): f.get("size_bytes", 0) for f in item.get("files", [])}
-        # Refuse compressed files: this endpoint promises re-downloadability, which a
-        # re-encoded file can't honour. Report them back instead of silently dropping them.
-        compressed_paths = {f.get("path", "") for f in item.get("files", []) if _file_is_compressed(f)}
-        blocked = [p for p in req.file_paths if p in compressed_paths]
-        targets = [p for p in req.file_paths if p in sizes and p not in compressed_paths]
+        records = {f.get("path", ""): dict(f) for f in item.get("files", [])}
+        targets = [p for p in dict.fromkeys(targets) if p in records]
 
         # 1) Mark skip + reconcile FIRST, so qBit drops these files to priority 0 and
         #    stops writing to them before we remove the bytes (no recreate-mid-delete).
@@ -17987,19 +17984,6 @@ async def delete_item_files(request: Request, item_id: str,
         await _apply_item_schedule(item, lib)
         item_status = item.get("status", "downloading")
 
-    # 1.5) If one of the targets is the file currently on screen, stop playback
-    #      before unlinking it. Same reasoning as delete_library_item: VLC holding
-    #      the handle makes the unlink fail outright on Windows (the primary
-    #      target), and pulling the bytes from under a live player is an
-    #      unexplained freeze for whoever is watching. Bulk-delete on the episode
-    #      page makes this easy to do by accident — select-all includes the
-    #      episode you have playing.
-    if state.library_current_file and state.library_current_file in targets:
-        try:
-            await stop()
-        except Exception as exc:
-            log.warning("stop() before file delete failed: %s", exc)
-
     # 2) Remove the bytes from disk + 3) purge the cached HLS bundle — OUTSIDE the
     #    library lock. Unlinking N files and rmtree-ing N bundle dirs is unbounded
     #    disk work, and `mutate_library` holds the one global library lock for its
@@ -18009,40 +17993,43 @@ async def delete_item_files(request: Request, item_id: str,
     freed = 0
     deleted = 0
     failed: list[dict] = []
+    unevict: list[str] = []
     for p in targets:
+        f = records[p]
         src = Path(p)
-        # Resolve the co-located bundle dir BEFORE unlinking — its key derives from
-        # the file's name+size, which we can't read once the file is gone.
-        bundle_dir: Optional[Path] = None
+        # Resolve the co-located bundle dir BEFORE unlinking — for a normal file its
+        # key derives from the file's name+size, which we can't read once it's gone.
+        bundle_dir = await asyncio.to_thread(_bundle_dir_for_file, f)
         try:
-            if src.exists():
-                bundle_dir = _offline_cache_dir(src)
+            size = src.stat().st_size
         except OSError:
-            pass
-
-        try:
-            existed = src.exists()
-        except OSError:
-            existed = False
-        if not existed:
+            size = -1
+        if size >= 0:
+            err = await _unlink_resilient(src)
+            if err:
+                # Report it. This used to be `except OSError: pass`, so a file Windows
+                # refused to unlink (held open by qBittorrent, VLC or an ffmpeg prep
+                # job) left the row marked deleted in the UI with the bytes still on
+                # disk — a bulk delete would drop one episode and silently keep another.
+                failed.append({"name": src.name, "path": p, "reason": err})
+                continue
+            freed += size
+        elif not _file_evicted(f):
             continue                      # nothing to free; leave the skip mark
-        err = await _unlink_resilient(src)
-        if err:
-            # Report it. This used to be `except OSError: pass`, so a file Windows
-            # refused to unlink (held open by qBittorrent, VLC or an ffmpeg prep
-            # job) left the row marked deleted in the UI with the bytes still on
-            # disk — a bulk delete would drop one episode and silently keep another.
-            failed.append({"name": src.name, "path": p, "reason": err})
-            continue
-        freed += sizes.get(p, 0)
-        deleted += 1
         # Only purge the bundle once its source is really gone — a file that
         # survived the delete still needs the prepped copy it already had.
+        got_bundle = False
         try:
-            if bundle_dir and bundle_dir.exists():
-                await asyncio.to_thread(shutil.rmtree, bundle_dir, ignore_errors=True)
+            if bundle_dir is not None and bundle_dir.exists():
+                freed += await asyncio.to_thread(
+                    _delete_cache_artifacts, bundle_dir.name, str(bundle_dir.parent))
+                got_bundle = True
         except OSError:
             pass
+        if _file_evicted(f):
+            unevict.append(p)
+        if size >= 0 or got_bundle:
+            deleted += 1
 
     # Name the holders for everything that failed — one sweep for the whole
     # request, appended to each reason so the UI can say what to close.
@@ -18055,31 +18042,271 @@ async def delete_item_files(request: Request, item_id: str,
             log.warning("delete-files: could not remove %s — %s", entry["path"], entry["reason"])
 
     # Put back the schedule of everything we failed to delete, so the library
-    # stops claiming a file is gone while it is still on disk.
-    if failed:
+    # stops claiming a file is gone while it is still on disk; and drop the
+    # eviction record of every evicted file whose bundle just went.
+    if failed or unevict:
         async with mutate_library() as lib:
             item = next((it for it in lib["items"] if it["id"] == item_id), None)
             if item:
-                files = item.setdefault("download", {}).setdefault("files", {})
-                for entry in failed:
-                    prev = prior_modes.get(entry["path"])
-                    if prev is None:
-                        files.pop(entry["path"], None)
-                    else:
-                        files[entry["path"]] = prev
-                await _apply_item_schedule(item, lib)
+                for f in item.get("files", []):
+                    if f.get("path") in unevict:
+                        f.pop("bundle", None)
+                if failed:
+                    files = item.setdefault("download", {}).setdefault("files", {})
+                    for entry in failed:
+                        prev = prior_modes.get(entry["path"])
+                        if prev is None:
+                            files.pop(entry["path"], None)
+                        else:
+                            files[entry["path"]] = prev
+                    await _apply_item_schedule(item, lib)
                 item_status = item.get("status", item_status)
 
-    await broadcast("library_update", {"item_id": item_id, "status": item_status})
+    if deleted:
+        _invalidate_bundle_index()
+        _invalidate_offline_cache_inventory()
+    return {"deleted": deleted, "freed_bytes": freed, "failed": failed, "status": item_status}
+
+
+@app.post("/api/library/{item_id}/delete-files")
+async def delete_item_files(request: Request, item_id: str,
+                            req: DeleteFilesReq) -> JSONResponse:
+    """Delete specific files from disk to reclaim space, keeping them re-downloadable.
+    Each file is marked "skip" (so qBit drops it to priority 0 and never refetches),
+    its bytes are removed from disk, and its cached HLS bundle is purged. The file's
+    metadata stays in the item, so the episode picker shows it as "not downloaded"
+    with a Download button to grab it again later. See `_delete_files_now`.
+
+    EXCEPTION: a compressed-in-place file is no longer torrent-backed and CANNOT be
+    re-downloaded — deleting it here would lose it permanently. Such paths are refused
+    and returned in `blocked`; remove the whole item if you really want them gone."""
+    if not req.file_paths:
+        raise HTTPException(400, "file_paths required.")
+    lib = await get_library()
+    _require_delete_auth(request, lib)
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+
+    known = {f.get("path", "") for f in item.get("files", [])}
+    # Refuse compressed files: this endpoint promises re-downloadability, which a
+    # re-encoded file can't honour. Report them back instead of silently dropping them.
+    compressed_paths = {f.get("path", "") for f in item.get("files", []) if _file_is_compressed(f)}
+    blocked = [p for p in req.file_paths if p in compressed_paths]
+    targets = [p for p in req.file_paths if p in known and p not in compressed_paths]
+
+    # If one of the targets is the file currently on screen, stop playback before
+    # unlinking it. Same reasoning as delete_library_item: VLC holding the handle
+    # makes the unlink fail outright on Windows (the primary target), and pulling
+    # the bytes from under a live player is an unexplained freeze for whoever is
+    # watching. Bulk-delete on the episode page makes this easy to do by accident —
+    # select-all includes the episode you have playing.
+    if state.library_current_file and state.library_current_file in targets:
+        try:
+            await stop()
+        except Exception as exc:
+            log.warning("stop() before file delete failed: %s", exc)
+
+    res = await _delete_files_now(item_id, targets)
+    await broadcast("library_update", {"item_id": item_id, "status": res["status"]})
     return JSONResponse({
-        "ok": True, "deleted": deleted, "freed_bytes": freed,
+        "ok": True, "deleted": res["deleted"], "freed_bytes": res["freed_bytes"],
         # Compressed files we refused to delete (not re-downloadable). The UI surfaces
         # this so the user knows why nothing happened for those rows.
         "blocked": [Path(p).name for p in blocked],
         # Files Windows would not let go of, each with the reason (and the process
         # holding them, when psutil could name it). Never empty-and-silent again.
-        "failed": failed,
+        "failed": res["failed"],
     })
+
+
+# ── Delete Watched ────────────────────────────────────────────────────────────
+# Free space by taking episodes people have finished off the host — source AND
+# bundle (unlike Reclaim, which keeps the bundle on purpose). A viewer does it
+# for one show from its page; the admin does it for one or more profiles across
+# the library. What qualifies is `watchpurge.py`; what deleting means is
+# `_delete_files_now`. The preview is the contract: execute takes the exact
+# paths the preview listed and re-checks each one before it goes.
+
+class WatchedPurgeReq(BaseModel):
+    profile_ids: list[str] = []
+    match: str = "all"          # "all" | "any" — how several profiles combine
+    item_ids: list[str] = []    # scope; empty = the whole library (admin only)
+    paths: list[str] = []       # execute only: the exact files to delete
+
+
+def _watched_purge_busy() -> "tuple[set[str], set[str]]":
+    """(busy source paths, bundle keys a prep job is writing) — this instant."""
+    keys = {Path(j.get("out", "")).name for j in _offline_jobs.values()
+            if j.get("status") in ("pending", "processing") and j.get("out")}
+    return _evict_busy_paths(), keys
+
+
+def _watched_purge_rows_sync(lib: dict, profile_ids: list, match: str,
+                             item_ids: "Optional[set]", busy: set,
+                             prepping: set) -> list[dict]:
+    """One row per file the selection has watched and the host still holds.
+    Stats sources and walks bundles, so run it in a thread."""
+    names = {p.get("id"): p.get("name") or "?" for p in lib.get("profiles", [])}
+    rows: list[dict] = []
+    for it in lib.get("items", []):
+        if item_ids is not None and it.get("id") not in item_ids:
+            continue
+        progress = it.get("progress") or {}
+        fp_by_pid = {pid: {_norm_path(k): v for k, v in
+                           ((prof or {}).get("file_progress") or {}).items()}
+                     for pid, prof in progress.items()}
+        show, _ = _item_display_names(it)
+        is_movie = (it.get("metadata") or {}).get("tmdb_kind") == "movie"
+        for f in it.get("files", []):
+            path = f.get("path", "")
+            if not path:
+                continue
+            npath = _norm_path(path)
+            records = {pid: fp.get(npath) for pid, fp in fp_by_pid.items()}
+            watched, partial = watchpurge.file_viewers(records)
+            if not watchpurge.is_selected(watched, profile_ids, match):
+                continue                  # cheap reject before any disk work
+            try:
+                source_bytes = Path(path).stat().st_size
+            except OSError:
+                source_bytes = 0
+            bdir = _bundle_dir_for_file(f)
+            has_bundle = bool(bdir is not None and (bdir / "master.m3u8").exists())
+            bundle_bytes = _dir_size_bytes(bdir) if has_bundle else 0
+            on_disk = source_bytes > 0 or has_bundle
+            v = watchpurge.verdict(
+                watched_by=watched, in_progress_by=partial, profile_ids=profile_ids,
+                match=match, on_disk=on_disk,
+                busy=npath in busy or (bdir is not None and bdir.name in prepping),
+                compressed=_file_is_compressed(f))
+            if v is None:
+                continue
+            lab = _file_label(it, f)
+            rows.append({
+                "item_id": it.get("id"), "path": path,
+                "group": _series_key(it), "group_title": show,
+                "kind": "movie" if is_movie else "show",
+                # Inside a show's group its name is noise: "S01E03 · Pilot".
+                "label": (" · ".join(x for x in (lab.get("code"), lab.get("name")) if x)
+                          or lab.get("short") or Path(path).name),
+                "sort": lab.get("line1") or "",
+                "source_bytes": source_bytes, "bundle_bytes": bundle_bytes,
+                "bytes": source_bytes + bundle_bytes,
+                "verdict": v,
+                "in_progress_by": sorted(names.get(pid, "?") for pid in partial),
+            })
+    rows.sort(key=lambda r: (r["group_title"].lower(), r["sort"].lower(), r["path"]))
+    return rows
+
+
+def _watched_purge_scope(request: Request, body: WatchedPurgeReq, lib: dict) -> tuple:
+    """Authorise and normalise a request: `(profile_ids, match, item_ids|None)`.
+
+    The admin may name any profiles and the whole library. Anyone else is a
+    PIN-verified profile deleting what THEY watched, inside the items they name.
+    """
+    known = {p.get("id") for p in lib.get("profiles", [])}
+    pids = [p for p in dict.fromkeys(body.profile_ids or []) if p in known]
+    if not pids:
+        raise HTTPException(400, "Choose at least one profile.")
+    match = body.match if body.match in (watchpurge.MATCH_ALL, watchpurge.MATCH_ANY) \
+        else watchpurge.MATCH_ALL
+    item_ids = set(i for i in (body.item_ids or []) if i) or None
+    if _check_admin(request):
+        return pids, match, item_ids
+    verified = _profile_session_id(request)
+    if not verified or verified not in known:
+        raise HTTPException(403, "Deleting requires a PIN-verified profile or the admin password.")
+    if pids != [verified]:
+        raise HTTPException(403, "You can only delete what your own profile has watched.")
+    if not item_ids:
+        raise HTTPException(400, "Pick a show.")
+    return pids, match, item_ids
+
+
+def _watched_purge_payload(rows: list) -> dict:
+    groups = []
+    for g in watchpurge.group_rows(rows):
+        strip = lambda r: {k: r[k] for k in ("item_id", "path", "label", "source_bytes",
+                                             "bundle_bytes", "bytes", "verdict",
+                                             "in_progress_by")}
+        groups.append({
+            "group": g["group"], "title": g["title"],
+            "kind": (g["delete"] or g["keep"])[0]["kind"],
+            "bytes": g["bytes"], "human": human_size(g["bytes"]),
+            "delete": [strip(r) for r in g["delete"]],
+            "keep": [strip(r) for r in g["keep"]],
+        })
+    total = sum(g["bytes"] for g in groups)
+    return {"groups": groups,
+            "delete_files": sum(len(g["delete"]) for g in groups),
+            "keep_files": sum(len(g["keep"]) for g in groups),
+            "bytes": total, "human": human_size(total),
+            "computed_at": _now_iso()}
+
+
+@app.post("/api/library/watched-purge/preview")
+async def watched_purge_preview(request: Request, body: WatchedPurgeReq) -> JSONResponse:
+    """What Delete Watched WOULD take, per show/film, and what it keeps and why.
+    Read-only. Walks each listed bundle for its size, so on demand, not polled."""
+    lib = await get_library()
+    pids, match, item_ids = _watched_purge_scope(request, body, lib)
+    busy, prepping = _watched_purge_busy()
+    rows = await asyncio.to_thread(
+        _watched_purge_rows_sync, lib, pids, match, item_ids, busy, prepping)
+    return JSONResponse(_watched_purge_payload(rows))
+
+
+@app.post("/api/library/watched-purge")
+async def watched_purge(request: Request, body: WatchedPurgeReq) -> JSONResponse:
+    """**Deletes** the named watched files — source and bundle — keeping each row
+    (marked Skip, re-downloadable) and its watch history.
+
+    Only `paths` are candidates, and each is re-judged now: a file that stopped
+    qualifying since the preview (someone started it, it began playing or
+    prepping) is kept and returned in `kept` with the reason. Synchronous;
+    the UIs send one show at a time to show progress."""
+    if not body.paths:
+        raise HTTPException(400, "paths required.")
+    lib = await get_library()
+    want = {_norm_path(p) for p in body.paths if p}
+    owner = {_norm_path(f.get("path", "")): it.get("id")
+             for it in lib.get("items", []) for f in it.get("files", [])}
+    scoped = {owner[p] for p in want if p in owner}
+    if body.item_ids:
+        scoped &= set(body.item_ids)
+    body.item_ids = sorted(scoped)
+    if not scoped:
+        return JSONResponse({"ok": True, "deleted": 0, "freed_bytes": 0, "failed": [], "kept": []})
+    pids, match, item_ids = _watched_purge_scope(request, body, lib)
+    busy, prepping = _watched_purge_busy()
+    rows = await asyncio.to_thread(
+        _watched_purge_rows_sync, lib, pids, match, item_ids, busy, prepping)
+    rows = [r for r in rows if _norm_path(r["path"]) in want]
+    kept = [{"label": r["label"], "path": r["path"], "reason": r["verdict"],
+             "in_progress_by": r["in_progress_by"]}
+            for r in rows if r["verdict"] != watchpurge.DELETE]
+    by_item: dict[str, list] = {}
+    for r in rows:
+        if r["verdict"] == watchpurge.DELETE:
+            by_item.setdefault(r["item_id"], []).append(r["path"])
+
+    deleted = freed = 0
+    failed: list = []
+    for iid, paths in by_item.items():
+        try:
+            res = await _delete_files_now(iid, paths)
+        except HTTPException:
+            continue                      # item removed since the read
+        deleted += res["deleted"]
+        freed += res["freed_bytes"]
+        failed += res["failed"]
+        await broadcast("library_update", {"item_id": iid, "status": res["status"]})
+    log.info("watched-purge: profiles=%s match=%s — deleted %d file(s), freed %s, kept %d, failed %d",
+             ",".join(pids), match, deleted, human_size(freed), len(kept), len(failed))
+    return JSONResponse({"ok": True, "deleted": deleted, "freed_bytes": freed,
+                         "freed_human": human_size(freed), "failed": failed, "kept": kept})
 
 
 @app.post("/api/library/{item_id}/prep-schedule")

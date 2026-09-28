@@ -6068,3 +6068,19 @@ Both O.J. entries carry `tt5275892`. A film and a show that merely share a name 
 different works, and linking them would send the user to the wrong one with a confident label.
 The cost is a missed twin when TMDb gives the two entries different IMDb ids (or none), in which
 case the page shows no link.
+
+## Reclaim keeps the bundle; Delete Watched and `delete-files` don't (18.34.0)
+
+Three paths delete media, and they disagree on purpose about the bundle:
+
+| Path | Source | Bundle | Row |
+|---|---|---|---|
+| Reclaim Source Files (`_evict_one_source`) | deleted | **kept**: it's the whole point | stays playable, badged Bundle Only |
+| `/delete-files`, Delete Watched (`_delete_files_now`) | deleted | **deleted** | Skip, "not downloaded", re-downloadable |
+| `DELETE /api/library/{id}` | deleted | deleted | removed |
+
+Don't "reuse" `_evict_paths` for Delete Watched to get its re-checks. It would leave every bundle behind, and those bundles are the larger half on a tight x265 source.
+
+**An evicted file has no source to key its bundle by.** `_offline_cache_dir(src)` stats the source, and the source is gone, so resolve the bundle via `_bundle_dir_for_file` (stored key). Before 18.34.0, `delete-files` did `if not src.exists(): continue` and so kept an evicted file's bundle and its `bundle.source_evicted` record: the row stayed Bundle Only after the user deleted it. `_delete_files_now` purges the bundle and pops the record. Popping the record matters: a file marked evicted whose bundle is gone points playback at a directory that doesn't exist.
+
+**"Watched by the selection" is not "safe to delete".** Delete Watched keeps a file if **any** profile is part-way through it, not just the chosen ones. Finishing an episode must not delete it from under a sibling who is halfway through. `watchpurge.verdict` checks in-progress before anything else.

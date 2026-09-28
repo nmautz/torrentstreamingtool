@@ -1,5 +1,33 @@
 # Changelog
 
+## [18.34.0] — 2026-09-27
+### Delete Watched: free space by removing what you've finished
+
+- **A show's page has a Delete watched button.** It lists every episode of the
+  show your profile has finished and the host still holds, with each one's
+  size. Press Delete to remove the file and its streaming copy. The episodes
+  stay in the library, marked watched, with a Download button to fetch them
+  again. Copies saved on a phone are not touched.
+- **Only finished episodes count.** An episode you started but didn't finish is
+  never listed. An episode anyone else is part-way through is kept, and the
+  preview says who. So is anything playing or being prepped right now, and any
+  compressed file (it can't be downloaded again).
+- **Admin -> Storage -> Delete Watched** does the same across the whole library
+  for one or more profiles. You choose whether all of them or any of them must
+  have finished a file. Preview lists every show and film with its size and an
+  expandable list of the exact files. Untick titles to exclude them, or use the
+  filter with None/All to target only a few. Delete Selected goes one title at a
+  time with a progress line.
+- Unlike Reclaim Source Files, which keeps the bundle on purpose, this deletes
+  both the source and the bundle.
+- **Fix:** deleting an episode whose source had already been reclaimed left its
+  bundle, and its Bundle Only badge, behind. `delete-files` now removes that
+  bundle too, and `freed_bytes` counts bundles as well as sources.
+- New endpoints: `POST /api/library/watched-purge/preview` and
+  `POST /api/library/watched-purge`. The rules are in the new `watchpurge.py`
+  (with tests). The delete core `_delete_files_now` is now shared with
+  `delete-files`.
+
 ## [18.33.0] — 2026-09-27
 ### Reclaim the source files of chosen releases from the admin panel
 

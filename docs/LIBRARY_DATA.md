@@ -958,6 +958,8 @@ Written by `vlc_progress_tracker` every 15 s, always under **`state.library_prof
 
 **A file completes when the playhead reached its tail _and_ enough of it was genuinely played.** The rule is `watchrule.watch_state` (pure, unit-tested in `tests/test_watchrule.py`); `main.py` wraps it as `_watch_state` / `_offline_watch_state` to add the file's detected `credits_start`. **Every** writer that records a playback position goes through it: the VLC tracker's 15 s save, `_finalize_stopped_file` (Stop, supersede, `/api/vlc/next`, credit skips, end-of-playlist, merged-series crossings), `POST /api/library/{id}/progress` (on-device player and the iOS native background player), and the offline sync.
 
+**Delete Watched (18.34.0) acts on `completed` alone** — `watchpurge.record_state` reads `completed is True` as watched and a position >5 s as in-progress; nothing else. A deleted episode keeps its record, so it stays watched.
+
 - **Tail reached:** `pos ≥ credits_start − STOP_OUTRO_WINDOW_SEC` (10 s) when credits were detected, else `pos ≥ FINISH_TAIL_PCT × duration` (**0.90**). The old no-credits rule was "within 10 s of the real end", which almost nobody reaches — an anime episode's last ~95 s are the ED and a next-episode preview, so an episode stopped in its ED at 93 % stayed unwatched forever.
 - **Actually played:** `played_sec ≥ MIN_PLAYED_PCT × duration` (**0.60**) — room to skip an intro, a recap and the credits, not to scrub past the plot.
 

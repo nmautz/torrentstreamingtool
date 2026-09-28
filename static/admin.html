@@ -808,6 +808,32 @@
       <div id="seResult" class="hidden border-t border-amber-900/60"></div>
       <div id="seReleases" class="hidden border-t border-amber-900/60"></div>
     </div>
+
+    <!-- Delete Watched: episodes/films chosen profiles have finished — source AND bundle -->
+    <div class="bg-gray-900 border border-red-900/60">
+      <div class="px-5 py-4 border-b border-red-900/60">
+        <h2 class="text-sm font-black uppercase tracking-wide text-red-300">Delete Watched<span class="help-tip" tabindex="0" data-tip="Only episodes marked WATCHED (finished by playing, or marked watched) count — never one that was merely started. Anything ANY profile is part-way through is kept, as is anything playing or being prepped and any compressed file (it can't be downloaded again). Unlike Reclaim Source Files, this also deletes the streaming bundle.">?</span></h2>
+        <p class="text-xs text-red-200/70 mt-0.5">Delete what the chosen profiles have finished: the <strong>source file and its bundle</strong>. Each row stays in the library, still watched, with a Download button to fetch it again. Copies saved on phones are not touched.</p>
+      </div>
+      <div class="px-5 py-4 space-y-3">
+        <div>
+          <div class="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Watched by</div>
+          <div id="wpProfiles" class="flex flex-wrap gap-2 text-xs text-gray-500">Loading profiles…</div>
+        </div>
+        <div class="flex items-center gap-3 flex-wrap">
+          <select id="wpMatch" class="bg-gray-950 border border-gray-700 px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-red-500">
+            <option value="all">All selected profiles finished it</option>
+            <option value="any">Any selected profile finished it</option>
+          </select>
+          <button id="wpPreviewBtn" onclick="loadWatchedPurgePreview(this)"
+            class="text-xs font-bold uppercase tracking-wide px-4 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:text-white transition-colors disabled:opacity-50">
+            Preview
+          </button>
+          <span id="wpStatus" class="text-[11px] text-gray-500"></span>
+        </div>
+      </div>
+      <div id="wpResult" class="hidden border-t border-red-900/60"></div>
+    </div>
   </div>
 
   <!-- ── Background Video Tab ─────────────────────────────────────────────────── -->
@@ -4071,6 +4097,7 @@ async function loadStorageCompression(){
   loadOndemandOnly();
   loadSourceEviction();
   loadSourceEvictionStatus();
+  loadWatchedPurgeProfiles();
   const running = await _fetchCompression();
   if(running) startCompressionPolling();
 }
@@ -6672,6 +6699,175 @@ async function _seWatchManualReclaim(){
   const d = await r.json();
   if(d.current && d.current.running){ setTimeout(_seWatchManualReclaim, 2000); return; }
   loadSourceEvictionReleases(document.getElementById("sePickBtn"));
+}
+
+// ── Delete Watched (bulk, by profile) ────────────────────────────────────────
+// Preview is the contract: the list shows every file that would go, per show or
+// film, and Delete Selected sends exactly those paths (one show per request, so
+// the status line can count). The server re-checks each file before deleting —
+// anything started, played or prepped since the preview is kept and reported.
+const _WP_KEEP = {
+  "in-progress": "someone is part-way through",
+  "in-use":      "playing or being prepped",
+  "compressed":  "compressed — can't be re-downloaded",
+};
+let _wpGroups = [], _wpReq = null;
+
+async function loadWatchedPurgeProfiles(){
+  const el = document.getElementById("wpProfiles");
+  if(!el) return;
+  let d;
+  try{ const r = await fetch("/api/profiles"); d = r.ok ? await r.json() : null; }catch(_){ d = null; }
+  if(!d){ el.textContent = "Failed to load profiles."; return; }
+  const prev = new Set([...document.querySelectorAll(".wpProf:checked")].map(x => x.value));
+  el.innerHTML = (d.profiles || []).map(p => `
+    <label class="inline-flex items-center gap-1.5 px-2.5 py-1.5 border border-gray-700 bg-gray-950 cursor-pointer text-gray-300">
+      <input type="checkbox" class="wpProf accent-red-600" value="${_esc(p.id)}" ${prev.has(p.id) ? "checked" : ""}>
+      ${_esc(p.name || p.id)}
+    </label>`).join("") || "No profiles.";
+}
+
+async function loadWatchedPurgePreview(btn){
+  const status = document.getElementById("wpStatus");
+  const out = document.getElementById("wpResult");
+  const pids = [...document.querySelectorAll(".wpProf:checked")].map(x => x.value);
+  if(!pids.length){ status.textContent = "Choose at least one profile."; return; }
+  const req = {profile_ids: pids, match: document.getElementById("wpMatch").value};
+  if(btn){ btn.disabled = true; _markLoading(btn, true); }
+  status.textContent = "Walking the library…";
+  let r;
+  try{
+    r = await fetch("/api/library/watched-purge/preview", {method: "POST",
+      headers: {...authHeader(), "Content-Type": "application/json"}, body: JSON.stringify(req)});
+  }catch(_){ r = null; }
+  if(btn){ btn.disabled = false; _markLoading(btn, false); }
+  if(!r){ status.textContent = "Network error."; return; }
+  if(!r.ok){
+    let msg = `HTTP ${r.status}`;
+    try{ msg = (await r.json()).detail || msg; }catch(_){}
+    status.textContent = `Failed: ${msg}`; return;
+  }
+  const d = await r.json();
+  status.textContent = "";
+  _wpReq = req;
+  _wpGroups = d.groups || [];
+  out.classList.remove("hidden");
+  out.innerHTML = _wpRenderGroups(_wpGroups);
+  _wpSelChanged();
+}
+
+function _wpKeepText(k){
+  if(k.verdict === "in-progress" && (k.in_progress_by || []).length)
+    return `${k.in_progress_by.join(", ")} part-way through`;
+  return _WP_KEEP[k.verdict] || k.verdict;
+}
+
+function _wpRenderGroups(list){
+  if(!list.length) return `<div class="px-5 py-4 text-[11px] text-gray-500">Nothing the selected profiles have watched is still on the host.</div>`;
+  const rows = list.map((g, i) => {
+    const can = g.delete.length > 0;
+    const eps = g.delete.map(e => `<div class="flex justify-between gap-3"><span class="truncate text-gray-300">${_esc(e.label)}</span><span class="font-mono text-red-300/80 flex-shrink-0">${_esc(_fmtBytes(e.bytes))}</span></div>`).join("")
+              + g.keep.map(e => `<div class="flex justify-between gap-3 text-gray-600"><span class="truncate">${_esc(e.label)}</span><span class="flex-shrink-0">kept — ${_esc(_wpKeepText(e))}</span></div>`).join("");
+    return `
+    <div class="wpRow border-t border-gray-800/60" data-title="${_esc((g.title || "").toLowerCase())}">
+      <div class="flex items-start gap-3 px-5 py-2 ${can ? "" : "opacity-60"}">
+        <input type="checkbox" class="wpChk mt-0.5 flex-shrink-0 accent-red-600" data-i="${i}" ${can ? "checked" : "disabled"} onchange="_wpSelChanged()">
+        <div class="min-w-0 flex-1">
+          <div class="truncate text-gray-200">${_esc(g.title || g.group)} <span class="text-[9px] font-bold uppercase tracking-widest text-gray-500 ml-1">${g.kind === "movie" ? "Film" : "Show"}</span></div>
+          <div class="text-[10px] text-gray-500">${g.delete.length} file${g.delete.length!==1?"s":""} to delete${g.keep.length ? ` · ${g.keep.length} kept` : ""}</div>
+          <details class="mt-1"><summary class="text-[10px] text-gray-500 cursor-pointer select-none uppercase tracking-widest">Show files</summary>
+            <div class="mt-1 space-y-0.5 text-[10px]">${eps}</div></details>
+        </div>
+        <div class="flex-shrink-0 font-mono ${can ? "text-red-300" : "text-gray-600"}">${_esc(g.human)}</div>
+      </div>
+    </div>`;
+  }).join("");
+  return `
+    <div class="px-5 py-3 flex items-center justify-between gap-3 flex-wrap">
+      <div class="flex items-center gap-2 flex-wrap">
+        <input id="wpFilter" type="search" placeholder="Filter shows…" oninput="_wpFilter(this.value)"
+          class="bg-gray-950 border border-gray-700 px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-red-500 w-40">
+        <button onclick="_wpSelectAll(true)" class="text-[10px] font-bold uppercase tracking-wide px-2.5 py-1.5 border border-gray-700 bg-gray-800 text-gray-300 hover:text-white">All</button>
+        <button onclick="_wpSelectAll(false)" class="text-[10px] font-bold uppercase tracking-wide px-2.5 py-1.5 border border-gray-700 bg-gray-800 text-gray-300 hover:text-white">None</button>
+      </div>
+      <div class="flex items-center gap-2">
+        <span id="wpSel" class="text-[11px] text-gray-500"></span>
+        <button id="wpGoBtn" onclick="deleteWatchedSelected(this)" disabled
+          class="text-xs font-black uppercase tracking-wide px-4 py-2 border border-red-800 bg-red-950 text-red-300 hover:bg-red-900 transition-colors disabled:opacity-50">
+          Delete Selected
+        </button>
+      </div>
+    </div>
+    <div class="text-[11px] max-h-[32rem] overflow-y-auto">${rows}</div>`;
+}
+
+// All/None act on the rows the filter shows, so "only these shows" is:
+// None, filter, All.
+function _wpSelectAll(on){
+  document.querySelectorAll(".wpRow").forEach(row => {
+    if(row.classList.contains("hidden")) return;
+    const c = row.querySelector(".wpChk");
+    if(c && !c.disabled) c.checked = on;
+  });
+  _wpSelChanged();
+}
+
+function _wpFilter(q){
+  q = (q || "").trim().toLowerCase();
+  document.querySelectorAll(".wpRow").forEach(row =>
+    row.classList.toggle("hidden", !!q && !row.dataset.title.includes(q)));
+}
+
+function _wpSelected(){
+  return [...document.querySelectorAll(".wpChk:checked")].map(el => _wpGroups[+el.dataset.i]).filter(Boolean);
+}
+
+function _wpSelChanged(){
+  const sel = _wpSelected();
+  const btn = document.getElementById("wpGoBtn"), lbl = document.getElementById("wpSel");
+  if(!btn || !lbl) return;
+  const files = sel.reduce((a, g) => a + g.delete.length, 0);
+  const bytes = sel.reduce((a, g) => a + g.bytes, 0);
+  btn.disabled = !files;
+  lbl.textContent = files ? `${sel.length} title${sel.length!==1?"s":""} · ${files} file${files!==1?"s":""} · ${_fmtBytes(bytes)}` : "";
+}
+
+async function deleteWatchedSelected(btn){
+  const sel = _wpSelected().filter(g => g.delete.length);
+  if(!sel.length || !_wpReq) return;
+  const files = sel.reduce((a, g) => a + g.delete.length, 0);
+  const bytes = sel.reduce((a, g) => a + g.bytes, 0);
+  const names = sel.slice(0, 10).map(g => `  • ${g.title} (${g.delete.length})`).join("\n")
+              + (sel.length > 10 ? `\n  …and ${sel.length - 10} more` : "");
+  if(!confirm(`Delete ${files} watched file${files!==1?"s":""} (${_fmtBytes(bytes)}) from the host — source AND streaming bundle:
+
+${names}
+
+They stay in the library, still watched, and can be downloaded again.`)) return;
+  const status = document.getElementById("wpStatus");
+  if(btn){ btn.disabled = true; _markLoading(btn, true); }
+  let deleted = 0, freed = 0, kept = 0, failed = 0, errors = 0;
+  for(let i = 0; i < sel.length; i++){
+    const g = sel[i];
+    status.textContent = `Deleting ${i + 1} of ${sel.length}: ${g.title}…`;
+    try{
+      const r = await fetch("/api/library/watched-purge", {method: "POST",
+        headers: {...authHeader(), "Content-Type": "application/json"},
+        body: JSON.stringify({..._wpReq, paths: g.delete.map(e => e.path)})});
+      if(!r.ok){ errors++; continue; }
+      const d = await r.json();
+      deleted += d.deleted || 0; freed += d.freed_bytes || 0;
+      kept += (d.kept || []).length; failed += (d.failed || []).length;
+    }catch(_){ errors++; }
+  }
+  if(btn) _markLoading(btn, false);
+  const msg = `Deleted ${deleted} file${deleted!==1?"s":""}, freed ${_fmtBytes(freed)}`
+    + (kept ? `, ${kept} kept (changed since the preview)` : "")
+    + (failed ? `, ${failed} still in use on the host` : "")
+    + (errors ? `, ${errors} title${errors!==1?"s":""} failed` : "") + ".";
+  showToast(msg, !!(errors || failed));
+  await loadWatchedPurgePreview(document.getElementById("wpPreviewBtn"));
+  status.textContent = msg;
 }
 
 // Contextual help for the Auto-Purge card: reflect the toggle + size cap.

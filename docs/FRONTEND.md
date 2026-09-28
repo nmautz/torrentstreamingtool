@@ -308,6 +308,8 @@ It also serves **downloading** series (opened from the card's ☰ Episodes butto
 
 **Bulk delete (free space, re-downloadable).** `#epBulkChips` has a red **🗑 Delete (N)** chip; `epDeleteSelected(btn)` → `epDeleteFiles([...epChecked], btn)` (the movie panel's Delete passes a single path). `epDeleteFiles` confirms, `POST`s `/api/library/{id}/delete-files`, then `refreshEpFiles()` + `loadLibrary()` and toasts the freed bytes (wrapped in `withInflight("ep_delete")`). The server marks the files Skip + removes the bytes, so the rows flip to "⊘ Not downloaded" with a ⬇ Download button. `updateEpCount` keeps `#epDeleteCount` synced with `#epSelectedCount`/`#epRecheckCount`.
 
+**Delete Watched (18.34.0).** A **Delete watched** button (`ic("trash")`) in the row above the episode list — the row Simple mode's "Watch … again" lives in; shown in both modes (never on TV) whenever the signed-in profile has finished any episode of the show. It is scoped to the **whole show** (every item in `_wpItemIds()`), not the visible season. `openDeleteWatched(btn)` posts `/api/library/watched-purge/preview` for `[profile.id]` and fills `#watchedPurgeModal` (`_wpRender`): the episodes that will go with each one's size, then a **Kept** list with the reason (`_WP_KEEP`; an in-progress keep names who). `confirmDeleteWatched` posts exactly the listed paths to `/api/library/watched-purge` and toasts deleted / freed / kept-since-preview / still-in-use, then `refreshEpFiles()` + `loadLibrary()`. Needs a PIN-verified profile, like every delete.
+
 State additions:
 - `epMetadata` — cached TMDb payload for the open item (or `null`).
 - `epMetaImgBase` — artwork base URL returned by the metadata endpoint (the host proxy `/api/metadata/img`).
