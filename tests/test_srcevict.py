@@ -252,6 +252,45 @@ p = se.plan(recent, free_bytes=0, policy=pol(floor_gb=1000, target_gb=5000))
 ok("INVARIANT: a zero-free disk still cannot touch a recently-watched series",
    p.triggered and p.would_delete == () and p.shortfall_bytes == p.deficit_bytes)
 
+# ── manual reclaim ────────────────────────────────────────────────────────────
+# A hand-picked release overrides intent guesses (age, next-up, in-progress) and
+# never overrides playability (bundle, audit, torrent completion, in use).
+def mc(path, item, gib, *reasons):
+    c = se.Candidate(path=path, series_key="s", item_id=item, item_title=item.upper(),
+                     source_bytes=int(gib * GIB))
+    return se.block(c, *reasons) if reasons else c
+
+man = [
+    mc("/a1", "a", 2, se.BLOCK_NOT_AGED),
+    mc("/a2", "a", 3, se.BLOCK_NOT_AGED, se.BLOCK_NEXT_UP),
+    mc("/a3", "a", 4, se.BLOCK_NOT_AGED, se.BLOCK_UNVERIFIED),
+    mc("/a4", "a", 0, se.BLOCK_ALREADY_EVICTED),
+    mc("/b1", "b", 9, se.BLOCK_NO_BUNDLE),
+    mc("/b2", "b", 1, se.BLOCK_IN_PROGRESS),
+    mc("/c1", "c", 0, se.BLOCK_NO_SOURCE),
+]
+ok("manual: not-aged alone is overridable", se.manually_reclaimable(man[0]))
+ok("manual: next-up is overridable", se.manually_reclaimable(man[1]))
+ok("manual: unverified stays hard", not se.manually_reclaimable(man[2])
+   and se.manual_hard_blockers(man[2]) == (se.BLOCK_UNVERIFIED,))
+ok("manual: no-bundle stays hard", not se.manually_reclaimable(man[4]))
+ok("manual: busy / damaged / incomplete / source-incomplete stay hard",
+   not (se.MANUAL_OVERRIDABLE & {se.BLOCK_BUSY, se.BLOCK_DAMAGED, se.BLOCK_NO_BUNDLE,
+                                 se.BLOCK_INCOMPLETE_BUNDLE, se.BLOCK_SOURCE_INCOMPLETE,
+                                 se.BLOCK_UNVERIFIED}))
+ok("manual: a zero-byte source is never taken", not se.manually_reclaimable(mc("/z", "z", 0)))
+rs = {r["item_id"]: r for r in se.release_summary(man)}
+ok("releases: an item with no source on disk is left out", "c" not in rs)
+ok("releases: counts", rs["a"]["files"] == 3 and rs["a"]["reclaimable"] == 2
+   and rs["a"]["evicted"] == 1, repr(rs.get("a")))
+ok("releases: bytes", rs["a"]["reclaimable_bytes"] == 5 * GIB
+   and rs["a"]["source_bytes"] == 9 * GIB)
+ok("releases: hard blockers listed", rs["a"]["blocked"] == [(se.BLOCK_UNVERIFIED, 1, 4 * GIB)])
+ok("releases: overridden soft blockers listed",
+   rs["a"]["overridden"] == [(se.BLOCK_NOT_AGED, 2), (se.BLOCK_NEXT_UP, 1)], repr(rs["a"]["overridden"]))
+ok("releases: biggest reclaimable first",
+   [r["item_id"] for r in se.release_summary(man)] == ["a", "b"])
+
 print("%d passed, %d failed" % (_PASS, len(_FAIL)))
 for f in _FAIL:
     print("  FAIL", f)

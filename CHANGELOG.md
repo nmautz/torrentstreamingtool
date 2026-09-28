@@ -1,5 +1,28 @@
 # Changelog
 
+## [18.33.0] — 2026-09-27
+### Reclaim the source files of chosen releases from the admin panel
+
+- **Admin -> Storage -> Reclaim Source Files has a new Pick Releases button.**
+  Before this, a source file could only be deleted by the disk-gated sweep. The
+  sweep takes the oldest eligible files, and only when the policy is on and free
+  space is below the floor. Now you can check specific releases and press
+  **Reclaim Selected** to delete their sources now, whatever the policy and
+  free space are.
+- Each row shows what it would free and which gates your pick overrides: the
+  idle clock, "someone's next episode" and "someone is part-way through". It
+  also shows which files it keeps. **A pick never overrides playability.** A
+  file whose bundle is missing, unaudited, damaged or incomplete, whose torrent
+  isn't verified complete, or which is in use is kept.
+- Deletion uses the same path as the sweep: the record is written first, and
+  every condition is re-checked right before each delete. The status line and
+  Stop behave the same, and the status line reports how many files a hard
+  blocker kept.
+- New endpoints: `POST /api/admin/source-eviction/releases` (read-only) and
+  `POST /api/admin/source-eviction/reclaim` (`{item_ids}`). The decision rules
+  are `srcevict.MANUAL_OVERRIDABLE`, `manually_reclaimable` and
+  `release_summary`, with tests.
+
 ## [18.32.1] — 2026-09-27
 ### A downloaded episode plays from the phone again when a show spans several downloads
 

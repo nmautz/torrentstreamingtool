@@ -2971,6 +2971,23 @@ down `plan.would_delete` until free space clears `target_gb`. `POST
 wait but not the conditions — it still refuses while the policy is off or the disk
 is above the floor.
 
+### Manual reclaim by release (18.33.0)
+
+Admin -> Storage -> **Pick Releases** lists every library item with a source on
+disk (`POST /api/admin/source-eviction/releases`, built by
+`srcevict.release_summary` over the same candidates the dry run weighs) and
+reclaims the checked ones now (`POST /api/admin/source-eviction/reclaim`,
+`_run_manual_reclaim`). The admin's pick **replaces the policy gates**: it runs
+with the policy off and the disk above the floor, and it overrides the blockers
+that only guess at intent: `srcevict.MANUAL_OVERRIDABLE` = `not-aged`, `next-up`,
+`in-progress`. Those three still show as **Overrides** on the row before you
+confirm. **No playability gate is overridden.** A file whose bundle is missing,
+unaudited, damaged or incomplete, whose torrent isn't verified complete, or which
+is busy is kept and counted under **Kept**. Deletion goes through the same
+`_evict_paths` → `_evict_one_source` path as the sweep (record first, re-check
+immediately before the delete), and progress rides on `state.source_eviction`,
+so the status line and Stop work unchanged.
+
 > **The record is written BEFORE the file is deleted, and the order is not
 > negotiable.** The two crash windows are not symmetric:
 >

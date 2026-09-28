@@ -744,7 +744,7 @@
       </div>
     </div>
 
-    <!-- Reclaim source files (dry run only — the sweep is not wired up yet) -->
+    <!-- Reclaim source files: the disk-gated sweep, its dry run, and a per-release manual reclaim -->
     <div class="bg-gray-900 border border-amber-900/60">
       <div class="px-5 py-4 border-b border-amber-900/60 flex items-start justify-between gap-3">
         <div class="min-w-0">
@@ -797,11 +797,16 @@
           class="text-xs font-black uppercase tracking-wide px-4 py-2 border border-red-800 bg-red-950 text-red-300 hover:bg-red-900 transition-colors disabled:opacity-50">
           Reclaim Now
         </button>
+        <button id="sePickBtn" onclick="loadSourceEvictionReleases(this)"
+          class="text-xs font-bold uppercase tracking-wide px-4 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:text-white transition-colors disabled:opacity-50">
+          Pick Releases
+        </button>
         <span id="seStatus" class="text-[11px] text-gray-500"></span>
       </div>
 
       <div id="seLast" class="hidden px-5 pb-4 text-[11px] text-gray-500"></div>
       <div id="seResult" class="hidden border-t border-amber-900/60"></div>
+      <div id="seReleases" class="hidden border-t border-amber-900/60"></div>
     </div>
   </div>
 
@@ -6333,9 +6338,9 @@ async function saveCacheAutopurge(btn){
 }
 
 // ── Reclaim Source Files (source eviction) ───────────────────────────────────
-// Dry run only: the policy is saved, the plan is computed and rendered, and
-// nothing is deleted. The point of the card today is the numbers — whether
-// giving up VLC/5.1/repair on the long tail is worth the GB it would return.
+// Three controls: the policy (the disk-gated sweep), Dry Run (its plan, deletes
+// nothing), and Pick Releases (reclaim chosen releases now, whatever the policy
+// says — age is overridden, playability never is).
 
 // What is holding a file back, in the operator's words rather than the wire's.
 const _SE_BLOCKERS = {
@@ -6502,8 +6507,10 @@ async function loadSourceEvictionStatus(){
   } else if(s.error){
     el.textContent = s.error;
   } else {
-    el.textContent = `Last sweep ${new Date(s.finished_at).toLocaleString()}: reclaimed `
+    el.textContent = `Last ${s.releases ? `reclaim of ${s.releases} release${s.releases!==1?"s":""}` : "sweep"} `
+      + `${new Date(s.finished_at).toLocaleString()}: reclaimed `
       + `${s.deleted} source file${s.deleted!==1?"s":""}, freed ${_fmtBytes(s.bytes_freed)}`
+      + (s.skipped ? `, kept ${s.skipped} blocked` : "")
       + (s.stopped ? " (stopped early)." : ".");
   }
 }
@@ -6541,6 +6548,130 @@ The only way back is re-downloading the identical release.`)) return;
   }catch(_){}
   if(btn){ btn.disabled = false; btn.classList.remove("opacity-50"); _markLoading(btn, false); }
   loadSourceEvictionStatus();
+}
+
+// ── Pick Releases: manual per-release reclaim ────────────────────────────────
+let _seReleaseRows = [];
+
+async function loadSourceEvictionReleases(btn){
+  const status = document.getElementById("seStatus");
+  const out    = document.getElementById("seReleases");
+  if(btn){ btn.disabled = true; btn.classList.add("opacity-50"); _markLoading(btn, true); }
+  status.textContent = "Walking the library…";
+  let r;
+  try{
+    r = await fetch("/api/admin/source-eviction/releases", {method: "POST", headers: authHeader()});
+  }catch(_){ r = null; }
+  if(btn){ btn.disabled = false; btn.classList.remove("opacity-50"); _markLoading(btn, false); }
+  if(!r){ status.textContent = "Network error."; return; }
+  if(!r.ok){ status.textContent = `Failed (HTTP ${r.status}).`; return; }
+  const d = await r.json();
+  status.textContent = "";
+  _seReleaseRows = d.releases || [];
+  out.classList.remove("hidden");
+  out.innerHTML = _seRenderReleases(_seReleaseRows);
+  _seReleaseSelChanged();
+}
+
+function _seRenderReleases(list){
+  if(!list.length) return `<div class="px-5 py-4 text-[11px] text-gray-500">No release has a source file on disk.</div>`;
+  const reasons = (arr, withBytes) => arr.map(b =>
+    `${_esc(_SE_BLOCKERS[b.reason] || b.reason)} (${b.files}${withBytes ? ` · ${_esc(b.human)}` : ""})`).join(" · ");
+  const rows = list.map((x, i) => {
+    const can = x.reclaimable > 0;
+    return `
+    <label class="flex items-start gap-3 px-5 py-2 border-t border-gray-800/60 ${can ? "cursor-pointer hover:bg-gray-800/40" : "opacity-60"}">
+      <input type="checkbox" class="seRelChk mt-0.5 flex-shrink-0 accent-red-600" data-i="${i}" ${can ? "" : "disabled"} onchange="_seReleaseSelChanged()">
+      <div class="min-w-0 flex-1">
+        <div class="truncate text-gray-200">${_esc(x.item_title || x.item_id)}</div>
+        <div class="text-[10px] text-gray-500">${x.reclaimable} of ${x.files} source file${x.files!==1?"s":""} can go${x.evicted ? ` · ${x.evicted} already reclaimed` : ""}</div>
+        ${x.overridden.length ? `<div class="text-[10px] text-amber-300/80">Overrides: ${reasons(x.overridden, false)}</div>` : ""}
+        ${x.blocked.length ? `<div class="text-[10px] text-gray-600">Kept: ${reasons(x.blocked, true)}</div>` : ""}
+      </div>
+      <div class="flex-shrink-0 text-right">
+        <div class="font-mono ${can ? "text-amber-300" : "text-gray-600"}">${_esc(x.reclaimable_human)}</div>
+        <div class="text-[10px] text-gray-600">of ${_esc(x.source_human)}</div>
+      </div>
+    </label>`;
+  }).join("");
+  return `
+    <div class="px-5 py-3 flex items-center justify-between gap-3 flex-wrap">
+      <div class="text-[10px] font-bold uppercase tracking-widest text-gray-500">Reclaim by release<span class="help-tip" tabindex="0" data-tip="Deletes the chosen releases' source files now, ignoring the on/off switch, the free-space floor and the idle clock. A file is still kept if its bundle is missing, unaudited, damaged or incomplete, its torrent isn't verified complete, or it's in use right now.">?</span></div>
+      <div class="flex items-center gap-2">
+        <span id="seRelSel" class="text-[11px] text-gray-500"></span>
+        <button id="seRelBtn" onclick="reclaimSelectedReleases(this)" disabled
+          class="text-xs font-black uppercase tracking-wide px-4 py-2 border border-red-800 bg-red-950 text-red-300 hover:bg-red-900 transition-colors disabled:opacity-50">
+          Reclaim Selected
+        </button>
+      </div>
+    </div>
+    <div class="text-[11px] max-h-[28rem] overflow-y-auto">${rows}</div>`;
+}
+
+function _seSelectedReleases(){
+  return [...document.querySelectorAll(".seRelChk:checked")]
+    .map(el => _seReleaseRows[+el.dataset.i]).filter(Boolean);
+}
+
+function _seReleaseSelChanged(){
+  const sel = _seSelectedReleases();
+  const btn = document.getElementById("seRelBtn");
+  const lbl = document.getElementById("seRelSel");
+  if(!btn || !lbl) return;
+  btn.disabled = !sel.length;
+  const bytes = sel.reduce((a, x) => a + x.reclaimable_bytes, 0);
+  const files = sel.reduce((a, x) => a + x.reclaimable, 0);
+  lbl.textContent = sel.length ? `${files} file${files!==1?"s":""} · ${_fmtBytes(bytes)}` : "";
+}
+
+async function reclaimSelectedReleases(btn){
+  const sel = _seSelectedReleases();
+  if(!sel.length) return;
+  const files = sel.reduce((a, x) => a + x.reclaimable, 0);
+  const bytes = sel.reduce((a, x) => a + x.reclaimable_bytes, 0);
+  const names = sel.slice(0, 8).map(x => "  • " + (x.item_title || x.item_id)).join("\n")
+              + (sel.length > 8 ? `\n  …and ${sel.length - 8} more` : "");
+  if(!confirm(`Permanently delete ${files} source file${files!==1?"s":""} (${_fmtBytes(bytes)}) from:
+
+${names}
+
+`
+            + `Their on-device bundles are kept, so they keep playing on phones and in the browser. `
+            + `They will lose VLC on the TV (5.1 audio, HDR, image subtitles), repair, re-prep and `
+            + `just-in-time streaming.
+
+The only way back is re-downloading the identical release.`)) return;
+  if(btn){ btn.disabled = true; btn.classList.add("opacity-50"); _markLoading(btn, true); }
+  let r;
+  try{
+    r = await fetch("/api/admin/source-eviction/reclaim", {
+      method: "POST",
+      headers: {...authHeader(), "Content-Type": "application/json"},
+      body: JSON.stringify({item_ids: sel.map(x => x.item_id)}),
+    });
+  }catch(_){ r = null; }
+  if(btn){ btn.classList.remove("opacity-50"); _markLoading(btn, false); }
+  if(!r){ showToast("Network error — nothing started."); if(btn) btn.disabled = false; return; }
+  if(!r.ok){
+    let msg = `HTTP ${r.status}`;
+    try{ msg = (await r.json()).detail || msg; }catch(_){}
+    showToast(`Reclaim refused: ${msg}`);
+    if(btn) btn.disabled = false;
+    return;
+  }
+  document.getElementById("seReleases").classList.add("hidden");
+  loadSourceEvictionStatus();          // polls itself while the run is live
+  setTimeout(_seWatchManualReclaim, 2000);
+}
+
+// Wait for the manual run to finish, then re-list so the rows show what is left.
+async function _seWatchManualReclaim(){
+  let r;
+  try{ r = await fetch("/api/admin/source-eviction/status", {headers: authHeader()}); }catch(_){ return; }
+  if(!r.ok) return;
+  const d = await r.json();
+  if(d.current && d.current.running){ setTimeout(_seWatchManualReclaim, 2000); return; }
+  loadSourceEvictionReleases(document.getElementById("sePickBtn"));
 }
 
 // Contextual help for the Auto-Purge card: reflect the toggle + size cap.

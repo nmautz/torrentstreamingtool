@@ -353,6 +353,75 @@ def sole_blocker_summary(candidates: Sequence[Candidate]) -> list:
     return [(r, n, b) for (r, n, b) in known + rest]
 
 
+# ── Manual reclaim ────────────────────────────────────────────────────────────
+# An admin picking a release by hand IS the age decision, so the blockers that
+# only exist to guess at intent can be overridden: the series clock, and "someone
+# is part-way through / it is someone's next episode" (the bundle still plays on
+# every phone and browser -- only VLC on the TV is lost). Everything that guards
+# PLAYABILITY stays hard: a missing, unaudited, damaged or incomplete bundle, a
+# torrent not verified complete, or a file in use this instant. Picking a release
+# is intent, not evidence.
+MANUAL_OVERRIDABLE = frozenset({BLOCK_NOT_AGED, BLOCK_IN_PROGRESS, BLOCK_NEXT_UP})
+# Not blockers so much as "there is nothing here to reclaim" -- a manual pick
+# skips these silently rather than reporting them as obstacles.
+NOTHING_TO_TAKE = frozenset({BLOCK_NOT_VIDEO, BLOCK_ALREADY_EVICTED, BLOCK_NO_SOURCE})
+
+
+def manual_hard_blockers(c: Candidate) -> tuple:
+    """The blockers a manual reclaim still honours (empty = it may be taken)."""
+    return tuple(r for r in c.blockers if r not in MANUAL_OVERRIDABLE)
+
+
+def manually_reclaimable(c: Candidate) -> bool:
+    return c.source_bytes > 0 and not manual_hard_blockers(c)
+
+
+def release_summary(candidates: Sequence[Candidate]) -> list:
+    """Per library item, what a manual reclaim of it would take and what it can't.
+
+    `[{item_id, item_title, files, source_bytes, reclaimable, reclaimable_bytes,
+    evicted, blocked:[(reason, n, bytes)], overridden:[(reason, n)]}]`, biggest
+    reclaimable first. `files` counts only files with a source on disk; an item
+    with none (fully evicted, or never downloaded) is left out entirely.
+    `overridden` names the soft blockers a manual pick would ride over, so the
+    admin sees "2 are someone's next episode" before confirming.
+    """
+    by: dict = {}
+    for c in candidates:
+        r = by.setdefault(c.item_id, {
+            "item_id": c.item_id, "item_title": c.item_title, "files": 0,
+            "source_bytes": 0, "reclaimable": 0, "reclaimable_bytes": 0,
+            "evicted": 0, "_blocked": {}, "_over": {},
+        })
+        if BLOCK_ALREADY_EVICTED in c.blockers:
+            r["evicted"] += 1
+        if any(b in NOTHING_TO_TAKE for b in c.blockers) or c.source_bytes <= 0:
+            continue
+        r["files"] += 1
+        r["source_bytes"] += c.source_bytes
+        hard = manual_hard_blockers(c)
+        if hard:
+            for b in hard:
+                n, sz = r["_blocked"].get(b, (0, 0))
+                r["_blocked"][b] = (n + 1, sz + c.source_bytes)
+            continue
+        r["reclaimable"] += 1
+        r["reclaimable_bytes"] += c.source_bytes
+        for b in c.blockers:
+            r["_over"][b] = r["_over"].get(b, 0) + 1
+    out = []
+    for r in by.values():
+        if not r["files"]:
+            continue
+        blk, over = r.pop("_blocked"), r.pop("_over")
+        r["blocked"] = [(b, *blk[b]) for b in BLOCKER_ORDER if b in blk] + \
+            sorted((b, *v) for b, v in blk.items() if b not in BLOCKER_ORDER)
+        r["overridden"] = [(b, over[b]) for b in BLOCKER_ORDER if b in over]
+        out.append(r)
+    out.sort(key=lambda r: (-r["reclaimable_bytes"], r["item_title"].lower(), r["item_id"]))
+    return out
+
+
 def parse_iso(value) -> Optional[datetime]:
     """An ISO-8601 stamp as an aware UTC datetime, or None.
 

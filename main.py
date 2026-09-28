@@ -27663,6 +27663,48 @@ async def admin_run_source_eviction(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "started": True})
 
 
+@app.post("/api/admin/source-eviction/releases")
+async def admin_source_eviction_releases(request: Request) -> JSONResponse:
+    """Per release: how much a MANUAL reclaim of it would free, and what it can't
+    take. Read-only. Same cost as the dry run (a stat per file plus a segment
+    walk per bundle that clears everything else), so on-demand, not polled."""
+    _require_admin(request)
+    _, _, _, candidates = await _gather_evict_candidates()
+    rows = []
+    for r in srcevict.release_summary(candidates):
+        rows.append({
+            **{k: r[k] for k in ("item_id", "item_title", "files", "reclaimable",
+                                 "evicted", "source_bytes", "reclaimable_bytes")},
+            "source_human": human_size(r["source_bytes"]),
+            "reclaimable_human": human_size(r["reclaimable_bytes"]),
+            "blocked": [{"reason": b, "files": n, "bytes": sz, "human": human_size(sz)}
+                        for (b, n, sz) in r["blocked"]],
+            "overridden": [{"reason": b, "files": n} for (b, n) in r["overridden"]],
+        })
+    return JSONResponse({"releases": rows, "computed_at": _now_iso()})
+
+
+class SourceReclaimReq(BaseModel):
+    item_ids: list[str]
+
+
+@app.post("/api/admin/source-eviction/reclaim")
+async def admin_source_eviction_reclaim(request: Request, body: SourceReclaimReq) -> JSONResponse:
+    """**Deletes source files** of the named library items now, bypassing the
+    policy switch, the free-space floor and the age clock — but never a
+    playability gate (see `_run_manual_reclaim`). 409 if a sweep is running;
+    poll `/status`."""
+    _require_admin(request)
+    ids = [i for i in dict.fromkeys(body.item_ids or []) if i]
+    if not ids:
+        raise HTTPException(400, "No releases selected.")
+    if state.source_eviction.get("running"):
+        raise HTTPException(409, "A source-eviction sweep is already running.")
+    state.source_eviction_stop = False
+    state.source_eviction_task = asyncio.create_task(_run_manual_reclaim(ids))
+    return JSONResponse({"ok": True, "started": True, "releases": len(ids)})
+
+
 @app.post("/api/admin/source-eviction/stop")
 async def admin_stop_source_eviction(request: Request) -> JSONResponse:
     """Halt an in-progress sweep. It stops between files, so whatever has already
@@ -32712,13 +32754,10 @@ def _evict_busy_paths() -> "set[str]":
     return busy
 
 
-async def _build_evict_plan() -> dict:
-    """Gather the facts and return the sweep plan as a JSON-ready payload.
-
-    Read-only: this computes and reports, and deletes nothing. It is what the
-    admin dry run renders, and what the sweep itself will consult once eviction is
-    switched on.
-    """
+async def _gather_evict_candidates() -> tuple:
+    """Gather the facts and weigh every library file: `(lib, policy, now,
+    candidates)`. Read-only. Shared by the sweep plan and the per-release manual
+    reclaim, so both see exactly the same blockers."""
     lib = await get_library()
     policy = _src_evict_cfg(lib)
     now = datetime.now(timezone.utc)
@@ -32759,7 +32798,16 @@ async def _build_evict_plan() -> dict:
     in_progress = await asyncio.to_thread(_evict_in_progress_paths, lib)
     candidates = await asyncio.to_thread(
         _evict_candidates_sync, lib, policy, now, incomplete, busy, next_up, in_progress)
+    return lib, policy, now, candidates
 
+
+async def _build_evict_plan() -> dict:
+    """Gather the facts and return the sweep plan as a JSON-ready payload.
+
+    Read-only: this computes and reports, and deletes nothing. It is what the
+    admin dry run renders, and what the sweep itself consults.
+    """
+    lib, policy, now, candidates = await _gather_evict_candidates()
     free_bytes = await asyncio.to_thread(_free_disk_bytes_for_library, lib)
     p = srcevict.plan(candidates, free_bytes, policy)
 
@@ -32952,8 +33000,7 @@ async def _run_source_eviction(*, manual: bool = False) -> dict:
     se = state.source_eviction
     se.update({"running": True, "deleted": 0, "bytes_freed": 0, "error": "",
                "manual": manual, "started_at": _now_iso(), "finished_at": None,
-               "stopped": False})
-    freed = deleted = 0
+               "stopped": False, "releases": 0, "skipped": 0})
     try:
         plan = await _build_evict_plan()
         if not plan["enabled"]:
@@ -32963,10 +33010,28 @@ async def _run_source_eviction(*, manual: bool = False) -> dict:
             se["error"] = ("Free space is above the floor — nothing to do. "
                            f"({plan['free_human']} free, floor {plan['floor_gb']} GB)")
             return se
-        lib = await get_library()
-        sigs = {f.get("path", ""): _file_sig(f.get("path", ""))
-                for it in lib.get("items", []) for f in it.get("files", [])}
-        for row in plan["would_delete"]:
+        await _evict_paths([row["path"] for row in plan["would_delete"]], se, manual=manual)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        se["error"] = str(exc)
+        log.warning("source-eviction: %s", exc)
+    finally:
+        se["running"] = False
+        se["finished_at"] = _now_iso()
+        state.source_eviction_last = dict(se)
+    return se
+
+
+async def _evict_paths(paths: list, se: dict, *, manual: bool) -> None:
+    """Reclaim each path in order through `_evict_one_source`, keeping the live
+    progress in `se` and honouring the Stop button. Shared by the disk-gated sweep
+    and the per-release manual reclaim."""
+    deleted = freed = 0
+    lib = await get_library()
+    files = {f.get("path", ""): f for it in lib.get("items", []) for f in it.get("files", [])}
+    try:
+        for path in paths:
             if state.source_eviction_stop:
                 se["stopped"] = True
                 break
@@ -32984,24 +33049,55 @@ async def _run_source_eviction(*, manual: bool = False) -> dict:
             if not manual and await _machine_in_use(60):
                 se["stopped"] = True
                 break
-            path = row["path"]
-            n = await _evict_one_source(path, _bundle_key_for_file(
-                next((f for it in lib.get("items", []) for f in it.get("files", [])
-                      if f.get("path") == path), {"path": path})), sigs.get(path, ""))
+            n = await _evict_one_source(
+                path, _bundle_key_for_file(files.get(path) or {"path": path}),
+                await asyncio.to_thread(_file_sig, path))
             if n:
                 deleted += 1
                 freed += n
                 se["deleted"], se["bytes_freed"] = deleted, freed
+    finally:
         if deleted:
             _invalidate_bundle_index()
             _invalidate_offline_cache_inventory()
             hls_log.info("evict: reclaimed %d source file(s), freed %s",
                          deleted, human_size(freed))
+
+
+async def _run_manual_reclaim(item_ids: list) -> dict:
+    """Reclaim the sources of hand-picked releases, now, whatever the policy says.
+
+    The admin's pick replaces the two policy gates — `enabled` and the free-space
+    floor — and the intent blockers `srcevict.MANUAL_OVERRIDABLE` (age, next-up,
+    in-progress). Every playability gate still holds: a file whose bundle is
+    missing, unaudited, damaged or incomplete, whose torrent isn't verified, or
+    which is in use is skipped, and `_evict_one_source` re-checks it all again
+    immediately before each delete. Progress rides on `state.source_eviction`,
+    so the card's status line and Stop work unchanged.
+    """
+    se = state.source_eviction
+    se.update({"running": True, "deleted": 0, "bytes_freed": 0, "error": "",
+               "manual": True, "releases": len(item_ids), "skipped": 0,
+               "started_at": _now_iso(), "finished_at": None, "stopped": False})
+    try:
+        want = set(item_ids)
+        _, _, _, candidates = await _gather_evict_candidates()
+        mine = [c for c in candidates if c.item_id in want and c.source_bytes > 0
+                and not (set(c.blockers) & srcevict.NOTHING_TO_TAKE)]
+        take = sorted((c for c in mine if srcevict.manually_reclaimable(c)),
+                      key=lambda c: -c.source_bytes)
+        se["skipped"] = len(mine) - len(take)
+        if not take:
+            se["error"] = "Nothing in the selected release(s) can be reclaimed — see their blockers."
+            return se
+        hls_log.info("evict: manual reclaim of %d release(s) — %d file(s), %d skipped",
+                     len(want), len(take), se["skipped"])
+        await _evict_paths([c.path for c in take], se, manual=True)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         se["error"] = str(exc)
-        log.warning("source-eviction: %s", exc)
+        log.warning("source-eviction (manual): %s", exc)
     finally:
         se["running"] = False
         se["finished_at"] = _now_iso()
