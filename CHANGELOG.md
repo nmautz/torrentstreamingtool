@@ -1,5 +1,29 @@
 # Changelog
 
+## [19.1.0] — 2026-09-28
+### Bookmarks: remember a show or movie for later, and hear when it's out
+
+- **Bookmark anything on Explore.** Every poster has a bookmark button in its top
+  right corner, and a show's page has a Bookmark button next to Trailer. Nothing
+  is downloaded. It's a list of things to watch later. Bookmarks belong to the
+  profile.
+- **Your Bookmarks** is the first row on Explore. The **Bookmarks** button next to
+  Hide owned opens the whole list.
+- **Countdowns.** A bookmarked movie that's still in theaters shows how many days
+  are left until its digital release ("Digital in 23 days"), or "In theaters ·
+  digital TBA" when TMDb has no date yet. Unreleased films, shows that haven't
+  premiered and a show's announced next season count down too.
+- **Something new is out.** When a movie you were waiting on reaches digital
+  (or a show premieres, or its new season starts), a red dot appears on the
+  Explore tab and on the Bookmarks button, and the title shows "New · out now".
+  Opening your Bookmarks clears the dot. A title that was already out when you
+  bookmarked it never sets off the dot.
+- The box checks every six hours, and again when you open the list if a
+  countdown has reached zero.
+- New: `bookmarks.py` (with tests), `GET/POST /api/profiles/{id}/bookmarks`,
+  `DELETE /api/profiles/{id}/bookmarks/{kind}/{tmdb_id}`,
+  `POST /api/profiles/{id}/bookmarks/seen`, SSE `bookmarks_update`.
+
 ## [19.0.0] — 2026-09-27
 ### Admin Devices tab: who is connected, what they're doing, and what they sent
 

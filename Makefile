@@ -24,6 +24,7 @@ test:
 	python3 tests/test_epgroups.py
 	python3 tests/test_watchpurge.py
 	python3 tests/test_devactivity.py
+	python3 tests/test_bookmarks.py
 
 clean:
 	rm -rf .venv __pycache__ .env

@@ -6113,3 +6113,13 @@ device used that IP in the last 10 minutes.
 query parameters the app sends; `devactivity.redact_query` blanks them before the
 tuple is even queued. Pairing tokens appear only as a SHA-256 prefix in
 `token_map`.
+
+## A bookmark's NEW dot is a transition, not a state (19.1.0)
+
+"Something new is out" must mean *out since you started waiting*. If the dot were derived from the current status ("digital date has passed"), bookmarking a 1994 film would light it instantly, and so would every bookmark on a fresh profile. `bookmarks.advance` therefore copies a waiting status into `awaiting`, and only an `awaiting` that later resolves to `out` stamps `new`. Consequences worth knowing:
+
+- **Don't recompute `new` from `status`** anywhere (client or server). It is a persisted event, cleared only by `POST …/bookmarks/seen`.
+- **`None` status is "no evidence"**, never "released". `_bookmark_status` returns `None` for an unreachable TMDb, a missing key or an unknown id; passing `{}` or an `out` placeholder instead would fire a false notification for every awaited bookmark the first time TMDb blips.
+- `POST /bookmarks` fetches the status **before** the write. Adding first and letting the loop fill it in would leave a theaters-only film un-awaited for up to six hours, and if it went digital in that window the dot would never come.
+- The explore tile is a `<button>`, so the bookmark toggle inside it is a `span[role=button]` whose handler stops propagation. A nested `<button>` is invalid HTML and browsers hoist it out of the tile.
+- Not in the iOS offline boot (`_appOfflineBoot`) on purpose: bookmarks are server state, with no on-device copy. Offline, `loadBookmarks` just fails silently.

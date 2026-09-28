@@ -53,6 +53,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 import analyzer
 import animemap
+import bookmarks
 import bundlecheck
 import clientlog
 import refiner
@@ -13758,6 +13759,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     maint_loop      = asyncio.create_task(background_maintenance_loop())
     evict_loop      = asyncio.create_task(source_eviction_loop())
     devact_loop     = asyncio.create_task(device_activity_loop())
+    bookmark_loop   = asyncio.create_task(bookmark_release_loop())
     # Finish any delete a restart interrupted, and clear qBit `.parts` files whose
     # torrent is long gone. See "The reaper".
     _reap_kick()
@@ -13802,7 +13804,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     for t in (guard, broadcaster, dl_monitor, dvbackfill, animefill, vlc_tracker, bg_loop,
               jackett_mon, reboot_loop, autoprep_loop, update_loop, dlsched_loop,
               sysmon_loop, cachepurge_loop, subupgrade_loop, od_reaper_loop,
-              maint_loop, evict_loop, devact_loop, shotscan_task, tvui_task, rvol_guard,
+              maint_loop, evict_loop, devact_loop, bookmark_loop, shotscan_task, tvui_task, rvol_guard,
               diag_lag, diag_vitals, diag_probe):
         t.cancel()
     if remote_listener is not None:
@@ -14866,6 +14868,22 @@ class SubsConfigReq(BaseModel):
     auto_search: bool = True
     upgrade_late_subs: bool = True
     single_option: bool = True
+
+
+class BookmarkReq(BaseModel):
+    # One TMDb title, in the /api/tmdb/search candidate shape (bookmarks.normalize
+    # keeps only what a bookmark stores).
+    id: int
+    kind: str
+    title: str
+    year: str = ""
+    poster_path: str = ""
+    date: str = ""
+
+
+class BookmarkSeenReq(BaseModel):
+    # "kind:tmdb_id" keys to clear the NEW flag on; None = every bookmark.
+    keys: Optional[list[str]] = None
 
 
 class EpisodeViewReq(BaseModel):
@@ -26359,6 +26377,177 @@ async def set_profile_episode_view(profile_id: str, req: EpisodeViewReq) -> JSON
             if not views:
                 profile.pop("episode_views", None)
     return JSONResponse({"ok": True, "group_id": gid})
+
+
+# ── Bookmarks (per-profile "watch later", with release countdowns) ────────────
+# The rules — when a bookmark is waiting, and when its wait ending raises the NEW
+# flag — live in bookmarks.py. This block fetches the TMDb evidence and persists.
+# See docs/LIBRARY_DATA.md § Bookmarks.
+
+_BOOKMARK_REFRESH_SEC = 6 * 3600
+_bookmark_rechecked: dict[str, float] = {}   # key → monotonic time of the last due-date re-check
+
+
+def _bookmark_today() -> str:
+    # UTC, the same clock _movie_release_flags judges "past" by.
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+async def _bookmark_status(kind: str, tmdb_id: int) -> Optional[dict]:
+    """Where one title is in its release, or None when TMDb gave us nothing
+    (unreachable, no key, unknown id) — None never reads as "released".
+    Same paths and params as _tmdb_fetch_movie / _tmdb_fetch_tv, so this rides
+    the disk cache the show page already filled."""
+    today = _bookmark_today()
+    if kind == "movie":
+        d = await _tmdb_get(f"/movie/{tmdb_id}",
+                            {"append_to_response": "alternative_titles,videos,release_dates"})
+        if not d or not d.get("id"):
+            return None
+        return bookmarks.movie_status(_movie_release_flags(d), d.get("release_date") or "", today)
+    if kind == "tv":
+        d = await _tmdb_get(f"/tv/{tmdb_id}",
+                            {"append_to_response": "alternative_titles,videos,external_ids"})
+        if not d or not d.get("id"):
+            return None
+        return bookmarks.tv_status(d, today)
+    return None
+
+
+def _profile_or_404(lib: dict, profile_id: str) -> dict:
+    profile = next((p for p in lib.get("profiles", []) if p["id"] == profile_id), None)
+    if not profile:
+        raise HTTPException(404, "Profile not found.")
+    return profile
+
+
+async def _refresh_bookmarks(only: Optional[set] = None) -> int:
+    """Re-check every bookmarked title (or just the `only` keys) against TMDb and
+    persist what moved. Returns how many NEW flags were raised. One TMDb call per
+    distinct title however many profiles bookmarked it."""
+    lib = await get_library()
+    wanted: set[tuple[str, int]] = set()
+    for p in lib.get("profiles", []):
+        for e in p.get("bookmarks") or []:
+            k = bookmarks.key(e.get("kind", ""), e.get("id", 0))
+            if only is None or k in only:
+                wanted.add((e.get("kind", ""), int(e.get("id", 0) or 0)))
+    statuses: dict[str, dict] = {}
+    for kind, tid in sorted(wanted):
+        st = await _bookmark_status(kind, tid)
+        if st is not None:
+            statuses[bookmarks.key(kind, tid)] = st
+        await asyncio.sleep(0.2)   # be gentle with TMDb on a long list
+    if not statuses:
+        return 0
+    now = _now_iso()
+    # Dry run on copies first: mutate_library always writes, and six-hourly
+    # rewrites of library.json for nothing are exactly what to avoid.
+    lib = await get_library()
+    if not any(bookmarks.advance(copy.deepcopy(e),
+                                 statuses.get(bookmarks.key(e.get("kind", ""), e.get("id", 0))), now)
+               for p in lib.get("profiles", []) for e in p.get("bookmarks") or []):
+        return 0
+    raised = 0
+    async with mutate_library() as lib:
+        for p in lib.get("profiles", []):
+            for e in p.get("bookmarks") or []:
+                had = bool(e.get("new"))
+                bookmarks.advance(e, statuses.get(bookmarks.key(e.get("kind", ""), e.get("id", 0))), now)
+                raised += int(bool(e.get("new")) and not had)
+    await broadcast("bookmarks_update", {"new": raised})
+    return raised
+
+
+async def bookmark_release_loop() -> None:
+    """Every six hours, see whether anything bookmarked has come out. TMDb's
+    movie TTL is 12 h for recent films, so most checks are disk-cache hits."""
+    await asyncio.sleep(120)   # let startup settle
+    while True:
+        try:
+            n = await _refresh_bookmarks()
+            if n:
+                log.info("bookmarks: %d newly released", n)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("bookmark_release_loop: %s", exc)
+        await asyncio.sleep(_BOOKMARK_REFRESH_SEC)
+
+
+@app.get("/api/profiles/{profile_id}/bookmarks")
+async def list_bookmarks(profile_id: str) -> JSONResponse:
+    """This profile's bookmarks in display order (newly released, then soonest
+    countdown, then most recently added), with `new_count` for the dot. A
+    preference like episode-view, so ungated."""
+    lib = await get_library()
+    profile = _profile_or_404(lib, profile_id)
+    items = bookmarks.ordered(copy.deepcopy(profile.get("bookmarks") or []))
+    # A countdown that has reached zero shouldn't wait up to six hours for the
+    # loop: re-check just those titles now (throttled), and the SSE event that
+    # follows repaints the list.
+    today, mono = _bookmark_today(), time.monotonic()
+    due = {bookmarks.key(e["kind"], e["id"]) for e in items
+           if (e.get("awaiting") or {}).get("date") and e["awaiting"]["date"] <= today}
+    due = {k for k in due if mono - _bookmark_rechecked.get(k, -1e9) > 1800}
+    if due:
+        _bookmark_rechecked.update({k: mono for k in due})
+        _spawn_bg(_refresh_bookmarks(due))
+    return JSONResponse({"bookmarks": items, "new_count": bookmarks.new_count(items),
+                         "today": _bookmark_today(), "img_base": LOCAL_IMG_BASE})
+
+
+@app.post("/api/profiles/{profile_id}/bookmarks")
+async def add_bookmark(profile_id: str, req: BookmarkReq) -> JSONResponse:
+    """Bookmark a TMDb title (idempotent). Its release status is fetched before
+    the write, so a film still in theaters shows its countdown straight away —
+    and, being awaited from the start, raises NEW the day it comes out."""
+    entry = bookmarks.normalize(req.model_dump())
+    if not entry:
+        raise HTTPException(400, "Not a TMDb title.")
+    status = await _bookmark_status(entry["kind"], entry["id"])
+    k = bookmarks.key(entry["kind"], entry["id"])
+    async with mutate_library() as lib:
+        lst = _profile_or_404(lib, profile_id).setdefault("bookmarks", [])
+        existing = next((e for e in lst if bookmarks.key(e.get("kind", ""), e.get("id", 0)) == k), None)
+        if existing is None:
+            if len(lst) >= bookmarks.MAX_BOOKMARKS:
+                raise HTTPException(400, f"Bookmark limit reached ({bookmarks.MAX_BOOKMARKS}).")
+            entry["added_at"] = _now_iso()
+            lst.append(entry)
+            existing = entry
+        bookmarks.advance(existing, status, _now_iso())
+        out = copy.deepcopy(existing)
+    return JSONResponse({"ok": True, "bookmark": out})
+
+
+@app.delete("/api/profiles/{profile_id}/bookmarks/{kind}/{tmdb_id}")
+async def remove_bookmark(profile_id: str, kind: str, tmdb_id: int) -> JSONResponse:
+    k = bookmarks.key(kind, tmdb_id)
+    async with mutate_library() as lib:
+        profile = _profile_or_404(lib, profile_id)
+        lst = profile.get("bookmarks") or []
+        profile["bookmarks"] = [e for e in lst
+                                if bookmarks.key(e.get("kind", ""), e.get("id", 0)) != k]
+        if not profile["bookmarks"]:
+            profile.pop("bookmarks", None)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/profiles/{profile_id}/bookmarks/seen")
+async def bookmarks_seen(profile_id: str, req: BookmarkSeenReq) -> JSONResponse:
+    """Clear the NEW flag — every bookmark's, or just `keys`. Called when the
+    person opens their Bookmarks list, or one newly released title."""
+    lib = await get_library()
+    profile = _profile_or_404(lib, profile_id)
+    keys = set(req.keys) if req.keys is not None else None
+    if not bookmarks.mark_seen(copy.deepcopy(profile.get("bookmarks") or []), keys):
+        return JSONResponse({"ok": True, "new_count": bookmarks.new_count(profile.get("bookmarks"))})
+    async with mutate_library() as lib:
+        profile = _profile_or_404(lib, profile_id)
+        bookmarks.mark_seen(profile.get("bookmarks") or [], keys)
+        n = bookmarks.new_count(profile.get("bookmarks"))
+    return JSONResponse({"ok": True, "new_count": n})
 
 
 @app.post("/api/profiles/{profile_id}/subtitles")

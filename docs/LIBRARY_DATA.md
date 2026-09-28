@@ -170,6 +170,14 @@ The only persistent server-side state. Lives at the project root. Accessed via `
   "episode_views": {                    // optional (18.25.0); how this profile arranges a show on its episode page.
     "1429": "63469b5dd34eb3007e7bce8a"  //   TMDb show id -> TMDb episode group id. Absent = TMDb's seasons (the default).
   },                                    //   Keyed by TMDb id so a season pack and the same show merged from singles agree.
+  "bookmarks": [                        // optional (19.1.0); watch-later list, see § Bookmarks below.
+    { "kind": "movie", "id": 693134, "title": "…", "year": "2026", "poster_path": "/….jpg",
+      "date": "2026-09-05",             //   release/air date from the card it was bookmarked from
+      "added_at": "...",
+      "status":   { "state": "theaters", "date": "2026-10-21", "what": "digital" },
+      "awaiting": { "...same as status..." },   // present while waiting; its end raises `new`
+      "new": "..." }                    //   ISO time the awaited release landed; cleared by /bookmarks/seen
+  ],
   "audio_language_pref": {              // optional (8.9.3); self-learning per-profile audio fallback.
     "lang": "jpn",                     // canonical language of the last-picked audio track
     "idx": 1,                          // slot index of that pick (for untagged multi-audio releases)
@@ -178,6 +186,17 @@ The only persistent server-side state. Lives at the project root. Accessed via `
   }
 }
 ```
+
+### Bookmarks (19.1.0)
+
+`profile.bookmarks` is a per-profile watch-later list of TMDb titles — a way to remember something without downloading it. Nothing about a bookmark touches `items`; bookmarking a title you own is fine and both badges show.
+
+The rules live in the leaf module **`bookmarks.py`** (tests: `tests/test_bookmarks.py`):
+
+- **`status`** is where the title is in its release. Movies (`movie_status`, fed by `_movie_release_flags` — the same US-first `release_dates` read as the show page's theaters banner): a home-release date on or before today → `out`; a future home date → `theaters` (already opened anywhere) or `upcoming`, counting down to that `digital` date; theatrical-only with no home date → `theaters`, date TBA; not released at all → `upcoming` to the `release` date. Shows (`tv_status`, from `/tv/{id}`): first air date ahead → `premiere`; `next_episode_to_air` being episode 1 of season ≥ 2 with a future date → `season`. Everything else is `out`.
+- **`new`** is raised by a *transition*, not a state (`advance`): while a bookmark is waiting its status is copied into `awaiting`; when a later status is `out` (or a later season than the awaited one), `new` is stamped and `awaiting` dropped. So bookmarking something already out never lights the dot, a slipped date just moves the countdown, and a TMDb failure (`None`) changes nothing. A show that is out gains `awaiting` the moment TMDb announces its next season, so a bookmarked show also notifies on new seasons.
+- **Refresh**: `bookmark_release_loop` (6 h, first run 2 min after start) re-checks every distinct bookmarked title once, via `_tmdb_get` with the same params as `_tmdb_fetch_movie` / `_tmdb_fetch_tv` so the TMDb disk cache is shared (movie TTL 12 h for anything recent). It dry-runs `advance` on copies and only takes `mutate_library` when something moved, then broadcasts `bookmarks_update`. `GET …/bookmarks` additionally re-checks titles whose awaited date is already `<= today` (throttled 30 min per title).
+- Deleting a profile deletes its bookmarks (they live on the profile). Capped at `MAX_BOOKMARKS` (500).
 
 PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "soft" — anyone with filesystem access can read the JSON, and there's no rate limiting on `verify-pin`. It is not a security boundary against someone with access to the box.
 

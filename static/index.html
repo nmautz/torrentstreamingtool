@@ -1132,6 +1132,8 @@
   <symbol id="i-warn" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M12 1.8 23.4 21H.6zM10.9 9v6h2.2V9zm0 7.6V19h2.2v-2.4z"/></symbol>
   <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13.2 2 4.8 13.5h5L8.6 22l8.6-11.5h-5z"/></symbol>
   <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 2 2.95 6.32 6.93.84-5.12 4.75L18.18 21 12 17.6 5.82 21l1.42-7.09-5.12-4.75 6.93-.84z"/></symbol>
+  <symbol id="i-bookmark" viewBox="0 0 24 24"><path d="M5.5 2h13v20L12 17.2 5.5 22z"/></symbol>
+  <symbol id="i-bookmark-o" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M5.5 2h13v20L12 17.2 5.5 22zm2.4 2.4v12.8l4.1-3 4.1 3V4.4z"/></symbol>
   <symbol id="i-menu" viewBox="0 0 24 24"><path d="M3 5.2h18v2.4H3zM3 10.8h18v2.4H3zM3 16.4h18v2.4H3z"/></symbol>
   <symbol id="i-gear" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M10 2h4v3.1c.62.16 1.21.4 1.76.71l2.19-2.19 2.83 2.83-2.19 2.19c.31.55.55 1.14.71 1.76H22v4h-3.1c-.16.62-.4 1.21-.71 1.76l2.19 2.19-2.83 2.83-2.19-2.19c-.55.31-1.14.55-1.76.71V22h-4v-3.1c-.62-.16-1.21-.4-1.76-.71l-2.19 2.19-2.83-2.83 2.19-2.19c-.31-.55-.55-1.14-.71-1.76H2v-4h3.1c.16-.62.4-1.21.71-1.76L3.62 6.45l2.83-2.83 2.19 2.19c.55-.31 1.14-.55 1.36-.6zM12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z"/></symbol>
   <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 2.8 19 9.8l-1.7 1.7-4.1-4.1V21h-2.4V7.4l-4.1 4.1L5 9.8z"/></symbol>
@@ -2136,6 +2138,11 @@
             <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
             <span id="ssTrailerLabel">Trailer</span>
           </button>
+          <button id="ssBookmarkBtn" onclick="ssToggleBookmark()"
+            class="hidden items-center gap-1 px-2 py-1 bg-white/10 hover:bg-white/20 text-white text-[10px] sm:text-xs font-bold uppercase tracking-widest transition-colors">
+            <svg class="ic" aria-hidden="true"><use href="#i-bookmark-o"/></svg>
+            <span data-lbl>Bookmark</span>
+          </button>
           <button id="ssMoreBtn" onclick="ssToggleHero()"
             class="inline-flex items-center gap-1 px-2 py-1 bg-white/10 hover:bg-white/20 text-white text-[10px] sm:text-xs font-bold uppercase tracking-widest transition-colors">
             <span data-lbl>More</span>
@@ -2665,8 +2672,10 @@
         <div class="order-3 sm:order-2 w-full sm:w-auto flex sm:flex-shrink-0 h-11 sm:h-14 border-t border-gray-800 sm:border-t-0 -mx-2 sm:mx-0">
           <button id="tabSearch" onclick="switchTab('search')"
             class="tab-btn tab-active flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap">Search</button>
-          <button id="tabExplore" onclick="switchTab('explore')"
-            class="tab-btn tab-inactive flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap">Explore</button>
+          <!-- #bmTabDot: a bookmarked title came out (see _bmRenderBadges). The
+               button's class is rewritten by switchTab, so `relative` is inline. -->
+          <button id="tabExplore" onclick="switchTab('explore')" style="position:relative"
+            class="tab-btn tab-inactive flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap">Explore<span id="bmTabDot" class="hidden absolute top-2 right-2 sm:right-1 w-2 h-2 bg-rose-500" title="A bookmarked title is out"></span></button>
           <button id="tabLibrary" onclick="switchTab('library')"
             class="tab-btn tab-inactive flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap">Library</button>
         </div>
@@ -2886,6 +2895,13 @@
             <!-- populated in JS (decades relative to the current year) -->
           </select>
           <button id="exHideOwned" type="button" onclick="exToggleHideOwned()">Hide owned</button>
+          <!-- Bookmarks: this profile's watch-later list. #exBmDot = something on it came out. -->
+          <button id="exBookmarksBtn" type="button" onclick="exOpenBookmarks()" style="position:relative"
+            class="hidden flex-shrink-0 items-center gap-1 px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide border bg-gray-900 border-gray-800 text-gray-300 hover:border-gray-600 hover:text-white transition-colors">
+            <svg class="ic" aria-hidden="true"><use href="#i-bookmark"/></svg>
+            <span>Bookmarks</span><span id="exBmCount" class="text-gray-500"></span>
+            <span id="exBmDot" class="hidden absolute -top-1 -right-1 w-2.5 h-2.5 bg-rose-500 border border-gray-950"></span>
+          </button>
         </div>
         <!-- Genre chips: single scrollable row (multi-select) -->
         <div id="exGenreChips" class="flex gap-1.5 overflow-x-auto pb-1"></div>
@@ -6676,7 +6692,7 @@ function switchTab(tab){
   document.getElementById("tabExplore").className=cls(isE);
   document.getElementById("tabLibrary").className=cls(isL);
   if(isL) loadLibrary();
-  if(isE) loadExplore();
+  if(isE){ loadExplore(); loadBookmarks(); }
 }
 
 // ── Profiles ───────────────────────────────────────────────────────────────
@@ -6764,6 +6780,7 @@ function _doSelectProfile(p){
   // profile changes — re-fetch rather than wait for the next rev bump, which may
   // not come for minutes.
   pbSessions = []; _pbRev = -1; renderElsewhere(); _pbFetchSessions();
+  loadBookmarks();   // per profile, like the list above
   if(activeTab==="library") loadLibrary();
   // M3: tell the native store whose history to record, then flush anything the
   // offline player accumulated for this profile.
@@ -14738,10 +14755,14 @@ function _exTile(c, grid){
          <span class="text-[10px] font-black uppercase tracking-widest text-gray-700 text-center line-clamp-4">${escHtml(c.title)}</span>
        </div>`;
   const badges=[];
+  const bm=_bmGet(c), bmBadge=bm&&_bmBadge(bm);
+  if(bmBadge) badges.push(`<span class="${bmBadge.cls} text-[8px] font-black uppercase tracking-widest px-1 py-0.5 leading-none">${escHtml(bmBadge.txt)}</span>`);
   if(_exInLib(c)) badges.push(`<span class="bg-green-700/90 text-white text-[8px] font-black uppercase tracking-widest px-1 py-0.5 leading-none">In Library</span>`);
-  if(_exInTheaters(c)) badges.push(`<span class="bg-amber-500/90 text-black text-[8px] font-black uppercase tracking-widest px-1 py-0.5 leading-none">In Theaters</span>`);
-  const overlay=badges.length
-    ? `<div class="absolute top-1 left-1 flex flex-col gap-0.5 items-start">${badges.join("")}</div>` : "";
+  // The bookmark's own status is exact; the list-tile heuristic only fills in without one.
+  if(!bmBadge&&_exInTheaters(c)) badges.push(`<span class="bg-amber-500/90 text-black text-[8px] font-black uppercase tracking-widest px-1 py-0.5 leading-none">In Theaters</span>`);
+  const overlay=(badges.length
+    ? `<div class="absolute top-1 left-1 right-8 flex flex-col gap-0.5 items-start">${badges.join("")}</div>` : "")
+    + _bmToggleHtml(c);
   const chip=c.kind==="movie"
     ? `<span class="font-black uppercase tracking-widest px-1 py-0.5 bg-purple-900/60 text-purple-300">Movie</span>`
     : `<span class="font-black uppercase tracking-widest px-1 py-0.5 bg-indigo-900/60 text-indigo-300">TV</span>`;
@@ -14751,7 +14772,15 @@ function _exTile(c, grid){
       <p class="text-[11px] font-bold uppercase tracking-wide text-gray-200 truncate">${escHtml(c.title)}</p>
       <div class="flex items-center gap-1.5 text-[9px] text-gray-500 mt-0.5">${chip}${c.year?`<span class="font-bold">${escHtml(c.year)}</span>`:""}${rating}</div>
     </div>`;
-  t.addEventListener("click",()=>openSearchShowFromTmdb(c));
+  // The toggle is a span inside the tile's <button> (a button can't nest one),
+  // so it has to stop the click reaching the tile.
+  const tog=t.querySelector("[data-bm-key]");
+  if(tog){
+    const fire=e=>{ e.stopPropagation(); e.preventDefault(); toggleBookmark(c); };
+    tog.addEventListener("click",fire);
+    tog.addEventListener("keydown",e=>{ if(e.key==="Enter"||e.key===" ") fire(e); });
+  }
+  t.addEventListener("click",()=>{ _bmSeenOne(c); openSearchShowFromTmdb(c); });
   return t;
 }
 
@@ -14798,6 +14827,7 @@ function _exRenderFilterBar(){
 function exSetKind(k){
   if(_exKind===k) return;
   _exKind=k;
+  if(_bmView){ _exRenderChips(); _bmRenderGrid(); return; }
   // Drop any selected genres the new kind doesn't have (e.g. movie "Action"
   // after switching to Shows-only).
   _exSelGenres=_exSelGenres.filter(n=>{
@@ -14829,7 +14859,7 @@ function exToggleHideOwned(){
 // ── Rails view ──
 function _exShowRails(){
   const seq=++_exSeq;
-  _exGridState=null;
+  _exGridState=null; _bmView=false; _bmViewNew=new Set();
   document.getElementById("exploreGridWrap").classList.add("hidden");
   const rails=document.getElementById("exploreRails");
   rails.classList.remove("hidden");
@@ -14847,6 +14877,7 @@ function _exShowRails(){
     rails.appendChild(sec);
     _exFillRail(sec, def, seq);
   });
+  _exRenderBmRail();
 }
 async function _exFillRail(sec, def, seq){
   try{
@@ -14873,8 +14904,9 @@ function _exOpenFilterGrid(){
                minRating:_exMinRating, title:bits.join(" · ")});
 }
 function _exOpenGrid(st){
-  _exSeq++;
+  _exSeq++; _bmView=false; _bmViewNew=new Set();
   _exGridState={...st, page:0, totalPages:1};
+  document.getElementById("exGridEmpty").textContent="Nothing found";
   document.getElementById("exploreRails").classList.add("hidden");
   document.getElementById("exploreGridWrap").classList.remove("hidden");
   document.getElementById("exGridTitle").textContent=st.title;
@@ -14951,6 +14983,174 @@ function exCloseGrid(){
   _exShowRails();
 }
 
+// ── Bookmarks: per-profile "watch later" (see docs/FRONTEND.md § Bookmarks) ──
+// The server owns the release rules (bookmarks.py): each entry carries
+// `status` {state: out|theaters|upcoming, date, what, season?} and `new` once
+// an awaited release has happened. The client only counts days and draws.
+let _bmList=[];             // this profile's bookmarks, server display order
+let _bmKeys=new Set();      // "kind:id"
+let _bmToday="";            // server UTC date the countdowns count from
+let _bmSeq=0;               // invalidates a superseded loadBookmarks
+let _bmView=false;          // Explore is showing the Bookmarks grid
+let _bmViewNew=new Set();   // keys NEW when the view opened: the badge outlives the seen-POST
+
+const _bmKey=c=>`${c.kind}:${c.id}`;
+const _bmGet=c=>_bmKeys.has(_bmKey(c))?(_bmList.find(b=>_bmKey(b)===_bmKey(c))||{kind:c.kind,id:c.id}):null;
+const _bmApi=(pid,tail="")=>`/api/profiles/${encodeURIComponent(pid)}/bookmarks${tail}`;
+
+async function loadBookmarks(){
+  const pid=profile.id, seq=++_bmSeq;
+  if(!pid){ _bmList=[]; _bmKeys=new Set(); _bmRenderBadges(); _bmRefreshViews(); return; }
+  try{
+    const r=await fetch(_bmApi(pid));
+    if(!r.ok) return;
+    const d=await r.json();
+    if(seq!==_bmSeq||pid!==profile.id) return;
+    _bmList=d.bookmarks||[]; _bmToday=d.today||"";
+    _bmKeys=new Set(_bmList.map(_bmKey));
+    if(d.img_base) _exImgBase=d.img_base;
+  }catch(_){ return; }
+  _bmRenderBadges();
+  _bmRefreshViews();
+}
+// Whole days from the server's today to `iso` (null when undated).
+function _bmDays(iso){
+  if(!iso) return null;
+  const a=Date.parse(iso+"T00:00:00Z");
+  const t=_bmToday?Date.parse(_bmToday+"T00:00:00Z"):Date.parse(new Date().toISOString().slice(0,10)+"T00:00:00Z");
+  return isNaN(a)||isNaN(t)?null:Math.round((a-t)/86400000);
+}
+// The tile/button badge for a bookmark, or null when there's nothing to say.
+function _bmBadge(b){
+  if(b.new||_bmViewNew.has(_bmKey(b))) return {cls:"bg-rose-600 text-white", txt:"New · out now"};
+  const st=b.status||{};
+  if(st.state!=="theaters"&&st.state!=="upcoming") return null;
+  const d=_bmDays(st.date);
+  const when=d==null?"":d<=0?"today":d===1?"tomorrow":`in ${d} days`;
+  let txt;
+  if(st.what==="digital") txt=d==null?(st.state==="theaters"?"In theaters · digital TBA":"Digital TBA"):`Digital ${when}`;
+  else if(st.what==="season") txt=d==null?`Season ${st.season} soon`:`Season ${st.season} ${when}`;
+  else if(st.what==="premiere") txt=d==null?"Coming soon":`Premieres ${when}`;
+  else txt=d==null?"Coming soon":`Out ${when}`;
+  return {cls:"bg-amber-500/90 text-black", txt};
+}
+function _bmToggleHtml(c){
+  if(!profile.id) return "";
+  const on=_bmKeys.has(_bmKey(c));
+  return `<span role="button" tabindex="0" data-bm-key="${escHtml(_bmKey(c))}" title="${on?"Remove bookmark":"Bookmark"}" aria-label="${on?"Remove bookmark":"Bookmark"}" aria-pressed="${on}"
+    class="absolute top-1 right-1 w-7 h-7 flex items-center justify-center bg-black/65 hover:bg-black/90 ${on?"text-amber-400":"text-gray-200"} transition-colors"><svg class="ic" aria-hidden="true"><use href="#i-bookmark${on?"":"-o"}"/></svg></span>`;
+}
+// Repaint every visible toggle in place (rails and grid keep their scroll).
+function _bmSyncToggles(){
+  document.querySelectorAll("[data-bm-key]").forEach(el=>{
+    const on=_bmKeys.has(el.dataset.bmKey);
+    el.classList.toggle("text-amber-400",on); el.classList.toggle("text-gray-200",!on);
+    const lbl=on?"Remove bookmark":"Bookmark";
+    el.title=lbl; el.setAttribute("aria-label",lbl); el.setAttribute("aria-pressed",on);
+    const u=el.querySelector("use"); if(u) u.setAttribute("href",on?"#i-bookmark":"#i-bookmark-o");
+  });
+  _ssRenderBookmarkBtn();
+}
+function _bmRenderBadges(){
+  const n=_bmList.filter(b=>b.new).length;
+  document.getElementById("bmTabDot").classList.toggle("hidden",!n);
+  document.getElementById("exBmDot").classList.toggle("hidden",!n);
+  const btn=document.getElementById("exBookmarksBtn");
+  btn.classList.toggle("hidden",!profile.id); btn.classList.toggle("flex",!!profile.id);
+  document.getElementById("exBmCount").textContent=_bmList.length?`· ${_bmList.length}`:"";
+  btn.title=n?`${n} bookmarked title${n===1?" is":"s are"} out`:"Bookmarks";
+}
+function _bmRefreshViews(){
+  _bmSyncToggles();
+  if(activeTab!=="explore") return;
+  if(_bmView) _bmRenderGrid();
+  else if(_exEnabled&&!document.getElementById("exploreRails").classList.contains("hidden")) _exRenderBmRail();
+}
+async function toggleBookmark(c){
+  const pid=profile.id;
+  if(!pid){ showAlert("Pick a profile to bookmark titles.","warn"); return; }
+  const k=_bmKey(c), on=_bmKeys.has(k);
+  // Optimistic: the icon flips now, the reload below settles it either way.
+  if(on){ _bmKeys.delete(k); _bmList=_bmList.filter(b=>_bmKey(b)!==k); }
+  else { _bmKeys.add(k); _bmList=[{kind:c.kind,id:c.id,title:c.title,year:c.year||"",poster_path:c.poster_path||"",date:c.date||""},..._bmList]; }
+  _bmSyncToggles(); _bmRenderBadges();
+  try{
+    const r=on
+      ? await fetch(_bmApi(pid,`/${c.kind}/${encodeURIComponent(c.id)}`),{method:"DELETE"})
+      : await fetch(_bmApi(pid),{method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({id:+c.id,kind:c.kind,title:c.title||"",year:String(c.year||""),
+                               poster_path:c.poster_path||"",date:c.date||""})});
+    if(!r.ok){
+      const d=await r.json().catch(()=>({}));
+      throw new Error(d.detail||`HTTP ${r.status}`);
+    }
+    if(!on){
+      const b=((await r.json()).bookmark)||{};
+      const badge=_bmBadge({...b,new:false});
+      showAlert(badge?`Bookmarked · ${badge.txt}`:"Bookmarked","success");
+    }
+  }catch(e){ showAlert(`Couldn't update bookmark: ${e.message||e}`,"error"); }
+  loadBookmarks();
+}
+// Clear NEW on one title the person just opened.
+function _bmSeenOne(c){
+  const b=_bmGet(c);
+  if(!b||!b.new||!profile.id) return;
+  b.new=null; _bmRenderBadges();
+  fetch(_bmApi(profile.id,"/seen"),{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({keys:[_bmKey(c)]})}).catch(()=>{});
+}
+// Bookmark entries in the Explore candidate shape (what _exTile + the show page take).
+const _bmCands=()=>_bmList.map(b=>({id:b.id,kind:b.kind,title:b.title,year:b.year,poster_path:b.poster_path,date:b.date}));
+// "Your Bookmarks" — the first rail, when there are any. Re-rendered in place.
+function _exRenderBmRail(){
+  const rails=document.getElementById("exploreRails");
+  let sec=document.getElementById("exBmRail");
+  const cands=_bmCands().filter(c=>!_exKind||c.kind===_exKind);
+  if(!cands.length){ if(sec) sec.remove(); return; }
+  if(!sec){
+    sec=document.createElement("section"); sec.id="exBmRail";
+    rails.prepend(sec);
+  }
+  const n=_bmList.filter(b=>b.new&&(!_exKind||b.kind===_exKind)).length;
+  sec.innerHTML=`
+    <div class="flex items-center justify-between mb-2">
+      <h2 class="text-sm font-black uppercase tracking-wide border-l-4 border-amber-500 pl-2 flex items-center gap-2">Your Bookmarks${n?`<span class="bg-rose-600 text-white text-[9px] font-black px-1.5 py-0.5 leading-none">${n} new</span>`:""}</h2>
+      <button type="button" class="ex-more text-[11px] font-bold uppercase tracking-wide text-gray-500 hover:text-gray-300 transition-colors">All ›</button>
+    </div>
+    <div class="ex-rail-row flex gap-2 overflow-x-auto pb-2"></div>`;
+  sec.querySelector(".ex-more").addEventListener("click",exOpenBookmarks);
+  const row=sec.querySelector(".ex-rail-row");
+  cands.slice(0,20).forEach(c=>row.appendChild(_exTile(c,false)));
+}
+function exOpenBookmarks(){
+  if(!profile.id) return;
+  _exSeq++; _exGridState=null; _bmView=true;
+  _bmViewNew=new Set(_bmList.filter(b=>b.new).map(_bmKey));
+  document.getElementById("exploreRails").classList.add("hidden");
+  document.getElementById("exploreGridWrap").classList.remove("hidden");
+  document.getElementById("exGridSections").classList.add("hidden");
+  document.getElementById("exMoreBtn").classList.add("hidden");
+  document.getElementById("exGridTitle").textContent="Bookmarks";
+  _bmRenderGrid();
+  // Opening the list is what "seeing" the notification means. The NEW badges
+  // stay on the tiles for this visit (_bmViewNew); the dots go now.
+  if(_bmViewNew.size){
+    _bmList.forEach(b=>{ b.new=null; }); _bmRenderBadges();
+    fetch(_bmApi(profile.id,"/seen"),{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({})}).catch(()=>{});
+  }
+}
+function _bmRenderGrid(){
+  const grid=document.getElementById("exGrid");
+  const items=_bmCands().filter(c=>!_exKind||c.kind===_exKind);
+  grid.innerHTML="";
+  items.forEach(c=>grid.appendChild(_exTile(c,true)));
+  const empty=document.getElementById("exGridEmpty");
+  empty.textContent=_bmList.length?"No bookmarks of this kind":"No bookmarks yet — tap the bookmark on any poster";
+  empty.classList.toggle("hidden",items.length>0);
+}
+
 // ── Inline Explore search (debounced TMDb title lookup → same poster grid) ──
 function exSearchInput(v){
   const q=(v||"").trim();
@@ -14965,7 +15165,8 @@ function exClearSearch(){
   _exSearchQ=""; _exApply();
 }
 async function _exShowSearch(){
-  const q=_exSearchQ, seq=++_exSearchSeq; _exSeq++; _exGridState=null;
+  const q=_exSearchQ, seq=++_exSearchSeq; _exSeq++; _exGridState=null; _bmView=false; _bmViewNew=new Set();
+  document.getElementById("exGridEmpty").textContent="Nothing found";
   document.getElementById("exploreRails").classList.add("hidden");
   document.getElementById("exploreGridWrap").classList.remove("hidden");
   document.getElementById("exGridSections").classList.add("hidden");
@@ -15601,6 +15802,7 @@ async function openSearchShow(group){
   document.getElementById("ssTheaterBanner").classList.add("hidden");
   _ssWatch=null; _ssRenderWatch();
   _ssTwin=null; _ssRenderTwinBanner();
+  _ssBmCand=null; _ssRenderBookmarkBtn();   // needs TMDb metadata first
   _ssResetHero();
   document.getElementById("ssLibraryBanner").classList.add("hidden");
 
@@ -15664,6 +15866,7 @@ async function openSearchShowFromTmdb(cand, opts){
   document.getElementById("ssTheaterBanner").classList.add("hidden");
   _ssWatch=null; _ssRenderWatch();
   _ssTwin=null; _ssRenderTwinBanner();
+  _ssBmCand={group, cand}; _ssRenderBookmarkBtn();
   _ssResetHero();
   _ssRenderLibraryBanner();
 
@@ -16005,9 +16208,36 @@ function _ssRenderHero(){
   _ssRenderTheaterBanner();
   _ssRenderTwinBanner();
   _ssRenderLibraryBanner();
+  _ssRenderBookmarkBtn();
   _ssLoadWatch();
   _ssUpdateTrailerBtn();
 }
+// Bookmark button in the hero. The candidate comes from the Explore/Search
+// card that opened the page (exact TMDb id), else from the TMDb metadata the
+// grouped-search path resolved — never from a guess, so no id means no button.
+let _ssBmCand=null;   // {group, cand}: valid only while _ssGroup===group
+function _ssBookmarkCand(){
+  if(_ssBmCand&&_ssBmCand.group===_ssGroup) return _ssBmCand.cand;
+  const m=_ssMeta;
+  if(!m||!m.tmdb_id||!["tv","movie"].includes(m.tmdb_kind)) return null;
+  const date=m.release_date||m.first_air_date||"";
+  return {id:m.tmdb_id, kind:m.tmdb_kind, title:m.title||"", year:date.slice(0,4),
+          poster_path:m.poster_path||"", date};
+}
+function _ssRenderBookmarkBtn(){
+  const btn=document.getElementById("ssBookmarkBtn"); if(!btn) return;
+  const c=_ssBookmarkCand();
+  const show=!!(c&&profile.id);
+  btn.classList.toggle("hidden",!show); btn.classList.toggle("inline-flex",show);
+  if(!show) return;
+  const b=_bmGet(c), badge=b&&_bmBadge(b);
+  btn.querySelector("use").setAttribute("href",b?"#i-bookmark":"#i-bookmark-o");
+  btn.classList.toggle("text-amber-300",!!b); btn.classList.toggle("text-white",!b);
+  btn.querySelector("[data-lbl]").textContent=b?(badge?`Bookmarked · ${badge.txt}`:"Bookmarked"):"Bookmark";
+  btn.title=b?"Remove from your bookmarks":"Remember this for later — nothing is downloaded";
+}
+function ssToggleBookmark(){ const c=_ssBookmarkCand(); if(c) toggleBookmark(c); }
+
 // "Theaters only" warning: a movie that opened in cinemas within the last year
 // and has no digital / disc / TV release yet won't have a real home-quality
 // torrent — only camera recordings. The server only sets `theatrical_only`
@@ -29598,6 +29828,9 @@ function connectSSE(){
     try{ _pid=(JSON.parse(e.data||"{}")||{}).item_id||""; }catch(_){}
     if(_epConcerns(_pid, true)) _epLiveRefresh();
   });
+  // A bookmarked title came out (bookmark_release_loop). Reload: the dots and
+  // badges come from the list, and this fires at most every few hours.
+  es.addEventListener("bookmarks_update",()=>{ _noteSSEMsg(); loadBookmarks(); });
   es.addEventListener("metadata_update",e=>{
     _noteSSEMsg();
     // A background TMDb fetch just landed for an item whose episode page we
@@ -30018,7 +30251,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
       try{
         const profiles=await fetchProfiles();
         const found=profiles.find(x=>x.id===p.id);
-        if(found){ profile=found; applySimpleUi(); renderNavProfile(); applyMaxVolumeToSliders(); loadSearchIndexers(); _appSyncSetProfile(); _appFlushOfflineProgress(); connectSSE(); _appProxiedAutoPlay(); _maybePromptForPin(found); return; }
+        if(found){ profile=found; applySimpleUi(); renderNavProfile(); applyMaxVolumeToSliders(); loadSearchIndexers(); _appSyncSetProfile(); _appFlushOfflineProgress(); connectSSE(); _appProxiedAutoPlay(); _maybePromptForPin(found); loadBookmarks(); return; }
         // Saved profile no longer exists on the server (deleted/renamed id).
         if(window.__appShowError) window.__appShowError("Saved profile id "+p.id+" not found among "+profiles.length+" server profiles.");
       } catch(e){
@@ -30034,6 +30267,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.0.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.1.0</div>
 </body>
 </html>
