@@ -2142,6 +2142,14 @@
           </button>
         </div>
         <p id="ssOverview" class="text-xs sm:text-sm text-gray-300 mt-2 line-clamp-3 sm:line-clamp-4"></p>
+        <!-- The same work under TMDb's other kind (a series TMDb also files as a
+             film, or the reverse), matched by shared IMDb id. See _tmdb_twin. -->
+        <div id="ssTwinBanner" class="hidden mt-2 flex items-center gap-2 flex-wrap bg-indigo-950/60 border border-indigo-800/70 px-2.5 py-1.5">
+          <span class="w-2 h-2 bg-indigo-400 flex-shrink-0"></span>
+          <p data-txt class="text-[10px] sm:text-xs text-indigo-200 uppercase tracking-wide font-bold leading-snug flex-1 min-w-0"></p>
+          <button data-open onclick="ssOpenTwin()"
+            class="text-[10px] px-2 py-1 bg-indigo-700 hover:bg-indigo-600 text-white uppercase tracking-wide transition-colors flex-shrink-0"></button>
+        </div>
         <div id="ssTheaterBanner" class="hidden mt-2 flex items-start gap-2 bg-amber-950/60 border border-amber-800/70 px-2.5 py-1.5">
           <svg class="w-4 h-4 flex-shrink-0 text-amber-400 mt-0.5" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-warn"/></svg>
           <p data-txt class="text-[10px] sm:text-xs text-amber-200 uppercase tracking-wide font-bold leading-snug"></p>
@@ -15150,6 +15158,27 @@ function _ssOwnedBadge(season,episode){
     : `<span class="text-[9px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-emerald-900/70 text-emerald-300 whitespace-nowrap">Downloaded</span>`;
 }
 
+// TMDb files a few works twice — O.J.: Made in America is both a film and a
+// five-part series — and the one a search or an Explore rail lands on may not be
+// the one the user meant. `_ssTwin` is the other entry (server: _tmdb_twin).
+let _ssTwin=null;
+function _ssRenderTwinBanner(){
+  const b=document.getElementById("ssTwinBanner");
+  if(!b) return;
+  const t=_ssTwin;
+  if(!t){ b.classList.add("hidden"); return; }
+  const tv=t.kind==="tv";
+  b.querySelector("[data-txt]").textContent=tv
+    ?"TMDb also lists this as a series, with episodes"
+    :"TMDb also lists this as a film";
+  b.querySelector("[data-open]").textContent=tv?"View episodes":"Open film";
+  b.classList.remove("hidden");
+}
+function ssOpenTwin(){
+  const t=_ssTwin; if(!t) return;
+  openSearchShowFromTmdb(t);
+}
+
 function _ssRenderLibraryBanner(){
   const b=document.getElementById("ssLibraryBanner");
   if(!b) return;
@@ -15408,6 +15437,7 @@ async function openSearchShow(group){
   document.getElementById("ssPosterFallback").classList.remove("hidden");
   document.getElementById("ssTheaterBanner").classList.add("hidden");
   _ssWatch=null; _ssRenderWatch();
+  _ssTwin=null; _ssRenderTwinBanner();
   _ssResetHero();
   document.getElementById("ssLibraryBanner").classList.add("hidden");
 
@@ -15426,7 +15456,7 @@ async function openSearchShow(group){
     if(r.ok){
       const d=await r.json();
       if(_ssGroup===group && d.metadata){   // still the open show
-        _ssMeta=d.metadata; _ssImgBase=d.img_base||_ssImgBase;
+        _ssMeta=d.metadata; _ssImgBase=d.img_base||_ssImgBase; _ssTwin=d.twin||null;
         _noteAnimeFacts(_ssMeta, d.anime);
         _ssResolveOwned();   // only now is there a TMDb identity to match on
         _ssRenderHero(); _ssRenderBody();
@@ -15470,6 +15500,7 @@ async function openSearchShowFromTmdb(cand, opts){
   document.getElementById("ssPosterFallback").classList.remove("hidden");
   document.getElementById("ssTheaterBanner").classList.add("hidden");
   _ssWatch=null; _ssRenderWatch();
+  _ssTwin=null; _ssRenderTwinBanner();
   _ssResetHero();
   _ssRenderLibraryBanner();
 
@@ -15493,7 +15524,7 @@ async function openSearchShowFromTmdb(cand, opts){
     if(r.ok){
       const d=await r.json();
       if(_ssGroup===group && d.metadata){
-        _ssMeta=d.metadata; _ssImgBase=d.img_base||_ssImgBase;
+        _ssMeta=d.metadata; _ssImgBase=d.img_base||_ssImgBase; _ssTwin=d.twin||null;
         _noteAnimeFacts(_ssMeta, d.anime);
         const seasons=_ssAllSeasons();
         // `keepSeason` callers asked for a season the RELEASES have, which TMDb
@@ -15809,6 +15840,7 @@ function _ssRenderHero(){
   if(posterSrc){ poster.src=posterSrc; poster.classList.remove("hidden"); posterFb.classList.add("hidden"); }
   else { poster.classList.add("hidden"); poster.removeAttribute("src"); posterFb.classList.remove("hidden"); }
   _ssRenderTheaterBanner();
+  _ssRenderTwinBanner();
   _ssRenderLibraryBanner();
   _ssLoadWatch();
   _ssUpdateTrailerBtn();
@@ -29792,6 +29824,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.31.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.32.0</div>
 </body>
 </html>

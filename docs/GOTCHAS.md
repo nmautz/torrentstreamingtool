@@ -6043,3 +6043,18 @@ Four traps:
   without any group *details*. Reading that as "no group places anything" (`{}`) stopped the fetch
   from ever happening, and it did on the box. `_ep_group_homes` returns `None` until every listed
   group is cached, or has been fetched this run and is gone.
+
+## TMDb files some works twice — once as a film, once as a series (18.32.0)
+
+*O.J.: Made in America* is TMDb **movie 377462** (the 467-minute theatrical cut) **and** TMDb
+**tv 66738** (the five-part ESPN series). Search returns both, but Explore's movie rails return
+only the film, and the film page has no seasons. A user who wanted the episodes reads that as
+"the app thinks this series is a movie". Nothing in our data is wrong: the user opened the other
+entry.
+
+`_tmdb_twin` finds the other entry for `/api/tmdb/lookup` and the show page offers it
+(`#ssTwinBanner`). **Match on the shared IMDb id (`/find/{imdb_id}`), never on title + year.**
+Both O.J. entries carry `tt5275892`. A film and a show that merely share a name and a year are
+different works, and linking them would send the user to the wrong one with a confident label.
+The cost is a missed twin when TMDb gives the two entries different IMDb ids (or none), in which
+case the page shows no link.

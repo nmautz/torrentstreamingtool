@@ -15723,7 +15723,33 @@ async def tmdb_lookup(title: str = "", year: int = 0, kind: str = "",
         # Same shape as the per-item metadata endpoint: the search show page
         # needs it to query an anime episode by its absolute number.
         "anime":    _anime_facts(data),
+        "twin":     await _tmdb_twin(data),
     })
+
+
+async def _tmdb_twin(meta: Optional[dict]) -> Optional[dict]:
+    """The same work filed under TMDb's OTHER kind, or None. TMDb keeps some
+    titles twice — O.J.: Made in America is movie 377462 (the theatrical cut)
+    AND tv 66738 (the five-part series) — and whichever one the user opened, the
+    other is what they may have meant. Matched ONLY by a shared IMDb id through
+    /find, never by title: "same name, same year" is a guess, one IMDb title is
+    one work. Returned in the /api/tmdb/search candidate shape so the page can
+    open it with openSearchShowFromTmdb."""
+    kind = (meta or {}).get("tmdb_kind")
+    imdb = (meta or {}).get("imdb_id") or ""
+    if kind not in ("tv", "movie") or not imdb.startswith("tt"):
+        return None
+    found = await _tmdb_get(f"/find/{imdb}", {"external_source": "imdb_id"})
+    other = "movie" if kind == "tv" else "tv"
+    for r in (found or {}).get(f"{other}_results", []) or []:
+        title = r.get("title") or r.get("name") or ""
+        if not r.get("id") or not title:
+            continue
+        date = r.get("release_date") or r.get("first_air_date") or ""
+        return {"id": r["id"], "kind": other, "title": title, "year": date[:4],
+                "overview": r.get("overview") or "",
+                "poster_path": r.get("poster_path") or ""}
+    return None
 
 
 @app.get("/api/tmdb/watch")

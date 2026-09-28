@@ -363,6 +363,7 @@ Search had no way to ask the library anything, so the Death Note poster card and
 
 **Search show page.** `_ssOwned` holds the coverage row for the open show — set straight from the candidate id on the TMDb-first path, and only once metadata lands (`_ssResolveOwned`) on the Jackett-fallback path, which starts with nothing but a release title. Everything downstream reads it through `_ssOwnedEps(season)` / `_ssOwns(season, ep)`:
 
+- **`#ssTwinBanner`** in the hero (`_ssRenderTwinBanner`, painted from `_ssRenderHero`, reset on every open) — when `/api/tmdb/lookup` returns a `twin` (the same work under TMDb's other kind, matched by IMDb id), "TMDb also lists this as a series, with episodes" + **View episodes**, or "…as a film" + **Open film**; `ssOpenTwin` re-opens the page on the twin via `openSearchShowFromTmdb`. See [GOTCHAS.md](GOTCHAS.md) § TMDb files some works twice.
 - **`#ssLibraryBanner`** in the hero (`_ssRenderLibraryBanner`, painted from `_ssRenderHero`) — "Already in your library — 37 episodes · S1" + **Open in library** (`ssOpenInLibrary`: closes the page; when it was stacked over `#episodePage` by a library handoff, closing is all that's needed, else it switches to the Library tab and opens `openSeriesPage` / `openEpisodePicker`).
 - **Season tabs** carry `owned/total` (`seasons_total` from coverage, falling back to `_tmdbSeasonEpisodes`), green once complete.
 - **`_ssEpRowHtml`** adds `_ssOwnedBadge` (**Downloaded** / **Downloading**) and an emerald left edge.

@@ -1,5 +1,19 @@
 # Changelog
 
+## [18.32.0] — 2026-09-27
+### A title TMDb lists as both a film and a series links to the other one
+
+- **A searched page now links to the same show under its other form.** TMDb
+  lists a few works twice. *O.J.: Made in America* is both a film (the
+  theatrical cut) and a five-part series. Opening the film, from Explore's
+  movie lists or the **Movie** search result, showed no episodes and gave no
+  hint that the series existed. The page now shows "TMDb also lists this as a
+  series, with episodes" with a **View episodes** button, and the series page
+  shows **Open film** the other way round.
+- The two entries are matched only when TMDb gives them the **same IMDb id**,
+  never by a matching title and year, so an unrelated film and show that happen
+  to share a name are never linked.
+
 ## [18.31.0] — 2026-09-27
 ### A searched show's header folds away so its downloads stay reachable
 
