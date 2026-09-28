@@ -1,5 +1,18 @@
 # Changelog
 
+## [18.31.0] — 2026-09-27
+### A searched show's header folds away so its downloads stay reachable
+
+- **The top of a searched movie or show page now opens small.** It shows a
+  small poster, two lines of the description and one row of streaming-service
+  logos. **More** opens the full header, and **Less** closes it again.
+- **The downloads can always be reached on a phone.** A long "Where to watch"
+  list (Project Hail Mary lists 13 services) used to fill the whole screen,
+  leaving no room for the download list and nothing to scroll. Now the header
+  folds down to its title bar as you scroll the list, and comes back when you
+  scroll to the top. Tapping the title scrolls back to the top. The open header
+  also never takes more than 60% of the screen.
+
 ## [18.30.7] — 2026-09-26
 ### Play on a show made of several downloads continues where you are
 

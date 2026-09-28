@@ -108,6 +108,22 @@
     .line-clamp-3 { display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
     .line-clamp-4 { display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical; overflow:hidden; }
     .line-clamp-2 { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+    /* Search show page hero (#ssHero). Collapsed by default: small poster, two
+       lines of overview, where-to-watch as one row of logos. .ss-open is the
+       full hero, capped so the download list below always keeps room.
+       .ss-scrolled (list scrolled down) folds the hero to its title bar. */
+    #ssHero:not(.ss-open) #ssPosterBox { width:4rem; }
+    #ssHero:not(.ss-open) #ssOverview { -webkit-line-clamp:2; }
+    #ssHero:not(.ss-open) #ssWatch { flex-wrap:nowrap; overflow:hidden; }
+    #ssHero:not(.ss-open) #ssWatch > a,
+    #ssHero:not(.ss-open) #ssWatch [data-list] > a { flex-shrink:0; padding-right:0; }
+    #ssHero:not(.ss-open) #ssWatch [data-wname],
+    #ssHero:not(.ss-open) #ssWatch [data-wkind],
+    #ssHero:not(.ss-open) #ssWatch [data-wlabel],
+    #ssHero:not(.ss-open) #ssWatch [data-credit] { display:none; }
+    #ssHero.ss-open { max-height:60vh; max-height:60dvh; overflow-y:auto; }
+    #ssHero.ss-open #ssMoreBtn svg { transform:rotate(180deg); }
+    #ssHero.ss-scrolled #ssHeroBody { display:none; }
     #epSeasonTabs::-webkit-scrollbar { display:none; }
     .ep-season-tab        { padding:.7rem 1rem; font-size:.7rem; font-weight:800;
                             text-transform:uppercase; letter-spacing:.08em; white-space:nowrap;
@@ -2096,11 +2112,11 @@
         </svg>
         <span class="text-[11px] font-bold uppercase tracking-widest">Back</span>
       </button>
-      <div id="ssHeaderTitle" class="text-[10px] sm:text-xs font-bold text-gray-400 uppercase tracking-widest truncate text-center flex-1 min-w-0"></div>
+      <div id="ssHeaderTitle" onclick="ssHeroToTop()" class="text-[10px] sm:text-xs font-bold text-gray-400 uppercase tracking-widest truncate text-center flex-1 min-w-0"></div>
       <div class="w-12 flex-shrink-0"></div>
     </div>
-    <div class="relative px-3 sm:px-6 pb-4 pt-1 flex gap-3 sm:gap-5">
-      <div class="flex-shrink-0 w-24 sm:w-32 bg-gray-900 border border-gray-800 flex items-center justify-center overflow-hidden">
+    <div id="ssHeroBody" class="relative px-3 sm:px-6 pb-3 pt-1 flex gap-3 sm:gap-5">
+      <div id="ssPosterBox" class="flex-shrink-0 self-start w-24 sm:w-32 aspect-[2/3] bg-gray-900 border border-gray-800 flex items-center justify-center overflow-hidden">
         <img id="ssPoster" class="w-full h-full object-cover hidden" alt=""/>
         <svg id="ssPosterFallback" class="w-10 h-10 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
@@ -2118,6 +2134,11 @@
             class="hidden items-center gap-1 px-2 py-1 bg-white/10 hover:bg-white/20 text-white text-[10px] sm:text-xs font-bold uppercase tracking-widest transition-colors">
             <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
             <span id="ssTrailerLabel">Trailer</span>
+          </button>
+          <button id="ssMoreBtn" onclick="ssToggleHero()"
+            class="inline-flex items-center gap-1 px-2 py-1 bg-white/10 hover:bg-white/20 text-white text-[10px] sm:text-xs font-bold uppercase tracking-widest transition-colors">
+            <span data-lbl>More</span>
+            <svg class="w-3 h-3 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/></svg>
           </button>
         </div>
         <p id="ssOverview" class="text-xs sm:text-sm text-gray-300 mt-2 line-clamp-3 sm:line-clamp-4"></p>
@@ -2137,7 +2158,7 @@
              data; the credit is a TMDb terms requirement). Filled by
              _ssLoadWatch once the TMDb identity is known. -->
         <div id="ssWatch" class="hidden mt-2 flex items-center gap-1.5 flex-wrap">
-          <span class="text-[10px] text-gray-400 uppercase tracking-widest font-bold mr-1">Where to watch</span>
+          <span data-wlabel class="text-[10px] text-gray-400 uppercase tracking-widest font-bold mr-1">Where to watch</span>
           <div data-list class="contents"></div>
           <a data-credit target="_blank" rel="noopener" onclick="return ssOpenWatchLink(event,this)"
             class="text-[9px] text-gray-500 hover:text-gray-300 uppercase tracking-widest ml-1">Data: JustWatch</a>
@@ -15387,6 +15408,7 @@ async function openSearchShow(group){
   document.getElementById("ssPosterFallback").classList.remove("hidden");
   document.getElementById("ssTheaterBanner").classList.add("hidden");
   _ssWatch=null; _ssRenderWatch();
+  _ssResetHero();
   document.getElementById("ssLibraryBanner").classList.add("hidden");
 
   document.getElementById("searchShowPage").classList.remove("hidden");
@@ -15448,6 +15470,7 @@ async function openSearchShowFromTmdb(cand, opts){
   document.getElementById("ssPosterFallback").classList.remove("hidden");
   document.getElementById("ssTheaterBanner").classList.add("hidden");
   _ssWatch=null; _ssRenderWatch();
+  _ssResetHero();
   _ssRenderLibraryBanner();
 
   document.getElementById("searchShowPage").classList.remove("hidden");
@@ -15503,6 +15526,40 @@ async function openSearchShowFromTmdb(cand, opts){
     else if(o.findMissing)           ssFindMissing(+o.season, o.episodes);
   }
 }
+
+// ── Hero collapse ────────────────────────────────────────────────────────────
+// The hero sits above the scrolling list (#ssBody), not inside it, so a tall
+// hero (a long where-to-watch list on a phone) used to squeeze the list to
+// nothing. It opens collapsed, More expands it (capped at 60vh in CSS), and
+// scrolling the list down folds it to the title bar; back at the top it returns.
+function _ssResetHero(){
+  const hero=document.getElementById("ssHero");
+  hero.classList.remove("ss-open","ss-scrolled"); hero.scrollTop=0;
+  document.querySelector("#ssMoreBtn [data-lbl]").textContent="More";
+  document.getElementById("ssBody").scrollTop=0;
+}
+function ssToggleHero(){
+  const hero=document.getElementById("ssHero");
+  const open=hero.classList.toggle("ss-open"); hero.scrollTop=0;
+  document.querySelector("#ssMoreBtn [data-lbl]").textContent=open?"Less":"More";
+}
+function ssHeroToTop(){
+  document.getElementById("ssBody").scrollTo({top:0, behavior:"smooth"});
+}
+function _ssOnBodyScroll(){
+  const body=document.getElementById("ssBody"), hero=document.getElementById("ssHero");
+  const st=body.scrollTop;
+  if(!hero.classList.contains("ss-scrolled")){
+    // Only fold when the list stays scrollable once the hero is gone — else
+    // folding clamps scrollTop to 0, which unfolds it again, and it flickers.
+    const hb=document.getElementById("ssHeroBody").offsetHeight;
+    if(st>24 && body.scrollHeight-body.clientHeight>hb+48) hero.classList.add("ss-scrolled");
+  } else if(st<=4) hero.classList.remove("ss-scrolled");
+}
+document.addEventListener("DOMContentLoaded",()=>{
+  const b=document.getElementById("ssBody");
+  if(b) b.addEventListener("scroll", _ssOnBodyScroll, {passive:true});
+});
 
 function closeSearchShow(){
   document.getElementById("searchShowPage").classList.add("hidden");
@@ -15817,8 +15874,8 @@ function _ssRenderWatch(){
       return `<a href="${escHtml(link)}" target="_blank" rel="noopener" onclick="return ssOpenWatchLink(event,this)"
         title="${escHtml(p.name)} — ${escHtml(kinds)}"
         class="flex items-center gap-1.5 bg-white/5 hover:bg-white/15 border border-white/10 pr-2 min-h-[26px] transition-colors">
-        ${logo}<span class="${logo?"":"pl-2 "}text-[10px] text-gray-200 font-bold uppercase tracking-wide truncate max-w-[9rem]">${escHtml(p.name)}</span>
-        <span class="text-[9px] text-gray-400 uppercase tracking-widest">${escHtml(kinds)}</span></a>`;
+        ${logo}<span ${logo?"data-wname ":""}class="${logo?"":"pl-2 "}text-[10px] text-gray-200 font-bold uppercase tracking-wide truncate max-w-[9rem]">${escHtml(p.name)}</span>
+        <span data-wkind class="text-[9px] text-gray-400 uppercase tracking-widest">${escHtml(kinds)}</span></a>`;
     }).join("");
   } else {
     const n=d.other_regions.length;
@@ -29735,6 +29792,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.30.7</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.31.0</div>
 </body>
 </html>
