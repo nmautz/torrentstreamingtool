@@ -6084,3 +6084,32 @@ Don't "reuse" `_evict_paths` for Delete Watched to get its re-checks. It would l
 **An evicted file has no source to key its bundle by.** `_offline_cache_dir(src)` stats the source, and the source is gone, so resolve the bundle via `_bundle_dir_for_file` (stored key). Before 18.34.0, `delete-files` did `if not src.exists(): continue` and so kept an evicted file's bundle and its `bundle.source_evicted` record: the row stayed Bundle Only after the user deleted it. `_delete_files_now` purges the bundle and pops the record. Popping the record matters: a file marked evicted whose bundle is gone points playback at a directory that doesn't exist.
 
 **"Watched by the selection" is not "safe to delete".** Delete Watched keeps a file if **any** profile is part-way through it, not just the chosen ones. Finishing an episode must not delete it from under a sibling who is halfway through. `watchpurge.verdict` checks in-progress before anything else.
+
+## Device tracking: the request middleware must stay I/O-free (19.0.0)
+
+`diag_track_requests` wraps **every** request, including every HLS segment.
+`_dev_capture` does no I/O: it appends a tuple and returns. Everything else
+(identity, classification, bundle-key → episode lookups that read `meta.json`,
+SQLite) runs in `device_activity_loop`. A "quick" DB insert per request there
+would put a disk write on every segment of every stream.
+
+**`X-Device-Name` must be URL-encoded.** The default names are "iPhone · Safari";
+`Headers.set` throws `TypeError` on any non-Latin-1 character. The wrapper
+catches it, so the failure is silent: the name just never arrives. The server
+`unquote`s it.
+
+**Don't let a token- or inference-matched request relabel a device.** AVPlayer on
+the phone reports `AppleCoreMedia/…`; if that overwrote the stored UA, Nathan's
+iPhone would read "iOS media player" after every background stream.
+`_dev_drain` only updates `ua`/`via` from `browser`/`anonymous` requests (or an
+`app-` device that has no browser identity).
+
+**IP-only inference is off whenever it could be wrong.** Remote phones reach the
+box through the Tailscale subnet router, so they share one source IP. Inference
+by IP alone is only for native iOS clients, and only when exactly one identified
+device used that IP in the last 10 minutes.
+
+**Secrets never reach the store.** `?device_token=` and `?profile_token=` are real
+query parameters the app sends; `devactivity.redact_query` blanks them before the
+tuple is even queued. Pairing tokens appear only as a SHA-256 prefix in
+`token_map`.

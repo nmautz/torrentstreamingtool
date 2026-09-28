@@ -4481,16 +4481,42 @@ function setProfileToken(tok){
   } catch(_){}
 }
 if(_seedTokenCookie) setProfileToken(_profileToken);
+// ── Device identity for the admin Devices tab ───────────────────────────────
+// The same localStorage UUID the playback sessions use (_pbDeviceId), mirrored
+// into a host cookie so the requests fetch doesn't make — hls.js segments,
+// EventSource, <img> — carry it too. A browser with no id yet adopts the
+// cookie's before minting one, so it stays one device across http/https.
+const DEVICE_ID_COOKIE = "streamlink_device_id";
+function _devIdSync(){
+  let id = "";
+  try { id = localStorage.getItem("streamlink_device_id") || ""; } catch(_){}
+  if(!id){
+    try {
+      const m = document.cookie.match(/(?:^|;\s*)streamlink_device_id=([^;]*)/);
+      if(m) id = decodeURIComponent(m[1]);
+    } catch(_){}
+    if(id){ try { localStorage.setItem("streamlink_device_id", id); } catch(_){} }
+  }
+  if(!id) id = _pbDeviceId();
+  try { document.cookie = `${DEVICE_ID_COOKIE}=${encodeURIComponent(id)};path=/;max-age=315360000;samesite=lax`; } catch(_){}
+  return id;
+}
+_devIdSync();
 (function(){
   const _origFetch = window.fetch.bind(window);
   window.fetch = function(input, init){
     try {
       const url = (typeof input === "string") ? input : (input && input.url) || "";
       // Same-origin API calls only — never leak the token to a third party.
-      if(_profileToken && (url.startsWith("/api/") || url.startsWith("api/"))){
+      if(url.startsWith("/api/") || url.startsWith("api/")){
         init = Object.assign({}, init);
         const h = new Headers((init && init.headers) || (typeof input !== "string" && input.headers) || {});
-        if(!h.has("X-Profile-Token")) h.set("X-Profile-Token", _profileToken);
+        if(_profileToken && !h.has("X-Profile-Token")) h.set("X-Profile-Token", _profileToken);
+        try {
+          if(!h.has("X-Device-Id")) h.set("X-Device-Id", _pbDeviceId());
+          // URL-encoded: the default names carry "·", and Headers rejects non-Latin-1.
+          if(!h.has("X-Device-Name")) h.set("X-Device-Name", encodeURIComponent(_pbDeviceName()));
+        } catch(_){}
         init.headers = h;
       }
     } catch(_){}
@@ -19474,6 +19500,7 @@ function _appProxiedSeedStorage() {
     const did = p.get("did") || "", dnm = p.get("dnm") || "";
     if (did) localStorage.setItem("streamlink_device_id", did);
     if (dnm) localStorage.setItem("streamlink_device_name", dnm);
+    if (did) _devIdSync();   // the cookie must agree, or segments land on a second device
     // The PIN proof. Without it a PIN-protected profile boots here unverified
     // and `_maybePromptForPin` asks for the PIN mid-episode — once per fresh
     // loopback storage, which is every app update that wipes it. Seeded
@@ -30007,6 +30034,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.34.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.0.0</div>
 </body>
 </html>

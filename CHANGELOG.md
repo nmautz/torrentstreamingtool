@@ -1,5 +1,32 @@
 # Changelog
 
+## [19.0.0] — 2026-09-27
+### Admin Devices tab: who is connected, what they're doing, and what they sent
+
+- **New admin tab, Devices.** Right Now shows every device active in the last
+  two minutes (or with the dashboard open) or in the last half hour, and what
+  it's doing: "Watching Frieren · S01E12", "Searched 'dune'", "Browsing the
+  library". A phone that is playing gets a position bar, and the row says
+  whether it streams from the box or plays its own downloaded copy. The TV gets
+  its own row while VLC plays.
+- **All Devices** lists every device that has ever connected, with first and last
+  seen, request count, how it was recognised and a Paired badge. You can filter
+  it.
+- **Click a device for its history.** Simple shows what it did, one line per run
+  of the same activity, with the time span, request count and failures. Raw shows
+  every request (method, path, status, time taken), searchable and paged. Both
+  are stored on the box. Raw history is kept 30 days (at most 1.5 M requests),
+  activity 365 days, and the device list until you forget a device.
+- Rename a device (admin-side name) or Forget it (deletes its history).
+- How a device is recognised: the dashboard now sends its device id with every
+  request, and keeps it in a cookie so video segments and the live event stream
+  carry it too. The iOS app's native player is matched through its pairing
+  token, which is stored hashed and never in plain text. Tokens, PINs and
+  passwords in URLs are replaced with *** before anything is stored.
+- New: `devactivity.py`, `devstore.py` (with tests), `GET /api/admin/devices`,
+  `/api/admin/devices/{id}/activity`, `/requests`, `POST .../label`,
+  `DELETE /api/admin/devices/{id}`.
+
 ## [18.34.0] — 2026-09-27
 ### Delete Watched: free space by removing what you've finished
 

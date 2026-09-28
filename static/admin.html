@@ -152,6 +152,10 @@
       class="tab-active px-4 sm:px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors whitespace-nowrap flex-shrink-0">
       Activity
     </button>
+    <button onclick="switchTab('devices')" id="tab-devices"
+      class="tab-inactive px-4 sm:px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors whitespace-nowrap flex-shrink-0">
+      Devices
+    </button>
     <button onclick="switchTab('indexers')" id="tab-indexers"
       class="tab-inactive px-4 sm:px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors whitespace-nowrap flex-shrink-0">
       Indexers
@@ -239,6 +243,72 @@
   </div>
 
   <!-- ── Indexers Tab ──────────────────────────────────────────────────────────── -->
+  <!-- ── Devices Tab ────────────────────────────────────────────────────────────
+       Who is connected and what they are doing (Right Now), every device that
+       has ever connected (All Devices), and per device a Simple / Raw history.
+       Backed by /api/admin/devices*; see docs/DIAGNOSTICS.md § Devices. -->
+  <div id="panelDevices" class="hidden flex-1 overflow-y-auto p-3 sm:p-5 max-w-4xl mx-auto w-full space-y-4">
+    <div id="devListView" class="space-y-4">
+      <div class="bg-gray-900 border border-gray-800">
+        <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+          <div class="min-w-0">
+            <h2 class="text-sm font-black uppercase tracking-wide">Right Now<span class="help-tip" tabindex="0" data-tip="Active: sent a request in the last 2 minutes, or has the dashboard open (its live event stream is connected). Recent: within the last 30 minutes. What a device is doing is read from its requests, and from the player's own heartbeat while it plays, which also covers a phone playing its downloaded copy.">?</span></h2>
+            <p class="text-xs text-gray-500 mt-0.5">Devices using the box now, and what they're doing. Refreshes every 5 s while this tab is open.</p>
+          </div>
+          <button onclick="loadDevices(this)"
+            class="text-xs text-indigo-400 hover:text-indigo-300 uppercase tracking-wide font-bold transition-colors flex-shrink-0">
+            Refresh
+          </button>
+        </div>
+        <div id="devSummary" class="px-5 py-3 border-b border-gray-800 flex flex-wrap gap-2 text-[10px] font-bold uppercase tracking-widest"></div>
+        <div id="devNow" class="divide-y divide-gray-800">
+          <div class="px-5 py-8 text-center text-gray-600 text-sm">Loading…</div>
+        </div>
+      </div>
+
+      <div class="bg-gray-900 border border-gray-800">
+        <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3 flex-wrap">
+          <div class="min-w-0">
+            <h2 class="text-sm font-black uppercase tracking-wide">All Devices<span class="help-tip" tabindex="0" data-tip="Every device that has ever connected, kept until you forget it. How it was recognised: Browser = the dashboard's own device id. App token = the paired iOS app. Inferred = matched to a known device by address and client. Anonymous = no id at all (curl, an old page); these are grouped by address + client.">?</span></h2>
+            <p id="devStoreLine" class="text-xs text-gray-500 mt-0.5"></p>
+          </div>
+          <input id="devFilter" type="search" placeholder="Filter…" oninput="_devRenderAll()"
+            class="bg-gray-950 border border-gray-700 px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-indigo-500 w-44">
+        </div>
+        <div id="devAll" class="divide-y divide-gray-800 text-xs"></div>
+      </div>
+    </div>
+
+    <div id="devDetailView" class="hidden bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-start justify-between gap-3 flex-wrap">
+        <div class="min-w-0">
+          <button onclick="closeDevice()" class="text-[10px] font-bold uppercase tracking-widest text-gray-500 hover:text-gray-300 mb-1">&larr; All devices</button>
+          <h2 id="devDetTitle" class="text-sm font-black uppercase tracking-wide truncate"></h2>
+          <p id="devDetFacts" class="text-[11px] text-gray-500 mt-0.5"></p>
+        </div>
+        <div class="flex items-center gap-2 flex-shrink-0">
+          <button onclick="renameDevice()" class="text-[10px] font-bold uppercase tracking-wide px-2.5 py-1.5 border border-gray-700 bg-gray-800 text-gray-300 hover:text-white">Rename</button>
+          <button onclick="forgetDevice()" class="text-[10px] font-bold uppercase tracking-wide px-2.5 py-1.5 border border-red-800 bg-red-950 text-red-300 hover:bg-red-900">Forget</button>
+        </div>
+      </div>
+      <div class="px-5 py-3 border-b border-gray-800 flex items-center justify-between gap-3 flex-wrap">
+        <div class="flex">
+          <button id="devModeSimple" onclick="setDeviceMode('simple')" class="text-[10px] font-black uppercase tracking-widest px-3 py-1.5 border border-gray-700">Simple</button>
+          <button id="devModeRaw" onclick="setDeviceMode('raw')" class="text-[10px] font-black uppercase tracking-widest px-3 py-1.5 border border-gray-700 border-l-0">Raw</button>
+        </div>
+        <div class="flex items-center gap-2">
+          <input id="devRawQ" type="search" placeholder="Search path / kind…" onkeydown="if(event.key==='Enter')loadDeviceHistory(true)"
+            class="hidden bg-gray-950 border border-gray-700 px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-indigo-500 w-48">
+          <button onclick="loadDeviceHistory(true)" class="text-xs text-indigo-400 hover:text-indigo-300 uppercase tracking-wide font-bold">Refresh</button>
+        </div>
+      </div>
+      <div id="devHistory" class="text-xs"></div>
+      <div class="px-5 py-3 border-t border-gray-800">
+        <button id="devMoreBtn" onclick="loadDeviceHistory(false)" class="hidden text-xs text-indigo-400 hover:text-indigo-300 uppercase tracking-wide font-bold">Load older</button>
+      </div>
+    </div>
+  </div>
+
   <div id="panelIndexers" class="hidden flex-1 overflow-y-auto p-3 sm:p-5 space-y-6 max-w-2xl mx-auto w-full">
 
     <!-- Categories override -->
@@ -2197,7 +2267,7 @@ function showDashboard(){
   // Deep link: the dashboard's first-run checklist links here as /admin#indexers
   // so "Fix" jumps straight to the relevant tab instead of the default Activity.
   const _hashTab = (location.hash || "").replace(/^#/, "");
-  const _tabs = ["activity","indexers","content","profiles","skip","offline",
+  const _tabs = ["activity","devices","indexers","content","profiles","skip","offline",
                  "storage","cleanup","background","system","updates"];
   if(_tabs.includes(_hashTab)) switchTab(_hashTab);
 }
@@ -2228,7 +2298,7 @@ async function loadOfflineEncoder(){
 function switchTab(tab){
   activeTab = tab;
   _ensureFileLabels();
-  ["activity","indexers","content","profiles","skip","offline","storage","cleanup","background","system","updates"].forEach(t=>{
+  ["activity","devices","indexers","content","profiles","skip","offline","storage","cleanup","background","system","updates"].forEach(t=>{
     document.getElementById(`tab-${t}`).className =
       t===tab ? "tab-active px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors"
                : "tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors";
@@ -2236,6 +2306,8 @@ function switchTab(tab){
   });
   if(tab==="activity")   { loadActivity(); startActivityPolling(); }
   else                   { stopActivityPolling(); }
+  if(tab==="devices")    { if(!_devOpen) loadDevices(); startDevicesPolling(); }
+  else                   { stopDevicesPolling(); }
   if(tab==="indexers")   { loadIndexerHealth(); loadFlaresolverr(); }
   else if(_fsPollTimer)  { clearInterval(_fsPollTimer); _fsPollTimer = null; }
   if(tab==="content")    loadContentList();
@@ -2250,6 +2322,256 @@ function switchTab(tab){
   else                 { stopSysHealthPolling(); stopForcePrepPolling(); stopFileValidationPolling(); stopFileRepairPolling(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); if(!_auChangelogLoaded) loadChangelog(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
+}
+
+// ── Devices ──────────────────────────────────────────────────────────────────
+// Right Now (active + recent, polled every 5 s), All Devices (every device ever
+// seen), and a per-device detail with a Simple view (collapsed activities) and a
+// Raw view (every request). Server: /api/admin/devices*, devactivity.py.
+let _devTimer = null, _devRows = [], _devOpen = null, _devMode = "simple", _devCursor = null;
+
+// Share the dashboard's device id so this page's own requests are attributed too.
+(function(){
+  try {
+    let id = localStorage.getItem("streamlink_device_id") || "";
+    const m = document.cookie.match(/(?:^|;\s*)streamlink_device_id=([^;]*)/);
+    if(!id && m) id = decodeURIComponent(m[1]);
+    if(!id){
+      id = (crypto && crypto.randomUUID) ? crypto.randomUUID() : "d" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+    }
+    localStorage.setItem("streamlink_device_id", id);
+    document.cookie = `streamlink_device_id=${encodeURIComponent(id)};path=/;max-age=315360000;samesite=lax`;
+  } catch(_){}
+})();
+
+function startDevicesPolling(){
+  stopDevicesPolling();
+  _devTimer = setInterval(() => { if(!document.hidden && !_devOpen) loadDevices(); }, 5000);
+}
+function stopDevicesPolling(){ if(_devTimer){ clearInterval(_devTimer); _devTimer = null; } }
+
+function _devAgo(ts){
+  if(!ts) return "never";
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if(s < 45) return "just now";
+  if(s < 3600) return `${Math.round(s / 60)} min ago`;
+  if(s < 86400) return `${Math.round(s / 3600)} h ago`;
+  if(s < 86400 * 14) return `${Math.round(s / 86400)} d ago`;
+  return new Date(ts * 1000).toLocaleDateString();
+}
+function _devTime(ts){ return ts ? new Date(ts * 1000).toLocaleString() : ""; }
+function _devClock(sec){
+  if(sec == null || !isFinite(sec)) return "";
+  sec = Math.max(0, Math.round(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+  return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s).padStart(2, "0");
+}
+const _DEV_DOT = {active: "bg-emerald-500", recent: "bg-amber-500", idle: "bg-gray-600"};
+const _DEV_VIA = {browser: "Browser", "app token": "App token", inferred: "Inferred", anonymous: "Anonymous"};
+
+async function loadDevices(btn){
+  if(btn){ btn.disabled = true; _markLoading(btn, true); }
+  let d = null;
+  try{
+    const r = await fetch("/api/admin/devices", {headers: authHeader()});
+    if(r.ok) d = await r.json();
+  }catch(_){}
+  if(btn){ btn.disabled = false; _markLoading(btn, false); }
+  const now = document.getElementById("devNow");
+  if(!d){ now.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Failed to load devices.</div>`; return; }
+  if(!d.available){ now.innerHTML = `<div class="px-5 py-6 text-center text-gray-500 text-sm">The device store isn't available — see the service log.</div>`; return; }
+  _devRows = d.devices || [];
+  const live = _devRows.filter(x => x.presence !== "idle" && !x.id.startsWith("anon-") || x.presence === "active");
+  const nAct = _devRows.filter(x => x.presence === "active").length;
+  const nRec = _devRows.filter(x => x.presence === "recent").length;
+  const nPlay = _devRows.filter(x => x.playback).length + (d.tv ? 1 : 0);
+  document.getElementById("devSummary").innerHTML = [
+    `<span class="px-2.5 py-1 border ${nAct ? "border-emerald-800 text-emerald-400 bg-emerald-950/30" : "border-gray-700 text-gray-500"}">${nAct} Active</span>`,
+    `<span class="px-2.5 py-1 border ${nRec ? "border-amber-800 text-amber-300 bg-amber-950/30" : "border-gray-700 text-gray-500"}">${nRec} Recent</span>`,
+    `<span class="px-2.5 py-1 border ${nPlay ? "border-indigo-700 text-indigo-300 bg-indigo-950/40" : "border-gray-700 text-gray-500"}">${nPlay} Playing</span>`,
+  ].join("");
+  let h = "";
+  if(d.tv) h += `
+    <div class="px-5 py-3 flex items-start gap-3">
+      <span class="w-2.5 h-2.5 mt-1 flex-shrink-0 bg-indigo-500"></span>
+      <div class="min-w-0 flex-1">
+        <div class="text-sm font-bold text-gray-200">The TV <span class="text-[10px] font-bold uppercase tracking-widest text-gray-500 ml-1">VLC</span></div>
+        <div class="text-xs text-indigo-300 truncate">Playing ${_esc(d.tv.title || "something")}${d.tv.profile_name ? ` · started by ${_esc(d.tv.profile_name)}` : ""}</div>
+      </div>
+    </div>`;
+  h += live.map(_devNowRow).join("");
+  now.innerHTML = h || `<div class="px-5 py-6 text-center text-gray-600 text-sm">Nobody has used the box in the last 30 minutes.</div>`;
+  const st = d.stats || {};
+  document.getElementById("devStoreLine").textContent =
+    `${_devRows.length} device${_devRows.length !== 1 ? "s" : ""} · ${(st.requests || 0).toLocaleString()} requests kept (${st.human || "0 B"}) · `
+    + `raw history ${d.retention.raw_days} days, activity ${d.retention.activity_days} days`;
+  _devRenderAll();
+}
+
+function _devNowRow(x){
+  const pb = x.playback;
+  let play = "";
+  if(pb && pb.duration_sec){
+    const pct = Math.min(100, Math.max(0, 100 * (pb.position_sec || 0) / pb.duration_sec));
+    play = `
+      <div class="mt-1.5 h-1 bg-gray-800"><div class="h-1 ${pb.playback === "playing" ? "bg-indigo-500" : "bg-gray-500"}" style="width:${pct.toFixed(1)}%"></div></div>
+      <div class="text-[10px] text-gray-500 mt-0.5">${_devClock(pb.position_sec)} / ${_devClock(pb.duration_sec)} · ${_esc(pb.playback || "")}${pb.source === "offline" ? " · its own downloaded copy" : " · streaming from the box"}</div>`;
+  }
+  const doing = x.doing ? x.doing.text : (x.last_activity ? `Last: ${x.last_activity.text}` : "");
+  return `
+    <button onclick="openDevice(${_esc(JSON.stringify(x.id))})" class="w-full text-left px-5 py-3 flex items-start gap-3 hover:bg-gray-800/40">
+      <span class="w-2.5 h-2.5 mt-1 flex-shrink-0 ${_DEV_DOT[x.presence]}" title="${_esc(x.presence)}"></span>
+      <div class="min-w-0 flex-1">
+        <div class="flex items-baseline justify-between gap-3">
+          <span class="text-sm font-bold text-gray-200 truncate">${_esc(x.display)}${x.profile_name ? ` <span class="text-[10px] font-bold uppercase tracking-widest text-gray-500 ml-1">${_esc(x.profile_name)}</span>` : ""}</span>
+          <span class="text-[10px] text-gray-500 flex-shrink-0">${x.connected ? "connected" : _esc(_devAgo(x.last_seen))}</span>
+        </div>
+        <div class="text-xs ${x.doing ? "text-gray-300" : "text-gray-500"} truncate">${_esc(doing)}</div>
+        ${play}
+        <div class="text-[10px] text-gray-600 truncate mt-0.5">${_esc(x.ua_summary || "")} · ${_esc(x.ip || "")}</div>
+      </div>
+    </button>`;
+}
+
+function _devRenderAll(){
+  const el = document.getElementById("devAll");
+  if(!el) return;
+  const q = (document.getElementById("devFilter")?.value || "").trim().toLowerCase();
+  const rows = _devRows.filter(x => !q || [x.display, x.name, x.label, x.ua_summary, x.ip, x.profile_name, x.id]
+    .some(v => (v || "").toLowerCase().includes(q)));
+  el.innerHTML = rows.map(x => `
+    <button onclick="openDevice(${_esc(JSON.stringify(x.id))})" class="w-full text-left px-5 py-2.5 flex items-center gap-3 hover:bg-gray-800/40">
+      <span class="w-2 h-2 flex-shrink-0 ${_DEV_DOT[x.presence]}"></span>
+      <div class="min-w-0 flex-1">
+        <div class="text-gray-200 truncate">${_esc(x.display)}
+          ${x.paired ? `<span class="text-[9px] font-bold uppercase tracking-widest text-sky-400 ml-1">Paired</span>` : ""}
+          <span class="text-[9px] font-bold uppercase tracking-widest text-gray-600 ml-1">${_esc(_DEV_VIA[x.via] || x.via || "")}</span></div>
+        <div class="text-[10px] text-gray-500 truncate">${_esc(x.ua_summary || "")} · ${_esc(x.ip || "")}${x.profile_name ? ` · ${_esc(x.profile_name)}` : ""} · first seen ${_esc(_devTime(x.first_seen))}</div>
+      </div>
+      <div class="text-right flex-shrink-0">
+        <div class="text-gray-400">${_esc(_devAgo(x.last_seen))}</div>
+        <div class="text-[10px] text-gray-600">${(x.requests || 0).toLocaleString()} req</div>
+      </div>
+    </button>`).join("") || `<div class="px-5 py-6 text-center text-gray-600">No devices${q ? " match" : " yet"}.</div>`;
+}
+
+function openDevice(id){
+  _devOpen = id;
+  document.getElementById("devListView").classList.add("hidden");
+  document.getElementById("devDetailView").classList.remove("hidden");
+  _devRenderDetailHead();
+  setDeviceMode(_devMode);
+}
+
+function closeDevice(){
+  _devOpen = null;
+  document.getElementById("devDetailView").classList.add("hidden");
+  document.getElementById("devListView").classList.remove("hidden");
+  loadDevices();
+}
+
+function _devRenderDetailHead(){
+  const x = _devRows.find(r => r.id === _devOpen) || {id: _devOpen, display: _devOpen};
+  document.getElementById("devDetTitle").textContent = x.display || x.id;
+  const bits = [x.presence && (x.presence === "active" ? "Active now" : x.presence === "recent" ? "Recently active" : `Last seen ${_devAgo(x.last_seen)}`),
+                x.doing && x.doing.text, x.ua_summary, x.ip, x.profile_name && `Profile: ${x.profile_name}`,
+                x.name && x.label && `Calls itself “${x.name}”`,
+                _DEV_VIA[x.via] && `Recognised by: ${_DEV_VIA[x.via]}`,
+                x.first_seen && `First seen ${_devTime(x.first_seen)}`,
+                x.requests && `${x.requests.toLocaleString()} requests`];
+  document.getElementById("devDetFacts").textContent = bits.filter(Boolean).join(" · ");
+}
+
+function setDeviceMode(mode){
+  _devMode = mode;
+  const on = "bg-indigo-600 text-white border-indigo-600", off = "bg-gray-800 text-gray-400";
+  document.getElementById("devModeSimple").className = `text-[10px] font-black uppercase tracking-widest px-3 py-1.5 border ${mode === "simple" ? on : off + " border-gray-700"}`;
+  document.getElementById("devModeRaw").className = `text-[10px] font-black uppercase tracking-widest px-3 py-1.5 border border-l-0 ${mode === "raw" ? on : off + " border-gray-700"}`;
+  document.getElementById("devRawQ").classList.toggle("hidden", mode !== "raw");
+  loadDeviceHistory(true);
+}
+
+async function loadDeviceHistory(reset){
+  if(!_devOpen) return;
+  const box = document.getElementById("devHistory");
+  const more = document.getElementById("devMoreBtn");
+  if(reset){ _devCursor = null; box.innerHTML = `<div class="px-5 py-6 text-center text-gray-600">Loading…</div>`; }
+  const id = encodeURIComponent(_devOpen);
+  const before = _devCursor ? `&before=${_devCursor}` : "";
+  let rows = [];
+  try{
+    if(_devMode === "simple"){
+      const r = await fetch(`/api/admin/devices/${id}/activity?limit=100${before}`, {headers: authHeader()});
+      rows = r.ok ? (await r.json()).activities : [];
+    }else{
+      const q = encodeURIComponent((document.getElementById("devRawQ").value || "").trim());
+      const r = await fetch(`/api/admin/devices/${id}/requests?limit=200${before}&q=${q}`, {headers: authHeader()});
+      rows = r.ok ? (await r.json()).requests : [];
+    }
+  }catch(_){ rows = []; }
+  const html = _devMode === "simple" ? rows.map(_devActRow).join("") : rows.map(_devRawRow).join("");
+  if(reset){
+    box.innerHTML = rows.length
+      ? (_devMode === "raw" ? `<div class="px-5 py-1.5 hidden sm:grid grid-cols-[9rem_3.5rem_1fr_3rem_4rem] gap-2 text-[9px] font-bold uppercase tracking-widest text-gray-600 border-b border-gray-800"><span>Time</span><span>Method</span><span>Path</span><span>Status</span><span class="text-right">ms</span></div>` : "") + html
+      : `<div class="px-5 py-6 text-center text-gray-600">Nothing recorded${_devMode === "raw" && document.getElementById("devRawQ").value ? " matches" : " yet"}.</div>`;
+  }else{
+    box.insertAdjacentHTML("beforeend", html);
+  }
+  if(rows.length){
+    const last = rows[rows.length - 1];
+    _devCursor = _devMode === "simple" ? last.end : last.ts;
+  }
+  more.classList.toggle("hidden", rows.length < (_devMode === "simple" ? 100 : 200));
+}
+
+function _devActRow(a){
+  const span = a.end - a.start;
+  const when = span >= 60 ? `${_devTime(a.start)} – ${new Date(a.end * 1000).toLocaleTimeString()}` : _devTime(a.start);
+  const noise = ["poll", "open"].includes(a.kind);
+  return `
+    <div class="px-5 py-2 border-b border-gray-800/60 flex items-baseline justify-between gap-3 ${noise ? "text-gray-500" : ""}">
+      <div class="min-w-0">
+        <div class="${noise ? "" : "text-gray-200"} truncate">${_esc(a.text)}</div>
+        <div class="text-[10px] text-gray-600">${_esc(when)}${span >= 60 ? ` · ${_devClock(span)}` : ""}${a.profile_name ? ` · ${_esc(a.profile_name)}` : ""}</div>
+      </div>
+      <div class="text-[10px] text-gray-600 flex-shrink-0 text-right">${a.count} req${a.errors ? ` · <span class="text-red-400">${a.errors} failed</span>` : ""}</div>
+    </div>`;
+}
+
+function _devRawRow(r){
+  const tone = r.status >= 500 ? "text-red-400" : r.status >= 400 ? "text-amber-400" : "text-gray-500";
+  const full = r.path + (r.query ? "?" + r.query : "");
+  return `
+    <div class="px-5 py-1 border-b border-gray-800/40 grid grid-cols-[auto_auto_1fr_auto] sm:grid-cols-[9rem_3.5rem_1fr_3rem_4rem] gap-x-2 font-mono text-[10px] items-baseline"
+      title="${_esc(`${r.kind} · via ${r.via} · ${r.ip}${r.profile_id ? " · profile " + r.profile_id : ""}\n${r.ua}`)}">
+      <span class="text-gray-500">${_esc(new Date(r.ts * 1000).toLocaleString([], {month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit"}))}</span>
+      <span class="text-gray-400">${_esc(r.method)}</span>
+      <span class="text-gray-300 break-all col-span-4 sm:col-span-1 order-last sm:order-none">${_esc(full)}</span>
+      <span class="${tone}">${r.status || "—"}</span>
+      <span class="text-gray-600 text-right">${Math.round(r.ms)}</span>
+    </div>`;
+}
+
+async function renameDevice(){
+  if(!_devOpen) return;
+  const x = _devRows.find(r => r.id === _devOpen) || {};
+  const label = prompt("Name this device (empty to clear):", x.label || x.display || "");
+  if(label === null) return;
+  const r = await fetch(`/api/admin/devices/${encodeURIComponent(_devOpen)}/label`, {method: "POST",
+    headers: {...authHeader(), "Content-Type": "application/json"}, body: JSON.stringify({label})});
+  if(!r.ok){ showToast("Rename failed.", true); return; }
+  await loadDevices();
+  _devRenderDetailHead();
+}
+
+async function forgetDevice(){
+  if(!_devOpen) return;
+  const x = _devRows.find(r => r.id === _devOpen) || {};
+  if(!confirm(`Forget ${x.display || _devOpen}?\n\nIts whole history (activity and raw requests) is deleted. If it connects again it shows up as a new device.`)) return;
+  const r = await fetch(`/api/admin/devices/${encodeURIComponent(_devOpen)}`, {method: "DELETE", headers: authHeader()});
+  if(!r.ok){ showToast("Forget failed.", true); return; }
+  showToast("Device forgotten.");
+  closeDevice();
 }
 
 // ── Background Activity ─────────────────────────────────────────────────────────

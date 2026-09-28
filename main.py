@@ -42,6 +42,8 @@ from urllib.parse import quote, unquote, urlparse
 import httpx
 import psutil
 import diagnostics as diag
+import devactivity
+import devstore
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -13755,6 +13757,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     od_reaper_loop  = asyncio.create_task(_od_reaper())
     maint_loop      = asyncio.create_task(background_maintenance_loop())
     evict_loop      = asyncio.create_task(source_eviction_loop())
+    devact_loop     = asyncio.create_task(device_activity_loop())
     # Finish any delete a restart interrupted, and clear qBit `.parts` files whose
     # torrent is long gone. See "The reaper".
     _reap_kick()
@@ -13799,7 +13802,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     for t in (guard, broadcaster, dl_monitor, dvbackfill, animefill, vlc_tracker, bg_loop,
               jackett_mon, reboot_loop, autoprep_loop, update_loop, dlsched_loop,
               sysmon_loop, cachepurge_loop, subupgrade_loop, od_reaper_loop,
-              maint_loop, evict_loop, shotscan_task, tvui_task, rvol_guard,
+              maint_loop, evict_loop, devact_loop, shotscan_task, tvui_task, rvol_guard,
               diag_lag, diag_vitals, diag_probe):
         t.cancel()
     if remote_listener is not None:
@@ -13837,6 +13840,7 @@ async def diag_track_requests(request: Request, call_next):
     rid = next(_req_seq)
     diag.note_request_start(rid, request.method, request.url.path)
     status = 0
+    t0 = time.perf_counter()
     try:
         resp = await call_next(request)
         status = resp.status_code
@@ -13846,6 +13850,446 @@ async def diag_track_requests(request: Request, call_next):
         raise
     finally:
         diag.note_request_end(rid, status)
+        try:
+            _dev_capture(request, status, (time.perf_counter() - t0) * 1000.0)
+        except Exception:
+            pass
+
+
+# ── Device activity (admin Devices tab) ───────────────────────────────────────
+# Who is connected, what are they doing, and what did they send. The middleware
+# above only APPENDS a tuple per request (`_dev_capture`, cheap and sync); the
+# identifying, classifying, naming and SQLite writes happen in
+# `device_activity_loop` every couple of seconds, off the request path. Rules in
+# `devactivity.py`, storage in `devstore.py`. See docs/DIAGNOSTICS.md § Devices.
+#
+# Identity, strongest first:
+#   1. the client's device id — `X-Device-Id` from the dashboard's fetch wrapper,
+#      or the `streamlink_device_id` cookie it also sets (hls.js segment requests,
+#      EventSource and <img> carry the cookie but no custom header). It is the
+#      same localStorage UUID the playback sessions key on, so a device's live
+#      "Watching …" joins up with its history.
+#   2. a paired-device token (Bearer / X-Device-Token): the iOS app's native
+#      player and background downloader send only this. Mapped to the device id
+#      last seen WITH that token (`token_map`, persisted, stored hashed).
+#   3. inferred: same IP + same User-Agent as an identified device in the last
+#      10 minutes, or — for the iOS media player only — the ONE identified device
+#      on that IP. More than one there (a NAT, the Tailscale subnet router) and
+#      it isn't guessed.
+#   4. otherwise an anonymous device keyed by IP + User-Agent.
+DEVICE_DB = LOG_DIR / "devices" / "activity.sqlite3"
+DEVICE_COOKIE = "streamlink_device_id"
+_DEV_INFER_SEC = 600
+_DEV_SETTLE_SEC = 2.0          # hold a request this long so a later identified one can claim its anonymous neighbours
+_dev_store: "Optional[devstore.DeviceStore]" = None
+_dev_events: deque = deque(maxlen=50000)
+_dev_live: dict[str, dict] = {}          # device_id -> live facts + open activity lanes
+_dev_connected: dict[str, int] = {}      # device_id -> open event streams
+_dev_token_map: dict[str, str] = {}      # sha256(token)[:16] -> device_id
+_dev_ipua_seen: dict[tuple, tuple] = {}  # (ip, ua) -> (device_id, ts), identified only
+_dev_ip_seen: dict[str, dict] = {}       # ip -> {device_id: ts}, identified only
+_dev_watch_hint: dict[str, dict] = {}    # device_id -> {title, ts} from playback heartbeats
+_dev_bundle_labels: dict[str, str] = {}  # bundle key -> "Show · S01E03"
+_dev_names = {"at": 0.0, "items": {}, "series": {}, "profiles": {}, "files": {}, "by_name": {}}
+
+
+def _dev_client_ip(request: Request) -> str:
+    """The real client. The HTTPS proxy connects from loopback and says who it is
+    forwarding for; that header is trusted from loopback only."""
+    peer = request.client.host if request.client else ""
+    if peer in ("127.0.0.1", "::1"):
+        fwd = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        if fwd:
+            return fwd
+    return peer
+
+
+def _dev_request_device_id(request: Request) -> str:
+    did = (request.headers.get("x-device-id", "").strip()
+           or request.cookies.get(DEVICE_COOKIE, "").strip())
+    return did if did and _PB_DEVICE_ID_RE.match(did) else ""
+
+
+def _dev_capture(request: Request, status: int, ms: float) -> None:
+    """Queue one finished request for the Devices tab. Hot path: no I/O."""
+    path = request.url.path
+    if path == "/healthz":
+        return                       # the in-process self-probe, every few seconds
+    tok = _request_bearer(request)
+    th = hashlib.sha256(tok.encode()).hexdigest()[:16] if tok and tok in _device_tokens else ""
+    _dev_events.append((
+        time.time(), request.method, path, devactivity.redact_query(request.url.query),
+        int(status or 0), round(ms, 1), _dev_client_ip(request),
+        request.headers.get("user-agent", "")[:300], _dev_request_device_id(request),
+        unquote(request.headers.get("x-device-name", ""))[:80], th, _profile_session_id(request) or "",
+    ))
+
+
+def _dev_touch(device_id: str) -> None:
+    live = _dev_live.get(device_id)
+    if live:
+        live["last_seen"] = max(live.get("last_seen", 0), time.time())
+
+
+async def _dev_refresh_names(force: bool = False) -> None:
+    """Item / series / profile names for the simple view, refreshed every 2 min."""
+    if not force and time.time() - _dev_names["at"] < 120:
+        return
+    _dev_names["at"] = time.time()           # one refresh at a time, even if it fails
+    lib = await get_library()
+
+    def build():
+        items, series, files, by_name = {}, {}, {}, {}
+        for it in lib.get("items", []):
+            try:
+                show, _ = _item_display_names(it)
+            except Exception:
+                show = it.get("title") or ""
+            items[it.get("id")] = show
+            series.setdefault(_series_key(it), show)
+            for f in it.get("files", []):
+                if f.get("path"):
+                    files[_norm_path(f["path"])] = (it, f)
+                    by_name.setdefault(Path(f["path"]).name, (it, f))
+        return items, series, files, by_name
+
+    items, series, files, by_name = await asyncio.to_thread(build)
+    _dev_names.update({"items": items, "series": series, "files": files, "by_name": by_name,
+                       "profiles": {p.get("id"): p.get("name") or "?"
+                                    for p in lib.get("profiles", [])}})
+
+
+def _dev_file_label(path: str) -> str:
+    if not path:
+        return ""
+    # A moved source still matches by file name alone.
+    hit = _dev_names["files"].get(_norm_path(path)) or _dev_names["by_name"].get(Path(path).name)
+    if hit:
+        try:
+            lab = _file_label(hit[0], hit[1])
+            return lab.get("short") or lab.get("line1") or ""
+        except Exception:
+            pass
+    return eplabel.clean_stem(Path(path).name)
+
+
+async def _dev_bundle_label(key: str) -> str:
+    if key in _dev_bundle_labels:
+        return _dev_bundle_labels[key]
+    label = ""
+    try:
+        bdir = await _resolve_bundle_dir(key)
+        if bdir is not None:
+            meta = await asyncio.to_thread(
+                lambda: json.loads((bdir / "meta.json").read_text(encoding="utf-8")))
+            label = _dev_file_label(str(meta.get("src") or ""))
+    except Exception:
+        pass
+    if len(_dev_bundle_labels) > 5000:
+        _dev_bundle_labels.clear()
+    _dev_bundle_labels[key] = label
+    return label
+
+
+async def _dev_subject(kind: str, ref: dict, device_id: str) -> tuple:
+    """`(lane key, human subject)` for one classified request."""
+    if kind in ("watch", "stream"):
+        hint = _dev_watch_hint.get(device_id)
+        hinted = hint["title"] if hint and time.time() - hint["ts"] < 600 else ""
+        if ref.get("bundle"):
+            return "b:" + ref["bundle"], (await _dev_bundle_label(ref["bundle"])) or hinted
+        if ref.get("od"):
+            sess = _od_sessions.get(ref["od"]) or {}
+            return "o:" + ref["od"], _dev_file_label(str(sess.get("src") or "")) or hinted
+        # Heartbeats and progress posts are unnamed: they continue whatever the
+        # device is watching rather than splitting it into a second row.
+        return "", hinted or _dev_names["items"].get(ref.get("item"), "")
+    if ref.get("q"):
+        return "q:" + ref["q"].lower(), ref["q"]
+    if ref.get("item"):
+        return "i:" + ref["item"], _dev_names["items"].get(ref["item"], "")
+    if ref.get("series"):
+        k = unquote(ref["series"])
+        return "s:" + k, _dev_names["series"].get(k, "")
+    if ref.get("profile"):
+        return "p:" + ref["profile"], _dev_names["profiles"].get(ref["profile"], "")
+    if ref.get("what"):
+        return "w:" + ref["what"], ref["what"]
+    return "", ""
+
+
+def _dev_identify(ts, ip, ua, did, th) -> tuple:
+    """`(device_id, via)` for one request — see the identity ladder above."""
+    if did:
+        return did, "browser"
+    if th:
+        mapped = _dev_token_map.get(th)
+        return (mapped, "app token") if mapped else ("app-" + th[:12], "app token")
+    hit = _dev_ipua_seen.get((ip, ua))
+    if hit and ts - hit[1] < _DEV_INFER_SEC:
+        return hit[0], "inferred"
+    if devactivity.ua_summary(ua) in ("iOS media player", "iOS app (native)"):
+        near = [d for d, t in (_dev_ip_seen.get(ip) or {}).items() if ts - t < _DEV_INFER_SEC]
+        if len(near) == 1:
+            return near[0], "inferred"
+    return "anon-" + hashlib.sha256(f"{ip}|{ua}".encode()).hexdigest()[:12], "anonymous"
+
+
+async def _dev_drain() -> None:
+    now = time.time()
+    batch = []
+    while _dev_events and _dev_events[0][0] <= now - _DEV_SETTLE_SEC:
+        batch.append(_dev_events.popleft())
+    if not batch or _dev_store is None:
+        return
+    await _dev_refresh_names()
+    # Pass 1: learn identities from every identified request in the batch first,
+    # so an anonymous request that arrived a moment BEFORE its page's first
+    # identified one (the dashboard document, before its JS set the cookie) is
+    # still attributed.
+    tokens = []
+    for (ts, _m, _p, _q, _s, _ms, ip, ua, did, _n, th, _pid) in batch:
+        if did:
+            _dev_ipua_seen[(ip, ua)] = (did, ts)
+            _dev_ip_seen.setdefault(ip, {})[did] = ts
+            if th and _dev_token_map.get(th) != did:
+                _dev_token_map[th] = did
+                tokens.append((th, did, ts))
+
+    reqs, devs, dirty = [], {}, {}
+    for (ts, method, path, query, status, ms, ip, ua, did, dname, th, pid) in batch:
+        dev_id, via = _dev_identify(ts, ip, ua, did, th)
+        kind, ref = devactivity.classify(method, path, query)
+        reqs.append({"device_id": dev_id, "ts": ts, "method": method, "path": path,
+                     "query": query, "status": status, "ms": ms, "ip": ip, "ua": ua,
+                     "profile_id": pid, "kind": kind, "via": via})
+        d = devs.get(dev_id)
+        if d is None:
+            d = devs[dev_id] = {"id": dev_id, "name": "", "ua": "", "ua_summary": "", "ip": "",
+                                "via": "", "first_seen": ts, "last_seen": ts, "requests": 0,
+                                "profile_id": "", "paired": False}
+        d["requests"] += 1
+        d["last_seen"] = max(d["last_seen"], ts)
+        d["first_seen"] = min(d["first_seen"], ts)
+        d["ip"] = ip or d["ip"]
+        if via in ("browser", "anonymous") or dev_id.startswith("app-"):
+            # A request matched by token or inference is usually a different
+            # program on the same phone (AVPlayer, the background downloader); it
+            # must not relabel the device the browser identified.
+            d["ua"], d["ua_summary"], d["via"] = ua, devactivity.ua_summary(ua), via
+        d["name"] = dname or d["name"]
+        d["profile_id"] = pid or d["profile_id"]
+        d["paired"] = d["paired"] or bool(th)
+
+        live = _dev_live.setdefault(dev_id, {"lanes": {}})
+        live.update({k: d[k] for k in ("ip", "ua_summary", "via") if d[k]})
+        live["last_seen"] = max(live.get("last_seen", 0), ts)
+        if dname:
+            live["name"] = dname
+        if pid:
+            live["profile_id"] = pid
+
+        if kind == "asset":
+            continue                 # raw only: a page load is dozens of these
+        lane_kind = devactivity.canonical_kind(kind)
+        key, subject = await _dev_subject(kind, ref, dev_id)
+        lane = live["lanes"].get(lane_kind)
+        if lane is not None and devactivity.extends(lane, kind, key, ts):
+            lane["end"] = ts
+            lane["count"] += 1
+            if key and not lane.get("key"):
+                lane["key"] = key
+            if subject and not lane.get("subject"):
+                lane["subject"] = subject
+        else:
+            lane = {"device_id": dev_id, "kind": lane_kind, "key": key, "subject": subject,
+                    "start": ts, "end": ts, "count": 1, "errors": 0}
+            live["lanes"][lane_kind] = lane
+        if status >= 400:
+            lane["errors"] += 1
+        if pid:
+            lane["profile_id"] = pid
+        dirty[id(lane)] = lane
+
+    acts = list(dirty.values())
+    ids = await asyncio.to_thread(_dev_store.write, reqs, list(devs.values()), acts, tokens)
+    for lane, aid in zip(acts, ids):
+        lane["id"] = aid
+    # Drop lanes and inference memory nobody can extend any more.
+    for live in _dev_live.values():
+        for k in [k for k, ln in live["lanes"].items()
+                  if now - ln["end"] > devactivity.MERGE_GAP_SEC * 2]:
+            live["lanes"].pop(k, None)
+    for k in [k for k, v in _dev_ipua_seen.items() if now - v[1] > _DEV_INFER_SEC]:
+        _dev_ipua_seen.pop(k, None)
+    for ip in list(_dev_ip_seen):
+        seen = {d: t for d, t in _dev_ip_seen[ip].items() if now - t < _DEV_INFER_SEC}
+        if seen:
+            _dev_ip_seen[ip] = seen
+        else:
+            _dev_ip_seen.pop(ip, None)
+    for k in [k for k, v in _dev_watch_hint.items() if now - v["ts"] > 3600]:
+        _dev_watch_hint.pop(k, None)
+
+
+async def device_activity_loop() -> None:
+    """Drain the request queue into the device store every 2 s; retention hourly."""
+    global _dev_store
+    try:
+        _dev_store = await asyncio.to_thread(devstore.DeviceStore, DEVICE_DB)
+        _dev_token_map.update(await asyncio.to_thread(_dev_store.token_map))
+    except Exception:
+        log.warning("devices: store unavailable — the Devices tab will be empty", exc_info=True)
+        return
+    last_prune = 0.0
+    while True:
+        try:
+            await asyncio.sleep(2)
+            await _dev_drain()
+            if time.time() - last_prune > 3600:
+                last_prune = time.time()
+                gone = await asyncio.to_thread(_dev_store.prune, last_prune)
+                if gone["requests"] or gone["activities"]:
+                    log.info("devices: retention removed %d request(s), %d activit(ies)",
+                             gone["requests"], gone["activities"])
+        except asyncio.CancelledError:
+            await asyncio.to_thread(_dev_store.close)
+            raise
+        except Exception:
+            log.warning("devices: drain failed", exc_info=True)
+
+
+def _dev_doing(device_id: str, now: float) -> Optional[dict]:
+    """The device's current activity: its newest non-noise lane while recent,
+    else "Dashboard open" while it is still polling."""
+    lanes = (_dev_live.get(device_id) or {}).get("lanes") or {}
+    real = [ln for k, ln in lanes.items() if k not in devactivity.NOISE]
+    pick = max(real, key=lambda ln: ln["end"]) if real else None
+    if pick is None or now - pick["end"] > devactivity.ACTIVE_SEC * 2:
+        pick = None
+        poll = lanes.get("poll") or lanes.get("open")
+        if poll and now - poll["end"] <= devactivity.ACTIVE_SEC:
+            pick = poll
+    if pick is None:
+        return None
+    return {"kind": pick["kind"], "text": devactivity.describe(pick["kind"], pick.get("subject", "")),
+            "since": pick["start"], "until": pick["end"], "count": pick["count"]}
+
+
+def _dev_playback(device_id: str) -> Optional[dict]:
+    sess = state.playback_sessions.get(device_id)
+    if not sess:
+        return None
+    return {k: sess.get(k) for k in ("title", "position_sec", "duration_sec", "playback",
+                                     "source", "item_id", "profile_id")}
+
+
+@app.get("/api/admin/devices")
+async def admin_devices(request: Request) -> JSONResponse:
+    """Every device ever seen, newest first, with presence and what it is doing.
+    `presence`: active (a request in the last 2 min, or an open event stream) |
+    recent (30 min) | idle."""
+    _require_admin(request)
+    if _dev_store is None:
+        return JSONResponse({"available": False, "devices": [], "now": time.time()})
+    await _dev_refresh_names()
+    rows = await asyncio.to_thread(_dev_store.devices)
+    last = await asyncio.to_thread(_dev_store.last_activities, tuple(devactivity.NOISE))
+    stats = await asyncio.to_thread(_dev_store.stats)
+    now = time.time()
+    profiles = _dev_names["profiles"]
+    out = []
+    for d in rows:
+        did = d["id"]
+        live = _dev_live.get(did) or {}
+        last_seen = max(d["last_seen"], live.get("last_seen", 0))
+        connected = _dev_connected.get(did, 0)
+        pb = _dev_playback(did)
+        doing = _dev_doing(did, now)
+        if pb and pb.get("title"):
+            doing = {"kind": "watch", "text": f"Watching {pb['title']}",
+                     "since": (doing or {}).get("since"), "until": now, "count": 0}
+        prev = last.get(did)
+        pid = d["profile_id"]
+        out.append({
+            **d,
+            "last_seen": last_seen,
+            "display": d["label"] or live.get("name") or d["name"] or d["ua_summary"] or did,
+            "profile_name": profiles.get(pid, "") if pid else "",
+            "presence": devactivity.presence(last_seen, now, connected),
+            "connected": connected,
+            "doing": doing,
+            "playback": pb,
+            "last_activity": ({"text": devactivity.describe(prev["kind"], prev["subject"]),
+                               "at": prev["end"]} if prev else None),
+        })
+    tv = None
+    if state.library_current_file:
+        tv = {"title": _dev_file_label(state.library_current_file),
+              "profile_name": state.library_profile_name or ""}
+    return JSONResponse({"available": True, "now": now, "devices": out, "tv": tv,
+                         "stats": {**stats, "human": human_size(stats.get("bytes") or 0)},
+                         "retention": {"raw_days": devstore.RAW_KEEP_DAYS,
+                                       "raw_max_rows": devstore.RAW_MAX_ROWS,
+                                       "activity_days": devstore.ACT_KEEP_DAYS}})
+
+
+@app.get("/api/admin/devices/{device_id}/activity")
+async def admin_device_activity(request: Request, device_id: str,
+                                before: Optional[float] = None, limit: int = 100) -> JSONResponse:
+    """The simple view: collapsed activities, newest first. Page with `before`
+    (the last row's `end`)."""
+    _require_admin(request)
+    if _dev_store is None:
+        raise HTTPException(503, "Device store unavailable.")
+    rows = await asyncio.to_thread(_dev_store.activities, device_id, before, limit)
+    profiles = _dev_names["profiles"]
+    for r in rows:
+        r["text"] = devactivity.describe(r["kind"], r["subject"])
+        r["profile_name"] = profiles.get(r["profile_id"], "") if r["profile_id"] else ""
+    return JSONResponse({"device": await asyncio.to_thread(_dev_store.device, device_id),
+                         "activities": rows})
+
+
+@app.get("/api/admin/devices/{device_id}/requests")
+async def admin_device_requests(request: Request, device_id: str, before: Optional[float] = None,
+                                limit: int = 200, q: str = "") -> JSONResponse:
+    """The raw view: every request, newest first. Page with `before` (the last
+    row's `ts`); `q` matches path, query or kind. Secrets in query strings were
+    redacted before they were stored."""
+    _require_admin(request)
+    if _dev_store is None:
+        raise HTTPException(503, "Device store unavailable.")
+    rows = await asyncio.to_thread(_dev_store.requests, device_id, before, limit, q.strip())
+    return JSONResponse({"requests": rows})
+
+
+class DeviceLabelReq(BaseModel):
+    label: str = ""
+
+
+@app.post("/api/admin/devices/{device_id}/label")
+async def admin_device_label(request: Request, device_id: str, body: DeviceLabelReq) -> JSONResponse:
+    """Name a device for the admin ("Mum's iPad"). Empty clears it. Admin-only;
+    the device's own name (Settings → This Device) is untouched."""
+    _require_admin(request)
+    if _dev_store is None or not await asyncio.to_thread(_dev_store.set_label, device_id, body.label.strip()):
+        raise HTTPException(404, "Unknown device.")
+    return JSONResponse({"ok": True})
+
+
+@app.delete("/api/admin/devices/{device_id}")
+async def admin_device_forget(request: Request, device_id: str) -> JSONResponse:
+    """Delete a device and all of its recorded history. It reappears as a new
+    device if it connects again."""
+    _require_admin(request)
+    if _dev_store is None:
+        raise HTTPException(503, "Device store unavailable.")
+    n = await asyncio.to_thread(_dev_store.forget, device_id)
+    _dev_live.pop(device_id, None)
+    for th in [t for t, d in _dev_token_map.items() if d == device_id]:
+        _dev_token_map.pop(th, None)
+    return JSONResponse({"ok": True, "removed": n})
 
 
 @app.get("/healthz")
@@ -22673,6 +23117,10 @@ async def playback_session(req: PlaybackSessionReq) -> JSONResponse:
     if not _PB_DEVICE_ID_RE.match(req.device_id or ""):
         raise HTTPException(400, "device_id is missing or malformed")
     now = time.time()
+    if req.active and req.title:
+        # Names the Devices tab's "Watching …" line — including an offline play,
+        # which sends no segment requests for the host to see.
+        _dev_watch_hint[req.device_id] = {"title": req.title, "ts": now}
     sess = state.playback_sessions.get(req.device_id)
 
     if not req.active:
@@ -25018,6 +25466,11 @@ async def download_library_zip(item_id: str, req: ZipDownloadReq) -> StreamingRe
 async def events(request: Request) -> StreamingResponse:
     q: asyncio.Queue = asyncio.Queue(maxsize=100)
     state.sse_queues.append(q)
+    # An open dashboard may send nothing else for minutes; its event stream is
+    # what says the device is still here (admin Devices tab, "Active now").
+    dev_id = _dev_request_device_id(request)
+    if dev_id:
+        _dev_connected[dev_id] = _dev_connected.get(dev_id, 0) + 1
     # Opening the dashboard = a viewer is present → shed idle prep immediately, even
     # though a page load is a GET (which doesn't stamp last_activity). The for_prep
     # idle check then keeps prep paused while the tab stays open.
@@ -25045,6 +25498,13 @@ async def events(request: Request) -> StreamingResponse:
         finally:
             if q in state.sse_queues:
                 state.sse_queues.remove(q)
+            if dev_id:
+                n = _dev_connected.get(dev_id, 0) - 1
+                if n > 0:
+                    _dev_connected[dev_id] = n
+                else:
+                    _dev_connected.pop(dev_id, None)
+                    _dev_touch(dev_id)
 
     return StreamingResponse(
         stream(),

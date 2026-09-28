@@ -32,6 +32,12 @@ The important tips are **contextual**: settings loaders rewrite them from the cu
 
 ## Tabs
 
+### Devices (19.0.0)
+
+**Right Now** lists every device that is active (a request in the last 2 min, or the dashboard open) or recent (30 min). Each row shows its name, profile, what it is doing, and for a phone that is playing, a position bar and whether it streams from the box or plays its own downloaded copy. The TV gets its own row while VLC is playing. **All Devices** is every device that ever connected: name, how it was recognised (Browser / App token / Inferred / Anonymous), Paired badge, first and last seen, request count, and a filter. Refreshes every 5 s while the tab is open.
+
+Click a device for its history: **Simple** (what it did, one row per run of the same activity, with time span, request count and failures) or **Raw** (every request, searchable by path or kind, paged with Load older). **Rename** sets an admin-side name; **Forget** deletes the device and its whole history. Mechanics, identity rules and retention: [DIAGNOSTICS.md § Devices](DIAGNOSTICS.md).
+
 ### 0. Activity (default landing tab)
 
 A single read-only view of **everything the server is doing in the background right now, why, and whether it survives a restart**. Motivated by server restarts / auto-updates silently discarding in-flight work — none of the background jobs checkpoint, so a progress bar that "reset" was actually a fresh start under a restarted process, with no operator-visible reason. This is the admin **landing tab** (`activeTab = "activity"`).

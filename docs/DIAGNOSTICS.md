@@ -691,6 +691,98 @@ shows it *while it is still hanging*, the vitals line counts it (`inflight=`,
 
 Requests slower than `REQUEST_SLOW_S` are logged as `SLOW REQUEST 7.2s status=200 GET /api/library`.
 
+The same middleware feeds the **Devices** tab (next section): its `finally` calls
+`_dev_capture`, which only appends a tuple to `_dev_events`. Never put I/O there.
+
+---
+
+## Devices (admin tab, 19.0.0)
+
+**Who is connected, what are they doing, and what did they send.** Before this
+the server could not say whether a phone was streaming from it. Only the TV
+(VLC) and the players that post heartbeats were visible, and nothing kept a
+record per client.
+
+| Piece | Where |
+|---|---|
+| Capture, per request (hot path, no I/O) | `_dev_capture`, called from `diag_track_requests` |
+| Identify, classify, name, write (every 2 s) | `device_activity_loop` → `_dev_drain` |
+| Rules: request → activity, UA labels, secret redaction | `devactivity.py` (pure, tests) |
+| Storage: SQLite, WAL, three tables + token map | `devstore.py` (stdlib, tests) |
+| Endpoints | `/api/admin/devices[/{id}/activity\|/requests\|/label]`, `DELETE /api/admin/devices/{id}` |
+| UI | admin → **Devices** (`loadDevices`, `openDevice`, `loadDeviceHistory`) |
+
+### Identity
+
+A device is the dashboard's own `streamlink_device_id`: the localStorage UUID
+the playback sessions already key on. That's what lets the tab show a phone's
+live "Watching …" with a position bar, straight from `state.playback_sessions`.
+The fetch wrapper sends it as `X-Device-Id` (with `X-Device-Name`,
+URL-encoded because default names contain "·" and `Headers` rejects non-Latin-1).
+It is also mirrored into a host **cookie**, because hls.js segment requests,
+`EventSource` and `<img>` send cookies but no custom headers. When that isn't
+there, the ladder is:
+
+1. **Pairing token** (Bearer / `X-Device-Token`): the iOS app's AVPlayer and
+   background downloader send nothing else. Mapped to the device id last seen
+   together with that token (`token_map`, persisted, **stored as a SHA-256
+   prefix, never the token**). A token never seen beside an id becomes
+   `app-<hash>`.
+2. **Inferred**: the same IP + User-Agent as an identified device in the last
+   10 min. For the iOS media player / native client only, the **one** identified
+   device on that IP. Two or more there (a NAT, the Tailscale subnet router, so
+   every remote phone) and nothing is guessed.
+3. **Anonymous**: `anon-<hash(ip|ua)>`. Old pages that predate the header, curl,
+   scripts.
+
+Requests are held `_DEV_SETTLE_SEC` (2 s) before they are drained, and each
+batch learns its identities first. A first visit's document request (sent
+before the page's JS set the cookie) therefore still lands on the device the
+page then identifies as.
+
+The client IP behind the HTTPS proxy is `X-Forwarded-For`, **trusted from
+loopback only**.
+
+### Simple vs raw
+
+**Raw** is every request: time, method, path + query, status, ms, IP, UA, kind,
+how it was identified. `/healthz` (the self-probe) is the only thing not
+recorded. Query strings are redacted **before storage** (`redact_query`): any
+parameter whose name looks like a token, key, password or PIN becomes `***`.
+
+**Simple** is `devactivity.classify` over the same requests: one of `watch`,
+`search`, `browse`, `delete`, `save`, `play` (on the TV), `tv`, `download`,
+`sync`, `sign-in`, `admin`, … Consecutive requests of one kind about one
+subject within `MERGE_GAP_SEC` (5 min) collapse into one row with a start, end,
+count and error count. Each kind has its own **lane**, so a phone streaming an
+episode with the dashboard open is two rows ("Watching Frieren · S01E12" and
+"Dashboard open"), not hundreds of alternating ones. Segments, heartbeats and
+progress posts are one `watch` lane; the heartbeat's `title`
+(`_dev_watch_hint`) names an offline play, which sends no segments.
+`poll`/`open` are noise: shown greyed, never the "current activity" while a real
+one is recent. `asset` requests are raw-only.
+
+### Presence
+
+Active = a request in the last 2 min **or an open `/api/events` stream**
+(`_dev_connected`, counted in the SSE handler). An idle open dashboard sends
+nothing else for minutes. Recent = 30 min.
+
+### Storage and retention
+
+`logs/devices/activity.sqlite3` (+ `-wal`/`-shm`). It sits in a **subdirectory**
+for the same reason `logs/client/` does: the log archive, `DELETE
+/api/admin/logs` and the log bundle only touch top-level files.
+
+| Table | Kept |
+|---|---|
+| `devices` | forever (the "ever connected" list); **Forget** deletes one |
+| `activities` | `ACT_KEEP_DAYS` = 365 |
+| `requests` | `RAW_KEEP_DAYS` = 30 **and** at most `RAW_MAX_ROWS` = 1.5 M, newest kept |
+
+Retention runs hourly. A streaming phone is roughly 600 raw rows an hour, which
+is why raw is the bounded one.
+
 ---
 
 ## Stall dumps
