@@ -1,5 +1,30 @@
 # Changelog
 
+## [18.32.1] — 2026-09-27
+### A downloaded episode plays from the phone again when a show spans several downloads
+
+- **Play on a show made of several downloads streamed from the box, even with the
+  episode on the phone.** The app plays its own copy by handing off to a player
+  served from the phone. That handoff only ran for a play of exactly one file,
+  with shuffle off. A show's Play or Resume, **Play from here** and selected
+  episodes all hand over a queue, so they skipped the handoff and streamed.
+  Hunter x Hunter showed it: while S01 was one download, Resume sent one file and
+  the phone's copy played. When S02 arrived on Sept 26, the show became two
+  downloads, its tile went through `playSeries`, and every episode streamed.
+- The handoff now runs for every play whose **first** file is on the phone,
+  including shuffle. It carries the whole queue (files, owning downloads, label,
+  shuffle), so the player on the phone plays the same queue in the same order,
+  across downloads. Later episodes play from the phone when they are on it and
+  stream through the proxy when they are not. The queue goes in the URL
+  **fragment**. The query is resent as the Referer on every request, and the
+  phone's local server drops any request whose headers pass 64 KB.
+- The player's `loaded` diagnostic row logs where the picture comes from as
+  `source`. It used `src`, which the native logger overwrote with `"js"`, so the
+  log could not tell a play from the phone from a stream.
+- Takes effect after the app next launches online and refreshes its saved player
+  (it does on a version change). Until then, the old saved player ignores the
+  queue and plays that download's own episode list, as before.
+
 ## [18.32.0] — 2026-09-27
 ### A title TMDb lists as both a film and a series links to the other one
 

@@ -3242,9 +3242,15 @@ hangs). Two paths keep page and media same-origin:
   **`_appProxiedReturnHost()`** navigates back to the direct host origin (progress
   already synced live via the proxied `/api`). Prev/Next spans the **full series** —
   downloaded episodes play from the device same-origin, non-downloaded ones stream from
-  the host through the proxy — one seamless playlist. Only **single-file, non-shuffle**
-  plays hand off (per-episode Play / Resume / a one-file movie played to device); multi-file "Play All" and
-  Shuffle keep their explicit order and stream. Any miss (episode or snapshot not fully
+  the host through the proxy — one seamless playlist. **Every** play hands off when its
+  first file is on the device (18.32.1; until then only single-file, non-shuffle plays
+  did, so a show made of several downloads — whose Play/Resume always goes through
+  `playSeries` with a queue — silently streamed). A multi-file queue travels with the
+  handoff as `#q=<json {f: files, i: owning items, l: label, sh, ss}>` in the URL
+  **fragment**, never the query (the query is resent as the Referer on every request,
+  and the LMS drops a request whose headers pass 64 KB); `_appProxyTarget` parses it
+  and `_appProxiedAutoPlay` replays the same queue. A snapshot older than 18.32.1
+  ignores the fragment and falls back to the single file's own item list. Any miss (episode or snapshot not fully
   downloaded, no plugin) falls through to normal server streaming. This supersedes 8.6.0's
   `offline=1&live=1` offline-mode handoff (which lost every live feature during playback).
 

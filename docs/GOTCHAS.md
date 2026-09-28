@@ -3633,6 +3633,16 @@ loopback" isn't a dead end — it's the mechanism, scoped to a single downloaded
 playback session (the user chose "only during playback"; running the *whole* app from
 the proxy is a bigger, deferred option).
 
+**The handoff must not be gated on the queue's shape (18.32.1).** `lpPlay` used to hand
+off only when `files.length === 1 && !shuffle`. That read as "per-episode play", but
+most plays arrive as a queue: a show's Play/Resume, **Play from here**, selected episodes.
+Once a show spans two downloads (Hunter x Hunter when S02 landed beside S01) its tile
+goes through `playSeries`, which always passes a queue, so every downloaded episode
+streamed from the host and nothing was logged. The handoff now keys on whether the
+**first** file is on the device and carries the queue in the URL **fragment**. Never
+put the queue in the query: every same-origin request repeats the query as the
+Referer, and `HLSStaticServer` drops a request whose headers pass 64 KB.
+
 **Native-proxy gotchas** (`ProxyForwarder` / `HLSStaticServer` in LocalMediaServer.swift):
 - **Set `Accept-Encoding: identity` on the outbound request** and drop
   `Content-Encoding`/`Transfer-Encoding` from the relayed response — otherwise URLSession

@@ -19294,11 +19294,25 @@ const _appProxyHost = (() => {
   try { return new URLSearchParams(location.search).get("host") || ""; } catch (_) { return ""; }
 })();
 const _appProxyTarget = (() => {
-  if (!_appProxied) return { item: "", file: "", seek: 0 };
+  if (!_appProxied) return { item: "", file: "", seek: 0, queue: null };
   try {
     const p = new URLSearchParams(location.search);
-    return { item: p.get("item") || "", file: p.get("file") || "", seek: parseInt(p.get("seek") || "0", 10) || 0 };
-  } catch (_) { return { item: "", file: "", seek: 0 }; }
+    const t = { item: p.get("item") || "", file: p.get("file") || "", seek: parseInt(p.get("seek") || "0", 10) || 0, queue: null };
+    // The whole play queue, when the handoff came from one (see
+    // _appTryLocalHandoff). It rides in the FRAGMENT: a fragment is never sent
+    // to a server, while the query is repeated as the Referer on every request
+    // the page makes — and the loopback server drops any request whose headers
+    // pass 64 KB, which a 136-episode show's paths would.
+    const h = new URLSearchParams(location.hash.replace(/^#/, "")).get("q");
+    if (h) {
+      const q = JSON.parse(h);
+      if (q && Array.isArray(q.f) && q.f[0] === t.file) {
+        t.queue = { files: q.f, items: (Array.isArray(q.i) && q.i.length === q.f.length) ? q.i : null,
+                    label: q.l || "", shuffle: !!q.sh, scope: q.ss || "" };
+      }
+    }
+    return t;
+  } catch (_) { return { item: "", file: "", seek: 0, queue: null }; }
 })();
 // Proxied mode boots as a normal ONLINE dashboard, but the loopback origin's
 // localStorage is empty — seed the active profile and auto-manage prefs the host
@@ -19355,7 +19369,11 @@ function _appProxiedSeedStorage() {
 function _appProxiedAutoPlay() {
   if (!(_appProxied && _appProxyTarget.item && _appProxyTarget.file)) return;
   setTimeout(() => {
-    try { lpPlay(_appProxyTarget.item, [_appProxyTarget.file], _appProxyTarget.seek); } catch (_) {}
+    const t = _appProxyTarget, q = t.queue;
+    try {
+      if (q) lpPlay(t.item, q.files, t.seek, q.label, q.shuffle, q.scope, q.items || undefined);
+      else   lpPlay(t.item, [t.file], t.seek);
+    } catch (_) {}
   }, 0);
 }
 // Proxied playback session: leave the loopback player and return to the DIRECT
@@ -20347,7 +20365,14 @@ async function _appLocalBundle(itemId, filePath) {
 // the snapshot's index.html in `?proxied=1` with the episode to auto-play + the
 // host to return to on stop. Returns true when it navigated away (caller must
 // stop), false to fall back to normal server streaming. Online + isApp only.
-async function _appTryLocalHandoff(itemId, filePath, seekTo) {
+//
+// `queue` (optional, {files, items, label, shuffle, scope}) is the play's whole
+// queue when it has more than one file — a show's Play/Resume, Play from here,
+// selected episodes, Shuffle. Only its first file has to be on the device; the
+// rest play from the device when they are and stream through the proxy when
+// they aren't. Carried so the loopback page plays the SAME queue, in the same
+// order and across the same downloads, instead of re-deriving one item's list.
+async function _appTryLocalHandoff(itemId, filePath, seekTo, queue) {
   if (!(isApp && _cap.dl && _cap.lms) || _appOffline || _appProxied || !navigator.onLine) return false;
   try {
     // The episode must be fully on-device…
@@ -20396,7 +20421,15 @@ async function _appTryLocalHandoff(itemId, filePath, seekTo) {
       // origin (see _appProxiedSeedStorage).
       tok: _profileToken || "",
     });
-    window.location.replace(base + "/index.html?" + q.toString());
+    // The queue goes in the fragment, never the query — see _appProxyTarget.
+    let frag = "";
+    if (queue && Array.isArray(queue.files) && queue.files.length > 1) {
+      frag = "#" + new URLSearchParams({ q: JSON.stringify({
+        f: queue.files, i: queue.items || undefined, l: queue.label || "",
+        sh: queue.shuffle ? 1 : 0, ss: queue.scope || "",
+      }) }).toString();
+    }
+    window.location.replace(base + "/index.html?" + q.toString() + frag);
     return true;
   } catch (_) { return false; }
 }
@@ -24069,14 +24102,24 @@ async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope, items
     _tvLocalBeat(true);
     _tvApplyStartVolume();
   }
-  // Online play-time handoff: if this single-file play is fully downloaded, hand
+  // Online play-time handoff: if the play's first file is fully downloaded, hand
   // off to the same-origin cached player so it plays from the on-device bundle
   // instead of streaming from the host (the loopback copy can only load
-  // same-origin — see _appTryLocalHandoff). Single, non-shuffle plays only for
-  // v1 (per-episode Play / Resume / "On Device"); multi-file queues and shuffle
-  // runs keep their explicit order and stream. On any miss it falls through here.
-  if (isApp && !_appOffline && navigator.onLine && files.length === 1 && !shuffle) {
-    if (await _appTryLocalHandoff(itemId, files[0], seekTo)) return;   // navigated away
+  // same-origin — see _appTryLocalHandoff). On any miss it falls through here.
+  //
+  // Every play, not only one-file ones. Until 18.32.1 this was gated on
+  // `files.length === 1 && !shuffle`, and that gate quietly decided most plays:
+  // a show made of several downloads (Hunter x Hunter once S02 landed beside
+  // S01) plays through playSeries, which always hands over the show's queue —
+  // so its downloaded episodes streamed from the host. A multi-file queue now
+  // travels with the handoff and plays in its own order.
+  if (isApp && !_appOffline && navigator.onLine) {
+    const owner = (Array.isArray(items) && items.length === files.length && items[0]) || itemId;
+    const queue = files.length > 1
+      ? { files, items: (Array.isArray(items) && items.length === files.length) ? items : null,
+          label: label || "", shuffle: !!shuffle, scope: shuffleScope || "" }
+      : null;
+    if (await _appTryLocalHandoff(owner, files[0], seekTo, queue)) return;   // navigated away
   }
   await lpUnloadCurrent();
   // A single-file play (per-episode Play, resume, "On Device" on one file) still
@@ -25275,7 +25318,10 @@ async function _lpLoadIndex(seekTo) {
   // phone hands off instead of stopping playback.
   _npArm();
   _npLog("loaded", {
-    file: lp.filePath, item: lp.itemId, src: lp.source, mode: lp.mode,
+    // `source`, not `src`: the native logger stamps `src: "js"` on every row the
+    // page writes, which overwrote this and left no way to tell a device play
+    // from a server stream in the transcript.
+    file: lp.filePath, item: lp.itemId, source: lp.source, mode: lp.mode,
     at: lp.resumeSec || 0, dur: lp.duration || 0,
     holding: _npHolding, nativeMaster: !!lp._nativeMaster,
     nextArmed: !!lp._nextNative,
@@ -29824,6 +29870,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.32.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">18.32.1</div>
 </body>
 </html>
