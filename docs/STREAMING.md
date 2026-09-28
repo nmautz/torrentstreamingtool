@@ -2707,7 +2707,9 @@ schedule. `item["prep"]["files"][path] ∈ {now, idle, never}` (read via `_prep_
 `POST /api/library/{id}/prep-schedule`:
 
 - **now** — `/prep-schedule` immediately enqueues a bulk prep job per file (a scoped
-  `/prep-all`).
+  `/prep-all`) at the asked tier `_PREP_PRIO_ASKED`, ahead of all auto-prep (and
+  promotes a job auto-prep already queued for the file). Interactive/admin prep
+  still outrank it; a running bulk encode is not preempted.
 - **idle** — the implicit default: `auto_prep_loop` builds the bundle during the
   idle/always window.
 - **never** — opt out of **all** automatic prep. Both `_enqueue_library_prep` (the

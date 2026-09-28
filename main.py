@@ -6055,6 +6055,11 @@ def _item_has_compressed(item: dict) -> bool:
 _PREP_MODES = ("now", "idle", "never")
 _PREP_PRIORITIES = ("low", "mid", "high")
 _PREP_PRIO_NUM = {"low": 0, "mid": 1, "high": 2}
+# A person pressing Prep → Now on specific episodes. Above every tier auto-prep can
+# stamp, because equal tiers run FIFO: at the file's own tier the request queued
+# behind a whole season of auto-prep that got there first (HxH S02E07, 2026-09-28:
+# 25 minutes behind This Is Us). Never written to the library — it lives on the job.
+_PREP_PRIO_ASKED = 3
 
 
 def _prep_cfg(item: dict) -> dict:
@@ -18914,7 +18919,6 @@ async def set_prep_schedule(item_id: str, req: PrepScheduleReq) -> JSONResponse:
     # and "never" only persist intent — auto_prep_loop / the prep bar act on them.
     started = 0
     if mode == "now":
-        prep_cfg = _prep_cfg(item)
         for p in req.file_paths:
             src = Path(p)
             try:
@@ -18922,8 +18926,7 @@ async def set_prep_schedule(item_id: str, req: PrepScheduleReq) -> JSONResponse:
                     continue
             except OSError:
                 continue
-            prio = _PREP_PRIO_NUM.get(_effective_prep_priority(prep_cfg, p), 1)
-            st = await _maybe_start_prep_job(src, item_id, prep_prio=prio)
+            st = await _maybe_start_prep_job(src, item_id, prep_prio=_PREP_PRIO_ASKED)
             if st.get("status") in ("processing", "pending", "paused"):
                 started += 1
             await asyncio.sleep(0)
@@ -18963,7 +18966,8 @@ async def set_prep_priority(item_id: str, req: PrepPriorityReq) -> JSONResponse:
     }
     num = _PREP_PRIO_NUM.get(prio, 1)
     for j in _offline_jobs.values():
-        if j.get("queue") == "bulk" and j.get("src") in affected:
+        if j.get("queue") == "bulk" and j.get("src") in affected \
+                and int(j.get("_prep_prio", 1)) < _PREP_PRIO_ASKED:   # never demote an ask
             j["_prep_prio"] = _PREP_PRIO_NUM.get(
                 _effective_prep_priority(prep_cfg, j.get("src", "")), num
             )
@@ -31677,11 +31681,14 @@ async def _run_offline_job(job_id: str) -> None:
     # encoding is separately booted by _preempt_running_bulk so the slot frees
     # without waiting for it. (The `not prep_paused` escape lets a bulk job fall
     # through to park at the pause gate below instead of spinning here.)
-    my_prio = int(job.get("_prep_prio", 1))
+    # The tier is read live, never cached: `/prep-priority` and a repeated "Prep
+    # now" re-stamp a job while it waits here, and a stale copy parked a promoted
+    # job behind ITSELF (it counted as the higher-tier work it was waiting on).
+    def _outranked() -> bool:
+        return _priority_hls_pending() > 0 or _higher_priority_bulk_pending(
+            int(job.get("_prep_prio", 1)), except_job_id=job_id) > 0
     if is_bulk:
-        while not state.prep_paused and (
-            _priority_hls_pending() > 0 or _higher_priority_bulk_pending(my_prio) > 0
-        ):
+        while not state.prep_paused and _outranked():
             await asyncio.sleep(0.25)
     # Hold pending until the global concurrency slot frees up. This is what
     # keeps a 77-file /prep-all from spawning 77 ffmpegs at once.
@@ -31691,9 +31698,7 @@ async def _run_offline_job(job_id: str) -> None:
         # interactive job (also waiting on the slot) takes it first. (When prep is
         # paused, skip this and fall through to park at the pause gate instead — a
         # paused job holds no slot, so interactive still wins without the churn.)
-        if is_bulk and not state.prep_paused and (
-            _priority_hls_pending() > 0 or _higher_priority_bulk_pending(my_prio) > 0
-        ):
+        if is_bulk and not state.prep_paused and _outranked():
             job["status"] = "pending"
             asyncio.create_task(_requeue_offline_job(job_id))
             return
@@ -32492,14 +32497,14 @@ def _priority_hls_pending() -> int:
                and j.get("status") in ("pending", "processing"))
 
 
-def _higher_priority_bulk_pending(prio: int) -> int:
+def _higher_priority_bulk_pending(prio: int, except_job_id: str = "") -> int:
     """Count bulk HLS jobs of a STRICTLY-higher prep-priority tier that are queued or
     encoding. A bulk job parks at the encode-slot gate while any exist, so a whole
     series / episode marked "high" preps ahead of "mid"/"low" auto-prep work. Equal
     tiers don't block each other (FIFO), and the top tier never parks, so there's no
     deadlock or starvation of the highest-priority work — see _run_offline_job."""
     return sum(1 for j in _offline_jobs.values()
-               if j.get("queue") == "bulk"
+               if j.get("queue") == "bulk" and j.get("id") != except_job_id
                and j.get("status") in ("pending", "processing")
                and int(j.get("_prep_prio", 1)) > prio)
 
@@ -35514,8 +35519,9 @@ async def _maybe_start_prep_job(src: Path, item_id: str = "",
     stream-copying it (used by the audio-sync repair so the re-prep can't carry
     the same constant offset forward — see _run_offline_job's A/V sync guard).
 
-    `prep_prio` (0=low, 1=mid, 2=high) orders this bulk job against other queued
-    bulk prep — a higher tier reaches the single encode slot first (see the gate
+    `prep_prio` (0=low, 1=mid, 2=high, 3=asked-for-now) orders this bulk job
+    against other queued bulk prep (and promotes an already-queued job for the same
+    file when higher) — a higher tier reaches the single encode slot first (see the gate
     in _run_offline_job). Interactive / admin prep outrank all bulk work regardless.
 
     Returns one of:
@@ -35541,6 +35547,10 @@ async def _maybe_start_prep_job(src: Path, item_id: str = "",
         None,
     )
     if existing:
+        # Asking again at a higher tier promotes the queued job: a "Prep now" on an
+        # episode auto-prep already queued at mid must not keep its old place.
+        if existing.get("queue") == "bulk" and int(prep_prio) > int(existing.get("_prep_prio", 1)):
+            existing["_prep_prio"] = int(prep_prio)
         return {"status": existing["status"], "job_id": existing["id"],
                 "progress": existing["progress"], "operation": existing["operation"]}
     if not analyzer.ffmpeg_bin():

@@ -606,7 +606,7 @@ control existed). Modes (`_PREP_MODES`):
 
 | mode | meaning |
 |------|---------|
-| `now`   | Prep immediately — `POST /prep-schedule` enqueues a bulk job per file (a scoped `/prep-all`). |
+| `now`   | Prep immediately — `POST /prep-schedule` enqueues a bulk job per file (a scoped `/prep-all`) at the **asked** tier `_PREP_PRIO_ASKED` (3), above every tier auto-prep stamps, and promotes a job auto-prep already queued for that file. |
 | `idle`  | Let `auto_prep_loop` build the bundle during the idle/always window (the default). |
 | `never` | Exclude from **all** auto-prep — both `_enqueue_library_prep` (idle/always) and the play-driven `_play_prep_chain` skip these files. **Non-destructive:** an already-built bundle is kept. |
 

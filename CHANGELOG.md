@@ -1,5 +1,20 @@
 # Changelog
 
+## [19.2.0] — 2026-09-28
+### Prep → Now jumps the queue
+
+- **Prep → Now on the episode page goes next.** It used to join the queue at the
+  episode's own priority, behind everything auto-prep had already lined up. One
+  re-downloaded episode waited 25 minutes behind a season of This Is Us. Now it
+  outranks all auto-prep, including episodes marked High. It also moves an
+  episode auto-prep had already queued to the front. It still waits for an
+  encode that's already running (a half-built bundle can't be resumed), and
+  play-on-device prep still goes first.
+- **Fixed: a raised priority could stall a queued episode for good.** Raising
+  the priority of an episode that was already waiting in the queue could leave
+  it waiting on itself. The queue now reads each job's priority fresh and never
+  counts a job against itself.
+
 ## [19.1.1] — 2026-09-28
 ### A show you freed space on no longer looks deleted after a restart
 
