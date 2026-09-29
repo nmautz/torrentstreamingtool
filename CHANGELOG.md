@@ -1,5 +1,15 @@
 # Changelog
 
+## [19.2.3] — 2026-09-28
+### Switching audio language on AirPlay works
+
+- **Fixed: switching language during AirPlay reloaded, but stayed in the same
+  language.** The box built the TV's stream using the language of the
+  episode's *last subtitle* instead of the language you picked. For This Is Us
+  that was always English. The same mistake also stripped the other audio
+  tracks from phone background playback on episodes with more than one audio
+  language. Box-only fix, no app rebuild.
+
 ## [19.2.2] — 2026-09-28
 ### AirPlay gets only the audio track you picked
 

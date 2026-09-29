@@ -3748,6 +3748,13 @@ forwarded to it. The only reliable control is the master: the TV is given one wi
 the picked rendition alone (`?audio=&lang=`, `_pin_audio`), and an audio change during
 AirPlay is a reload at the playhead.
 
+**Then switching reloaded into the same language (19.2.3).** `_native_master`'s
+subtitle loop assigned `lang = ...`, the same name as the pin parameter, and a Python
+loop variable outlives its loop. Every bundle with subtitles was pinned to its LAST
+subtitle's language, with or without a query, which also stripped the other audio
+from phone background playback. The Swift mirror was fine (block scope). Test the
+generator with a real `meta.json`, not `{}`.
+
 ### Bundle downloads are durable, but only *completed files* survive a kill — partials resume
 `BundleDownloader` writes each finished file straight into the final
 `StreamLinkBundles/<sha>/` dir, then flips `complete` in `index.json` only once

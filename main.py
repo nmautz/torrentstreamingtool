@@ -36052,10 +36052,13 @@ def _native_master(master_text: str, meta: dict,
         m = _SUB_VTT_RE.match(str(s.get("file") or ""))
         n = m.group(1) if m else str(i)
         name = _m3u8_attr(s.get("label") or f"Subtitles {i + 1}")
-        lang = _m3u8_attr(s.get("language") or "und")
+        # NOT `lang`: that is the audio pin below, and Python's loop variables
+        # outlive the loop — 19.2.2 pinned every bundle to its LAST subtitle's
+        # language, query or no query.
+        sub_lang = _m3u8_attr(s.get("language") or "und")
         media.append(
             '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",'
-            f'NAME="{name}",LANGUAGE="{lang}",'
+            f'NAME="{name}",LANGUAGE="{sub_lang}",'
             f'DEFAULT=NO,AUTOSELECT=NO,FORCED=NO,URI="sub_{n}.m3u8"')
     out: list[str] = []
     for line in master_text.splitlines():   # also normalises any CRLF to LF
