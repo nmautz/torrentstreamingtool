@@ -1674,8 +1674,8 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             if let want = armed.audioName {
                 pick = group.options.first { $0.displayName == want }
             }
-            if pick == nil, let lang = armed.audioLang, !lang.isEmpty {
-                pick = group.options.first { $0.locale?.languageCode == lang }
+            if pick == nil, let lang = langKey(armed.audioLang) {
+                pick = group.options.first { langKey($0) == lang }
             }
             if let pick = pick { it.select(pick, in: group) }
         }
@@ -1683,9 +1683,17 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             if armed.subIndex < 0 {
                 it.select(nil, in: group)
             } else {
+                // Index first, checked against the language: one bundle can hold
+                // two tracks in one language (Spanish Forced + Spanish Full), so
+                // a language-only match would pick the wrong one of the pair.
+                let want = langKey(armed.subLang)
                 var pick: AVMediaSelectionOption?
-                if let lang = armed.subLang, !lang.isEmpty {
-                    pick = group.options.first { $0.locale?.languageCode == lang }
+                if armed.subIndex < group.options.count {
+                    let o = group.options[armed.subIndex]
+                    if want == nil || langKey(o) == want { pick = o }
+                }
+                if pick == nil, let want = want {
+                    pick = group.options.first { langKey($0) == want }
                 }
                 if pick == nil, armed.subIndex < group.options.count {
                     pick = group.options[armed.subIndex]
@@ -1693,6 +1701,20 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
                 it.select(pick, in: group)
             }
         }
+    }
+
+    /// One comparable form for a language. The page sends meta.json's ISO 639-2
+    /// ("eng"); AVFoundation's `locale.languageCode` reports ISO 639-1 ("en").
+    /// Comparing the two raw never matched, so AirPlay kept the DEFAULT=YES track.
+    /// `Locale(identifier:)` folds both ("eng", "en", "en-US") to "en".
+    private func langKey(_ code: String?) -> String? {
+        guard let c = code?.trimmingCharacters(in: .whitespaces), !c.isEmpty,
+              c.lowercased() != "und" else { return nil }
+        return (Locale(identifier: c).languageCode ?? c).lowercased()
+    }
+
+    private func langKey(_ o: AVMediaSelectionOption) -> String? {
+        langKey(o.extendedLanguageTag ?? o.locale?.identifier)
     }
 
     // MARK: Clock, Now Playing, progress

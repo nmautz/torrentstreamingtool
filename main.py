@@ -35966,6 +35966,27 @@ def _sub_wrapper_playlist(vtt_name: str, duration: float) -> str:
     )
 
 
+_AUDIO_MEDIA_URI_RE = re.compile(r'URI="audio_(\d+)\.m3u8"')
+_AUDIO_MEDIA_NAME_RE = re.compile(r'NAME="[^"]*"')
+
+
+def _native_audio_name(line: str) -> str:
+    """Rename an audio rendition to `audio_<n>`, `<n>` read from its own URI.
+
+    ffmpeg names renditions by OUTPUT STREAM index, which counts the video
+    variants too: a two-rung bundle names `audio_0.m3u8` "audio_2". The app
+    asks AVPlayer for `audio_<playlist index>` by name, so ffmpeg's name never
+    matched (two rungs), or matched the WRONG track (one rung: "audio_1" is
+    `audio_0.m3u8`), and AirPlay stayed on the DEFAULT=YES track whatever the
+    user picked. The URI is the one number every client agrees on."""
+    if not line.startswith("#EXT-X-MEDIA:") or "TYPE=AUDIO" not in line:
+        return line
+    m = _AUDIO_MEDIA_URI_RE.search(line)
+    if not m:
+        return line
+    return _AUDIO_MEDIA_NAME_RE.sub(f'NAME="audio_{m.group(1)}"', line, count=1)
+
+
 def _native_master(master_text: str, meta: dict) -> str:
     """`master.m3u8` with the bundle's sidecar subtitles declared as renditions.
 
@@ -35979,8 +36000,6 @@ def _native_master(master_text: str, meta: dict) -> str:
     bare names with cwd=<bundle dir> for the Windows backslash reason).
     """
     subs = meta.get("subtitles") or []
-    if not subs:
-        return master_text
     media: list[str] = []
     for i, s in enumerate(subs):
         m = _SUB_VTT_RE.match(str(s.get("file") or ""))
@@ -35993,8 +36012,9 @@ def _native_master(master_text: str, meta: dict) -> str:
             f'DEFAULT=NO,AUTOSELECT=NO,FORCED=NO,URI="sub_{n}.m3u8"')
     out: list[str] = []
     for line in master_text.splitlines():   # also normalises any CRLF to LF
-        if line.startswith("#EXT-X-STREAM-INF:") and "SUBTITLES=" not in line:
+        if media and line.startswith("#EXT-X-STREAM-INF:") and "SUBTITLES=" not in line:
             line += ',SUBTITLES="subs"'
+        line = _native_audio_name(line)
         out.append(line)
         if line.startswith("#EXTM3U"):
             out.extend(media)

@@ -1592,7 +1592,8 @@ never on disk**:
 ```
 GET /api/library/offline-cache/<key>/master-native.m3u8
     → master.m3u8 + one #EXT-X-MEDIA:TYPE=SUBTITLES per meta.json subtitle,
-      and SUBTITLES="subs" appended to every #EXT-X-STREAM-INF
+      SUBTITLES="subs" appended to every #EXT-X-STREAM-INF, and every
+      TYPE=AUDIO rendition renamed NAME="audio_<n>" from its URI audio_<n>.m3u8
 
 GET /api/library/offline-cache/<key>/sub_<i>.m3u8
     #EXTM3U
@@ -1626,6 +1627,16 @@ see [GOTCHAS.md](GOTCHAS.md) § a suspended app loses its loopback server.
 `_sub_wrapper_playlist` — **change one, change both** — and the device prep reports
 `native_master_url: <base>/master-native.m3u8` like any streamed file. It is resolved
 *before* the proxy fallthrough, or the host would 404 it.
+
+**Audio renditions are renamed to `audio_<n>` (19.2.1).** The page arms `audioName:
+"audio_<playlist index>"` and `applyTrackSelection` matches it against the option's
+`displayName` (the HLS `NAME`). ffmpeg names renditions by *output stream* index, which
+counts the video rungs, so a two-rung bundle calls `audio_0.m3u8` "audio_2". The name
+never matched, and the language fallback compared `"eng"` with AVFoundation's `"en"`,
+so **AirPlay stayed on the `DEFAULT=YES` track whatever the user picked**. Both are
+fixed: the native master renames from the URI, and `langKey` folds ISO 639-1/-2
+through `Locale`. Subtitles stay index-first, checked against the language, because
+one bundle can hold two tracks in one language (Forced + Full).
 
 **On-demand (JIT) is deliberately reduced**: its `master-native.m3u8` is identical to
 `master.m3u8` (video + audio only). OD segments are MPEG-TS, and AVPlayer needs an

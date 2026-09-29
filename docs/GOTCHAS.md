@@ -3726,6 +3726,22 @@ either generator, change both — and note the subtitle **number** comes from ea
 meta entry's `file` (`sub_<n>.vtt`), never from its position in the array, or the
 playlist maps onto the wrong subtitle.
 
+### ffmpeg's audio rendition NAME is not the playlist number — AirPlay ignored the audio pick
+
+ffmpeg's HLS muxer names each `#EXT-X-MEDIA:TYPE=AUDIO` rendition by **output stream
+index**, and the video rungs count. A bundle with 1080p + 480p calls `audio_0.m3u8`
+`NAME="audio_2"`; a one-rung bundle calls it `"audio_1"`, which is the name of the
+*other* track. `NativePlayback.applyTrackSelection` matches `audio_<playlist index>`
+by `displayName`, so the name missed (or hit the wrong track). The language fallback
+missed too: meta.json says `"eng"` (ISO 639-2), `AVMediaSelectionOption.locale.languageCode`
+says `"en"`. With no match, AVPlayer kept the `DEFAULT=YES` track. On the phone this
+never showed, because hls.js picks by index. It only showed on AirPlay (This Is Us S01E04:
+stuck in Spanish, `tracks-live` logged every toggle and nothing changed).
+Fixed in 19.2.1 at serve time (`_native_audio_name` in main.py, `nativeAudioName` in
+`LocalMediaServer`; no re-prep) and in the matcher (`langKey`). Never match a
+language code without normalising it, and never trust ffmpeg's rendition `NAME`.
+Chromecast was unaffected: `applyCastTracks` picks by manifest order.
+
 ### Bundle downloads are durable, but only *completed files* survive a kill — partials resume
 `BundleDownloader` writes each finished file straight into the final
 `StreamLinkBundles/<sha>/` dir, then flips `complete` in `index.json` only once

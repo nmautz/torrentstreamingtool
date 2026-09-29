@@ -640,7 +640,6 @@ final class HLSStaticServer {
     /// route above maps `sub_<n>.m3u8` straight onto `sub_<n>.vtt`.
     private func nativeMaster(_ masterText: String, meta: [String: Any]) -> String {
         let subs = (meta["subtitles"] as? [[String: Any]]) ?? []
-        if subs.isEmpty { return masterText }
         var media: [String] = []
         for (i, s) in subs.enumerated() {
             let file = (s["file"] as? String) ?? ""
@@ -660,13 +659,28 @@ final class HLSStaticServer {
         var out: [String] = []
         for raw in masterText.components(separatedBy: "\n") {
             var line = raw.hasSuffix("\r") ? String(raw.dropLast()) : raw   // normalise CRLF
-            if line.hasPrefix("#EXT-X-STREAM-INF:"), !line.contains("SUBTITLES=") {
+            if !media.isEmpty, line.hasPrefix("#EXT-X-STREAM-INF:"), !line.contains("SUBTITLES=") {
                 line += ",SUBTITLES=\"subs\""
             }
+            line = nativeAudioName(line)
             out.append(line)
             if line.hasPrefix("#EXTM3U") { out.append(contentsOf: media) }
         }
         return out.joined(separator: "\n") + "\n"
+    }
+
+    /// Rename an audio rendition to `audio_<n>`, `<n>` read from its own URI —
+    /// mirrors `_native_audio_name` in main.py. ffmpeg numbers renditions by
+    /// OUTPUT STREAM, video rungs included (a two-rung bundle calls
+    /// `audio_0.m3u8` "audio_2"), while NativePlayback matches `audio_<playlist
+    /// index>` by name — so AirPlay never switched language.
+    private func nativeAudioName(_ line: String) -> String {
+        guard line.hasPrefix("#EXT-X-MEDIA:"), line.contains("TYPE=AUDIO"),
+              let uri = line.range(of: #"URI="audio_(\d+)\.m3u8""#, options: .regularExpression),
+              let name = line.range(of: #"NAME="[^"]*""#, options: .regularExpression)
+        else { return line }
+        let n = line[uri].dropFirst("URI=\"audio_".count).dropLast(".m3u8\"".count)
+        return line.replacingCharacters(in: name, with: "NAME=\"audio_\(n)\"")
     }
 
     /// A WebVTT rendition playlist wrapping one sidecar `.vtt` as a single

@@ -1,5 +1,17 @@
 # Changelog
 
+## [19.2.1] — 2026-09-28
+### AirPlay plays the audio language you picked
+
+- **Fixed: AirPlay ignored the audio track.** On a show with two audio
+  languages (This Is Us S01E04: Spanish and English), AirPlay always played the
+  default track, and switching tracks in the player did nothing. The phone
+  itself was fine. The app looked for the track by a name the playlist didn't
+  use, then compared "eng" with "en" and found no match. The playlist now names
+  each audio track by its number, and the app normalises language codes before
+  comparing them. Works for existing bundles and downloads with no re-prep.
+  Chromecast was not affected.
+
 ## [19.2.0] — 2026-09-28
 ### Prep → Now jumps the queue
 
