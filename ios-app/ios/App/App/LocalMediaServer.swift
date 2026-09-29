@@ -470,7 +470,7 @@ final class HLSStaticServer {
             // two `main.py` generates (`offline_cache_bundle_file`). They are
             // resolved BEFORE the proxy fallthrough on purpose: the host has no
             // idea what `/StreamLinkBundles/<sha>/…` means and would 404 them.
-            if let body = derivedPlaylist(for: fileURL) {
+            if let body = derivedPlaylist(for: fileURL, query: rawTarget) {
                 sendText(conn, body, mime: HLSStaticServer.mime["m3u8"]!, method: method)
                 return
             }
@@ -599,13 +599,16 @@ final class HLSStaticServer {
 
     private static let nativeMasterName = "master-native.m3u8"
 
-    private func derivedPlaylist(for url: URL) -> String? {
+    private func derivedPlaylist(for url: URL, query target: String) -> String? {
         let name = url.lastPathComponent
         let dir = url.deletingLastPathComponent()
         if name == HLSStaticServer.nativeMasterName {
             let master = dir.appendingPathComponent("master.m3u8")
             guard let text = try? String(contentsOf: master, encoding: .utf8) else { return nil }
-            return nativeMaster(text, meta: readMeta(dir))
+            let q = URLComponents(string: target)?.queryItems ?? []
+            let audio = q.first { $0.name == "audio" }?.value.flatMap { Int($0) }
+            let lang = q.first { $0.name == "lang" }?.value
+            return nativeMaster(text, meta: readMeta(dir), audio: audio, lang: lang)
         }
         if name.hasPrefix("sub_"), name.hasSuffix(".m3u8") {
             let n = String(name.dropFirst(4).dropLast(5))
@@ -638,7 +641,8 @@ final class HLSStaticServer {
     /// The subtitle NUMBER comes from each entry's `file` (`sub_<n>.vtt`), never
     /// from its position — a mismatch would serve the WRONG subtitle, since the
     /// route above maps `sub_<n>.m3u8` straight onto `sub_<n>.vtt`.
-    private func nativeMaster(_ masterText: String, meta: [String: Any]) -> String {
+    private func nativeMaster(_ masterText: String, meta: [String: Any],
+                              audio: Int? = nil, lang: String? = nil) -> String {
         let subs = (meta["subtitles"] as? [[String: Any]]) ?? []
         var media: [String] = []
         for (i, s) in subs.enumerated() {
@@ -666,7 +670,44 @@ final class HLSStaticServer {
             out.append(line)
             if line.hasPrefix("#EXTM3U") { out.append(contentsOf: media) }
         }
-        return out.joined(separator: "\n") + "\n"
+        return pinAudio(out, audio: audio, lang: lang).joined(separator: "\n") + "\n"
+    }
+
+    /// Keep ONE audio rendition, the viewer's pick, as DEFAULT=YES — mirrors
+    /// `_pin_audio` in main.py. An AirPlay TV fetches the master and picks its
+    /// own audio; the phone's media selection never reaches it. By number when
+    /// its language agrees with `lang`, else the first in `lang`, else by number.
+    private func pinAudio(_ lines: [String], audio: Int?, lang: String?) -> [String] {
+        let want = (lang ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+        if audio == nil && want.isEmpty { return lines }
+        func attr(_ line: String, _ pattern: String) -> String? {
+            guard let r = line.range(of: pattern, options: .regularExpression) else { return nil }
+            return String(line[r].split(separator: "\"", omittingEmptySubsequences: false)[1])
+        }
+        var rends: [(i: Int, n: Int, lang: String)] = []
+        for (i, line) in lines.enumerated()
+        where line.hasPrefix("#EXT-X-MEDIA:") && line.contains("TYPE=AUDIO") {
+            let uri = attr(line, #"URI="audio_\d+\.m3u8""#) ?? ""
+            let n = Int(uri.dropFirst("audio_".count).dropLast(".m3u8".count)) ?? -1
+            rends.append((i, n, (attr(line, #"LANGUAGE="[^"]*""#) ?? "").lowercased()))
+        }
+        if rends.count < 2 { return lines }
+        let byNum = rends.first { $0.n == audio }
+        var pick = byNum.flatMap { want.isEmpty || $0.lang == want ? $0 : nil }
+        if pick == nil, !want.isEmpty { pick = rends.first { $0.lang == want } }
+        if pick == nil { pick = byNum }
+        guard let keep = pick else { return lines }
+        let drop = Set(rends.map { $0.i }).subtracting([keep.i])
+        return lines.enumerated().compactMap { i, line in
+            if drop.contains(i) { return nil }
+            guard i == keep.i else { return line }
+            var l = line.replacingOccurrences(of: "DEFAULT=NO", with: "DEFAULT=YES")
+                        .replacingOccurrences(of: "AUTOSELECT=NO", with: "AUTOSELECT=YES")
+            if !l.contains("AUTOSELECT=") {
+                l = l.replacingOccurrences(of: "DEFAULT=YES", with: "DEFAULT=YES,AUTOSELECT=YES")
+            }
+            return l
+        }
     }
 
     /// Rename an audio rendition to `audio_<n>`, `<n>` read from its own URI —

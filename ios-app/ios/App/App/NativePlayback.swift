@@ -74,7 +74,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "18.30.3"
+let NP_BUILD = "19.2.2"
 
 // MARK: - Armed state
 
@@ -1143,7 +1143,10 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // The page arms with the URLs IT can reach (loopback / the box). While
         // AirPlay is up the receiver is fetching, so every URL the player could
         // load — this one or the next episode's — goes through the door.
-        if airplayOn || cast != nil {
+        if airplayOn {
+            if let u = a.url { a.url = airplayURL(u, a) }
+            if let u = a.nextUrl { a.nextUrl = airplayURL(u, a) }
+        } else if cast != nil {
             if let u = a.url { a.url = AirPlayDoor.shared.lanURL(for: u) ?? u }
             if let u = a.nextUrl { a.nextUrl = AirPlayDoor.shared.lanURL(for: u) ?? u }
         }
@@ -1238,8 +1241,17 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // took effect on the next item load.
         let tracksChanged = isNativeActive && !switchingFile && a.filePath == armed.filePath
             && (a.audioName != armed.audioName || a.subIndex != armed.subIndex)
+        let airplayAudioChanged = tracksChanged && airplayOn && cast == nil
+            && a.audioName != armed.audioName
         armed = a
-        if tracksChanged { applyTracksLive() }
+        if airplayAudioChanged, let u = armed.url {
+            // The TV only ever has the one audio track we put in its master
+            // (see airplayURL), so a new pick is a new master, at the playhead.
+            let at = player.map { CMTimeGetSeconds($0.currentTime()) } ?? armed.position
+            DiagLog.shared.write("airplay-audio", ["audio": armed.audioName ?? "",
+                                                   "lang": armed.audioLang ?? "", "at": at], cat: "ext")
+            replaceItem(with: u, at: at, play: !armed.paused)
+        } else if tracksChanged { applyTracksLive() }
 
         // AND NOW MOVE THE PLAYER, NOT JUST THE PAPERWORK.
         //
@@ -1662,6 +1674,30 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         }
     }
 
+    /// The URL an AirPlay TV is given: through the door, and for a bundle's
+    /// native master, pinned to the viewer's audio (`?audio=<n>&lang=<code>`,
+    /// `_pin_audio` in main.py / `pinAudio` in LocalMediaServer).
+    ///
+    /// The TV fetches the stream itself and chooses its own audio rendition —
+    /// `AVPlayerItem.select` on the phone never reached it. Measured 2026-09-28
+    /// (LG, This Is Us S01E05): the selection matched, the TV played the
+    /// DEFAULT=YES Spanish track through every toggle. A master holding only
+    /// the picked track leaves it nothing to get wrong. The language rides
+    /// along so the next episode, armed with the same query, still gets the
+    /// right language if its tracks are in another order.
+    private func airplayURL(_ url: URL, _ a: ArmedPlayback) -> URL {
+        let lan = AirPlayDoor.shared.lanURL(for: url) ?? url
+        guard lan.lastPathComponent == "master-native.m3u8",
+              var c = URLComponents(url: lan, resolvingAgainstBaseURL: false) else { return lan }
+        var q = (c.queryItems ?? []).filter { $0.name != "audio" && $0.name != "lang" }
+        if let n = a.audioName.flatMap({ Int($0.replacingOccurrences(of: "audio_", with: "")) }) {
+            q.append(URLQueryItem(name: "audio", value: String(n)))
+        }
+        if let l = a.audioLang, !l.isEmpty { q.append(URLQueryItem(name: "lang", value: l)) }
+        c.queryItems = q.isEmpty ? nil : q
+        return c.url ?? lan
+    }
+
     /// Map the web player's picks onto AVFoundation media selections.
     ///
     /// Matched by NAME then language — never by index. AVMediaSelectionGroup
@@ -1678,6 +1714,13 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
                 pick = group.options.first { langKey($0) == lang }
             }
             if let pick = pick { it.select(pick, in: group) }
+            DiagLog.shared.write("tracks-applied", [
+                "want": armed.audioName ?? "", "lang": armed.audioLang ?? "",
+                "options": group.options.map { "\($0.displayName)/\($0.extendedLanguageTag ?? "-")" },
+                "picked": pick?.displayName ?? "",
+                "now": it.currentMediaSelection.selectedMediaOption(in: group)?.displayName ?? "",
+                "airplay": airplayOn,
+            ], cat: "play")
         }
         if let group = asset.mediaSelectionGroup(forMediaCharacteristic: .legible) {
             if armed.subIndex < 0 {
@@ -2770,7 +2813,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
                     DiagLog.shared.write("airplay-refused", ["err": err.localizedDescription], cat: "ext")
                     done(["ok": false, "error": err.localizedDescription]); return
                 }
-                guard let lan = AirPlayDoor.shared.lanURL(for: url) else {
+                guard AirPlayDoor.shared.lanURL(for: url) != nil else {
                     done(["ok": false, "error": "Could not share this stream."]); return
                 }
                 self.airplayOn = true
@@ -2779,11 +2822,14 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
                 // device test: an audio interruption had left the page's intent
                 // paused, and the TV sat on a still frame until play was pressed.
                 self.armed.paused = false
-                self.armed.url = lan
-                if let n = self.armed.nextUrl { self.armed.nextUrl = AirPlayDoor.shared.lanURL(for: n) ?? n }
+                self.armed.url = self.airplayURL(url, self.armed)
+                if let n = self.armed.nextUrl { self.armed.nextUrl = self.airplayURL(n, self.armed) }
+                let lan = self.armed.url ?? url
                 DiagLog.shared.write("airplay-start", [
                     "native": self.isNativeActive, "at": self.armed.position,
                     "title": self.armed.title,
+                    "audio": self.armed.audioName ?? "", "lang": self.armed.audioLang ?? "",
+                    "pinned": lan.query?.contains("audio=") ?? false,
                     // Scheme + host only: the token in the path is the door's key.
                     "upstream": "\(url.scheme ?? "?")://\(url.host ?? "?")",
                     "lanHost": AirPlayDoor.shared.host ?? "",

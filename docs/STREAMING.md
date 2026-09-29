@@ -1638,6 +1638,19 @@ fixed: the native master renames from the URI, and `langKey` folds ISO 639-1/-2
 through `Locale`. Subtitles stay index-first, checked against the language, because
 one bundle can hold two tracks in one language (Forced + Full).
 
+**AirPlay gets a master with ONE audio rendition (19.2.2).** Fixing the names was not
+enough: an AirPlay TV fetches the master itself and chooses its own audio, and the
+phone's `AVPlayerItem.select` never reaches it (LG, 2026-09-28: Spanish through every
+toggle). So `NativePlayback.airplayURL` appends `?audio=<n>&lang=<code>` to the native
+master URL it hands the TV. `_pin_audio` (main.py) / `pinAudio` (LocalMediaServer) then
+keep only that rendition, as `DEFAULT=YES,AUTOSELECT=YES`. It is picked by number when
+the number's LANGUAGE agrees with `lang`, else by the first rendition in `lang`, else by
+number, else nothing changes. The language matters because the NEXT episode is armed
+with the same query and its tracks may be in another order. An audio change during
+AirPlay is a `replaceItem` at the playhead (`airplay-audio` row), not a selection.
+`tracks-applied` logs what AVPlayer really selected. Cast is untouched (it picks by
+track id).
+
 **On-demand (JIT) is deliberately reduced**: its `master-native.m3u8` is identical to
 `master.m3u8` (video + audio only). OD segments are MPEG-TS, and AVPlayer needs an
 `X-TIMESTAMP-MAP` in the WebVTT to anchor cues to segment PTS — the JIT timeline isn't

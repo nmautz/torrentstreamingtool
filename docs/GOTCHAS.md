@@ -3742,6 +3742,12 @@ Fixed in 19.2.1 at serve time (`_native_audio_name` in main.py, `nativeAudioName
 language code without normalising it, and never trust ffmpeg's rendition `NAME`.
 Chromecast was unaffected: `applyCastTracks` picks by manifest order.
 
+**Then it still played Spanish (19.2.2).** An AirPlay receiver fetches the master and
+picks audio for itself; a media selection on the phone's `AVPlayerItem` is not
+forwarded to it. The only reliable control is the master: the TV is given one with
+the picked rendition alone (`?audio=&lang=`, `_pin_audio`), and an audio change during
+AirPlay is a reload at the playhead.
+
 ### Bundle downloads are durable, but only *completed files* survive a kill — partials resume
 `BundleDownloader` writes each finished file straight into the final
 `StreamLinkBundles/<sha>/` dir, then flips `complete` in `index.json` only once

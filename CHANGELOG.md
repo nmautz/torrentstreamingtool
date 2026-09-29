@@ -1,5 +1,17 @@
 # Changelog
 
+## [19.2.2] — 2026-09-28
+### AirPlay gets only the audio track you picked
+
+- **Fixed: AirPlay still played the default audio.** 19.2.1 made the phone
+  select the right track, but an AirPlay TV fetches the stream itself and
+  chooses its own audio. The TV is now given a stream that holds only the track
+  you picked. Switching tracks during AirPlay reloads the stream at the same
+  spot. The next episode keeps your language even if its tracks are in another
+  order. Works for streamed and downloaded episodes. Needs the app rebuilt.
+- A new `tracks-applied` log row records which audio track the player actually
+  selected.
+
 ## [19.2.1] — 2026-09-28
 ### AirPlay plays the audio language you picked
 

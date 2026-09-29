@@ -35987,7 +35987,54 @@ def _native_audio_name(line: str) -> str:
     return _AUDIO_MEDIA_NAME_RE.sub(f'NAME="audio_{m.group(1)}"', line, count=1)
 
 
-def _native_master(master_text: str, meta: dict) -> str:
+def _pin_audio(lines: list[str], audio: Optional[int], lang: Optional[str]) -> list[str]:
+    """Keep ONE audio rendition, the one the viewer picked, as DEFAULT=YES.
+
+    For AirPlay. A TV that receives an AirPlay stream fetches the master itself
+    and picks its own audio: the phone's `AVPlayerItem.select` never reached it
+    (19.2.1 on an LG: every toggle logged, Spanish throughout). A master with
+    one audio rendition leaves the receiver nothing to choose.
+
+    Picked by `audio` (the playlist number) when its LANGUAGE agrees with
+    `lang`, else by the first rendition in `lang`, else by number. The number
+    alone is not enough: the phone arms the NEXT episode with the same query,
+    and its tracks may be in another order. No match changes nothing."""
+    if audio is None and not lang:
+        return lines
+    rends = []                       # (line index, number, language)
+    for i, line in enumerate(lines):
+        if line.startswith("#EXT-X-MEDIA:") and "TYPE=AUDIO" in line:
+            m = _AUDIO_MEDIA_URI_RE.search(line)
+            lm = re.search(r'LANGUAGE="([^"]*)"', line)
+            rends.append((i, int(m.group(1)) if m else -1,
+                          (lm.group(1) if lm else "").lower()))
+    if len(rends) < 2:
+        return lines
+    want = (lang or "").strip().lower()
+    by_num = next((r for r in rends if r[1] == audio), None)
+    pick = by_num if by_num and (not want or by_num[2] == want) else None
+    if pick is None and want:
+        pick = next((r for r in rends if r[2] == want), None)
+    if pick is None:
+        pick = by_num
+    if pick is None:
+        return lines
+    drop = {r[0] for r in rends if r is not pick}
+    out = []
+    for i, line in enumerate(lines):
+        if i in drop:
+            continue
+        if i == pick[0]:
+            line = re.sub(r"DEFAULT=(YES|NO)", "DEFAULT=YES", line)
+            line = re.sub(r"AUTOSELECT=(YES|NO)", "AUTOSELECT=YES", line)
+            if "AUTOSELECT=" not in line:
+                line = line.replace("DEFAULT=YES", "DEFAULT=YES,AUTOSELECT=YES", 1)
+        out.append(line)
+    return out
+
+
+def _native_master(master_text: str, meta: dict,
+                   audio: Optional[int] = None, lang: Optional[str] = None) -> str:
     """`master.m3u8` with the bundle's sidecar subtitles declared as renditions.
 
     The subtitle NUMBER is read back out of each entry's `file` (`sub_<n>.vtt`)
@@ -36018,11 +36065,13 @@ def _native_master(master_text: str, meta: dict) -> str:
         out.append(line)
         if line.startswith("#EXTM3U"):
             out.extend(media)
-    return "\n".join(out) + "\n"
+    return "\n".join(_pin_audio(out, audio, lang)) + "\n"
 
 
 @app.get("/api/library/offline-cache/{cache_key}/{filename}")
-async def offline_cache_bundle_file(cache_key: str, filename: str) -> Response:
+async def offline_cache_bundle_file(cache_key: str, filename: str,
+                                    audio: Optional[int] = None,
+                                    lang: Optional[str] = None) -> Response:
     """Serve one file from an HLS bundle directory.
 
     Bundles live beside the media (`<file_dir>/.streamlink_cache/<key>/`), so the
@@ -36049,7 +36098,9 @@ async def offline_cache_bundle_file(cache_key: str, filename: str) -> Response:
             raise HTTPException(404, "Cached file not found.")
         txt = await asyncio.to_thread(src.read_text, encoding="utf-8", errors="replace")
         meta = await asyncio.to_thread(_read_meta, bundle_dir)
-        return Response(content=_native_master(txt, meta),
+        # `?audio=&lang=` pins one audio rendition — the AirPlay door asks
+        # for it; see _pin_audio.
+        return Response(content=_native_master(txt, meta, audio, lang),
                         media_type=_HLS_MIME[".m3u8"])
 
     sm = _SUB_PLAYLIST_RE.match(filename)
