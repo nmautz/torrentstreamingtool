@@ -794,6 +794,33 @@ is why raw is the bounded one.
 
 ---
 
+## Loop-block sampler (19.9.3)
+
+A stall dump is written by the event loop, so it runs only after the loop is free
+again. By then the frame that blocked it has returned, and the September 2026 dumps
+all show the aftermath. `diagnostics._loop_watchdog` is a daemon thread (started by
+`_measure_loop_lag`) that watches the heartbeat that task leaves every 0.5 s. When
+the heartbeat is `LOOP_BLOCK_SAMPLE_S` (2 s) stale, it samples the loop thread's stack
+every 0.25 s via `sys._current_frames()`. When the loop recovers, it logs one WARNING
+to `streamlink_app.log`:
+
+```
+LOOP BLOCKED 18.3s — 73 sample(s) of the event-loop thread
+--- seen in 70/73 samples ---
+  File "...main.py", line …, in _prefetch_metadata_images
+  …
+```
+
+The stacks seen most often come first. If the loop thread looks idle (parked in
+`select`/`GetQueuedCompletionStatus`), the report also lists the other threads that
+were running Python, because one of them holds the GIL. A block still going after
+`LOOP_BLOCK_ONGOING_S` (15 s) is reported while it runs, in case it never returns. The
+latest report is kept in `state.last_block`, and the next stall dump includes it.
+
+One limit: a C call that holds the GIL for the whole block also stops this thread.
+Its samples land after the release and name what ran next. Tested in
+`tests/test_diagnostics.py`.
+
 ## Stall dumps
 
 `dump_stalled_state(reason)` writes `logs/stall_<ts>.txt` containing:
@@ -838,7 +865,8 @@ in-flight ≥ 60 s.
      outside the process.
    - Entries present but no matching completion → the handler hung; find it in
      the stall dump.
-2. **`streamlink_app.log` — grep `VITALS ANOMALY`, `SELF-PROBE`, `SLOW REQUEST`, `LOCK`.**
+2. **`streamlink_app.log` — grep `LOOP BLOCKED`, `VITALS ANOMALY`, `SELF-PROBE`, `SLOW REQUEST`, `LOCK`.**
+   A `LOOP BLOCKED` report names the frame that froze the loop; read it first.
    The first anomaly line marks the onset.
 3. **`vitals.log` — scroll back to the onset** and read across: `lag`, `tp=`,
    `lock_held=`, `inflight=`. These name the starvation mode directly.

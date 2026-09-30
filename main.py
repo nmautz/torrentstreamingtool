@@ -3167,11 +3167,13 @@ async def _tmdb_img_bytes(size: str, filename: str,
     ext = Path(filename).suffix.lower()
     ct = _TMDB_IMG_CT.get(ext, "image/jpeg")
     cache_file = TMDB_IMG_CACHE / size / filename
-    try:
-        if cache_file.exists():
-            return cache_file.read_bytes(), ct
-    except Exception:
-        pass
+    # Every disk touch here runs in a worker thread. This sits under the image
+    # route and the metadata prefetch; inline, a busy F: drive froze the whole
+    # server for 18-35 s while a big show's stills were checked (see GOTCHAS
+    # § Sync file I/O on the event loop).
+    body = await asyncio.to_thread(_tmdb_img_read, cache_file)
+    if body is not None:
+        return body, ct
     if not fetch:
         return None
     try:
@@ -3180,18 +3182,36 @@ async def _tmdb_img_bytes(size: str, filename: str,
                                      follow_redirects=True) as c:
             r = await c.get(url)
         if r.status_code == 200 and r.content:
-            try:
-                cache_file.parent.mkdir(parents=True, exist_ok=True)
-                # Atomic write so a concurrent reader never sees a torn file.
-                tmp = cache_file.with_suffix(cache_file.suffix + f".{os.getpid()}.tmp")
-                tmp.write_bytes(r.content)
-                os.replace(tmp, cache_file)
-            except Exception:
-                pass
+            await asyncio.to_thread(_tmdb_img_write, cache_file, r.content)
             return r.content, ct
     except Exception:
         pass
     return None
+
+
+def _tmdb_img_read(cache_file: Path) -> Optional[bytes]:
+    try:
+        return cache_file.read_bytes()
+    except OSError:
+        return None
+
+
+def _tmdb_img_write(cache_file: Path, content: bytes) -> None:
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        # Atomic write so a concurrent reader never sees a torn file.
+        tmp = cache_file.with_suffix(cache_file.suffix + f".{os.getpid()}.tmp")
+        tmp.write_bytes(content)
+        os.replace(tmp, cache_file)
+    except Exception:
+        pass
+
+
+def _tmdb_img_missing(wanted: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """The (size, filename) pairs not yet in the artwork cache. One stat each,
+    no reads: blocking, so call it through `asyncio.to_thread`."""
+    return [(size, fn) for size, fn in wanted
+            if not (TMDB_IMG_CACHE / size / fn).exists()]
 
 
 async def _prefetch_metadata_images(data: dict) -> None:
@@ -3209,10 +3229,12 @@ async def _prefetch_metadata_images(data: dict) -> None:
         for ep in s.get("episodes", []) or []:
             if ep.get("still_path"):
                 wanted.append(("w300", ep["still_path"]))
-    for size, path in wanted:
-        fn = path.lstrip("/")
-        if not _TMDB_IMG_FILE_RE.match(fn):
-            continue
+    wanted = [(size, fn) for size, fn in ((s, p.lstrip("/")) for s, p in wanted)
+              if _TMDB_IMG_FILE_RE.match(fn)]
+    # A 19-season show is ~650 stills, nearly all cached after the first open.
+    # Checking them costs one thread hop in total and reads nothing; only the
+    # misses are fetched.
+    for size, fn in await asyncio.to_thread(_tmdb_img_missing, wanted):
         try:
             await _tmdb_img_bytes(size, fn)
         except Exception:
@@ -3220,14 +3242,29 @@ async def _prefetch_metadata_images(data: dict) -> None:
 
 
 async def _tmdb_effective_key() -> str:
-    """Resolve the active TMDb API key. Admin override beats .env."""
+    """Resolve the active TMDb API key. Admin override beats .env.
+
+    Memoised: every `_tmdb_get` asks, and a full `get_library()` per ask meant
+    a 19-season show paid ~25 serialised library loads under `_lib_lock` just to
+    read one string. `admin_update_settings` drops the memo when it changes the
+    override; the TTL covers any other writer (a restored library.json)."""
+    global _tmdb_key_memo
+    now = time.monotonic()
+    if _tmdb_key_memo is not None and now - _tmdb_key_memo[0] < _TMDB_KEY_TTL:
+        return _tmdb_key_memo[1]
     lib = await get_library()
     override = (
         lib.get("settings", {})
            .get("admin_overrides", {})
            .get("tmdb_api_key", "")
     )
-    return (override or settings.tmdb_api_key or "").strip()
+    key = (override or settings.tmdb_api_key or "").strip()
+    _tmdb_key_memo = (now, key)
+    return key
+
+
+_TMDB_KEY_TTL = 60.0
+_tmdb_key_memo: Optional[tuple[float, str]] = None
 
 
 # On-disk cache of TMDb API responses (see tmdbcache.py). Fresh entries are
@@ -3402,7 +3439,9 @@ async def _tmdb_get(path: str, params: Optional[dict] = None) -> Optional[dict]:
     key = await _tmdb_effective_key()
     if not key:
         return None
-    hit = _tmdb_disk.get(path, params)
+    # Disk cache I/O off the loop: a 19-season lookup makes ~25 of these, and
+    # each is an open() on the same drive the downloads and encodes hammer.
+    hit = await asyncio.to_thread(_tmdb_disk.get, path, params)
     if hit and hit[1] and not _tmdb_fresh.get():
         return hit[0]
     if time.monotonic() < _tmdb_offline_until:
@@ -3416,7 +3455,7 @@ async def _tmdb_get(path: str, params: Optional[dict] = None) -> Optional[dict]:
         if r.status_code == 200:
             data = r.json()
             if isinstance(data, dict):
-                _tmdb_disk.put(path, params, data)
+                await asyncio.to_thread(_tmdb_disk.put, path, params, data)
             return data
         if r.status_code == 404:
             return None
@@ -10636,6 +10675,22 @@ def _item_all_torrent_hashes(item: dict) -> list:
     return out
 
 
+def _item_live_torrent_hashes(item: dict) -> list:
+    """The torrents this item is actually running: the incumbent plus race
+    challengers still live. Unlike `_item_all_torrent_hashes`, a DROPPED
+    challenger is not counted - `/api/library/download` drops one precisely
+    when a user claims it as their own item."""
+    out: list = []
+    h = (item.get("torrent_hash") or "").lower()
+    if h:
+        out.append(h)
+    for e in (item.get("race") or {}).get("entries") or []:
+        eh = (e.get("hash") or "").lower()
+        if eh and eh not in out and e.get("status") in ("live", "paused"):
+            out.append(eh)
+    return out
+
+
 # The pure decision arithmetic lives in `racerules` so it can be tested without
 # a running qBittorrent (tests/test_race_rules.py). Aliased rather than wrapped:
 # these are hot-path calls inside a 5 s tick and an extra frame buys nothing.
@@ -13470,8 +13525,28 @@ async def library_download_pipeline(
         # library.json during it clobbered this write-back — leaving the item stuck
         # at "downloading" with no torrent_hash, no error, and no recovery path
         # (the admin Cleanup tab classifies it as neither orphan nor missing).
+        # A torrent another live item already owns is not a new download. It
+        # happens when the add never knew its hash up front (an indexer .torrent
+        # link) or the indexer listed one torrent under a different episode's
+        # name: qBit rejects the duplicate, `qbit_add_magnet` adopts the existing
+        # hash, and two items end up sharing one file - SpongeBob's "S01E13
+        # Pickles" played Hall Monitor, E14. Refuse it instead.
+        owner = None
         async with mutate_library() as lib:
+            owner = next((x for x in lib["items"]
+                          if x["id"] != item_id and x.get("status") != "error"
+                          and h.lower() in _item_live_torrent_hashes(x)), None)
             for it in lib["items"]:
+                if it["id"] == item_id and owner is not None:
+                    it["status"] = "error"
+                    it["error"] = (
+                        "That release is the same torrent as \u201c"
+                        + (owner.get("title") or "another library item")[:120]
+                        + "\u201d, which is already in your library \u2014 the "
+                        "indexer listed it under the wrong name. Pick another "
+                        "release from Search.")
+                    it.pop("pending_download", None)
+                    break
                 if it["id"] == item_id:
                     it["torrent_hash"] = h
                     # Keep the magnet + save path for as long as the download runs, so
@@ -13487,6 +13562,11 @@ async def library_download_pipeline(
                     # metadata is still pending, so it's no longer an orphan to recover.
                     it.pop("pending_download", None)
                     break
+        if owner is not None:
+            log.warning("[dl] %s: torrent %s already belongs to %r - refused",
+                        item_id, h, owner.get("title", ""))
+            await broadcast("library_update", {"item_id": item_id, "status": "error"})
+            return
 
         # Start the race behind the incumbent now its hash is durable. Detached
         # on purpose: everything below is the normal download path and must not
@@ -18062,6 +18142,14 @@ async def _delete_items(request: Request, item_ids: list[str], delete_file: bool
             raise HTTPException(404, "Item not found.")
         lib["items"] = [it for it in lib["items"] if it["id"] not in want]
         _drop_orphan_hidden_series(lib)
+        # A torrent (and its files) another item still owns is not ours to
+        # remove. Two items can share one: an indexer that lists the same
+        # torrent under two episode names made "S01E13 Pickles" adopt E14's
+        # torrent (19.9.3 now refuses that at add time, but items made before
+        # it exist). Deleting the wrong-content item must not take the right
+        # one's file with it.
+        kept_hashes = {h for it in lib["items"] for h in _item_live_torrent_hashes(it)}
+        kept_paths = {f.get("path", "") for it in lib["items"] for f in it.get("files", [])}
         if delete_file:
             pend = lib.setdefault("pending_deletes", [])
             for it in gone:
@@ -18069,14 +18157,17 @@ async def _delete_items(request: Request, item_ids: list[str], delete_file: bool
                 pend.append(_reap_entry(
                     item_id=it["id"], profile_id=profile_id,
                     title=it.get("series") or it.get("title") or "",
-                    hashes=_item_all_torrent_hashes(it),
-                    paths=[f.get("path", "") for f in files],
+                    hashes=[h for h in _item_all_torrent_hashes(it) if h not in kept_hashes],
+                    paths=[f.get("path", "") for f in files
+                           if f.get("path", "") not in kept_paths],
                     # An evicted source can't be stat'ed for its bundle key; the
                     # stored key finds the bundle without it.
                     bundle_dirs=[_evicted_bundle_dir(f) for f in files
-                                 if _file_evicted(f)]))
+                                 if _file_evicted(f)
+                                 and f.get("path", "") not in kept_paths]))
         else:
-            keep_files = [h for it in gone for h in _item_all_torrent_hashes(it)]
+            keep_files = [h for it in gone for h in _item_all_torrent_hashes(it)
+                          if h not in kept_hashes]
     if delete_file:
         _reap_kick()
     elif keep_files:
@@ -26086,6 +26177,7 @@ async def admin_get_settings(request: Request) -> JSONResponse:
 
 @app.post("/api/admin/settings")
 async def admin_update_settings(request: Request, req: AdminSettingsReq) -> JSONResponse:
+    global _tmdb_key_memo
     _require_admin(request)
     async with mutate_library() as lib:
         overrides = lib.setdefault("settings", {}).setdefault("admin_overrides", {})
@@ -26097,6 +26189,7 @@ async def admin_update_settings(request: Request, req: AdminSettingsReq) -> JSON
                 overrides["tmdb_api_key"] = v
             else:
                 overrides.pop("tmdb_api_key", None)
+            _tmdb_key_memo = None
         if req.hls_ladder is not None:
             # Keep only valid ladder heights, dedupe, order high→low. Exactly the
             # built-in default removes the override (cleaner); any other selection —

@@ -25,6 +25,7 @@ test:
 	python3 tests/test_watchpurge.py
 	python3 tests/test_devactivity.py
 	python3 tests/test_bookmarks.py
+	python3 tests/test_diagnostics.py
 
 clean:
 	rm -rf .venv __pycache__ .env

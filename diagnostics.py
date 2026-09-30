@@ -77,6 +77,9 @@ PROBE_INTERVAL_S      = 30.0    # how often to prove we're still accepting
 VITALS_INTERVAL_S     = 30.0    # how often to sample
 THREADPOOL_WARN_FRAC  = 0.85    # default executor this saturated ⇒ to_thread calls are queuing
 STALL_DUMP_COOLDOWN_S = 300.0   # min gap between stack dumps, so a long outage writes a few not thousands
+LOOP_BLOCK_SAMPLE_S   = 2.0     # loop heartbeat this stale ⇒ start sampling the loop thread's stack
+LOOP_BLOCK_POLL_S     = 0.25    # sampling interval while it is blocked
+LOOP_BLOCK_ONGOING_S  = 15.0    # still blocked this long ⇒ log what it is doing NOW, in case it never returns
 
 
 # ── Shared mutable state ─────────────────────────────────────────────────────
@@ -117,6 +120,9 @@ class DiagState:
     probe_last_ms:   float = 0.0
     last_stall_dump: float = 0.0     # monotonic
     locks:           dict  = field(default_factory=dict)   # name -> _LockProbe
+    loop_beat:       float = 0.0     # monotonic; set by _measure_loop_lag every turn
+    loop_thread_id:  int   = 0
+    last_block:      str   = ""      # the most recent LOOP BLOCKED report, for the stall dump
 
 
 state = DiagState()
@@ -460,6 +466,10 @@ def dump_stalled_state(reason: str) -> Optional[Path]:
         buf.write(f"  {p.name}: held={p.held_for():.1f}s holder={p.holder or '-'} "
                   f"waiters={p.waiters} max_held={p.max_held_s:.1f}s\n")
 
+    if state.last_block:
+        buf.write("\n=== last loop block (sampled while it was happening) ===\n")
+        buf.write(state.last_block + "\n")
+
     buf.write("\n=== asyncio tasks ===\n")
     try:
         for t in asyncio.all_tasks():
@@ -617,12 +627,115 @@ async def _measure_loop_lag() -> None:
     Lag is the single clearest indicator that something synchronous is blocking
     the loop. Cheap enough to run permanently.
     """
+    state.loop_thread_id = threading.get_ident()
+    state.loop_beat = time.monotonic()
+    start_loop_watchdog()
     while True:
         t0 = time.monotonic()
         await asyncio.sleep(0.5)
-        lag = max(0.0, (time.monotonic() - t0) - 0.5)
+        state.loop_beat = time.monotonic()
+        lag = max(0.0, (state.loop_beat - t0) - 0.5)
         state.loop_lag_s = lag
         state.loop_lag_max_s = max(state.loop_lag_max_s, lag)
+
+
+# ── Loop-block sampler ───────────────────────────────────────────────────────
+#
+# The stall dump is written BY the event loop, so it can only run once the loop
+# is free again — by which point whatever blocked it has returned and its frame
+# is gone. Every dump from the 18-35 s freezes of September 2026 shows the
+# aftermath and never the culprit. This thread watches the heartbeat
+# `_measure_loop_lag` leaves and, while it is stale, samples the loop thread's
+# own stack from outside. Stdlib only: `sys._current_frames()`.
+#
+# One limit: a C call that holds the GIL for the whole block stops this thread
+# too. The samples then land only after it releases, and name what ran next.
+
+_watchdog_started = False
+_IDLE_FRAMES = ("select", "_poll", "GetQueuedCompletionStatus", "poll",
+                "wait", "acquire", "get")
+
+
+def start_loop_watchdog() -> None:
+    global _watchdog_started
+    if _watchdog_started:
+        return
+    _watchdog_started = True
+    threading.Thread(target=_loop_watchdog, name="diag-loop-watchdog",
+                     daemon=True).start()
+
+
+def _stack_key(frame: Any, limit: int = 18) -> str:
+    """One sampled stack as text, innermost last. Frames from the stdlib's
+    asyncio plumbing above our code are dropped: they are the same every time."""
+    lines = traceback.format_stack(frame, limit=limit)
+    keep = [ln for ln in lines if "asyncio" not in ln.split("\n", 1)[0]
+            or ln is lines[-1]]
+    return "".join(keep or lines).rstrip()
+
+
+def _busy_threads(frames: dict, skip: set) -> list[str]:
+    """The other threads that are running Python rather than parked in a wait:
+    when the loop thread is itself idle-looking, one of these holds the GIL."""
+    out = []
+    for th in threading.enumerate():
+        if th.ident in skip:
+            continue
+        fr = frames.get(th.ident or -1)
+        if fr is None or fr.f_code.co_name in _IDLE_FRAMES:
+            continue
+        out.append(f"[{th.name}] " + _stack_key(fr, limit=8))
+    return out
+
+
+def summarize_block(blocked_s: float, samples: list[str], others: list[str],
+                    ongoing: bool = False) -> str:
+    """Pure: the report for one block — the stacks seen most often first."""
+    from collections import Counter
+    head = (f"LOOP BLOCKED {'(still) ' if ongoing else ''}{blocked_s:.1f}s — "
+            f"{len(samples)} sample(s) of the event-loop thread")
+    parts = [head]
+    for stack, n in Counter(samples).most_common(3):
+        parts.append(f"--- seen in {n}/{len(samples)} samples ---\n{stack}")
+    if others:
+        parts.append("--- other threads running Python meanwhile ---")
+        for stack, n in Counter(others).most_common(3):
+            parts.append(f"({n}x) {stack}")
+    return "\n".join(parts)
+
+
+def _loop_watchdog() -> None:
+    samples: list[str] = []
+    others: list[str] = []
+    blocked_since = 0.0
+    told_ongoing = False
+    me = threading.get_ident()
+    while True:
+        time.sleep(LOOP_BLOCK_POLL_S)
+        try:
+            now = time.monotonic()
+            stale = now - state.loop_beat if state.loop_beat else 0.0
+            if stale >= LOOP_BLOCK_SAMPLE_S:
+                if not blocked_since:
+                    blocked_since = state.loop_beat
+                frames = sys._current_frames()
+                fr = frames.get(state.loop_thread_id)
+                if fr is not None:
+                    samples.append(_stack_key(fr))
+                    if fr.f_code.co_name in _IDLE_FRAMES:
+                        others.extend(_busy_threads(frames, {me, state.loop_thread_id}))
+                if not told_ongoing and stale >= LOOP_BLOCK_ONGOING_S:
+                    told_ongoing = True
+                    log.warning("%s", summarize_block(stale, samples, others, ongoing=True))
+                continue
+            if samples:
+                report = summarize_block(now - blocked_since, samples, others)
+                state.last_block = time.strftime("%Y-%m-%d %H:%M:%S ") + report
+                log.warning("%s", report)
+            samples, others, blocked_since, told_ongoing = [], [], 0.0, False
+        except Exception as exc:                     # never let the watchdog die
+            log.error("loop watchdog sample failed: %s: %s", type(exc).__name__, exc)
+            samples, others, blocked_since, told_ongoing = [], [], 0.0, False
 
 
 def _is_power_of_two(n: int) -> bool:

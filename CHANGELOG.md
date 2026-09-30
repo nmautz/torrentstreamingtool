@@ -1,5 +1,23 @@
 # Changelog
 
+## [19.9.3] — 2026-09-29
+### No more 20-second freezes when opening a big show
+
+- **Fixed: the whole server froze for 18-35 s** when a show with many seasons was
+  opened (SpongeBob: 19 seasons, 651 episode images). Every TMDb call re-read the
+  whole library for the API key, and every image was checked on disk on the
+  server's main loop. Those checks now run in the background, and the key is
+  cached. Playback, progress saves and the dashboard no longer stall behind them.
+- **New diagnostics: a freeze now names its cause.** When the main loop is blocked for
+  2 s or more, a watchdog records what it was doing *during* the freeze and logs
+  `LOOP BLOCKED` with the responsible code. The old stall dumps were written after
+  the freeze ended and never showed the cause.
+- **Fixed: two library items could share one torrent.** An indexer that lists a torrent
+  under another episode's name (SpongeBob "S01E13 Pickles" was really *Hall Monitor*)
+  gave the second item the first one's file. Such a download is now refused with an
+  explanation. Deleting an item also no longer deletes a torrent or file that another
+  item still uses.
+
 ## [19.9.2] — 2026-09-29
 ### The offline player refreshes whatever the download settings say
 

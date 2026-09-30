@@ -6242,6 +6242,50 @@ new poster-bearing tile has to survive a rebuild the same way, or be rendered
 with its `src` already set. Overlapping `loadLibrary` calls could also paint out
 of order, so a response older than the last one painted is dropped.
 
+## Sync file I/O on the event loop freezes the whole server when F: is busy (19.9.3)
+
+Everything the box writes (library.json, `.tmdb_cache/`, `.tmdb_img_cache/`, bundles,
+downloads) is on one drive. A plain `open()`/`exists()` on the loop is harmless on an
+idle disk and a whole-server freeze on a busy one. Measured 2026-09-27 to 09-29: four
+freezes of 18-35 s. Two coincided with an NVENC encode making no progress for 90 s,
+so the disk itself had stalled. Two came from opening SpongeBob's show page. That
+lookup fetched 19 seasons, and each `_tmdb_get` read and wrote its disk cache on the
+loop. `_prefetch_metadata_images` then ran `exists()` + `read_bytes()` on the loop for
+**651 episode stills**. On top of that, every `_tmdb_get` did a full `get_library()`
+just to read the API key.
+
+Fixed in 19.9.3: `_tmdb_get`'s cache get/put, `_tmdb_img_bytes`' read/write and the
+prefetch's existence check (one thread hop for the whole list) run in
+`asyncio.to_thread`. `_tmdb_effective_key` is memoised for 60 s, and
+`admin_update_settings` drops the memo. **Rule: no file access on the loop in anything
+that scales with a show's size.** `_ep_group_homes` still reads the TMDb disk cache
+synchronously because it runs inside the attribution pass. It is memoised for 300 s;
+keep it that way.
+
+A stall dump can't show this kind of culprit, because the loop writes the dump only
+after it is free again. The loop-block sampler (`diagnostics._loop_watchdog`) samples
+the loop thread from outside while it is blocked and logs `LOOP BLOCKED …` naming the
+frame. Read that line first. See [DIAGNOSTICS.md § Loop-block sampler](DIAGNOSTICS.md).
+
+## One torrent, two library items (19.9.3)
+
+An indexer can list one torrent under another episode's name. UIndex's "SpongeBob
+S01E13 Pickles REPACK2 1080p" is the E14 *Hall Monitor* torrent. `/api/library/download`
+dedups only on a hash it knows up front, which a `.torrent` link doesn't give it. qBit
+then rejects the duplicate add, `qbit_add_magnet` **adopts** the existing hash, and
+two items share one torrent. The E13 tile plays E14. Worse, deleting the E13 item
+queued E14's torrent for delete-with-files.
+
+19.9.3 guards both ends:
+- `library_download_pipeline` refuses a hash that another live item owns
+  (`_item_live_torrent_hashes`: the incumbent plus live or paused race challengers,
+  **not** dropped ones, because `/download` drops a challenger precisely when a user
+  claims it). The new item errors with an explanation.
+- `_delete_items` never queues a hash or path that a surviving item still owns.
+
+Items that already share a torrent (made before 19.9.3) are safe to delete now. Delete
+the wrong-content one.
+
 ## A quality cap on a TV has to live in the master (19.9.0)
 
 An AirPlay TV and a Chromecast fetch the HLS master themselves and run their own ABR.
