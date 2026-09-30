@@ -2329,6 +2329,30 @@ function switchTab(tab){
 // seen), and a per-device detail with a Simple view (collapsed activities) and a
 // Raw view (every request). Server: /api/admin/devices*, devactivity.py.
 let _devTimer = null, _devRows = [], _devOpen = null, _devMode = "simple", _devCursor = null;
+let _devAppLatest = "";   // newest iOS app on SideStore (/api/admin/devices app_latest)
+
+// The iOS app version a device last reported (X-App-Version, 19.7.0), or "" for a
+// browser. "<19.5.0" = a build older than 19.5.0 that can't say exactly.
+function _devAppBehind(v){
+  if(!v || !_devAppLatest) return false;
+  if(v.startsWith("<")) return true;
+  const p = (s) => s.split(".").map(n => parseInt(n, 10) || 0);
+  const a = p(v), b = p(_devAppLatest);
+  for(let i = 0; i < 3; i++) if((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) < (b[i] || 0);
+  return false;
+}
+function _devAppText(x){
+  const v = x.app_version;
+  if(!v) return "";
+  const shown = v.startsWith("<") ? `before ${v.slice(1)}` : v;
+  return _devAppBehind(v) ? `App ${shown} · update to ${_devAppLatest}` : `App ${shown}`;
+}
+function _devAppTag(x){
+  const t = _devAppText(x);
+  if(!t) return "";
+  const behind = _devAppBehind(x.app_version);
+  return `<span class="text-[9px] font-bold uppercase tracking-widest ${behind ? "text-amber-400" : "text-gray-500"} ml-1" title="${behind ? "This phone's app is out of date" : "iOS app version"}">${_esc(t)}</span>`;
+}
 
 // Share the dashboard's device id so this page's own requests are attributed too.
 (function(){
@@ -2381,14 +2405,18 @@ async function loadDevices(btn){
   if(!d){ now.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Failed to load devices.</div>`; return; }
   if(!d.available){ now.innerHTML = `<div class="px-5 py-6 text-center text-gray-500 text-sm">The device store isn't available — see the service log.</div>`; return; }
   _devRows = d.devices || [];
+  _devAppLatest = d.app_latest || "";
   const live = _devRows.filter(x => x.presence !== "idle" && !x.id.startsWith("anon-") || x.presence === "active");
   const nAct = _devRows.filter(x => x.presence === "active").length;
   const nRec = _devRows.filter(x => x.presence === "recent").length;
   const nPlay = _devRows.filter(x => x.playback).length + (d.tv ? 1 : 0);
+  const nOld = _devRows.filter(x => _devAppBehind(x.app_version)).length;
   document.getElementById("devSummary").innerHTML = [
     `<span class="px-2.5 py-1 border ${nAct ? "border-emerald-800 text-emerald-400 bg-emerald-950/30" : "border-gray-700 text-gray-500"}">${nAct} Active</span>`,
     `<span class="px-2.5 py-1 border ${nRec ? "border-amber-800 text-amber-300 bg-amber-950/30" : "border-gray-700 text-gray-500"}">${nRec} Recent</span>`,
     `<span class="px-2.5 py-1 border ${nPlay ? "border-indigo-700 text-indigo-300 bg-indigo-950/40" : "border-gray-700 text-gray-500"}">${nPlay} Playing</span>`,
+    // Phones whose app is behind SideStore (19.7.0). Only shown when there are any.
+    nOld ? `<span class="px-2.5 py-1 border border-amber-800 text-amber-300 bg-amber-950/30" title="iOS apps older than ${_esc(_devAppLatest)}">${nOld} App${nOld === 1 ? "" : "s"} out of date</span>` : "",
   ].join("");
   let h = "";
   if(d.tv) h += `
@@ -2423,7 +2451,7 @@ function _devNowRow(x){
       <span class="w-2.5 h-2.5 mt-1 flex-shrink-0 ${_DEV_DOT[x.presence]}" title="${_esc(x.presence)}"></span>
       <div class="min-w-0 flex-1">
         <div class="flex items-baseline justify-between gap-3">
-          <span class="text-sm font-bold text-gray-200 truncate">${_esc(x.display)}${x.profile_name ? ` <span class="text-[10px] font-bold uppercase tracking-widest text-gray-500 ml-1">${_esc(x.profile_name)}</span>` : ""}</span>
+          <span class="text-sm font-bold text-gray-200 truncate">${_esc(x.display)}${x.profile_name ? ` <span class="text-[10px] font-bold uppercase tracking-widest text-gray-500 ml-1">${_esc(x.profile_name)}</span>` : ""}${_devAppTag(x)}</span>
           <span class="text-[10px] text-gray-500 flex-shrink-0">${x.connected ? "connected" : _esc(_devAgo(x.last_seen))}</span>
         </div>
         <div class="text-xs ${x.doing ? "text-gray-300" : "text-gray-500"} truncate">${_esc(doing)}</div>
@@ -2437,7 +2465,7 @@ function _devRenderAll(){
   const el = document.getElementById("devAll");
   if(!el) return;
   const q = (document.getElementById("devFilter")?.value || "").trim().toLowerCase();
-  const rows = _devRows.filter(x => !q || [x.display, x.name, x.label, x.ua_summary, x.ip, x.profile_name, x.id]
+  const rows = _devRows.filter(x => !q || [x.display, x.name, x.label, x.ua_summary, x.ip, x.profile_name, x.id, _devAppText(x)]
     .some(v => (v || "").toLowerCase().includes(q)));
   el.innerHTML = rows.map(x => `
     <button onclick="openDevice(${_esc(JSON.stringify(x.id))})" class="w-full text-left px-5 py-2.5 flex items-center gap-3 hover:bg-gray-800/40">
@@ -2445,7 +2473,7 @@ function _devRenderAll(){
       <div class="min-w-0 flex-1">
         <div class="text-gray-200 truncate">${_esc(x.display)}
           ${x.paired ? `<span class="text-[9px] font-bold uppercase tracking-widest text-sky-400 ml-1">Paired</span>` : ""}
-          <span class="text-[9px] font-bold uppercase tracking-widest text-gray-600 ml-1">${_esc(_DEV_VIA[x.via] || x.via || "")}</span></div>
+          <span class="text-[9px] font-bold uppercase tracking-widest text-gray-600 ml-1">${_esc(_DEV_VIA[x.via] || x.via || "")}</span>${_devAppTag(x)}</div>
         <div class="text-[10px] text-gray-500 truncate">${_esc(x.ua_summary || "")} · ${_esc(x.ip || "")}${x.profile_name ? ` · ${_esc(x.profile_name)}` : ""} · first seen ${_esc(_devTime(x.first_seen))}</div>
       </div>
       <div class="text-right flex-shrink-0">
@@ -2474,7 +2502,7 @@ function _devRenderDetailHead(){
   const x = _devRows.find(r => r.id === _devOpen) || {id: _devOpen, display: _devOpen};
   document.getElementById("devDetTitle").textContent = x.display || x.id;
   const bits = [x.presence && (x.presence === "active" ? "Active now" : x.presence === "recent" ? "Recently active" : `Last seen ${_devAgo(x.last_seen)}`),
-                x.doing && x.doing.text, x.ua_summary, x.ip, x.profile_name && `Profile: ${x.profile_name}`,
+                x.doing && x.doing.text, x.ua_summary, _devAppText(x), x.ip, x.profile_name && `Profile: ${x.profile_name}`,
                 x.name && x.label && `Calls itself “${x.name}”`,
                 _DEV_VIA[x.via] && `Recognised by: ${_DEV_VIA[x.via]}`,
                 x.first_seen && `First seen ${_devTime(x.first_seen)}`,

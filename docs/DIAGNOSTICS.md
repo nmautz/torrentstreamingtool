@@ -719,6 +719,12 @@ the playback sessions already key on. That's what lets the tab show a phone's
 live "Watching …" with a position bar, straight from `state.playback_sessions`.
 The fetch wrapper sends it as `X-Device-Id` (with `X-Device-Name`,
 URL-encoded because default names contain "·" and `Headers` rejects non-Latin-1).
+Inside the iOS app it also sends `X-App-Version` (19.7.0): the installed app's
+version from `AppShell.info()`. A 19.5.0 app (no `info()`) is identified by its
+`NP_BUILD`, and anything older sends `<19.5.0`. The version lands in
+`devices.app_version`; a request without the header never clears it. The tab shows
+`App x.y.z` beside the name, in amber with "update to …" when it's behind
+`app_latest`, plus an **N apps out of date** chip in the summary.
 It is also mirrored into a host **cookie**, because hls.js segment requests,
 `EventSource` and `<img>` send cookies but no custom headers. When that isn't
 there, the ladder is:

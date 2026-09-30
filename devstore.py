@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS devices (
     last_seen    REAL NOT NULL,
     requests     INTEGER NOT NULL DEFAULT 0,
     profile_id   TEXT NOT NULL DEFAULT '',
-    paired       INTEGER NOT NULL DEFAULT 0
+    paired       INTEGER NOT NULL DEFAULT 0,
+    app_version  TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS requests (
     id         INTEGER PRIMARY KEY,
@@ -91,7 +92,7 @@ CREATE TABLE IF NOT EXISTS token_map (
 """
 
 _DEVICE_COLS = ("id", "label", "name", "ua", "ua_summary", "ip", "via", "first_seen",
-                "last_seen", "requests", "profile_id", "paired")
+                "last_seen", "requests", "profile_id", "paired", "app_version")
 _REQ_COLS = ("device_id", "ts", "method", "path", "query", "status", "ms", "ip", "ua",
              "profile_id", "kind", "via")
 _ACT_COLS = ("id", "device_id", "kind", "key", "subject", "start", "end", "count",
@@ -106,6 +107,11 @@ class DeviceStore:
         self._w = self._connect()
         with self._lock:
             self._w.executescript(_SCHEMA)
+            # Columns added after a store already existed. CREATE TABLE IF NOT
+            # EXISTS leaves an old table alone, so they are added here.
+            cols = {r["name"] for r in self._w.execute("PRAGMA table_info(devices)")}
+            if "app_version" not in cols:     # the iOS app's version (19.7.0)
+                self._w.execute("ALTER TABLE devices ADD COLUMN app_version TEXT NOT NULL DEFAULT ''")
             self._w.commit()
 
     def _connect(self) -> sqlite3.Connection:
@@ -146,8 +152,8 @@ class DeviceStore:
             for d in devices:
                 c.execute(
                     """INSERT INTO devices (id, name, ua, ua_summary, ip, via, first_seen,
-                                            last_seen, requests, profile_id, paired)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                                            last_seen, requests, profile_id, paired, app_version)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(id) DO UPDATE SET
                          name       = CASE WHEN excluded.name <> '' THEN excluded.name ELSE devices.name END,
                          ua         = CASE WHEN excluded.ua <> '' THEN excluded.ua ELSE devices.ua END,
@@ -158,10 +164,12 @@ class DeviceStore:
                          first_seen = MIN(devices.first_seen, excluded.first_seen),
                          requests   = devices.requests + excluded.requests,
                          profile_id = CASE WHEN excluded.profile_id <> '' THEN excluded.profile_id ELSE devices.profile_id END,
-                         paired     = MAX(devices.paired, excluded.paired)""",
+                         paired     = MAX(devices.paired, excluded.paired),
+                         app_version = CASE WHEN excluded.app_version <> '' THEN excluded.app_version ELSE devices.app_version END""",
                     (d["id"], d.get("name", ""), d.get("ua", ""), d.get("ua_summary", ""),
                      d.get("ip", ""), d.get("via", ""), d["first_seen"], d["last_seen"],
-                     int(d.get("requests", 0)), d.get("profile_id", ""), int(bool(d.get("paired")))))
+                     int(d.get("requests", 0)), d.get("profile_id", ""), int(bool(d.get("paired"))),
+                     d.get("app_version", "")))
             for a in activities:
                 if a.get("id"):
                     c.execute("UPDATE activities SET end=?, count=?, subject=?, key=?, profile_id=?, errors=? WHERE id=?",

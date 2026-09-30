@@ -4554,6 +4554,7 @@ function _devIdSync(){
   return id;
 }
 _devIdSync();
+let _appVerHeader = "";   // set by _appVersionInit (iOS app only)
 (function(){
   const _origFetch = window.fetch.bind(window);
   window.fetch = function(input, init){
@@ -4568,6 +4569,9 @@ _devIdSync();
           if(!h.has("X-Device-Id")) h.set("X-Device-Id", _pbDeviceId());
           // URL-encoded: the default names carry "·", and Headers rejects non-Latin-1.
           if(!h.has("X-Device-Name")) h.set("X-Device-Name", encodeURIComponent(_pbDeviceName()));
+          // The installed iOS app's version, for the admin Devices tab (19.7.0).
+          // "<x.y.z" = older than that; known once _appVersionInit resolves.
+          if(_appVerHeader && !h.has("X-App-Version")) h.set("X-App-Version", _appVerHeader);
         } catch(_){}
         init.headers = h;
       }
@@ -21787,6 +21791,7 @@ async function _appOfflineBoot() {
   _npReconcileOrphan("page-boot");
   _appOpenDashboard();
   _appInitQuickActions();
+  _appVersionInit();
   _appOfflineReconnectInit();
 }
 
@@ -21912,18 +21917,36 @@ function _verCmp(a, b) {
 // is older, and its NativePlayback build stamp (NP_BUILD) is a LOWER bound on
 // its version — enough to know it's behind, not enough to print, so `exact`
 // is false. null = can't tell, or a dev build from Xcode ("1.0"): say nothing.
-async function _appInstalledVersion() {
-  try {
-    const r = await _cap.shell.info();
-    const v = r && r.version;
-    if (!/^\d+\.\d+\.\d+$/.test(v || "")) return null;
-    return { v, exact: true };
-  } catch (_) {}
-  try {
-    const d = await _cap.np.extDiag();
-    if (d && /^\d+\.\d+\.\d+$/.test(d.build || "")) return { v: d.build, exact: false };
-  } catch (_) {}
-  return { v: "0.0.0", exact: false };   // older than extDiag itself (pre-18.4.0)
+//
+// Asked once per page: the answer can't change under a running page, and the
+// extDiag fallback writes a diagnostic row each time.
+let _appVerPromise = null;
+function _appInstalledVersion() {
+  if (!_appVerPromise) _appVerPromise = (async () => {
+    try {
+      const r = await _cap.shell.info();
+      const v = r && r.version;
+      if (!/^\d+\.\d+\.\d+$/.test(v || "")) return null;
+      return { v, exact: true };
+    } catch (_) {}
+    try {
+      const d = await _cap.np.extDiag();
+      // 19.5.0 is the one build with AppShell but no info(), and its NP_BUILD
+      // is exactly 19.5.0 — so there the lower bound IS the version.
+      if (d && d.build === "19.5.0") return { v: "19.5.0", exact: true };
+      if (d && /^\d+\.\d+\.\d+$/.test(d.build || "")) return { v: d.build, exact: false };
+    } catch (_) {}
+    return { v: "0.0.0", exact: false };   // older than extDiag itself (pre-18.4.0)
+  })();
+  return _appVerPromise;
+}
+
+// Tag every later /api request with the app version (the admin Devices tab).
+// An inexact one is only known to be older than 19.5.0, so it says exactly that.
+async function _appVersionInit() {
+  if (!isApp) return;
+  const inst = await _appInstalledVersion();
+  if (inst) _appVerHeader = inst.exact ? inst.v : "<19.5.0";
 }
 
 async function _appCheckUpdate() {
@@ -30664,6 +30687,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
   _npBindEvents();
   _npReconcileOrphan("page-boot");
   _appInitQuickActions();
+  _appVersionInit();
   _appInitUpdateCheck();
   // Keep the offline player snapshot fresh (fire-and-forget; no-op in a browser).
   _appRefreshPlayerSnapshot();
@@ -30770,6 +30794,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.6.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.7.0</div>
 </body>
 </html>

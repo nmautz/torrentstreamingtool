@@ -14057,6 +14057,7 @@ def _dev_capture(request: Request, status: int, ms: float) -> None:
         int(status or 0), round(ms, 1), _dev_client_ip(request),
         request.headers.get("user-agent", "")[:300], _dev_request_device_id(request),
         unquote(request.headers.get("x-device-name", ""))[:80], th, _profile_session_id(request) or "",
+        request.headers.get("x-app-version", "")[:20],
     ))
 
 
@@ -14183,7 +14184,7 @@ async def _dev_drain() -> None:
     # identified one (the dashboard document, before its JS set the cookie) is
     # still attributed.
     tokens = []
-    for (ts, _m, _p, _q, _s, _ms, ip, ua, did, _n, th, _pid) in batch:
+    for (ts, _m, _p, _q, _s, _ms, ip, ua, did, _n, th, _pid, _av) in batch:
         if did:
             _dev_ipua_seen[(ip, ua)] = (did, ts)
             _dev_ip_seen.setdefault(ip, {})[did] = ts
@@ -14192,7 +14193,7 @@ async def _dev_drain() -> None:
                 tokens.append((th, did, ts))
 
     reqs, devs, dirty = [], {}, {}
-    for (ts, method, path, query, status, ms, ip, ua, did, dname, th, pid) in batch:
+    for (ts, method, path, query, status, ms, ip, ua, did, dname, th, pid, appv) in batch:
         dev_id, via = _dev_identify(ts, ip, ua, did, th)
         kind, ref = devactivity.classify(method, path, query)
         reqs.append({"device_id": dev_id, "ts": ts, "method": method, "path": path,
@@ -14202,7 +14203,7 @@ async def _dev_drain() -> None:
         if d is None:
             d = devs[dev_id] = {"id": dev_id, "name": "", "ua": "", "ua_summary": "", "ip": "",
                                 "via": "", "first_seen": ts, "last_seen": ts, "requests": 0,
-                                "profile_id": "", "paired": False}
+                                "profile_id": "", "paired": False, "app_version": ""}
         d["requests"] += 1
         d["last_seen"] = max(d["last_seen"], ts)
         d["first_seen"] = min(d["first_seen"], ts)
@@ -14215,6 +14216,10 @@ async def _dev_drain() -> None:
         d["name"] = dname or d["name"]
         d["profile_id"] = pid or d["profile_id"]
         d["paired"] = d["paired"] or bool(th)
+        # The iOS app's version (X-App-Version, 19.7.0). Only the app's own page
+        # sends it, so a request without it never clears a known one.
+        if appv:
+            d["app_version"] = appv
 
         live = _dev_live.setdefault(dev_id, {"lanes": {}})
         live.update({k: d[k] for k in ("ip", "ua_summary", "via") if d[k]})
@@ -14363,6 +14368,8 @@ async def admin_devices(request: Request) -> JSONResponse:
         tv = {"title": _dev_file_label(state.library_current_file),
               "profile_name": state.library_profile_name or ""}
     return JSONResponse({"available": True, "now": now, "devices": out, "tv": tv,
+                         # The newest app on SideStore, to flag devices behind it.
+                         "app_latest": _app_latest.get("version"),
                          "stats": {**stats, "human": human_size(stats.get("bytes") or 0)},
                          "retention": {"raw_days": devstore.RAW_KEEP_DAYS,
                                        "raw_max_rows": devstore.RAW_MAX_ROWS,

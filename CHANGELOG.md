@@ -1,5 +1,17 @@
 # Changelog
 
+## [19.7.0] — 2026-09-29
+### The admin Devices tab shows each phone's app version
+
+- **New: admin → Devices shows the iOS app version** a phone is running (`App 19.6.0`)
+  next to its name, in the device detail and in search. A phone behind the newest
+  SideStore release is shown in amber with the version to update to, and the summary
+  gets an **N apps out of date** chip. Browsers show nothing. The version comes from a
+  new `X-App-Version` header the app's dashboard sends with each request. Phones
+  running an app older than 19.5.0 show as "before 19.5.0".
+- **Docs:** noted that the older paired-token `/api/admin/devices` route is shadowed
+  by the Devices-tab route and never reached.
+
 ## [19.6.0] — 2026-09-29
 ### The app tells you when it's out of date
 

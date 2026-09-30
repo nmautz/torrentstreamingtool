@@ -11,6 +11,7 @@ strings that actually carry a secret today (`?device_token=`, `?profile_token=`)
 import os
 import shutil
 import sys
+import sqlite3
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -154,6 +155,32 @@ try:
     eq("raw capped by count, newest kept", [r["path"] for r in st.requests("d1")], ["/n9", "/n8", "/n7", "/n6"])
     eq("stats", st.stats()["devices"], 1)
     eq("forget", st.forget("d1") > 0 and st.device("d1") is None and st.requests("d1") == [], True)
+    st.close()
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+
+# ── devstore: the app_version column (19.7.0) ────────────────────────────────
+tmp = tempfile.mkdtemp()
+try:
+    path = os.path.join(tmp, "old.sqlite3")
+    # A store made before the column existed must gain it, keeping its rows.
+    old = sqlite3.connect(path)
+    old.executescript("""CREATE TABLE devices (id TEXT PRIMARY KEY, label TEXT NOT NULL DEFAULT '',
+        name TEXT NOT NULL DEFAULT '', ua TEXT NOT NULL DEFAULT '', ua_summary TEXT NOT NULL DEFAULT '',
+        ip TEXT NOT NULL DEFAULT '', via TEXT NOT NULL DEFAULT '', first_seen REAL NOT NULL,
+        last_seen REAL NOT NULL, requests INTEGER NOT NULL DEFAULT 0,
+        profile_id TEXT NOT NULL DEFAULT '', paired INTEGER NOT NULL DEFAULT 0);
+        INSERT INTO devices (id, first_seen, last_seen) VALUES ('old', 1.0, 2.0);""")
+    old.commit(); old.close()
+    st = devstore.DeviceStore(path)
+    eq("old store migrated", st.device("old")["app_version"], "")
+    base = {"id": "a1", "first_seen": 1.0, "last_seen": 2.0, "requests": 1}
+    st.write(devices=[{**base, "app_version": "19.6.0"}])
+    eq("app version stored", st.device("a1")["app_version"], "19.6.0")
+    st.write(devices=[{**base, "last_seen": 3.0}])
+    eq("request without it keeps it", st.device("a1")["app_version"], "19.6.0")
+    st.write(devices=[{**base, "app_version": "19.7.0"}])
+    eq("newer replaces", st.device("a1")["app_version"], "19.7.0")
     st.close()
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
