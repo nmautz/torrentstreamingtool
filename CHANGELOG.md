@@ -1,5 +1,17 @@
 # Changelog
 
+## [19.4.1] — 2026-09-29
+### The app connects over HTTP by default
+
+- **Fixed: typing a bare address in the app's Connect screen tried HTTPS.**
+  `192.168.1.20` now becomes `http://192.168.1.20`, the dashboard's real
+  port-80 server, instead of `https://…`, which needs the self-signed cert
+  trusted on the phone. Type `https://` yourself to keep using HTTPS. The
+  example address no longer shows the stale `:8000` port.
+- **Changed: the app allows plain HTTP to local-network names**
+  (`NSAllowsLocalNetworking`), so `http://streamlink.local` loads too; raw IP
+  addresses were already exempt from App Transport Security.
+
 ## [19.4.0] — 2026-09-29
 ### Install the app from SideStore
 

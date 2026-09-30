@@ -109,13 +109,13 @@
     <h1>Connect</h1>
     <p class="sub">Enter the address of your StreamLink host. You can find it in
       the dashboard&rsquo;s footer or your <code>run.py</code> output
-      (e.g. <code>https://192.168.1.20:8000</code>).</p>
+      (e.g. <code>http://192.168.1.20</code>).</p>
 
     <label for="server">Server address</label>
     <input id="server" type="url" inputmode="url" autocapitalize="off"
            autocorrect="off" spellcheck="false"
-           placeholder="https://192.168.1.20:8000" />
-    <div class="hint">If you omit <code>https://</code> it is added automatically.</div>
+           placeholder="http://192.168.1.20" />
+    <div class="hint">If you omit <code>http://</code> it is added automatically. Type <code>https://</code> yourself to use HTTPS.</div>
 
     <label for="pw">Host password <span style="opacity:.6">(optional)</span></label>
     <input id="pw" type="password" autocapitalize="off" autocorrect="off"
@@ -185,13 +185,14 @@
     }
 
     // Normalise a user-typed address into an absolute origin URL.
-    // - prepends https:// when no scheme is present
+    // - prepends http:// when no scheme is present (the dashboard serves
+    //   plain HTTP on port 80; HTTPS is opt-in by typing the scheme)
     // - strips a trailing slash so we control the path we navigate to
     // Returns null when it cannot be parsed into an http(s) URL.
     function normalizeUrl(raw) {
       let v = (raw || "").trim();
       if (!v) return null;
-      if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(v)) v = "https://" + v;
+      if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(v)) v = "http://" + v;
       let u;
       try { u = new URL(v); } catch { return null; }
       if (u.protocol !== "http:" && u.protocol !== "https:") return null;
@@ -287,7 +288,7 @@
 
     $("connect").addEventListener("click", async () => {
       const url = normalizeUrl($("server").value);
-      if (!url) { showError("That doesn't look like a valid address. Example: https://192.168.1.20:8000"); return; }
+      if (!url) { showError("That doesn't look like a valid address. Example: http://192.168.1.20"); return; }
       localStorage.setItem(KEY_URL, url);
       const pw = $("pw").value.trim();
       if (pw) {

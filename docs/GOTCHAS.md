@@ -4433,7 +4433,7 @@ and the one time it did (overnight) the cause was the task flood, already fixed.
 
 ### The remote dashboard CANNOT load offline — `downloads.html` is the offline entry point
 The whole dashboard UI (`static/index.html`) is **served by the host**. The shell
-navigates the WKWebView to `https://<host>/`, so with no connection (Airplane Mode
+navigates the WKWebView to `http(s)://<host>/`, so with no connection (Airplane Mode
 / host down) the WebView can't load the page at all — it hangs on "connecting to
 server" and *none* of the in-page offline glue runs. So offline playback can't live
 only in the dashboard. The app bundles a self-contained **`www/downloads.html`**
