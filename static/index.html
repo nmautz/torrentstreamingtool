@@ -1086,6 +1086,11 @@
        itself is z-40 and opaque, but the footer is also z-40 and later in the
        DOM, and skip/resume offers + the local-device player are z-50+ — so
        without this rule they bleed through over the buttons on mobile. */
+    /* Nothing playing on the TV (renderPlayer sets .tv-idle): no player
+       footer. <main>'s pb-36 cleared that footer; keep only enough to scroll
+       the last row clear of the app's floating APP button. */
+    body.tv-idle footer { display: none !important; }
+    body.tv-idle main { padding-bottom: calc(4.5rem + env(safe-area-inset-bottom, 0px)) !important; }
     body:has(#profilePicker:not(.hidden)) footer,
     body:has(#profilePicker:not(.hidden)) #skipOffer,
     body:has(#profilePicker:not(.hidden)) #resumeOffer,
@@ -1125,7 +1130,7 @@
     }
   </style>
 </head>
-<body class="dark bg-gray-950 text-gray-100 flex flex-col">
+<body class="dark tv-idle bg-gray-950 text-gray-100 flex flex-col">
 
 <!-- ── Icon sprite ──────────────────────────────────────────────────────────
      Single source for every pictographic UI glyph (docs/FRONTEND.md § Iconography).
@@ -5548,6 +5553,11 @@ function renderPlayer(s){
 
   // Seek bar: use VLC playback position when playing with known duration; else download progress
   const isPlaying=s.stream_status==="playing";
+  // Nothing on the TV → the footer is dead weight (every control in it drives
+  // the TV), so it hides and <main> gives the space back. An error keeps it up
+  // so the failure is still readable.
+  document.body.classList.toggle("tv-idle",
+    !isPlaying && s.stream_status!=="buffering" && s.stream_status!=="error" && !s.youtube_active);
   const hasVlcTime=isPlaying&&(s.vlc_duration||0)>0;
   const barPct=hasVlcTime
     ?(s.vlc_time/s.vlc_duration*100)
@@ -30908,6 +30918,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.10.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.11.0</div>
 </body>
 </html>

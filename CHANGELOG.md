@@ -1,5 +1,13 @@
 # Changelog
 
+## [19.11.0] — 2026-09-29
+### The player bar hides when nothing is playing on the TV
+
+- With the TV idle (no stream, nothing buffering, no YouTube), the bottom player bar
+  — seek bar, "No active stream" and the transport buttons — is hidden and the
+  library gets the space back. It returns the moment playback starts, and stays up
+  on an error so the message can be read.
+
 ## [19.10.1] — 2026-09-29
 ### A finished download can no longer lose its torrent
 
