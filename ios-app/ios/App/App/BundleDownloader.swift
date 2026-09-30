@@ -1593,6 +1593,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         jobOrder.removeAll { $0 == sha }
         endBgTaskIfIdle()
         emit("bundleComplete", ["sha": sha, "itemId": job.itemId, "filePath": job.filePath, "dir": bundleDir(sha).path])
+        Haptics.downloadFinished()
         // End the Live Activity (terminal frame) when the last job finishes, else
         // keep it showing the remaining downloads.
         if jobs.isEmpty {

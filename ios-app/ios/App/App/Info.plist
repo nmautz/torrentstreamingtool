@@ -88,6 +88,33 @@
 			</array>
 		</dict>
 	</dict>
+	<key>UIApplicationShortcutItems</key>
+	<array>
+		<dict>
+			<key>UIApplicationShortcutItemType</key>
+			<string>com.streamlink.client.continue</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>Continue Watching</string>
+			<key>UIApplicationShortcutItemIconSymbolName</key>
+			<string>play.fill</string>
+		</dict>
+		<dict>
+			<key>UIApplicationShortcutItemType</key>
+			<string>com.streamlink.client.downloads</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>Downloads</string>
+			<key>UIApplicationShortcutItemIconSymbolName</key>
+			<string>arrow.down.circle</string>
+		</dict>
+		<dict>
+			<key>UIApplicationShortcutItemType</key>
+			<string>com.streamlink.client.search</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>Search</string>
+			<key>UIApplicationShortcutItemIconSymbolName</key>
+			<string>magnifyingglass</string>
+		</dict>
+	</array>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

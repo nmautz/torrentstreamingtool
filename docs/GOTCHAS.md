@@ -3230,6 +3230,33 @@ The player's orientation lock (`#lpRotBtn` → `.lp-lock-landscape`) needs a CSS
 
 ## iOS client app (Capacitor)
 
+### The sleep timer must run natively, and must not fire twice (19.5.0)
+
+A sleep timer is used with the phone locked, which is exactly when the page's
+`setInterval`s are frozen. So the timer rides the native arm and `NativePlayback.maybeSleep`
+fires it. Three traps:
+
+- **The re-arm race.** Waking from a lock, the page re-arms from its own state, which
+  still carries the timer, before the queued `sleepFired` event reaches it. Without
+  `sleepFiredId` (native refusing an arm whose `sleepId` it already spent), the timer
+  would fire a second time and pause the episode the user just resumed.
+- **`<video>.volume` does nothing on iOS.** The page's fade is silent on a foreground
+  iPhone. Only the native AVPlayer's `volume` actually fades. Don't "fix" this by routing
+  the element through WebAudio: MSE on WebKit can't be tapped (see § Manual audio
+  offset).
+- **A page reload loses the timer.** A jettisoned content process reloads the page
+  (§ WKWebView grey screen), and the fresh page arms with `sleepId: 0`, which cancels
+  native's copy. That's accepted: the reload is rare and the cost is one missed stop.
+
+### Quick actions arrive in two places, and before the page that can act on them
+
+A cold launch from a home-screen quick action delivers the item in
+`scene(_:willConnectTo:options:)` (`connectionOptions.shortcutItem`) and does **not**
+call `windowScene(_:performActionFor:)`. A warm launch uses only the second one. Both
+feed `QuickActions.shared`. The page that can act on the action is the host dashboard,
+which only loads after the connect shell probes and navigates. So the action waits
+natively until the page takes it, and never reaches the shell page.
+
 ### Auto-manage keyed on an item id cannot know about next season (18.21.0)
 
 A library item is one torrent, not one show. South Park is **32 items / 66 episodes** on the

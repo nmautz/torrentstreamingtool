@@ -1,5 +1,24 @@
 # Changelog
 
+## [19.5.0] — 2026-09-29
+### Sleep timer, home-screen shortcuts, haptics
+
+- **New: sleep timer** in the player's Options panel: Off, End of episode, 15 / 30 /
+  45 min, 1 / 1.5 / 2 hours. When the time runs out, the sound fades over 10 s and
+  playback pauses. **End of episode** marks the episode watched and closes the player,
+  so the next Resume starts the next episode. It keeps running with the phone locked,
+  on the glasses, on AirPlay and on Chromecast. A moon badge next to the clock shows
+  the time left. On a foreground iPhone the fade is silent (iOS ignores page volume),
+  but the pause still happens on time.
+- **New (app): home-screen quick actions.** Long-press the StreamLink icon for
+  **Continue Watching** (resumes the show you watched most recently), **Downloads** and
+  **Search**. Continue Watching and Search wait for the profile picker if nobody is
+  signed in. Offline, only Downloads works.
+- **New (app): haptics** on play/pause, ±10 s, Skip Intro/Credits, hold buttons when
+  they fire (Prev/Next episode, Stop, Clip…), setting the sleep timer, and a download
+  finishing (one buzz per burst). Nothing buzzes when it wasn't your touch, such as
+  an auto-skip or the timer running out.
+
 ## [19.4.2] — 2026-09-29
 ### Library posters stop flickering
 

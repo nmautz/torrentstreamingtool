@@ -50,7 +50,10 @@
 //                         resume() takes the episode back ("Back to phone")
 //    routeCheck()      -> { airplay, shown }   after Back to phone: if the system
 //                         audio route is still AirPlay, open the route sheet
+//  arm() also carries the sleep timer (sleepId / sleepAt / sleepEpisode — see
+//  "Sleep timer" below); native enforces it while it is the player.
 //  Events: nativeStarted, nativeEnded, nativeAdvanced, displayChanged,
+//          sleepFired ({id, at: clock|credits|end|lapsed}),
 //          airplayEnded (the route was never picked, or was dropped),
 //          castEnded (the Cast session failed or was stopped from the TV),
 //          castVolume ({level, muted} — the TV's volume, as the receiver reports it),
@@ -74,7 +77,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "19.2.2"
+let NP_BUILD = "19.5.0"
 
 // MARK: - Armed state
 
@@ -164,6 +167,16 @@ struct ArmedPlayback {
     var nextIntroStart: Double = -1
     var nextIntroEnd: Double = -1
     var nextCreditsStart: Double = -1
+    /// The sleep timer. It travels with the arm for the same reason auto-skip
+    /// does: the page's timers are frozen once the phone locks, and the phone
+    /// locking is the whole point of a sleep timer. `sleepId` names one setting
+    /// of it (0 = off), so a page that wakes and re-arms with a timer native has
+    /// already fired can't fire it a second time. `sleepAt` is a wall-clock
+    /// deadline (epoch seconds, 0 = none); `sleepEpisode` means "stop where
+    /// this episode would advance". See maybeSleep.
+    var sleepId: Double = 0
+    var sleepAt: Double = 0
+    var sleepEpisode = false
     /// When `position` was sampled. Handoff extrapolates from this.
     var armedAt = Date()
 }
@@ -908,6 +921,11 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     /// being asked.
     private var audioEverActivated = false
     private var endedFlag = false
+    /// The sleep timer's last firing (its `sleepId`), and the fade running
+    /// towards one. See maybeSleep.
+    private var sleepFiredId: Double = 0
+    private var sleepFade: Timer?
+    private var sleepFadeFor: Double = 0
     private var handBackDeadline: DispatchWorkItem?
     /// An AirPlay session is up: the player's URLs point at AirPlayDoor, and the
     /// native player is the presentation exactly as it is on the glasses.
@@ -1139,6 +1157,15 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         a.nextIntroStart   = call.getDouble("nextIntroStart") ?? -1
         a.nextIntroEnd     = call.getDouble("nextIntroEnd") ?? -1
         a.nextCreditsStart = call.getDouble("nextCreditsStart") ?? -1
+        a.sleepId          = call.getDouble("sleepId") ?? 0
+        a.sleepAt          = call.getDouble("sleepAt") ?? 0
+        a.sleepEpisode     = call.getBool("sleepEpisode") ?? false
+        // A timer we already fired stays fired. The page learns of it from
+        // `sleepFired`, but that event can sit queued behind a frozen WebView
+        // while the page's first re-arm still carries the old setting.
+        if a.sleepId != 0, a.sleepId == sleepFiredId {
+            a.sleepId = 0; a.sleepAt = 0; a.sleepEpisode = false
+        }
         a.armedAt        = Date()
         // The page arms with the URLs IT can reach (loopback / the box). While
         // AirPlay is up the receiver is fetching, so every URL the player could
@@ -1244,6 +1271,8 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         let airplayAudioChanged = tracksChanged && airplayOn && cast == nil
             && a.audioName != armed.audioName
         armed = a
+        // Cancelled or re-set mid-fade: the volume comes straight back.
+        if sleepFade != nil, armed.sleepId != sleepFadeFor { endSleepFade() }
         if airplayAudioChanged, let u = armed.url {
             // The TV only ever has the one audio track we put in its master
             // (see airplayURL), so a new pick is a new master, at the playhead.
@@ -1814,6 +1843,9 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
                                          "paused": p.timeControlStatus != .playing])
             self.maybePostProgress(t)
             self.maybePostSession(t)
+            // Before auto-skip: "stop after this episode" stops AT the credits
+            // skip rather than letting it carry us into the next one.
+            if self.maybeSleep(t) { return }
             // LAST, and deliberately after the progress write: a credits skip
             // re-points `armed` at the next episode, and a post issued after
             // that would file this episode's position under the next one's path.
@@ -2065,9 +2097,14 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private func reachedEnd() {
         maybePostProgress(armed.duration, force: true)
 
+        // "Stop after this episode": this is that stop. Fall through to the
+        // no-next path, which is exactly what ending here should look like.
+        let sleepStop = sleepActive && armed.sleepEpisode
+        if sleepStop { fireSleep(at: "end") }
+
         // Advance in place if the web player armed a next episode — it already
         // preps it (_lpWarmNextEp), so this costs no extra host round-trip.
-        if advanceToNext(reason: "ended") { return }
+        if !sleepStop, advanceToNext(reason: "ended") { return }
         endedFlag = true
         DiagLog.shared.write("ended", ["file": armed.filePath, "dur": armed.duration,
                                        "hadNext": false], cat: "play")
@@ -2116,6 +2153,96 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         emit("nativeAdvanced", ["filePath": armed.filePath, "url": next.absoluteString])
         replaceItem(with: next)
         return true
+    }
+
+    // MARK: Sleep timer
+
+    /// Mirrors LP_SLEEP_FADE_SEC in static/index.html.
+    private static let sleepFadeSec = 10.0
+    private static let sleepStaleSec = 3.0
+
+    private var sleepActive: Bool { armed.sleepId != 0 && armed.sleepId != sleepFiredId }
+
+    /// Where "stop after this episode" stops, in media time: the credits
+    /// auto-skip when one is going to carry us onward (it fires before the end
+    /// and would advance), otherwise the end itself. 0 when unknown.
+    private var sleepEpisodeEnd: Double {
+        if armed.autoSkipCredits, !armed.creditsDone, armed.creditsStart > 0,
+           armed.nextUrl != nil { return armed.creditsStart }
+        return armed.duration
+    }
+
+    /// Seconds left on the running sleep timer, nil when there is none.
+    private func sleepRemaining(_ t: Double) -> Double? {
+        guard sleepActive else { return nil }
+        if armed.sleepAt > 0 { return armed.sleepAt - Date().timeIntervalSince1970 }
+        if armed.sleepEpisode, sleepEpisodeEnd > 0 { return sleepEpisodeEnd - t }
+        return nil
+    }
+
+    /// Run the sleep timer while WE are the player. Returns true when it just
+    /// stopped playback, so the caller skips whatever would have moved it on.
+    ///
+    /// The clock pauses. "End of episode" ENDS the episode — watched, session
+    /// over, exactly like the last episode of a run — so the morning's Resume
+    /// lands on the next one. At the credits point that means ending it early
+    /// through reachedEnd; the natural end gets there on its own (pausing a hair
+    /// before it would leave an episode that never ends).
+    private func maybeSleep(_ t: Double) -> Bool {
+        guard let left = sleepRemaining(t) else { return false }
+        let atEnd = armed.sleepAt <= 0 && sleepEpisodeEnd == armed.duration
+        // A clock that ran out while we were paused (the observer doesn't tick
+        // then) is spent, not due: pausing the moment someone presses play
+        // would read as a broken play button. Same rule as the page's.
+        if armed.sleepAt > 0, left < -Self.sleepStaleSec {
+            DiagLog.shared.write("sleep-lapsed", ["late": -left], cat: "play")
+            sleepFiredId = armed.sleepId
+            emit("sleepFired", ["id": armed.sleepId, "at": "lapsed"])
+            armed.sleepId = 0; armed.sleepAt = 0; armed.sleepEpisode = false
+            endSleepFade()
+            return false
+        }
+        if left <= 0, !atEnd {
+            if armed.sleepAt > 0 { fireSleep(at: "clock") } else { reachedEnd() }
+            return true
+        }
+        if left <= Self.sleepFadeSec, sleepFade == nil, player != nil { startSleepFade() }
+        return false
+    }
+
+    /// Pause, restore the volume, and tell the page. Fired once per `sleepId`.
+    private func fireSleep(at: String) {
+        let id = armed.sleepId
+        sleepFiredId = id
+        DiagLog.shared.write("sleep-fired", ["at": at, "file": armed.filePath,
+                                             "pos": armed.position], cat: "play")
+        if at != "end" { setPaused(true, source: "sleep") }
+        endSleepFade()
+        armed.sleepId = 0; armed.sleepAt = 0; armed.sleepEpisode = false
+        emit("sleepFired", ["id": id, "at": at])
+    }
+
+    /// Ramp the player's own volume to silence over what is left of the window.
+    /// Its own 0.1 s timer: the 1 Hz observer would make the ramp audibly
+    /// stepped. A Cast session has no local volume to ramp and simply pauses.
+    private func startSleepFade() {
+        sleepFadeFor = armed.sleepId
+        sleepFade = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self = self, let p = self.player else { return }
+            let t = CMTimeGetSeconds(p.currentTime())
+            guard let left = self.sleepRemaining(t.isFinite ? t : self.armed.position) else {
+                self.endSleepFade(); return
+            }
+            if left <= 0, self.armed.sleepAt > 0 { self.fireSleep(at: "clock"); return }
+            p.volume = Float(max(0, min(1, left / Self.sleepFadeSec)))
+        }
+    }
+
+    private func endSleepFade() {
+        sleepFade?.invalidate()
+        sleepFade = nil
+        sleepFadeFor = 0
+        player?.volume = 1
     }
 
     // MARK: Auto-skip
@@ -2343,6 +2470,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
                                                "title": armed.title,
                                                "ended": endedFlag], cat: "play")
         }
+        endSleepFade()
         handBackDeadline?.cancel(); handBackDeadline = nil
         if let p = player, let obs = timeObserver { p.removeTimeObserver(obs) }
         timeObserver = nil
@@ -3215,6 +3343,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
                                     "paused": armed.paused])
             maybePostProgress(t)
             maybePostSession(t)
+            if !armed.paused, maybeSleep(t) { return }
             maybeAutoSkip(t)      // last, as in the AVPlayer observer
         } else if st.playerState == "IDLE", castReady, st.idleReason == "FINISHED" {
             // Polled at 1 Hz, so the same FINISHED arrives repeatedly; castReady

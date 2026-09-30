@@ -1877,6 +1877,39 @@ Not yet exercised: seek, auto-skip, advance, and a locked phone.
   `_npHandBack()` → `reclaim` → `stopNative` stops the TV and resumes the page's element
   at the native playhead.
 
+#### Sleep timer (19.5.0)
+
+The Options panel's **Sleep** row (`#lpSleepSelect` → `lpSetSleep`): Off, **End of
+episode**, 15 / 30 / 45 min, 1 / 1.5 / 2 hours. A small moon badge with the time left
+(`#lpSleepBadge`) sits next to the clock while one runs; tapping it opens Options.
+
+- **The clock pauses.** The sound fades over the last 10 s (`LP_SLEEP_FADE_SEC`), then
+  playback pauses and the volume is restored.
+- **End of episode ends the episode**: it's marked watched and the player closes, the
+  same as the last episode of a run. The morning's Resume then lands on the next
+  episode instead of restarting this one. It stops where the episode would have
+  advanced: the credits auto-skip point when that is on and a next episode exists,
+  otherwise the real end.
+- **Two runners, one timer.** The page runs it (`_lpSleepTick`, 4 Hz) while it is the
+  player. It also rides every arm (`sleepId` / `sleepAt` epoch seconds / `sleepEpisode`),
+  and native runs it (`maybeSleep`, from the AVPlayer time observer and the Cast status
+  poll, ahead of auto-skip) while native holds playback. Once the phone locks, the
+  page's timers are frozen, so native is the only thing that can fire it. Native tells
+  the page with `sleepFired {id, at: clock|credits|end|lapsed}`. For `end`, the page's
+  next `_lpAdvanceOrEnd` is swallowed (`_lpSleepSwallow`), because native already ended
+  the episode.
+- **`sleepId` makes it fire once.** It is the `Date.now()` of the setting. Native
+  remembers the last id it fired (`sleepFiredId`) and strips it from any later arm. A
+  page waking from a lock re-arms before the queued `sleepFired` reaches it, and would
+  otherwise hand native a timer that is already spent.
+- **A clock that runs out while paused is spent, not due.** Both runners drop it
+  silently instead of pausing the moment play is pressed. The page also drops a clock
+  that ran out while it was frozen (a tick gap over 3 s).
+- **The fade is audible only on the native player.** iOS ignores `<video>.volume`, so
+  on a foreground iPhone the page's fade is silent and the pause lands on time. The
+  AVPlayer's own `volume` ramps at 10 Hz. Cast has no local volume, so it just pauses.
+- **Setting it buzzes** (`_hap("selection")`); running out never does.
+
 ### 2c. Subtitle image packs (styled ASS + PGS/VOBSUB)
 
 **The problem.** An HLS subtitle rendition may carry WebVTT or IMSC1 and nothing else, so

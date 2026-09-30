@@ -4132,6 +4132,11 @@
           <span id="lpTimeCur" class="lp-ctl-time">0:00</span>
           <span class="lp-ctl-time lp-ctl-dim">/</span>
           <span id="lpTimeDur" class="lp-ctl-time lp-ctl-dim">–:––</span>
+          <!-- Sleep timer running (19.5.0): what's left, tap for Options. -->
+          <button id="lpSleepBadge" class="lp-ctl-time hidden flex items-center gap-1 ml-2 text-indigo-300"
+            onclick="lpToggleOpts()" title="Sleep timer">
+            <svg class="ic" aria-hidden="true"><use href="#i-moon"/></svg><span id="lpSleepBadgeTxt"></span>
+          </button>
           <div class="flex-1"></div>
           <button id="lpOptsBtn" class="lp-ctl-sm" onclick="lpToggleOpts()" title="Options — quality, audio, subtitles, clip">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -4191,7 +4196,7 @@
   </div>
   <!-- Skip offer floating tile (anchored above the controls row). Hidden in tiny mode by CSS. -->
   <div id="lpSkipOffer" class="hidden">
-    <button id="lpSkipBtn" onclick="lpAcceptSkipOffer()"
+    <button id="lpSkipBtn" onclick="_hap('medium');lpAcceptSkipOffer()"
       class="bg-amber-500 hover:bg-amber-400 text-black px-5 py-3 font-black uppercase tracking-wide shadow-2xl border-2 border-amber-300 flex items-center gap-2">
       <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" d="M13 5l7 7-7 7M6 12h13"/>
@@ -4267,6 +4272,22 @@
         class="flex-shrink-0 bg-indigo-800 hover:bg-indigo-700 text-white text-[10px] font-black uppercase tracking-wide px-2.5 py-1.5 transition-colors">
         Find
       </button>
+    </div>
+    <!-- Sleep timer (19.5.0) — see lpSetSleep. -->
+    <div id="lpSleepRow" class="flex items-center gap-3">
+      <span class="text-[9px] font-black uppercase tracking-widest text-gray-600 flex-shrink-0 w-8">Sleep</span>
+      <select id="lpSleepSelect" onchange="lpSetSleep(this.value)"
+        class="flex-1 min-w-0 bg-gray-900 border-b border-gray-700 text-xs text-gray-300 px-2 py-1.5 focus:outline-none focus:border-indigo-500 cursor-pointer">
+        <option value="off">Off</option>
+        <option value="ep">End of episode</option>
+        <option value="15">15 min</option>
+        <option value="30">30 min</option>
+        <option value="45">45 min</option>
+        <option value="60">1 hour</option>
+        <option value="90">1.5 hours</option>
+        <option value="120">2 hours</option>
+      </select>
+      <span id="lpSleepLeft" class="hidden text-xs font-mono font-bold text-indigo-400 tabular-nums flex-shrink-0 w-10 text-right"></span>
     </div>
     <!-- Clip — save & share the last N seconds of on-device playback. Prominent
          30s button + a quieter custom-length sibling. Always available here (the
@@ -6038,6 +6059,7 @@ function _holdStart(btn, fn, ev, ms){
     btn.classList.remove("holding");
     btn.classList.add("hold-fired");
     setTimeout(() => btn.classList.remove("hold-fired"), 250);
+    _hap("medium");
     try { fn(btn); } catch(_){}
   }, ms || 500);
 }
@@ -6801,6 +6823,7 @@ function _doSelectProfile(p){
   // offline player accumulated for this profile.
   _appSyncSetProfile();
   _appFlushOfflineProgress();
+  _qaFlush();
 }
 
 function applyMaxVolumeToSliders(){
@@ -19766,9 +19789,26 @@ const _cap = (() => {
   // the same reason: an older shell just keeps today's behaviour, where locking
   // the phone stops playback.
   let np = null; try { np = get("NativePlayback"); } catch (_) {}
-  return { lms, dl, os, tv, np };
+  // AppShell (19.5.0): haptics + home-screen quick actions. Best-effort — an
+  // older shell simply has neither.
+  let shell = null; try { shell = get("AppShell"); } catch (_) {}
+  return { lms, dl, os, tv, np, shell };
 })();
 const isApp = !!_cap;
+
+// Haptic tick for a deliberate touch (19.5.0). iOS has no navigator.vibrate, so
+// the app shell does it; everywhere else this is silent. Throttled so a burst of
+// ±10 s presses feels like presses, not a motor. Only for things the user DID —
+// never for something that happened to them (an auto-skip, a timer running out).
+let _hapLast = 0;
+function _hap(kind) {
+  if (!isApp || !_cap.shell) return;
+  const now = Date.now();
+  if (now - _hapLast < 60) return;
+  _hapLast = now;
+  // The proxy answers any method on an older shell with a rejecting promise.
+  try { const r = _cap.shell.haptic({ kind: kind || "light" }); if (r && r.catch) r.catch(() => {}); } catch (_) {}
+}
 
 // ── Offline cached-player mode (docs/PLAYER_CACHE_PLAN.md) ──────────────────
 // When the host is unreachable, the iOS shell serves a device-cached snapshot
@@ -20476,6 +20516,10 @@ function _npPayload() {
     nextIntroStart: (nsk && nsk.intro && nsk.intro.start != null) ? nsk.intro.start : -1,
     nextIntroEnd:   (nsk && nsk.intro && nsk.intro.end   != null) ? nsk.intro.end   : -1,
     nextCreditsStart: (nsk && nsk.credits_start != null) ? nsk.credits_start : -1,
+    // The sleep timer, for native to keep running once the phone locks.
+    sleepId: _lpSleep.id,
+    sleepAt: _lpSleep.at ? _lpSleep.at / 1000 : 0,
+    sleepEpisode: !!_lpSleep.episode,
   };
 }
 
@@ -20677,6 +20721,16 @@ function _npBindEvents() {
       _lpHideSkipOffer();
       _npLog("native-skipped", { type: e.type, at: e.position || 0,
                                  file: e.filePath || "" }, "play");
+    });
+    // The sleep timer ran out while native was the player (see _lpSleepTick).
+    _cap.np.addListener("sleepFired", (e) => {
+      _npLog("native-sleep", { at: e && e.at, id: e && e.id }, "play");
+      if (e && e.at === "end") _lpSleepSwallow = true;
+      if (e && e.id === _lpSleep.id) {
+        _lpSleepFadeEnd();
+        _lpSleep = { id: 0, at: 0, episode: false };
+        _lpRenderSleep();
+      }
     });
     _cap.np.addListener("nativeEnded", (e) => {
       _npLog("native-ended", { file: (e && e.filePath) || lp.filePath,
@@ -21732,6 +21786,7 @@ async function _appOfflineBoot() {
   _npBindEvents();
   _npReconcileOrphan("page-boot");
   _appOpenDashboard();
+  _appInitQuickActions();
   _appOfflineReconnectInit();
 }
 
@@ -21825,6 +21880,61 @@ let _appDashTimer = null;
 // of selected offKeys. Module-level so it survives the 1 s re-render tick.
 let _appDashSelectMode = false;
 const _appDashSel = new Set();
+
+// ── iOS app: home-screen quick actions (19.5.0) ─────────────────────────────
+// Long-press the app icon: Continue Watching / Downloads / Search. The shell
+// holds the action across the connect-shell → host navigation (AppShell.swift),
+// so a cold launch is handled by taking it at boot, and a warm one by the
+// `quickAction` doorbell. Taking clears it, so the two can't both act.
+let _qaPending = "";   // waiting for a profile to be picked
+// A quick action that arrived before anyone was signed in. Called wherever a
+// profile becomes current: the picker, and the boot-time restore.
+function _qaFlush() {
+  if (!_qaPending || !profile.id) return;
+  const a = _qaPending; _qaPending = "";
+  _appRunQuickAction(a);
+}
+function _appInitQuickActions() {
+  if (!isApp || !_cap.shell) return;
+  const take = async () => {
+    try {
+      const r = await _cap.shell.takeQuickAction();
+      if (r && r.action) _appRunQuickAction(r.action);
+    } catch (_) {}
+  };
+  try { const l = _cap.shell.addListener("quickAction", take); if (l && l.catch) l.catch(() => {}); } catch (_) {}
+  take();
+}
+async function _appRunQuickAction(action) {
+  _npLog("quick-action", { action, offline: _appOffline, profile: !!profile.id }, "app");
+  if (action === "downloads") { _appOpenDashboard(); return; }
+  if (_appOffline) {
+    showAlert("Offline — only Downloads is available until the server is reachable.", "warn");
+    return;
+  }
+  // Both of the others are per profile; the picker is up. Finish after it.
+  if (!profile.id) { _qaPending = action; return; }
+  _appCloseDashboard();
+  if (action === "search") {
+    switchTab("search");
+    const i = document.getElementById("searchInput");
+    if (i) { i.focus(); i.select(); }
+    return;
+  }
+  if (action === "continue") {
+    // The show watched most recently that still has something left to watch —
+    // then the ordinary Resume path, chooser and shuffle prompt included.
+    await _libRefreshCache();
+    let best = null;
+    for (const it of (window._libCache || [])) {
+      if (!it || !it.last_watched_at || (it.resume && it.resume.all_completed)) continue;
+      if (!best || it.last_watched_at > best.last_watched_at) best = it;
+    }
+    if (best) { resumeLibraryItemWithChooser(best.id); return; }
+    switchTab("library");
+    showAlert("Nothing in progress — pick something from the library.", "info");
+  }
+}
 
 function _appOpenDashboard() {
   // Offline cached-player mode boots this overlay as the whole UI, including in
@@ -27327,6 +27437,7 @@ function lpStageTap(e) {
 
 function lpTogglePlay() {
   const v = _lpV();
+  _hap("light");
   // THE MANUAL CURE, RECORDED. A transport press before this file has ever
   // reached `playing` IS the bug happening — it is the user doing by hand what
   // nothing in the player managed — and the press itself was never an event, so
@@ -27678,6 +27789,7 @@ function _lpSeekPendFlush() {
 
 function lpSeekBy(delta) {
   const v = _lpV();
+  _hap("light");
   const d = v.duration || lp.duration || _npNativeDur || 0;
   if (!d) return;
   // Accumulate from the pending target, not the element — otherwise every press
@@ -28559,6 +28671,9 @@ async function lpUnloadCurrent() {
 }
 
 async function lpStop() {
+  // A sleep timer belongs to one viewing session.
+  _lpSleepClear("stop");
+  _lpSleepSwallow = false;
   // TV kiosk: end the startup grace window FIRST, or the next heartbeat would go
   // on claiming "buffering" for the rest of it instead of releasing the surface —
   // holding the TV on a stopped player and keeping the idle video away.
@@ -28818,10 +28933,150 @@ function lpDismissSkipOffer() {
   if (_npArmed) _npArm();
 }
 
+// ── Sleep timer (19.5.0) ─────────────────────────────────────────────────────
+// Off / end of episode / N minutes, from the Options panel. The clock PAUSES
+// (fading the sound out over the last LP_SLEEP_FADE_SEC); "end of episode" ENDS
+// the episode — watched, player closed, like the last one of a run — so the
+// morning's Resume lands on the next episode rather than restarting this one.
+//
+// It rides the native arm (sleepId / sleepAt / sleepEpisode) because the phone
+// locking is the whole point of a sleep timer, and once it locks this page's
+// timers are frozen: native runs it from then on (NativePlayback.maybeSleep)
+// and tells us with `sleepFired`. `id` names one setting of the timer so a fired
+// one can't fire twice — native refuses a re-arm carrying an id it has spent.
+//
+// iOS ignores <video>.volume, so on a foreground iPhone the fade is silent and
+// the pause lands on time; with the phone locked (native AVPlayer) the fade is
+// real. Browsers fade properly.
+const LP_SLEEP_FADE_SEC  = 10;   // mirrors NativePlayback.sleepFadeSec
+const LP_SLEEP_STALE_SEC = 3;    // mirrors NativePlayback.sleepStaleSec
+let _lpSleep = { id: 0, at: 0, episode: false };   // at: epoch ms, 0 = not a clock
+let _lpSleepSwallow = false;     // native ended the episode for us; the next advance is that stop
+let _lpSleepFadeBase = null;     // the element's volume before a fade began
+let _lpSleepLastTick = 0;
+
+function lpSetSleep(val) {
+  _lpSleepFadeEnd();
+  _lpSleepSwallow = false;
+  if (val === "ep") _lpSleep = { id: Date.now(), at: 0, episode: true };
+  else {
+    const m = parseInt(val, 10);
+    _lpSleep = m > 0 ? { id: Date.now(), at: Date.now() + m * 60000, episode: false }
+                     : { id: 0, at: 0, episode: false };
+  }
+  if (_lpSleep.id) _hap("selection");   // setting it buzzes; running out never does
+  _npLog("sleep-set", { mode: val }, "play");
+  _lpRenderSleep();
+  if (_npArmed) _npArm();
+}
+
+function _lpSleepClear(why) {
+  if (!_lpSleep.id) return;
+  _npLog("sleep-clear", { why }, "play");
+  _lpSleepFadeEnd();
+  _lpSleep = { id: 0, at: 0, episode: false };
+  _lpRenderSleep();
+  if (_npArmed) _npArm();
+}
+
+// Where "end of episode" stops: the credits auto-skip when it is going to carry
+// us onward (it fires before the end), otherwise the end itself.
+function _lpSleepEpisodeEnd(v) {
+  const sk = lp.skipData, asp = _lpAutoSkipPrefs();
+  const cs = sk && sk.credits_start;
+  if (asp.credits && cs != null && cs > 0 && !lp.skipDoneFor.has((lp.filePath || "") + "#credits")
+      && (lp.playlist || []).length > (lp.pi || 0) + 1) return cs;
+  return v.duration || lp.duration || 0;
+}
+
+function _lpSleepFadeEnd() {
+  if (_lpSleepFadeBase == null) return;
+  const v = _lpV();
+  if (v) v.volume = _lpSleepFadeBase;
+  _lpSleepFadeBase = null;
+}
+
+// "End of episode" arrived: it counts as watched and the session is over.
+function _lpSleepEndEpisode(why) {
+  const v = _lpV();
+  const d = (v && v.duration) || lp.duration || 0;
+  _npLog("sleep-fired", { at: why, file: lp.filePath }, "play");
+  if (d > 0 && lp.itemId) saveProgress(lp.itemId, lp.filePath, d, d, _lpProfileId());
+  _lpSleepSwallow = false;
+  _lpSleepClear("fired");
+  lpStop();
+}
+
+// 4 Hz, from _lpAttachVideoEvents. Runs the timer while THIS page is the player.
+function _lpSleepTick() {
+  const now = Date.now();
+  // A gap far longer than the interval means the page was frozen — the phone
+  // was locked and native owned the timer. What it did arrives as sleepFired.
+  const frozen = _lpSleepLastTick && now - _lpSleepLastTick > LP_SLEEP_STALE_SEC * 1000;
+  _lpSleepLastTick = now;
+  if (!_lpSleep.id) return;
+  _lpRenderSleepLeft();
+  if (_npHolding || !lp.itemId) return;   // native is the player; it runs the timer
+  const v = _lpV(); if (!v) return;
+  let left;
+  if (_lpSleep.at) {
+    left = (_lpSleep.at - now) / 1000;
+    // Ran out while paused, or while we were frozen: spent, not due. Pausing the
+    // moment someone presses play would read as a broken play button.
+    if (left <= 0 && (v.paused || frozen)) { _lpSleepClear("lapsed"); return; }
+  } else {
+    const end = _lpSleepEpisodeEnd(v);
+    if (!(end > 0)) return;
+    left = end - (v.currentTime || 0);
+  }
+  if (v.paused) return;
+  if (left <= 0) {
+    if (_lpSleep.at) {
+      _npLog("sleep-fired", { at: "clock", file: lp.filePath, t: v.currentTime || 0 }, "play");
+      _npSetPausedIntent(true); v.pause();
+      _lpSleepClear("fired");
+      _lpCtlSync(); _lpCtlShow();
+    } else if (_lpSleepEpisodeEnd(v) < (v.duration || lp.duration || 0)) {
+      _lpSleepEndEpisode("credits");   // the natural end goes through `ended`
+    }
+    return;
+  }
+  if (left <= LP_SLEEP_FADE_SEC) {
+    if (_lpSleepFadeBase == null) _lpSleepFadeBase = v.muted ? 1 : (v.volume || 1);
+    v.volume = Math.max(0, Math.min(1, _lpSleepFadeBase * left / LP_SLEEP_FADE_SEC));
+  }
+}
+
+function _lpSleepLeftText() {
+  if (!_lpSleep.id) return "";
+  if (!_lpSleep.at) return "EP";
+  const s = Math.max(0, Math.round((_lpSleep.at - Date.now()) / 1000));
+  return s >= 60 ? Math.ceil(s / 60) + "m" : s + "s";
+}
+function _lpRenderSleepLeft() {
+  const txt = _lpSleepLeftText();
+  const b = document.getElementById("lpSleepBadgeTxt"); if (b) b.textContent = txt;
+  const l = document.getElementById("lpSleepLeft");
+  if (l) { l.textContent = _lpSleep.at ? txt : ""; l.classList.toggle("hidden", !_lpSleep.at); }
+}
+function _lpRenderSleep() {
+  const sel = document.getElementById("lpSleepSelect");
+  // A re-render must not snap the select back to what it says: only when the
+  // timer is off (fired / cleared) does it return to Off.
+  if (sel && !_lpSleep.id) sel.value = "off";
+  const badge = document.getElementById("lpSleepBadge");
+  if (badge) badge.classList.toggle("hidden", !_lpSleep.id);
+  _lpRenderSleepLeft();
+}
+
 const LP_SEEK_END_GRACE_MS = 2500;   // see the `ended` listener in _lpAttachVideoEvents
 async function _lpAdvanceOrEnd() {
   const v = document.getElementById("lpVideo");
   const d = v.duration || lp.duration || 0;
+  // "End of episode" on the sleep timer: this is the stop, not an advance —
+  // whether we got here by the natural end, the credits skip, or native ending
+  // it for us while the phone was locked.
+  if (_lpSleepSwallow || (_lpSleep.id && _lpSleep.episode)) { _lpSleepEndEpisode("end"); return; }
   if (d > 0) saveProgress(lp.itemId, lp.filePath, d, d, _lpProfileId());
   const next = lp.pi + 1;
   // WHICH ADVANCE PATH THIS IS. With the glasses connected there are two, and
@@ -29112,6 +29367,8 @@ function _lpAttachVideoEvents() {
   // Fallback playback clock — keeps the seek bar / skip offers / progress saves
   // alive through iOS MMS timeupdate gaps. See _lpClockTick.
   setInterval(_lpClockPump, 500);
+  // Sleep timer: its own clock, because it has to notice a paused player too.
+  setInterval(_lpSleepTick, 250);
   // TV kiosk: claim/refresh the on-device playback surface. Its own interval
   // rather than a _lpClockTick hook because the claim must survive a PAUSE —
   // _lpClockPump returns early when paused, and a paused film that stopped
@@ -30317,6 +30574,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
   // display appearing or going away). No-op in a plain browser.
   _npBindEvents();
   _npReconcileOrphan("page-boot");
+  _appInitQuickActions();
   // Keep the offline player snapshot fresh (fire-and-forget; no-op in a browser).
   _appRefreshPlayerSnapshot();
   // M3: when the browser regains connectivity, drain any offline progress the
@@ -30406,7 +30664,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
       try{
         const profiles=await fetchProfiles();
         const found=profiles.find(x=>x.id===p.id);
-        if(found){ profile=found; applySimpleUi(); renderNavProfile(); applyMaxVolumeToSliders(); loadSearchIndexers(); _appSyncSetProfile(); _appFlushOfflineProgress(); connectSSE(); _appProxiedAutoPlay(); _maybePromptForPin(found); loadBookmarks(); if(activeTab==="library") loadLibrary(); return; }
+        if(found){ profile=found; applySimpleUi(); renderNavProfile(); applyMaxVolumeToSliders(); loadSearchIndexers(); _appSyncSetProfile(); _appFlushOfflineProgress(); connectSSE(); _appProxiedAutoPlay(); _maybePromptForPin(found); loadBookmarks(); if(activeTab==="library") loadLibrary(); _qaFlush(); return; }
         // Saved profile no longer exists on the server (deleted/renamed id).
         if(window.__appShowError) window.__appShowError("Saved profile id "+p.id+" not found among "+profiles.length+" server profiles.");
       } catch(e){
@@ -30422,6 +30680,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.4.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.5.0</div>
 </body>
 </html>

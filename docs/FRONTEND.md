@@ -636,13 +636,29 @@ Don't re-add the `controls` attribute. Pieces:
   moves".
 - **Options panel** — the **gear button** (`#lpOptsBtn`, `lpToggleOpts`)
   toggles `.lp-opts` on `#localPlayer`, showing `#lpTrackRow` (quality /
-  audio / subtitle selectors, the **Sync** audio-delay slider, AI button, Clip
-  row) as an absolute panel
+  audio / subtitle selectors, the **Sync** audio-delay slider, AI button, the
+  **Sleep** timer (`#lpSleepSelect`, see [STREAMING.md § Sleep timer](STREAMING.md)),
+  Clip row) as an absolute panel
   anchored above the bottom strip — scrollable, ≤380px wide. The panel is
   **never** visible otherwise (`_lpRenderTrackRows` doesn't unhide it; the
   gear owns visibility). While open, the overlay won't auto-hide
   (`_lpCtlShow`/`_lpCtlIdle` guard on `_lpOptsOpen`); a tap on the video
   closes the panel first, and `lpStop`/`lpMinimize` clear `.lp-opts`.
+- **Haptics** (iOS app only, 19.5.0): `_hap(kind)` → `AppShell.haptic`, throttled to
+  one per 60 ms, a no-op in a browser. It fires only for a deliberate touch:
+  `lpTogglePlay`, `lpSeekBy`, the Skip Intro/Credits button, any `_holdStart` hold
+  button when it fires (Prev/Next episode, Stop, Clip…), and setting the sleep timer.
+  Never for something that just happened (an auto-skip, a timer running out). Download
+  completion buzzes natively (`Haptics.downloadFinished`, one per 3 s burst).
+- **Home-screen quick actions** (iOS app only, 19.5.0): **Continue Watching / Downloads /
+  Search**, declared in `Info.plist` (`UIApplicationShortcutItems`) and delivered to
+  `SceneDelegate`. `AppShell.swift` holds the action across the connect-shell → host
+  navigation. `_appInitQuickActions` takes it at boot and on the `quickAction` event,
+  and taking clears it. `_appRunQuickAction` opens the Downloads overlay, focuses
+  Search, or resumes the most recently watched library item that isn't all-watched
+  (`resumeLibraryItemWithChooser`). Search and Continue need a profile, so if the
+  picker is up they wait in `_qaPending` until `_qaFlush` (picker and boot restore).
+  Offline, only Downloads works.
 - **Mute** (`lpToggleMute`) and **fullscreen** (`lpToggleFullscreen`) buttons.
   Fullscreen requests OS fullscreen on **the whole `#localPlayer` container**,
   never the bare `<video>` — so the header, transport, and track selectors stay

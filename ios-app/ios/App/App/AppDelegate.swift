@@ -111,6 +111,17 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
                options connectionOptions: UIScene.ConnectionOptions) {
         for ctx in connectionOptions.urlContexts { forward(ctx.url) }
         if let activity = connectionOptions.userActivities.first { forward(activity) }
+        // A cold launch from a home-screen quick action arrives here, and does
+        // NOT also call performActionFor below.
+        if let item = connectionOptions.shortcutItem { QuickActions.shared.receive(item) }
+    }
+
+    // A quick action on an app that is already running.
+    func windowScene(_ windowScene: UIWindowScene,
+                     performActionFor shortcutItem: UIApplicationShortcutItem,
+                     completionHandler: @escaping (Bool) -> Void) {
+        QuickActions.shared.receive(shortcutItem)
+        completionHandler(true)
     }
 
     // …and a URL opened while already running arrives here.
