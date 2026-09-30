@@ -194,6 +194,16 @@ The absolute test is the correct one: that pack duplicates nothing, and fetching
 
 So the cost was real and the benefit was zero. If you revive it, two conditions are both required, not either: **containment** as above, *and* **ownership** — every other TMDb season the batch's range overlaps must also be un-owned, or a 148-episode batch fetched for a 74-episode season re-downloads seasons the user already has, which is the one thing the owns-none rule exists to prevent. `pickdiff.py` still carries `abs_batch_ok`, so re-testing is one flag away.
 
+### A merged series page borrows ONE member's metadata — the others must still be bound (19.3.1)
+
+Attribution passes 2-4 (absolute numbers, the anime grid remap, episode-group homes) run only
+when an item has its **own** TMDb binding. The merged series page reads metadata from whichever
+member already has it, and nothing else binds the rest: an item was only matched when its own
+`/metadata` endpoint was opened. So a later season pack of a show already in the library stayed
+unbound and un-remapped for good. Hunter x Hunter S3 showed S03E01-12 beside TMDb's S03E137-148.
+`_nudge_metadata_health` now binds an item with no metadata (condition 0, throttled per item),
+and the series endpoint nudges every member. See [LIBRARY_DATA.md](LIBRARY_DATA.md) § Metadata cache migration.
+
 ### An anime's `SxxExx` can be authoritative and still wrong — the season grids don't agree
 
 `SxxExx` on the basename is the strongest signal attribution has, and for anime it is routinely a

@@ -1,5 +1,16 @@
 # Changelog
 
+## [19.3.1] — 2026-09-29
+### A new season pack of a show you already have lines up with its episodes
+
+- **Fixed: Hunter x Hunter Season 3 showed 12 missing episodes plus 12 unnamed
+  files.** A season pack added to a show already in the library was never
+  matched to TMDb, because the show page borrows the metadata of the season
+  that already had it. Without its own match, the pack's S03E01-12 files were
+  never renumbered to TMDb's S03E137-148. Opening the show now matches every
+  season pack in it, and the page refreshes when the match lands. Needs a
+  server restart, no app rebuild.
+
 ## [19.3.0] — 2026-09-29
 ### Library search, and the dashboard opens on the Library
 

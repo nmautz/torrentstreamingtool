@@ -1179,7 +1179,9 @@ The migration is in-place and silent. No version field on items.
 
 Not part of `_migrate_item` — it needs a network round trip, so it's **lazy and per-item**, in `_fetch_item_metadata`. A cached entry with `tmdb_kind == "tv"` and a `tmdb_id` but **no `all_seasons` key** is treated as stale: the next access re-fetches it **by the existing `tmdb_id`** (never a fresh auto-match, so a wrong binding can't change under the user) and preserves the existing `source`, so a pinned `manual` entry stays pinned. It then writes `all_seasons` and is never re-fetched again.
 
-A merged series never touches `GET /api/library/{id}/metadata`, so `GET /api/library/series/{key}` fires the same self-heal in the background (`_spawn_metadata_fetch` on the member it served metadata from) without delaying its own response. Until either lands, the frontend tops up from `/api/tmdb/lookup`, so the UI is correct on the very first open.
+A merged series never touches `GET /api/library/{id}/metadata`, so `GET /api/library/series/{key}` fires the same self-heal in the background (`_nudge_metadata_health` on **every member**) without delaying its own response. Until either lands, the frontend tops up from `/api/tmdb/lookup`, so the UI is correct on the very first open.
+
+**A member with no metadata at all is bound too (19.3.1).** Before, the series endpoint nudged only the member it borrowed metadata from, so a season pack added to a show already in the library was never matched to TMDb, and its files never went through attribution passes 2-4. Hunter x Hunter's iAHD S03E01-12 stayed at S03E01-12 while TMDb numbers that season 137-148, so Season 3 showed 12 missing episodes beside 12 unnamed files. `_nudge_metadata_health` condition 0 now spawns the first bind for an unbound item that has files, throttled to once per `_TMDB_UNBOUND_RETRY_SEC` (600 s) per item so an unmatchable one doesn't re-ask TMDb on every open. The bind fires `metadata_update`, and the open merged page re-pulls its file list and season tabs when the id is one of its members.
 
 ### Derived view: library coverage (11.22.0)
 

@@ -29942,6 +29942,18 @@ function connectSSE(){
         clearTimeout(_epMetaRetryTimer); _epMetaRetryTimer=null;
         _epApplyMetadata(epItemId, epHeroTitle, null);
       }
+      // A member of the open merged series was just bound for the first time
+      // (a later season pack), so its files were renumbered onto TMDb's slots.
+      // Re-pull the merged list; a file may have changed season, so the tabs too.
+      else if(epSeriesKey && epSeriesItemIds.includes(d.item_id)){
+        const key=epSeriesKey;
+        refreshEpFiles().then(()=>{
+          if(epSeriesKey!==key) return;
+          _epRebuildSeasonList();
+          if(!epSeasonList.includes(epCurrentSeason)) epCurrentSeason=pickDefaultSeason();
+          renderEpSeasonTabs(); renderEpList();
+        });
+      }
     }catch(_){}
   });
   es.addEventListener("tv_command",e=>{
@@ -30368,6 +30380,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.3.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.3.1</div>
 </body>
 </html>

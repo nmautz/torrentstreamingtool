@@ -3210,6 +3210,11 @@ _TMDB_IMG_CT = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
 _tmdb_fetch_locks: dict[str, asyncio.Lock] = {}
 # item_id → in-flight background fetch task (see _spawn_metadata_fetch).
 _tmdb_fetch_tasks: dict[str, "asyncio.Task[Optional[dict]]"] = {}
+# item_id → monotonic time of the last first-bind attempt for an item with no
+# metadata at all (see _nudge_metadata_health, condition 0). An item TMDb can't
+# match stays unbound, so without this every page open would re-ask.
+_tmdb_unbound_tried: dict[str, float] = {}
+_TMDB_UNBOUND_RETRY_SEC = 600
 
 # Fire-and-forget tasks need a strong reference until they finish — a bare
 # asyncio.create_task() result can be garbage-collected mid-flight.
@@ -4967,7 +4972,16 @@ def _assert_item_visible(request: Request, lib: dict, item: dict,
 
 def _nudge_metadata_health(item: dict) -> None:
     """Background-repair an item whose cached TMDb binding can't answer "what is
-    this show missing?". Two conditions, both self-healing and both idempotent.
+    this show missing?". Every condition is self-healing and idempotent.
+
+    **0 — no binding at all (19.3.1).** An item only got matched when its OWN
+    `/metadata` endpoint was opened, and the merged series page never opens it —
+    it borrows whichever member is already bound. So a season pack added to a
+    show already in the library stayed unbound for ever, and its files never
+    went through passes 2-4: Hunter x Hunter's iAHD S03E01-12 never became
+    TMDb's S03E137-148, and the season showed 12 empty episodes beside 12
+    unnamed files. Throttled per item (`_TMDB_UNBOUND_RETRY_SEC`), because an
+    item TMDb can't match stays unbound and would otherwise re-ask on every open.
 
     **1 — TV metadata predating `all_seasons`.**
     `episodes.resolve_absolute` turns a series-absolute number into a within-season
@@ -4999,6 +5013,15 @@ def _nudge_metadata_health(item: dict) -> None:
     stops matching once placed, because `place_files` is idempotent.
     """
     meta = item.get("metadata") or {}
+    if not meta:
+        if not item.get("files"):
+            return     # nothing to attribute yet; the next open catches it
+        now = time.monotonic()
+        if now - _tmdb_unbound_tried.get(item["id"], -1e9) < _TMDB_UNBOUND_RETRY_SEC:
+            return
+        _tmdb_unbound_tried[item["id"]] = now
+        _spawn_metadata_fetch(item["id"])
+        return
     if ((meta.get("tmdb_kind") == "tv" and "all_seasons" not in meta)
             or _movie_binding_is_stale(item, meta)
             or _ep_groups_pending(item, meta)):
@@ -16046,8 +16069,13 @@ async def get_series_files(request: Request, series_key: str,
     # background (the fetch self-heals `all_seasons`; see _fetch_item_metadata),
     # so the NEXT open is complete. This response is not delayed by it — the
     # client tops up from /api/tmdb/lookup meanwhile.
-    if meta_item is not None:
-        _nudge_metadata_health(meta_item)
+    # EVERY member, not just the one the metadata is borrowed from: a member
+    # that was never bound has had no attribution passes at all, and this page
+    # is the only one that shows it (a later season pack of a show already in
+    # the library — see _nudge_metadata_health, condition 0). Its fetch fires
+    # `metadata_update`, which repaints this page with the settled numbers.
+    for it in members:
+        _nudge_metadata_health(it)
 
     # Series-level on-demand-only state so the merged-series episode page can
     # render its toggle: "on" only when EVERY member is on-demand-only; "locked"
