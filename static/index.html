@@ -2671,13 +2671,13 @@
         <!-- Tabs: order-3 + w-full on mobile (wraps to row 2), order-2 inline on sm+ -->
         <div class="order-3 sm:order-2 w-full sm:w-auto flex sm:flex-shrink-0 h-11 sm:h-14 border-t border-gray-800 sm:border-t-0 -mx-2 sm:mx-0">
           <button id="tabSearch" onclick="switchTab('search')"
-            class="tab-btn tab-active flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap">Search</button>
+            class="tab-btn tab-inactive flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap">Search</button>
           <!-- #bmTabDot: a bookmarked title came out (see _bmRenderBadges). The
                button's class is rewritten by switchTab, so `relative` is inline. -->
           <button id="tabExplore" onclick="switchTab('explore')" style="position:relative"
             class="tab-btn tab-inactive flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap">Explore<span id="bmTabDot" class="hidden absolute top-2 right-2 sm:right-1 w-2 h-2 bg-rose-500" title="A bookmarked title is out"></span></button>
           <button id="tabLibrary" onclick="switchTab('library')"
-            class="tab-btn tab-inactive flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap">Library</button>
+            class="tab-btn tab-active flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap">Library</button>
         </div>
         <!-- Right cluster: order-2 on mobile (next to logo), order-3 on sm+. ml-auto acts as the spacer in both layouts. -->
         <div class="order-2 sm:order-3 ml-auto flex items-center gap-1 sm:gap-2 h-12 sm:h-14 flex-shrink-0">
@@ -2735,7 +2735,7 @@
   <div class="max-w-screen-2xl mx-auto px-3 sm:px-4 py-5">
 
     <!-- Search tab -->
-    <div id="searchTab">
+    <div id="searchTab" class="hidden">
       <!-- First-run setup checklist: rendered by refreshSetupChecklist() from
            /api/setup-status when a required prerequisite (indexer, etc.) is missing.
            Stays hidden once everything required is configured. -->
@@ -2936,22 +2936,38 @@
       </div>
     </div>
 
-    <!-- Library tab -->
-    <div id="libraryTab" class="hidden">
-      <div class="flex items-center justify-between mb-5">
-        <div>
-          <h2 class="text-lg font-black uppercase tracking-wide">Library</h2>
-          <div class="flex items-center gap-2 mt-1">
-            <div id="diskSpaceContainer" class="hidden space-y-1 flex-1"></div>
-            <button onclick="openStorageModal()" title="Manage storage paths"
-              class="text-gray-700 hover:text-gray-400 transition-colors p-0.5">
-              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                  d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
-              </svg>
-            </button>
-          </div>
+    <!-- Library tab — the page the dashboard opens on (19.3.0). Search sits on
+         top and filters the grid as you type (see _libSearchMatch); the
+         housekeeping controls (disk space + storage paths, Upload, Hidden,
+         Refresh) live in a toolbar under the grid, out of the way. -->
+    <div id="libraryTab">
+      <div class="relative mb-5">
+        <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-600 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z"/>
+        </svg>
+        <input id="libSearchInput" type="text" enterkeyhint="search" placeholder="Search your library" autocomplete="off" spellcheck="false"
+          oninput="onLibSearchInput()" onkeydown="if(event.key==='Escape'){clearLibSearch();this.blur();}"
+          class="w-full bg-gray-900 border border-gray-800 focus:border-indigo-600 focus:outline-none
+                 pl-10 pr-10 py-2.5 text-sm text-gray-100 placeholder-gray-600"/>
+        <button id="libSearchClear" onclick="clearLibSearch()" title="Clear search"
+          class="hidden absolute right-1 top-1/2 -translate-y-1/2 p-2 text-gray-600 hover:text-gray-300 transition-colors">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+      <div id="libraryContent"></div>
+      <div class="mt-6 pt-3 border-t border-gray-800 flex items-center justify-between gap-x-4 gap-y-2 flex-wrap">
+        <div class="flex items-center gap-2 min-w-0">
+          <div id="diskSpaceContainer" class="hidden space-y-1 flex-1"></div>
+          <button onclick="openStorageModal()" title="Manage storage paths"
+            class="text-gray-700 hover:text-gray-400 transition-colors p-0.5">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+            </svg>
+          </button>
         </div>
         <div class="flex items-center gap-3">
           <button onclick="openUploadModal()"
@@ -2977,7 +2993,6 @@
           </button>
         </div>
       </div>
-      <div id="libraryContent"></div>
     </div>
 
   </div>
@@ -4774,7 +4789,7 @@ let subtitleSingleOption = true;
 // are dropped. See docs/LIBRARY_DATA.md § settings.
 let missingContentEnabled = true;
 let missingUnaired        = false;
-let activeTab    = "search";
+let activeTab    = "library";   // the dashboard opens on the Library (19.3.0)
 let libShowHidden = false;   // true = library shows hidden items instead of main list
 let selectedColor = "indigo";
 let downloadTarget = null;
@@ -9161,6 +9176,43 @@ function _libTileCount(list, hiddenView){
   return shelves.length + keys.size;
 }
 
+// ── Library search (19.3.0) ──────────────────────────────────────────────
+// The box on top of the Library tab narrows the grid as you type. Purely a view
+// over window._libCache — no server trip — so it survives the SSE-driven
+// re-renders untouched. Every word typed must appear somewhere in the item's
+// show name, title or display title (accents and punctuation ignored), so
+// "bb s2" doesn't match but "breaking bad" and "bad breaking" both do. A
+// franchise shelf ("Star Wars") matches by its own name; a search that only
+// hits some of its films shows those films on their own instead of a shelf.
+let libSearchQuery = "";
+function _libNorm(s){
+  return String(s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+    .toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
+}
+function _libTextMatches(text, words){
+  const hay=" "+_libNorm(text)+" ";
+  return words.every(w=>hay.includes(w));
+}
+function _libSearchWords(){
+  const q=_libNorm(libSearchQuery);
+  return q?q.split(" "):[];
+}
+function _libItemMatches(item, words){
+  return _libTextMatches([item.display_show, item.series, item.title, item.display_title].join(" "), words);
+}
+function onLibSearchInput(){
+  const input=document.getElementById("libSearchInput");
+  libSearchQuery=input?input.value:"";
+  const clr=document.getElementById("libSearchClear");
+  if(clr) clr.classList.toggle("hidden", !libSearchQuery);
+  if(window._libCache) renderLibrary(window._libCache);
+}
+function clearLibSearch(){
+  const input=document.getElementById("libSearchInput");
+  if(input) input.value="";
+  onLibSearchInput();
+}
+
 function renderLibrary(items){
   const el=document.getElementById("libraryContent");
 
@@ -9201,9 +9253,9 @@ function renderLibrary(items){
   }
 
   // Pick which set to render
-  const renderItems=effectiveShowHidden?hiddenItems:visibleItems;
+  const sideItems=effectiveShowHidden?hiddenItems:visibleItems;
 
-  if(!renderItems.length){
+  if(!sideItems.length){
     el.innerHTML=effectiveShowHidden
       ?`<div class="flex flex-col items-center justify-center py-16 text-center">
           <p class="text-gray-500 font-medium">No hidden items</p>
@@ -9217,6 +9269,24 @@ function renderLibrary(items){
           <p class="text-gray-500 font-medium">No downloads yet</p>
           <p class="text-gray-700 text-xs mt-1">Click ↓ on any search result to save for later</p>
         </div>`;
+    return;
+  }
+
+  // The search box narrows the chosen side. A shelf whose name matches keeps
+  // every member present; otherwise only the items that match themselves.
+  const words=_libSearchWords();
+  const shelfHits=words.length
+    ? libGroups.filter(g=>_libTextMatches(g.name, words))
+    : [];
+  const shelfKeys=new Set(shelfHits.flatMap(g=>(g.members||[]).map(m=>m.key)));
+  const renderItems=words.length
+    ? sideItems.filter(i=>shelfKeys.has(i.series_key) || _libItemMatches(i, words))
+    : sideItems;
+  if(!renderItems.length){
+    el.innerHTML=`<div class="flex flex-col items-center justify-center py-16 text-center">
+      <p class="text-gray-500 font-medium">Nothing in your library matches \u201c${escHtml(libSearchQuery.trim())}\u201d</p>
+      <button onclick="clearLibSearch()" class="mt-3 text-xs uppercase tracking-wide font-bold text-indigo-400 border border-indigo-800 px-3 py-1.5">Clear search</button>
+    </div>`;
     return;
   }
 
@@ -9236,7 +9306,14 @@ function renderLibrary(items){
   // hidden view draws the same merged show tiles the grid does — one South Park,
   // not thirty-two downloads — and the counts on both sides mean the same thing.
   // Shelves are the one exception there; see _libShelves for why.
-  const {shelves:activeGroups, claimed} = _libShelves(renderItems, effectiveShowHidden);
+  let {shelves:activeGroups, claimed} = _libShelves(renderItems, effectiveShowHidden);
+  if(words.length){
+    // Searching: only a shelf the query named stays folded; the members of any
+    // other shelf that matched individually show as their own tiles.
+    const keep=new Set(shelfHits.map(g=>g.id));
+    activeGroups=activeGroups.filter(g=>keep.has(g.id));
+    claimed=new Set(activeGroups.flatMap(g=>g.members.map(m=>m.key)));
+  }
   const gridItems = claimed.size
     ? renderItems.filter(i=>!claimed.has(i.series_key))
     : renderItems;
@@ -30275,7 +30352,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
       try{
         const profiles=await fetchProfiles();
         const found=profiles.find(x=>x.id===p.id);
-        if(found){ profile=found; applySimpleUi(); renderNavProfile(); applyMaxVolumeToSliders(); loadSearchIndexers(); _appSyncSetProfile(); _appFlushOfflineProgress(); connectSSE(); _appProxiedAutoPlay(); _maybePromptForPin(found); loadBookmarks(); return; }
+        if(found){ profile=found; applySimpleUi(); renderNavProfile(); applyMaxVolumeToSliders(); loadSearchIndexers(); _appSyncSetProfile(); _appFlushOfflineProgress(); connectSSE(); _appProxiedAutoPlay(); _maybePromptForPin(found); loadBookmarks(); if(activeTab==="library") loadLibrary(); return; }
         // Saved profile no longer exists on the server (deleted/renamed id).
         if(window.__appShowError) window.__appShowError("Saved profile id "+p.id+" not found among "+profiles.length+" server profiles.");
       } catch(e){
@@ -30291,6 +30368,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.2.4</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.3.0</div>
 </body>
 </html>

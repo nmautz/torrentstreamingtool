@@ -1,5 +1,16 @@
 # Changelog
 
+## [19.3.0] — 2026-09-29
+### Library search, and the dashboard opens on the Library
+
+- **New: a search box at the top of the Library.** It filters your shows and
+  films as you type. Accents and punctuation are ignored, and every word must
+  match, in any order. Typing a collection's name ("Star Wars") keeps its shelf.
+  **Esc** or the X clears the search.
+- **Changed: the dashboard now opens on the Library tab** instead of Search.
+- **Changed: disk space, storage paths, Upload, Hidden and Refresh moved to a
+  toolbar at the bottom of the Library.** Dashboard-only, no app rebuild.
+
 ## [19.2.4] — 2026-09-29
 ### Progress and auto-downloads keep up during native playback
 
