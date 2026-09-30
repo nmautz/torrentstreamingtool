@@ -1,5 +1,17 @@
 # Changelog
 
+## [19.6.0] — 2026-09-29
+### The app tells you when it's out of date
+
+- **New (app): an out-of-date notice.** When SideStore has a newer StreamLink app
+  than the one you're running, the **App** menu button gets a small blue dot and an
+  **Update app** entry that explains how to update. A short toast also mentions it
+  once per new version (again every 3 days until you update), never while something
+  is playing. It works in apps already installed. Builds made straight from Xcode are
+  never flagged.
+- **New: `GET /api/app/latest`**, the newest app version on the SideStore source,
+  checked by the server every 6 hours.
+
 ## [19.5.0] — 2026-09-29
 ### Sleep timer, home-screen shortcuts, haptics
 

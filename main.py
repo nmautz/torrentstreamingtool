@@ -25257,6 +25257,55 @@ async def get_ui_version() -> JSONResponse:
     )
 
 
+# ── Latest iOS app (19.6.0) ─────────────────────────────────────────────────
+# The newest version installable from the SideStore source (ios-app/publish-ipa.sh
+# writes it). The page compares it with the version of the app it is running
+# inside and shows a quiet "update in SideStore" strip when the app is behind.
+# The source, not UI_VERSION: the badge moves for host-only changes too, and a
+# warning for an update nobody can install is exactly the annoying kind.
+_APP_SOURCE_URL = "https://raw.githubusercontent.com/nmautz/streamlink-ios/main/apps.json"
+_APP_LATEST_TTL = 6 * 3600          # a publish shows up within six hours
+_APP_LATEST_RETRY = 15 * 60         # after a failed fetch, try again sooner
+_app_latest: dict = {"version": None, "date": None, "checked": 0.0, "ok": False}
+_app_latest_lock = asyncio.Lock()
+
+
+async def _app_latest_fetch() -> dict:
+    now = time.time()
+    ttl = _APP_LATEST_TTL if _app_latest["ok"] else _APP_LATEST_RETRY
+    if now - _app_latest["checked"] < ttl:
+        return _app_latest
+    async with _app_latest_lock:
+        if time.time() - _app_latest["checked"] < ttl:
+            return _app_latest
+        _app_latest["checked"] = time.time()
+        try:
+            async with _http_client(timeout=httpx.Timeout(10.0, connect=5.0),
+                                    follow_redirects=True) as c:
+                r = await c.get(_APP_SOURCE_URL)
+                r.raise_for_status()
+                src = r.json()
+            app_entry = next((a for a in src.get("apps", [])
+                              if a.get("bundleIdentifier") == "com.streamlink.client"), None)
+            versions = (app_entry or {}).get("versions") or []
+            if versions:
+                _app_latest["version"] = versions[0].get("version")
+                _app_latest["date"] = versions[0].get("date")
+            _app_latest["ok"] = True
+        except Exception as e:
+            # Offline host, GitHub down: keep the last good answer (or none). A
+            # missing answer only means no banner, never a wrong one.
+            _app_latest["ok"] = False
+            log.info("app-latest fetch failed: %s", e)
+    return _app_latest
+
+
+@app.get("/api/app/latest")
+async def get_app_latest() -> JSONResponse:
+    d = await _app_latest_fetch()
+    return JSONResponse({"version": d["version"], "date": d["date"]})
+
+
 # Files an iOS "player snapshot" must carry — the dashboard page plus every asset
 # it can lazily load (see docs/PLAYER_CACHE_PLAN.md). A fixed allowlist, not a
 # directory walk, so the snapshot never grows surprise files; every entry is

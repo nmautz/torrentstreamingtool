@@ -22,6 +22,10 @@
 //  JS surface (Capacitor plugin "AppShell"):
 //    haptic({ kind })     -> {}   kind: light | medium | selection | success | warning
 //    takeQuickAction()    -> { action }   "" when none; clears the inbox
+//    info()               -> { version, build }   CFBundleShortVersionString /
+//                            CFBundleVersion. build-ipa.sh stamps the dashboard
+//                            badge into both; a plain Xcode build says "1.0".
+//                            The page's out-of-date check reads it (19.6.0).
 //  Events: quickAction { action }
 //
 
@@ -101,6 +105,7 @@ public class AppShell: CAPPlugin, CAPBridgedPlugin {
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "haptic",          returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "takeQuickAction", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "info",            returnType: CAPPluginReturnPromise),
     ]
 
     public override func load() {
@@ -115,6 +120,14 @@ public class AppShell: CAPPlugin, CAPBridgedPlugin {
     @objc func haptic(_ call: CAPPluginCall) {
         Haptics.fire(call.getString("kind") ?? "light")
         call.resolve()
+    }
+
+    @objc func info(_ call: CAPPluginCall) {
+        let d = Bundle.main.infoDictionary ?? [:]
+        call.resolve([
+            "version": d["CFBundleShortVersionString"] as? String ?? "",
+            "build": d["CFBundleVersion"] as? String ?? "",
+        ])
     }
 
     @objc func takeQuickAction(_ call: CAPPluginCall) {

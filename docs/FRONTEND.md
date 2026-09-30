@@ -659,6 +659,17 @@ Don't re-add the `controls` attribute. Pieces:
   (`resumeLibraryItemWithChooser`). Search and Continue need a profile, so if the
   picker is up they wait in `_qaPending` until `_qaFlush` (picker and boot restore).
   Offline, only Downloads works.
+- **Out-of-date app notice** (iOS app only, 19.6.0): `_appCheckUpdate` (5 s after boot,
+  then on return to the foreground at most every 6 h) compares `/api/app/latest` with the
+  installed app. The installed version comes from `AppShell.info()` (19.6.0+). Older apps
+  fall back to `NativePlayback.extDiag().build`, which is `NP_BUILD`: a **lower bound**
+  on the version, good enough to know the app is behind but not to print. A `1.0` (Xcode
+  dev build) is never flagged. When the app is behind, the **App** menu button gets a
+  blue dot and an **Update app — x.y.z** entry that explains the SideStore step. A toast
+  shows once per new version, and again every 3 days until it's installed
+  (`sl_app_update_seen`), never while something is playing. The reference is the
+  published SideStore version, not the dashboard badge, because the badge also moves for
+  host-only changes.
 - **Mute** (`lpToggleMute`) and **fullscreen** (`lpToggleFullscreen`) buttons.
   Fullscreen requests OS fullscreen on **the whole `#localPlayer` container**,
   never the bare `<video>` — so the header, transport, and track selectors stay

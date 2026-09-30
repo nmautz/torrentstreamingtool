@@ -43,6 +43,7 @@ Event types:
 |--------|------|-------|
 | GET | `/api/state` | Current full snapshot |
 | GET | `/api/version` | `{"version": "<semver>"}` — always `no-cache`. The UI fetches this on load and force-reloads with `?_v=<ver>` if the cached page is older (see `UI_VERSION` in `main.py` and the `[data-ui-version]` badge in `index.html`) |
+| GET | `/api/app/latest` | `{"version": "x.y.z"|null, "date": "YYYY-MM-DD"|null}`. The newest iOS app on the SideStore source (`apps.json` in `nmautz/streamlink-ios`, written by `ios-app/publish-ipa.sh`), fetched by the host and cached for 6 h (15 min after a failure, keeping the last good answer). `null` when it has never been reachable. The app's out-of-date notice (`_appCheckUpdate`) compares it with the installed version |
 | GET | `/api/setup-status` | **Unauthenticated, secret-free** first-run health check. `{ready: bool, items: [{key, ok, required, label, detail, how_to_fix, admin_tab}]}`. Aggregates existing signals (`_tmdb_effective_key`, `settings.indexer_api_key` + `state.indexers_*`, `settings.admin_password`, `qbit_login`) — no new polling. `ready` = all `required` items ok. The dashboard's first-run checklist (`refreshSetupChecklist()` in `index.html`) renders not-ok items with a "Fix" deep link to `/admin#<admin_tab>`. Returns booleans + hints only, never the keys themselves, so it's safe to call before `ADMIN_PASSWORD` is set |
 
 ## Search

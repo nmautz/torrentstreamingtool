@@ -21853,8 +21853,17 @@ function _appInitNav() {
   menu.appendChild(mk("Settings", _appOpenAppSettings));
   menu.appendChild(mk("Change Server / Re-pair", _appOpenChangeServer));
   menu.lastChild.style.borderBottom = "0";
+  // Out-of-date app (19.6.0): an entry at the top of the menu and a dot on the
+  // button, both hidden until _appCheckUpdate finds the app behind.
+  const upd = mk("Update app", () => _appUpdExplain());
+  upd.id = "appNavUpd";
+  upd.style.color = "#1BA1E2";
+  upd.style.display = "none";
+  menu.insertBefore(upd, menu.firstChild);
   const toggle = document.createElement("button");
-  toggle.innerHTML = ic("menu")+" App";
+  toggle.innerHTML = ic("menu")+" App"
+    + '<span id="appNavDot" style="display:none;width:7px;height:7px;background:#1BA1E2;'
+    + 'margin-left:6px;vertical-align:middle"></span>';
   toggle.style.cssText = "all:unset;cursor:pointer;color:#cbd5e1;background:#141417cc;"
     + "border:1px solid #2a2a30;padding:8px 11px;text-transform:uppercase;letter-spacing:.06em;font-weight:800;";
   toggle.addEventListener("click", () => {
@@ -21880,6 +21889,86 @@ let _appDashTimer = null;
 // of selected offKeys. Module-level so it survives the 1 s re-render tick.
 let _appDashSelectMode = false;
 const _appDashSel = new Set();
+
+// ── iOS app: "this app is out of date" (19.6.0) ─────────────────────────────
+// The host asks the SideStore source what the newest installable app is
+// (/api/app/latest) and we compare it with the app we're running in. Behind =
+// a blue dot on the App menu button plus an "Update app" entry, always; and a
+// short toast once per new version, again every 3 days until it's installed.
+// Never while something is playing — the dot is enough then.
+const APP_UPD_NAG_MS = 3 * 86400000;
+const APP_UPD_RECHECK_MS = 6 * 3600000;
+let _appUpd = null;          // { have, latest } while behind; have "" = unknown-but-older
+let _appUpdCheckedAt = 0;
+
+function _verCmp(a, b) {
+  const p = (v) => String(v || "").split(".").map(n => parseInt(n, 10) || 0);
+  const x = p(a), y = p(b);
+  for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0);
+  return 0;
+}
+
+// The installed app's version. AppShell.info() since 19.6.0. An app without it
+// is older, and its NativePlayback build stamp (NP_BUILD) is a LOWER bound on
+// its version — enough to know it's behind, not enough to print, so `exact`
+// is false. null = can't tell, or a dev build from Xcode ("1.0"): say nothing.
+async function _appInstalledVersion() {
+  try {
+    const r = await _cap.shell.info();
+    const v = r && r.version;
+    if (!/^\d+\.\d+\.\d+$/.test(v || "")) return null;
+    return { v, exact: true };
+  } catch (_) {}
+  try {
+    const d = await _cap.np.extDiag();
+    if (d && /^\d+\.\d+\.\d+$/.test(d.build || "")) return { v: d.build, exact: false };
+  } catch (_) {}
+  return { v: "0.0.0", exact: false };   // older than extDiag itself (pre-18.4.0)
+}
+
+async function _appCheckUpdate() {
+  if (!isApp || _appOffline) return;
+  _appUpdCheckedAt = Date.now();
+  let latest = null;
+  try {
+    const r = await fetch("/api/app/latest", { headers: _appAuthHeaders(), cache: "no-store" });
+    if (r.ok) latest = (await r.json()).version;
+  } catch (_) {}
+  if (!/^\d+\.\d+\.\d+$/.test(latest || "")) return;
+  const inst = await _appInstalledVersion();
+  if (!inst) return;
+  _appUpd = _verCmp(inst.v, latest) < 0 ? { have: inst.exact ? inst.v : "", latest } : null;
+  _npLog("app-update-check", { have: inst.v, exact: inst.exact, latest, behind: !!_appUpd }, "app");
+  _appUpdPaint();
+  if (!_appUpd || lp.itemId) return;
+  let seen = null;
+  try { seen = JSON.parse(localStorage.getItem("sl_app_update_seen") || "null"); } catch (_) {}
+  if (seen && seen.v === latest && Date.now() - (seen.at || 0) < APP_UPD_NAG_MS) return;
+  try { localStorage.setItem("sl_app_update_seen", JSON.stringify({ v: latest, at: Date.now() })); } catch (_) {}
+  showAlert(`App update available (${latest}). Open the App menu for how to install it.`, "info");
+}
+
+function _appUpdPaint() {
+  const on = !!_appUpd;
+  const dot = document.getElementById("appNavDot"); if (dot) dot.style.display = on ? "inline-block" : "none";
+  const upd = document.getElementById("appNavUpd"); if (upd) upd.style.display = on ? "block" : "none";
+  if (upd && on) upd.textContent = "Update app — " + _appUpd.latest;
+}
+
+function _appUpdExplain() {
+  if (!_appUpd) return;
+  const have = _appUpd.have ? `You have ${_appUpd.have}. ` : "";
+  showAlert(`${have}To update: open SideStore, find StreamLink and tap Update to ${_appUpd.latest}.`, "info");
+}
+
+function _appInitUpdateCheck() {
+  if (!isApp || _appOffline) return;
+  // After the boot rush, so it isn't one more thing popping at launch.
+  setTimeout(_appCheckUpdate, 5000);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && Date.now() - _appUpdCheckedAt > APP_UPD_RECHECK_MS) _appCheckUpdate();
+  });
+}
 
 // ── iOS app: home-screen quick actions (19.5.0) ─────────────────────────────
 // Long-press the app icon: Continue Watching / Downloads / Search. The shell
@@ -30575,6 +30664,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
   _npBindEvents();
   _npReconcileOrphan("page-boot");
   _appInitQuickActions();
+  _appInitUpdateCheck();
   // Keep the offline player snapshot fresh (fire-and-forget; no-op in a browser).
   _appRefreshPlayerSnapshot();
   // M3: when the browser regains connectivity, drain any offline progress the
@@ -30680,6 +30770,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.5.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.6.0</div>
 </body>
 </html>
