@@ -20606,6 +20606,11 @@ function _npBindEvents() {
           try { _lpRenderNavButtons(); } catch (_) {}
           _lpWarmNextEp();
           _npArm();
+          // _lpLoadIndex never ran for this episode, so nothing else will move
+          // the download window or repaint progress: the window stayed pinned to
+          // the episode you STARTED on until playback ended.
+          _appAutoManage();
+          _lpRefreshProgressViews();
         }
       }
     });
@@ -25135,6 +25140,24 @@ function _lpNextTitle(path, itemId) {
   return { title: np.title, series: np.series };
 }
 
+// The episode changed under the player: repaint what shows watch progress (the
+// episode list, the library's resume hints) from the SERVER. Nothing pushes
+// progress to the page, so without this the ticks and bars stayed where they were
+// when playback began until playback ended — and a proxied (device-copy) session
+// only caught up because ending it reloads the whole page from the host. The 4 s
+// delay is _appAutoManage's: it lets the finished episode's completion write land,
+// whichever player (web or native) made it. Coalesced, so a burst of Next presses
+// costs one refetch.
+let _lpProgViewsTimer = null;
+function _lpRefreshProgressViews() {
+  if (_appOffline || _lpProgViewsTimer) return;
+  _lpProgViewsTimer = setTimeout(() => {
+    _lpProgViewsTimer = null;
+    if (_epPageOpen()) refreshEpFiles();
+    loadLibrary();
+  }, 4000);
+}
+
 async function _lpLoadIndex(seekTo) {
   const filePath = lp.playlist[lp.pi];
   if (!filePath) { lpStop(); return; }
@@ -25321,6 +25344,7 @@ async function _lpLoadIndex(seekTo) {
   // iOS app: auto-managed downloads — drop this series' watched device copies and
   // keep the next N episodes downloading ahead (Settings-gated; online only).
   _appAutoManage();
+  _lpRefreshProgressViews();
 
   // Fetch skip-data in parallel — fire-and-forget; skip-offer logic just runs
   // off `lp.skipData` once it lands. Offline: no host, no skip markers.
@@ -30267,6 +30291,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.2.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.2.4</div>
 </body>
 </html>

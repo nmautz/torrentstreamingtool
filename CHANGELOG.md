@@ -1,5 +1,18 @@
 # Changelog
 
+## [19.2.4] — 2026-09-29
+### Progress and auto-downloads keep up during native playback
+
+- **Fixed: while a downloaded episode played on the glasses or with the phone
+  locked, the next episode's progress and the auto-download window did not
+  update until you stopped playing.** The native player moves to the next
+  episode itself, and that path never re-ran the auto-download manager. Only
+  the web player's episode load did. So the download window stayed on the
+  episode you started with. The server was already recording progress
+  correctly. Now every episode change, native or web, re-runs the manager and
+  re-reads the episode list and library progress from the server 4 s later.
+  Dashboard-only fix, no app rebuild.
+
 ## [19.2.3] — 2026-09-28
 ### Switching audio language on AirPlay works
 

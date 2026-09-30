@@ -43,7 +43,9 @@
 > available rung, so it never prompts mid-playback). Two feeders share
 > `_appAutoFiles`/`_appAutoWants`/`_appAutoApply`: **(a) in-app playback** —
 > each episode load (`_lpLoadIndex` → `_appAutoManage`, 4 s delay so the prior
-> episode's completion write lands, then `_appAutoManageRun`) rolls the window
+> episode's completion write lands, then `_appAutoManageRun`) — **and each
+> in-place native advance** (the `nativeAdvanced` listener; glasses / lock screen
+> never go through `_lpLoadIndex`, 19.2.4) — rolls the window
 > along the live `lp.playlist` (Shuffle order = watch order); **(b) the
 > server-progress sweep `_appAutoSweep`/`_appAutoSweepRun`** for episodes watched
 > on the **TV (VLC)** or another device while the phone was locked/backgrounded —
