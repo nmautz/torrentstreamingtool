@@ -1,5 +1,16 @@
 # Changelog
 
+## [19.9.2] — 2026-09-29
+### The offline player refreshes whatever the download settings say
+
+- **Fixed: the offline player snapshot was held back by the download settings.** It
+  shared the queue with episodes, so on cellular, in Low Power Mode, below the battery
+  floor or off the charger, it waited behind the paused queue, and the app kept an
+  old offline player. It now ignores all of those while the app is open. It is a few
+  MB and always goes first. Episodes stay paused exactly as before.
+- **Fixed: a success haptic on every launch.** Refreshing the snapshot counted as a
+  finished download. The snapshot now has no haptic and no Live Activity.
+
 ## [19.9.1] — 2026-09-29
 ### A tidier navbar on a phone
 

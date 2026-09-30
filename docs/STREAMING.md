@@ -1400,6 +1400,15 @@ the app is next opened — and a *suspended* app is not woken by plugging in at 
 That is why every pause string names its condition rather than just saying
 "paused".
 
+**The player snapshot is exempt** (19.9.2). The `__player__` job (the offline copy of
+the dashboard, see [PLAYER_CACHE_PLAN.md](PLAYER_CACHE_PLAN.md)) ignores every gate,
+cellular included, **while the app is in the foreground** (`bypassesGate`). It goes to
+the **front** of `jobOrder`, and closing a gate does not cancel it. It never requests
+the continued-processing grant, and it has no Live Activity or haptic. Content behind a
+shut gate stays paused, and the banner and Live Activity still say so. If the app is
+backgrounded behind a shut gate, the snapshot's tasks are cancelled rather than
+migrated (`dl-player-bg`), and `pump` restarts them on the next foreground.
+
 ### 2b. Native background playback (iOS app only)
 
 **The problem.** The player is a `<video>` inside a WKWebView. WebKit **pauses any

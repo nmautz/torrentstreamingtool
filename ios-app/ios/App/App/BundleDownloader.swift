@@ -539,7 +539,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         // out-of-process session and nothing better until the user next opens the
         // app. That is a real limitation of the platform, not an oversight; it is
         // also why the pause text names the condition rather than saying "paused".
-        if appActive { submitContinuedProcessing(name: jobs.values.first?.name ?? "Downloads") }
+        if appActive { submitContinuedProcessing(name: contentJobs.first?.name ?? "Downloads") }
         pump()
         scheduleHeartbeat()
         updateLiveActivity(force: true)
@@ -559,7 +559,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         // These cancels are explained, so move the generation on and don't let
         // `dl-cancel-loop` cry wolf over a gate closing.
         migGen += 1
-        for (_, job) in jobs {
+        for (sha, job) in jobs where !bypassesGate(sha) {
             for (file, task) in Array(job.tasks) {
                 task.cancel()
                 job.tasks[file] = nil
@@ -586,7 +586,10 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             // may also simply have reopened while we were suspended and nothing
             // was awake to notice.
             self.evaluateGate("foreground")
-            if self.gate == .go { self.submitContinuedProcessing(name: self.jobs.values.first?.name ?? "Downloads") }
+            if self.gate == .go { self.submitContinuedProcessing(name: self.contentJobs.first?.name ?? "Downloads") }
+            // A shut gate that stayed shut does not pump, and the snapshot may be
+            // waiting on exactly that.
+            else { self.pump() }
         }
     }
     // MARK: - Continued processing (iOS 26+)
@@ -835,6 +838,18 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         queue.async {
             self.appActive = false
             guard !self.jobs.isEmpty else { return }
+            // The snapshot's gate bypass is foreground-only, so behind a shut gate
+            // it stops here instead of migrating. Its job is kept; `pump` restarts
+            // it on the next foreground.
+            if self.gate != .go, let job = self.jobs[Self.playerKey], !job.tasks.isEmpty {
+                self.migGen += 1
+                for (file, task) in Array(job.tasks) {
+                    task.cancel()
+                    job.tasks[file] = nil
+                    job.liveBytes[file] = nil
+                }
+                DiagLog.shared.write("dl-player-bg", ["gate": self.gate.rawValue], cat: "offline")
+            }
             // THE ASSERTION IS NOT RE-TAKEN WHEN IT EXPIRES. beginBgTaskIfNeeded
             // ran only from startDownload, so the first `dl-bgtask-expired`
             // (measured 06:37:26, five seconds after a `left: 9` grant) left
@@ -1046,6 +1061,22 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     /// walks this, so bundles finish in the order they were queued — which is what
     /// you want: one watchable episode beats twenty-one half-episodes.
     private var jobOrder: [String] = []
+
+    /// The player snapshot's cache key (`_APP_PLAYER_KEY` in static/index.html):
+    /// the device copy of the dashboard that the shell serves when the host is
+    /// unreachable. A few MB, refreshed on every connect.
+    static let playerKey = "__player__"
+    /// THE PLAYER SNAPSHOT IGNORES THE GATE — but only in the foreground. The gate
+    /// exists to stop a 17 GB queue spending battery or mobile data. It was never
+    /// meant to stop a few MB that decide whether the app works offline at all, and
+    /// a stale snapshot is precisely what you find out about with no signal.
+    /// Foreground only: the refresh is kicked off from an open app, and nothing
+    /// about it is worth a background session. Content stays gated either way.
+    /// Assumes `queue`.
+    private func bypassesGate(_ sha: String) -> Bool { sha == Self.playerKey && appActive }
+    /// The jobs that count as downloads to the user. The snapshot is never shown:
+    /// no Live Activity, no haptic, no continued-processing grant.
+    private var contentJobs: [Job] { jobs.filter { $0.key != Self.playerKey }.map { $0.value } }
 
     /// THE FLOOD. `startDownload` gave every pending file a live
     /// URLSessionDownloadTask the moment the job was created, with no ceiling
@@ -1298,9 +1329,14 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             ], cat: "offline")
             job.pending = Set(toFetch.map { $0.name })
             jobs[cacheKey] = job
+            let isPlayer = cacheKey == Self.playerKey
             beginBgTaskIfNeeded()
-            if !jobOrder.contains(cacheKey) { jobOrder.append(cacheKey) }
-            sessionTotal += job.totalBytes
+            // The snapshot goes to the FRONT: it is a few MB and should never wait
+            // behind hours of bundles.
+            if !jobOrder.contains(cacheKey) {
+                if isPlayer { jobOrder.insert(cacheKey, at: 0) } else { jobOrder.append(cacheKey) }
+            }
+            if !isPlayer { sessionTotal += job.totalBytes }
             // Re-read the conditions BEFORE spending the submission: a run gets
             // exactly one grant (it can only be asked for while foreground), so a
             // queue added while the gate is shut must not burn it on work that
@@ -1309,14 +1345,16 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             // The user tapped Download — the only thing that legitimises a
             // continued-processing request. Kept alongside the old assertion, not
             // instead of it: if the system refuses, everything below is unchanged.
-            submitContinuedProcessing(name: name)
+            // Not for the snapshot: a run gets one grant, and a boot-time refresh
+            // must not spend it.
+            if !isPlayer { submitContinuedProcessing(name: name) }
             pump()
             scheduleHeartbeat()
             // Queued straight into a shut gate: say so now, while we are still
             // foreground and a Live Activity can actually be started. Backgrounded
             // it would be refused with `visibility` and the user would see a
             // download that simply never begins.
-            if gate != .go { updateLiveActivity(force: true) }
+            if gate != .go && !isPlayer { updateLiveActivity(force: true) }
             result = StartResult(dir: dir.path, alreadyComplete: false)
         }
         if let e = thrown { throw e }
@@ -1447,7 +1485,8 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         // effect on the very next segment. Belt and braces with the gate: the
         // gate stops us choosing to use cellular, this stops us doing it by
         // accident in the window before a path change is delivered.
-        req.allowsCellularAccess = policy.allowCellular
+        // The snapshot is exempt (see `bypassesGate`).
+        req.allowsCellularAccess = policy.allowCellular || sha == Self.playerKey
         // Foreground ⇒ fast in-process default session; suspended ⇒ background
         // session that survives suspend. A migration passes the destination explicitly.
         //
@@ -1477,12 +1516,15 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     private func pump() {
         // THE ONE CHOKE POINT. Every path that starts a transfer goes through
         // here (the only other caller of `enqueue` is `migrateTasks`, which moves
-        // transfers that are already running), so gating it gates everything.
-        guard gate == .go else { return }
+        // transfers that are already running), so gating it gates everything —
+        // except the player snapshot while foreground (see `bypassesGate`).
+        let open = gate == .go
+        guard open || jobs.keys.contains(where: bypassesGate) else { return }
         var budget = Self.maxInFlight - inFlight
         guard budget > 0 else { return }
         for sha in jobOrder {
             guard let job = jobs[sha] else { continue }
+            if !open && !bypassesGate(sha) { continue }
             // `files` order, not `pending` — a Set has no order and segment order
             // is the order a player would want them in anyway.
             for f in job.files {
@@ -1596,10 +1638,13 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         jobOrder.removeAll { $0 == sha }
         endBgTaskIfIdle()
         emit("bundleComplete", ["sha": sha, "itemId": job.itemId, "filePath": job.filePath, "dir": bundleDir(sha).path])
+        // The snapshot is not a download to the user: no buzz on every boot, and
+        // no Live Activity frame of its own.
+        if sha == Self.playerKey { return }
         Haptics.downloadFinished()
         // End the Live Activity (terminal frame) when the last job finishes, else
         // keep it showing the remaining downloads.
-        if jobs.isEmpty {
+        if contentJobs.isEmpty {
             DownloadLiveActivity.shared.end(title: job.name, finished: true, failed: false,
                                             filesDone: job.files.count, fileCount: job.files.count,
                                             bytesTotal: job.totalBytes)
@@ -1632,7 +1677,8 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         jobOrder.removeAll { $0 == sha }
         endBgTaskIfIdle()
         emit("bundleError", ["sha": sha, "itemId": job.itemId, "filePath": job.filePath, "message": message])
-        if jobs.isEmpty {
+        if sha == Self.playerKey { return }
+        if contentJobs.isEmpty {
             DownloadLiveActivity.shared.end(title: job.name, finished: false, failed: true,
                                             filesDone: job.doneBytes.count, fileCount: job.files.count,
                                             bytesTotal: job.totalBytes)
@@ -1761,17 +1807,18 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     // Build an aggregate snapshot across all in-flight jobs and push it to the
     // download Live Activity. `force` bypasses the throttle (per-file completion).
     private func updateLiveActivity(force: Bool) {
-        guard !jobs.isEmpty else { return }
+        let content = contentJobs
+        guard !content.isEmpty else { return }
         var done: Int64 = 0, total: Int64 = 0, filesDone = 0, fileCount = 0
         var soleName = ""
-        for (_, j) in jobs {
+        for j in content {
             done += j.doneBytes.values.reduce(0, +) + j.liveBytes.values.reduce(0, +)
             total += j.totalBytes
             filesDone += j.doneBytes.count
             fileCount += j.files.count
             soleName = j.name
         }
-        let title = jobs.count == 1 ? soleName : "\(jobs.count) downloads"
+        let title = content.count == 1 ? soleName : "\(content.count) downloads"
         let frac = total > 0 ? min(1.0, Double(done) / Double(total)) : 0
         // THE HEARTBEAT RUNS WHETHER OR NOT ANYTHING IS DRAWN, and 18.16.0 got
         // that wrong in the most expensive way available: `la-progress` was
