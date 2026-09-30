@@ -35964,8 +35964,49 @@ def _pin_audio(lines: list[str], audio: Optional[int], lang: Optional[str]) -> l
     return out
 
 
+_RESOLUTION_RE = re.compile(r"RESOLUTION=\d+x(\d+)")
+
+
+def _cap_variants(lines: list[str], maxh: Optional[int]) -> list[str]:
+    """Drop the video variants taller than `maxh` — the remote's quality pick.
+
+    For every transport the native player hands to (glasses, AirPlay, a
+    Chromecast): an AirPlay TV or a Chromecast fetches the master itself and
+    runs its own ABR, so a cap on the phone's AVPlayerItem would never reach
+    it. A master with only the allowed rungs leaves it nothing to exceed.
+
+    A variant with no RESOLUTION is kept (we can't judge it). If no variant is
+    small enough, the SMALLEST is kept instead: a cap never empties the ladder."""
+    if not maxh or maxh <= 0:
+        return lines
+    rungs = []                        # (tag line index, height)
+    for i, line in enumerate(lines):
+        if line.startswith("#EXT-X-STREAM-INF:") or line.startswith("#EXT-X-I-FRAME-STREAM-INF:"):
+            m = _RESOLUTION_RE.search(line)
+            if m:
+                rungs.append((i, int(m.group(1))))
+    if not rungs:
+        return lines
+    over = {i for i, h in rungs if h > maxh}
+    if len(over) == len(rungs):
+        low = min(h for _, h in rungs)
+        over = {i for i, h in rungs if h != low}
+    drop = set()
+    for i in over:
+        drop.add(i)
+        # A STREAM-INF's URI is the next non-tag line; an I-FRAME one carries its own.
+        if lines[i].startswith("#EXT-X-STREAM-INF:"):
+            j = i + 1
+            while j < len(lines) and lines[j].startswith("#") and not lines[j].startswith("#EXT"):
+                j += 1
+            if j < len(lines) and not lines[j].startswith("#"):
+                drop.add(j)
+    return [line for i, line in enumerate(lines) if i not in drop]
+
+
 def _native_master(master_text: str, meta: dict,
-                   audio: Optional[int] = None, lang: Optional[str] = None) -> str:
+                   audio: Optional[int] = None, lang: Optional[str] = None,
+                   maxh: Optional[int] = None) -> str:
     """`master.m3u8` with the bundle's sidecar subtitles declared as renditions.
 
     The subtitle NUMBER is read back out of each entry's `file` (`sub_<n>.vtt`)
@@ -35999,13 +36040,14 @@ def _native_master(master_text: str, meta: dict,
         out.append(line)
         if line.startswith("#EXTM3U"):
             out.extend(media)
-    return "\n".join(_pin_audio(out, audio, lang)) + "\n"
+    return "\n".join(_cap_variants(_pin_audio(out, audio, lang), maxh)) + "\n"
 
 
 @app.get("/api/library/offline-cache/{cache_key}/{filename}")
 async def offline_cache_bundle_file(cache_key: str, filename: str,
                                     audio: Optional[int] = None,
-                                    lang: Optional[str] = None) -> Response:
+                                    lang: Optional[str] = None,
+                                    maxh: Optional[int] = None) -> Response:
     """Serve one file from an HLS bundle directory.
 
     Bundles live beside the media (`<file_dir>/.streamlink_cache/<key>/`), so the
@@ -36033,8 +36075,9 @@ async def offline_cache_bundle_file(cache_key: str, filename: str,
         txt = await asyncio.to_thread(src.read_text, encoding="utf-8", errors="replace")
         meta = await asyncio.to_thread(_read_meta, bundle_dir)
         # `?audio=&lang=` pins one audio rendition — the AirPlay door asks
-        # for it; see _pin_audio.
-        return Response(content=_native_master(txt, meta, audio, lang),
+        # for it; see _pin_audio. `?maxh=` is the remote's quality cap; see
+        # _cap_variants.
+        return Response(content=_native_master(txt, meta, audio, lang, maxh),
                         media_type=_HLS_MIME[".m3u8"])
 
     sm = _SUB_PLAYLIST_RE.match(filename)

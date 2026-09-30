@@ -6241,3 +6241,14 @@ full-screen flashing. `_libKeepPosters` / `_libRestorePosters` move the painted
 new poster-bearing tile has to survive a rebuild the same way, or be rendered
 with its `src` already set. Overlapping `loadLibrary` calls could also paint out
 of order, so a response older than the last one painted is dropped.
+
+## A quality cap on a TV has to live in the master (19.9.0)
+
+An AirPlay TV and a Chromecast fetch the HLS master themselves and run their own ABR.
+`preferredMaximumResolution` / `preferredPeakBitRate` on the phone's `AVPlayerItem`
+would only ever reach the glasses. So the remote's quality pick is a URL parameter
+(`?maxh=`) that makes the server serve a master without the taller rungs, and changing
+it is a reload at the playhead. It's the same lesson as the AirPlay audio pin (19.2.2):
+anything the receiver chooses, you control by what you hand it, never by a setting on
+the phone. `LocalMediaServer` doesn't implement `maxh`: a downloaded master has one rung.
+If that ever changes, mirror `_cap_variants` there.

@@ -3672,27 +3672,22 @@
 <!-- ── Pause Stream-Prep chooser modal ───────────────────────────────────────
      Lets the user pick how the in-flight encode is handled when pausing.
 -->
-<!-- Audio & subtitles for the REMOTE (18.30.0). The on-phone player's options
-     panel addresses the parked <video> and is hidden in remote mode, so the
-     remote gets its own sheet. Picks go through lpSetAudio / lpSetSubtitle like
-     the panel's, whose _lpSaveLocalTracks re-arms native — and native switches
-     the running transport (AVPlayer media selection, or the Chromecast's
-     active tracks). Filled by lpRemoteTracks. -->
-<div id="trackModal"
+<!-- The remote's MORE sheet (19.9.0; Audio & Subs since 18.30.0). While the
+     native player holds the picture the Options panel is hidden (it addresses
+     the parked <video>), so everything it offers is here instead — and what
+     the current route can't do is shown greyed with the reason, not dropped.
+     Filled by lpRemoteMore; each pick re-renders it. -->
+<div id="moreModal"
   class="hidden fixed inset-0 z-[90] bg-black/70 flex items-end sm:items-center justify-center sm:px-4"
-  onclick="if (event.target === this) _lpTracksClose()">
+  onclick="if (event.target === this) _lpMoreClose()">
   <div class="bg-gray-900 w-full sm:max-w-sm fade-in border-t-[3px] border-indigo-600 max-h-[85vh] flex flex-col">
     <div class="px-5 pt-5 pb-3 border-b border-gray-800 flex-shrink-0">
-      <h2 class="text-lg font-black uppercase tracking-wide">Audio &amp; Subtitles</h2>
+      <h2 class="text-lg font-black uppercase tracking-wide">More</h2>
+      <p id="moreModalSub" class="text-xs text-gray-500 mt-0.5"></p>
     </div>
-    <div class="p-4 overflow-y-auto">
-      <div id="trackModalAudioHdr" class="text-[9px] font-black uppercase tracking-widest text-gray-500 mb-2">Audio</div>
-      <div id="trackModalAudio" class="grid grid-cols-1 gap-2 mb-4"></div>
-      <div class="text-[9px] font-black uppercase tracking-widest text-gray-500 mb-2">Subtitles</div>
-      <div id="trackModalSubs" class="grid grid-cols-1 gap-2"></div>
-    </div>
+    <div id="moreModalBody" class="p-4 overflow-y-auto"></div>
     <div class="px-4 pb-4 safe-bottom flex-shrink-0">
-      <button onclick="_lpTracksClose()"
+      <button onclick="_lpMoreClose()"
         class="w-full bg-gray-800 hover:bg-gray-700 py-3 text-sm font-bold uppercase tracking-wide transition-colors">Done</button>
     </div>
   </div>
@@ -4051,12 +4046,12 @@
             <svg class="w-8 h-8 mb-1" fill="currentColor" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14"/></svg>
             <span class="lp-rm-label text-xs font-bold">Stop</span>
           </button>
-          <button id="lpRemoteTracksBtn" onclick="lpRemoteTracks()" title="Audio and subtitles"
-            class="fc-tile flex-1 border-r border-gray-800 hover:bg-gray-800/60 active:bg-gray-700/80 text-gray-300 transition-colors" style="display:none">
-            <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-              <rect x="3" y="5" width="18" height="14"/><path stroke-linecap="round" d="M7 13h4M13 13h4M7 16h7"/>
-            </svg>
-            <span class="lp-rm-label text-xs font-bold">Audio &amp; Subs</span>
+          <!-- Everything the on-phone Options panel has: audio, subtitles,
+               quality, sleep, clip, shuffle — lpRemoteMore. -->
+          <button id="lpRemoteMoreBtn" onclick="lpRemoteMore()" title="Audio, subtitles, quality, sleep and more"
+            class="fc-tile flex flex-1 border-r border-gray-800 hover:bg-gray-800/60 active:bg-gray-700/80 text-gray-300 transition-colors">
+            <svg class="w-8 h-8 mb-1" fill="currentColor" aria-hidden="true"><use href="#i-dots"/></svg>
+            <span class="lp-rm-label text-xs font-bold">More</span>
           </button>
           <!-- Back to phone replaces To TV while the picture is on AirPlay or a
                Chromecast: the TV the viewer is looking at IS the destination, so
@@ -20180,8 +20175,6 @@ function _npSyncRemoteUi() {
   const toTv = document.getElementById("lpRemoteToTv");
   if (toPhone) toPhone.style.display = onTv ? "flex" : "none";
   if (toTv) toTv.style.display = onTv ? "none" : "";
-  const trk = document.getElementById("lpRemoteTracksBtn");
-  if (trk) trk.style.display = (on && _lpRemoteTrackChoices()) ? "flex" : "none";
   const hdr = document.getElementById("lpToTvBtn");
   const hdrLbl = hdr && hdr.querySelector(".lp-btn-label");
   if (hdrLbl) hdrLbl.textContent = onTv ? "To Phone" : "To TV";
@@ -20253,42 +20246,148 @@ async function lpCastMute() {
   try { const r = await _cap.np.castVolume({ muted: !_npCastVol.muted }); if (r && r.ok) { _npCastVol = r; _npPaintCastVol(); } } catch (_) {}
 }
 
-// ── Audio & subtitles from the remote (18.30.0) ──────────────────────────────
-// Only what the native transport can switch: the bundle's audio renditions and
-// its text subtitles. Downloaded sidecar subs (lp.sidecarSubs) live only on the
-// phone's <track> elements, so they are not offered here. On-demand sessions
-// mux ONE audio track and switching it re-encodes via the web player, which is
-// parked — so no audio list there.
+// ── The remote's More sheet (19.9.0; audio & subtitles since 18.30.0) ─────────
+// Everything the on-phone Options panel offers, for while the native player
+// holds the picture and that panel (which addresses the parked <video>) is
+// hidden. What the current route can't do is listed GREYED with the reason:
+// a missing row reads as "the app doesn't have this", a greyed one says why.
+//
+// Audio/subs: only what the native transport can switch — the bundle's audio
+// renditions and its text subtitles. Downloaded sidecar subs live only on the
+// phone's <track>s. On-demand muxes ONE audio track and switching re-encodes
+// through the parked web player, so no audio list there.
 function _lpRemoteAudioChoices() {
   return lp.mode === "ondemand" ? [] : (lp.audios || []);
 }
-function _lpRemoteTrackChoices() {
-  return _lpRemoteAudioChoices().length > 1 || (lp.subtitles || []).length > 0;
+
+// The native quality cap (arm `maxHeight` → `?maxh=` on the master, see
+// _cap_variants in main.py). 0 = Auto. Kept for the run, like the web pick;
+// cleared when the player closes.
+const NP_QUALITY_MIN_APP = "19.9.0";   // first app build that sends maxHeight
+function _lpRemoteQuality() {
+  if (lp.source === "device") return { heights: [], why: "The downloaded copy has one quality" };
+  if (isApp && _appVerHeader && _verCmp(_appVerHeader.replace(/^</, ""), NP_QUALITY_MIN_APP) < 0)
+    return { heights: [], why: "Update the app to change quality here" };
+  const hs = [...new Set(((lp.hls && lp.hls.levels) || []).map(l => l.height || 0).filter(h => h > 0))]
+    .sort((a, b) => b - a);
+  if (hs.length < 2) return { heights: [], why: "This episode has one quality" };
+  return { heights: hs, why: "" };
 }
-function _lpTracksClose() { document.getElementById("trackModal")?.classList.add("hidden"); }
-function lpRemoteTracks() {
-  const mk = (label, on, fn) => {
-    const b = document.createElement("button");
-    b.className = "px-4 py-3 text-left text-sm font-bold uppercase tracking-wide transition-colors border-l-4 "
-      + (on ? "bg-indigo-900/40 border-indigo-500 text-indigo-200" : "bg-gray-800 hover:bg-gray-700 border-gray-700 text-gray-300");
-    b.textContent = label;
-    b.onclick = () => { fn(); lpRemoteTracks(); };
-    return b;
+function lpSetNativeQuality(h) {
+  lp.nativeMaxH = Number(h) || 0;
+  _npLog("quality-cap-set", { maxh: lp.nativeMaxH, where: _npWhereLabel() }, "play");
+  if (_npArmed) _npArm();
+}
+
+function _lpMoreClose() { document.getElementById("moreModal")?.classList.add("hidden"); }
+function lpRemoteMore() {
+  const body = document.getElementById("moreModalBody");
+  if (!body) return;
+  body.innerHTML = "";
+  const where = _npWhereLabel().replace(/^On /, "");
+  document.getElementById("moreModalSub").textContent = "Playing on " + where;
+  const section = (title, cols = 1) => {
+    const h = document.createElement("div");
+    h.className = "text-[9px] font-black uppercase tracking-widest text-gray-500 mb-2" + (body.children.length ? " mt-4" : "");
+    h.textContent = title;
+    body.appendChild(h);
+    const g = document.createElement("div");
+    g.className = "grid gap-2 " + (cols === 2 ? "grid-cols-2" : "grid-cols-1");
+    body.appendChild(g);
+    return g;
   };
-  const aud = document.getElementById("trackModalAudio");
-  const subs = document.getElementById("trackModalSubs");
-  aud.innerHTML = ""; subs.innerHTML = "";
+  // on: the current pick. fn: null = greyed (why says so). keep: don't re-render
+  // after (the action opens something else or runs on its own).
+  const opt = (g, label, { on = false, fn = null, why = "", keep = false } = {}) => {
+    const b = document.createElement("button");
+    b.className = "px-4 py-3 text-left transition-colors border-l-4 "
+      + (!fn ? "bg-gray-900 border-gray-800 text-gray-600 cursor-default"
+         : on ? "bg-indigo-900/40 border-indigo-500 text-indigo-200"
+              : "bg-gray-800 hover:bg-gray-700 border-gray-700 text-gray-300");
+    const l = document.createElement("div");
+    l.className = "text-sm font-bold uppercase tracking-wide";
+    l.textContent = label;
+    b.appendChild(l);
+    if (why) {
+      const w = document.createElement("div");
+      w.className = "text-[11px] normal-case tracking-normal font-normal mt-0.5 " + (fn ? "text-gray-500" : "text-gray-600");
+      w.textContent = why;
+      b.appendChild(w);
+    }
+    if (fn) b.onclick = () => { _hap("selection"); fn(b); if (!keep) lpRemoteMore(); };
+    else b.disabled = true;
+    g.appendChild(b);
+  };
+
+  // Audio
   const auds = _lpRemoteAudioChoices();
-  document.getElementById("trackModalAudioHdr").style.display = auds.length > 1 ? "" : "none";
-  aud.style.display = auds.length > 1 ? "" : "none";
-  const curA = Number(lp.pendingAudioIdx || 0);
-  auds.forEach((a, i) => aud.appendChild(
-    mk(a.label || ("Audio " + (i + 1)), i === curA, () => lpSetAudio(i))));
-  const curS = String(lp.pendingSubtitleIdx ?? -1);
-  subs.appendChild(mk("Off", curS === "-1" || curS.startsWith("sidecar:"), () => lpSetSubtitle(-1)));
-  (lp.subtitles || []).forEach((t, i) => subs.appendChild(
-    mk(t.label || ("Subtitles " + (i + 1)), curS === String(i), () => lpSetSubtitle(i))));
-  document.getElementById("trackModal").classList.remove("hidden");
+  if (auds.length > 1) {
+    const g = section("Audio");
+    const curA = Number(lp.pendingAudioIdx || 0);
+    auds.forEach((a, i) => opt(g, a.label || ("Audio " + (i + 1)),
+      { on: i === curA, fn: () => lpSetAudio(i) }));
+  } else if ((lp.audios || []).length > 1) {
+    opt(section("Audio"), "Change audio", { why: "Only while playing on this phone (this stream is encoded on the fly)" });
+  }
+
+  // Subtitles
+  {
+    const g = section("Subtitles");
+    const curS = String(lp.pendingSubtitleIdx ?? -1);
+    opt(g, "Off", { on: curS === "-1" || curS.startsWith("sidecar:"), fn: () => lpSetSubtitle(-1) });
+    (lp.subtitles || []).forEach((t, i) => opt(g, t.label || ("Subtitles " + (i + 1)),
+      { on: curS === String(i), fn: () => lpSetSubtitle(i) }));
+    (lp.sidecarSubs || []).forEach(t => opt(g,
+      (t.lang ? t.lang.toUpperCase() + " — " : "") + (t.name || "Downloaded"),
+      { why: "Downloaded subtitles only show on this phone" }));
+    opt(g, "Find subtitles online", { why: "Found subtitles only show on this phone" });
+  }
+
+  // Quality
+  {
+    const g = section("Quality");
+    const q = _lpRemoteQuality();
+    if (!q.heights.length) opt(g, "Auto", { why: q.why });
+    else {
+      const cur = lp.nativeMaxH || 0;
+      opt(g, "Auto", { on: !cur, fn: () => lpSetNativeQuality(0), why: "Best the connection allows" });
+      q.heights.forEach(h => opt(g, "Up to " + h + "p",
+        { on: cur === h, fn: () => lpSetNativeQuality(h) }));
+    }
+  }
+
+  // Audio delay: WebAudio on the phone's own element — nothing reaches a TV.
+  opt(section("Audio delay"), "Sync", { why: "Only while playing on this phone" });
+
+  // Sleep
+  {
+    const g = section("Sleep", 2);
+    const sel = document.getElementById("lpSleepSelect");
+    const cur = !_lpSleep.id ? "off" : _lpSleep.episode ? "ep" : (sel ? sel.value : "");
+    const left = _lpSleep.id ? _lpSleepLeftText() : "";
+    [["off", "Off"], ["ep", "End of episode"], ["15", "15 min"], ["30", "30 min"], ["45", "45 min"],
+     ["60", "1 hour"], ["90", "1.5 hours"], ["120", "2 hours"]].forEach(([v, label]) => opt(g, label, {
+      on: cur === v, why: (cur === v && v !== "off" && left) ? left + " left" : "",
+      fn: () => { if (sel) sel.value = v; lpSetSleep(v); } }));
+  }
+
+  // Clip — cut on the host from the native playhead (lpClip reads it).
+  {
+    const g = section("Clip");
+    if (_appOffline) opt(g, "Clip last 30s", { why: "Needs the host" });
+    else {
+      opt(g, "Clip last 30s", { fn: (b) => lpClip(30, b), keep: true });
+      opt(g, "Clip last…", { fn: (b) => lpClipCustom(b), keep: true });
+    }
+  }
+
+  // Shuffle
+  if (lp.shuffle) opt(section("Shuffle"), "Exit shuffle",
+    { fn: (b) => lpExitShuffle(b).then(lpRemoteMore), keep: true, why: "Play the rest in order" });
+  else if ((lp.playlist || []).length > 1) opt(section("Shuffle"), "Shuffle",
+    { fn: (b) => lpEnterShuffle(b).then(lpRemoteMore), keep: true, why: "The rest of this show in random order" });
+
+  document.getElementById("moreModal").classList.remove("hidden");
 }
 
 // Where the picture is while native holds it — the header, the remote banner.
@@ -20511,6 +20610,8 @@ function _npPayload() {
     sleepId: _lpSleep.id,
     sleepAt: _lpSleep.at ? _lpSleep.at / 1000 : 0,
     sleepEpisode: !!_lpSleep.episode,
+    // The remote's quality cap (More sheet): tallest rung allowed, 0 = Auto.
+    maxHeight: lp.nativeMaxH || 0,
   };
 }
 
@@ -24447,7 +24548,8 @@ function _clipPromptSeconds() {
 // On-device: clip the local <video>'s last `seconds`, using the selected audio.
 function lpClip(seconds, btn) {
   const v = document.getElementById("lpVideo");
-  const end = v ? v.currentTime : 0;
+  // As a remote the element is parked; the native playhead is the real one.
+  const end = _npHolding ? _npUiTime(v) : (v ? v.currentTime : 0);
   _doClip(lp.itemId, lp.filePath, end, seconds || 30, lp.pendingAudioIdx || 0, btn);
 }
 function lpClipCustom(btn) {
@@ -28772,6 +28874,7 @@ async function lpStop() {
   if (isApp && lp._lmsActive) { try { _cap.lms.stop(); } catch (_) {} }
   lp._lmsActive = false; lp._localBase = null;
   lp.source = "server"; lp._localRung = null; lp._localLadder = []; lp._srvOverride = null;
+  lp.nativeMaxH = 0;
   await lpUnloadCurrent();
   _lpStopSubUpgradePoll();
   lp.subAutoApplied = false;
@@ -30732,6 +30835,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.8.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.9.0</div>
 </body>
 </html>

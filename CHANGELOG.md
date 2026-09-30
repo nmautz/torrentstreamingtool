@@ -1,5 +1,21 @@
 # Changelog
 
+## [19.9.0] — 2026-09-29
+### The remote's More menu
+
+- **New: a More tile on the remote** (glasses, AirPlay, Chromecast), replacing Audio &
+  Subs. It has everything the on-phone Options panel has: audio, subtitles, quality,
+  audio delay, sleep timer, clip, and shuffle. What can't work on the current route is
+  shown greyed with the reason instead of missing. Downloaded subtitles, Find subtitles
+  and Audio delay only work on the phone's own player.
+- **New: quality control while casting or on the glasses.** Auto or "Up to 1080p / 720p
+  / …". The server serves a master without the taller rungs (`?maxh=` on
+  `master-native.m3u8`), so it also binds an AirPlay TV and a Chromecast, which choose
+  their own quality. It reloads at the playhead. Needs app 19.9.0; older builds see it
+  greyed with "Update the app".
+- Clip from the remote cuts at the native playhead, not at the parked phone player's
+  position.
+
 ## [19.8.0] — 2026-09-29
 ### Device pairing removed
 

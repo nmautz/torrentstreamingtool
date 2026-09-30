@@ -1711,15 +1711,37 @@ What the remote can drive is what `NativePlayback` exposes: `lpTogglePlay` →
 **There is deliberately no volume row on the glasses:** the phone's hardware volume
 buttons already drive them. A Chromecast gets one (see the Chromecast section).
 
-**Audio & Subs** (18.30.0). The remote has a tile (`#lpRemoteTracksBtn`, shown when
-there are at least 2 audio tracks or any text subtitles) that opens `#trackModal`. It
-lists the bundle's audio renditions and its text subtitles; downloaded sidecar subtitles
-live only on the phone's `<track>`s and are not offered. On-demand shows no audio list,
-because switching there re-encodes through the parked web player. Picks go through
-`lpSetAudio` / `lpSetSubtitle`, whose `_lpSaveLocalTracks` re-arms. `arm()` notices
-`audioName`/`subIndex` changing for the same file and calls `applyTracksLive()`: an
-AVPlayer (glasses, AirPlay) re-runs `applyTrackSelection` on the live item, and a
-Chromecast re-runs `applyCastTracks` against the last status that listed tracks.
+**More** (19.9.0; was **Audio & Subs**, 18.30.0). The remote's bottom row has a
+**More** tile (`#lpRemoteMoreBtn`, always shown) that opens `#moreModal`, filled by
+`lpRemoteMore`. It carries everything the on-phone Options panel has, and what the
+current route can't do is listed **greyed with the reason** rather than dropped:
+
+| Section | On glasses / AirPlay / Chromecast |
+|---|---|
+| Audio | the bundle's renditions (`lpSetAudio`). On-demand: greyed, since switching there re-encodes through the parked web player |
+| Subtitles | the bundle's text subs (`lpSetSubtitle`). Downloaded sidecars and **Find subtitles online** are greyed: sidecars live only on the phone's `<track>`s |
+| Quality | Auto / Up to N p: the **native quality cap** (below). Greyed for a downloaded copy (one rung), a single-rung episode, or an app older than 19.9.0 |
+| Audio delay | greyed: it is WebAudio on the phone's own element |
+| Sleep | `lpSetSleep`, which native already runs |
+| Clip | `lpClip`, which reads the native playhead (`_npUiTime`) while holding, not the parked element |
+| Shuffle | `lpEnterShuffle` / `lpExitShuffle` |
+
+Audio/sub picks go through `lpSetAudio` / `lpSetSubtitle`, whose `_lpSaveLocalTracks` re-arms.
+`arm()` notices `audioName`/`subIndex` changing for the same file and calls
+`applyTracksLive()`: an AVPlayer (glasses, AirPlay) re-runs `applyTrackSelection` on the
+live item, and a Chromecast re-runs `applyCastTracks` against the last status that listed
+tracks.
+
+**Native quality cap** (19.9.0). The pick is `lp.nativeMaxH` (0 = Auto; kept for the run,
+cleared when the player closes) and rides every arm as `maxHeight`. Native appends it to
+the native master URLs as `?maxh=<h>` (`cappedURL`, `url` and `nextUrl`), and
+`_cap_variants` in `main.py` drops the `#EXT-X-STREAM-INF` / I-frame variants taller than
+it. If none fit, only the smallest is kept, so the ladder is never emptied. It is done in the
+master, not with `preferredMaximumResolution`, because an AirPlay TV or a Chromecast fetches
+the master itself and runs its own ABR: nothing set on the phone's player item reaches
+it (the same reason as the AirPlay audio pin). A change for the same file is a
+`replaceItem` at the playhead on every transport (`quality-cap` log row). The loopback
+server (`LocalMediaServer`) ignores `maxh`: a downloaded master has one rung.
 
 Native side: `ios-app/ios/App/App/NativePlayback.swift` (+ `PlaybackLiveActivity.swift`,
 `Shared/PlaybackIntents.swift`, `StreamLinkLiveActivities/PlaybackWidget.swift`).

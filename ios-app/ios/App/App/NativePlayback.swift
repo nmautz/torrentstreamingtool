@@ -176,6 +176,11 @@ struct ArmedPlayback {
     var sleepId: Double = 0
     var sleepAt: Double = 0
     var sleepEpisode = false
+    /// The remote's quality cap: the tallest video rung allowed, 0 = Auto. It
+    /// rides the master URL as `?maxh=` (`_cap_variants` in main.py), because an
+    /// AirPlay TV or a Chromecast fetches the master itself and runs its own
+    /// ABR; nothing set on this phone's player item would reach it.
+    var maxHeight = 0
     /// When `position` was sampled. Handoff extrapolates from this.
     var armedAt = Date()
 }
@@ -1164,6 +1169,9 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         if a.sleepId != 0, a.sleepId == sleepFiredId {
             a.sleepId = 0; a.sleepAt = 0; a.sleepEpisode = false
         }
+        a.maxHeight      = max(0, call.getInt("maxHeight") ?? 0)
+        if let u = a.url { a.url = cappedURL(u, a.maxHeight) }
+        if let u = a.nextUrl { a.nextUrl = cappedURL(u, a.maxHeight) }
         a.armedAt        = Date()
         // The page arms with the URLs IT can reach (loopback / the box). While
         // AirPlay is up the receiver is fetching, so every URL the player could
@@ -1268,10 +1276,20 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             && (a.audioName != armed.audioName || a.subIndex != armed.subIndex)
         let airplayAudioChanged = tracksChanged && airplayOn && cast == nil
             && a.audioName != armed.audioName
+        // A quality pick from the remote's More sheet is a new master (fewer
+        // rungs), so it is a reload at the playhead on every transport.
+        let qualityChanged = isNativeActive && !switchingFile && a.filePath == armed.filePath
+            && a.maxHeight != armed.maxHeight
         armed = a
         // Cancelled or re-set mid-fade: the volume comes straight back.
         if sleepFade != nil, armed.sleepId != sleepFadeFor { endSleepFade() }
-        if airplayAudioChanged, let u = armed.url {
+        if qualityChanged, let u = armed.url {
+            let at = cast != nil ? armed.position
+                : (player.map { CMTimeGetSeconds($0.currentTime()) } ?? armed.position)
+            DiagLog.shared.write("quality-cap", ["maxh": armed.maxHeight, "at": at,
+                                                 "airplay": airplayOn, "cast": cast != nil], cat: "play")
+            replaceItem(with: u, at: at, play: !armed.paused)
+        } else if airplayAudioChanged, let u = armed.url {
             // The TV only ever has the one audio track we put in its master
             // (see airplayURL), so a new pick is a new master, at the playhead.
             let at = player.map { CMTimeGetSeconds($0.currentTime()) } ?? armed.position
@@ -1699,6 +1717,17 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             self.updateNowPlaying()
             self.endBgTask()
         }
+    }
+
+    /// `url` with the remote's quality cap as `?maxh=` (dropped when 0). Only a
+    /// bundle's native master understands it; any other URL is left alone.
+    private func cappedURL(_ url: URL, _ maxh: Int) -> URL {
+        guard url.lastPathComponent == "master-native.m3u8",
+              var c = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        var q = (c.queryItems ?? []).filter { $0.name != "maxh" }
+        if maxh > 0 { q.append(URLQueryItem(name: "maxh", value: String(maxh))) }
+        c.queryItems = q.isEmpty ? nil : q
+        return c.url ?? url
     }
 
     /// The URL an AirPlay TV is given: through the door, and for a bundle's

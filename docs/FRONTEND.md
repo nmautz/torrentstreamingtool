@@ -702,7 +702,7 @@ Don't re-add the `controls` attribute. Pieces:
   header flips "On Device" → "On Glasses". **No volume row and no track row** —
   `NativePlayback` has no volume method and track switching needs a native
   reload, and a tile that can't do anything is worse than a missing one. See
-  [GOTCHAS.md](GOTCHAS.md) § "A remote is a control panel, not an overlay".
+  [GOTCHAS.md](GOTCHAS.md) § "A remote is a control panel, not an overlay". The bottom row's **More** tile (`#lpRemoteMoreBtn` → `lpRemoteMore` → `#moreModal`, 19.9.0) holds everything the Options panel does, with what the route can't do greyed and explained; see [STREAMING.md § 2b](STREAMING.md).
 
 The header (`#lpHeader`, `.lp-chrome`, hidden in tiny mode; on phones ≤480px
 the Min / To TV text labels collapse to icons via `.lp-btn-label` so the bar
