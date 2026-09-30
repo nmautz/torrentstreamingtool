@@ -3463,13 +3463,11 @@ browser users keep pinch-to-zoom. Same injection pattern as `injectCapacitorRunt
 ### Cross-origin data between the shell and the host dashboard must go through a native plugin — NOT `localStorage`
 The connect shell (`capacitor://localhost/index.html`) and the host dashboard
 (`https://<host>`) are **different web origins**, so `localStorage` written by one is
-invisible to the other. This bit M5's pairing token: the shell pairs and gets a
-token, but the dashboard (which actually makes the device-facing fetches) can't read
-it from `localStorage`. Fix: store such shared state **natively** —
-`OfflineStore.set/getPairingToken` persists it in the app sandbox, readable from
-both origins (same reason the offline progress log is native). The shell writes the
-token after pairing; the dashboard reads it at startup into `_pairToken` and sends
-`Authorization: Bearer …`.
+invisible to the other. This bit M5's pairing token (removed in 19.8.0): the shell
+paired and got a token, but the dashboard (which made the device-facing fetches)
+couldn't read it from `localStorage`. Fix: store such shared state **natively** in a
+plugin, readable from both origins (the same reason the offline progress log is
+native).
 
 ### The app WKWebView has no visible JS console — surface uncaught errors on-screen
 A bug that only reproduces inside the Capacitor shell is effectively undebuggable by
@@ -3509,8 +3507,8 @@ sheet). The Clip feature hit all three. Fix: when `isApp`, `_shareOrDownload` ha
 clip's **host URL** to **Safari** via the native `BundleDownloader.openExternal({url})`
 (`UIApplication.shared.open`), where iOS previews the MP4 with a native
 Save-to-Files/Photos + Share sheet. Works because the clip URL's random 16-hex token is
-the capability (`GET /api/library/clip/{token}/{filename}` has no `_require_device_auth`),
-so Safari needs no `Authorization` header. Any future "save/share a host file from the
+the capability (`GET /api/library/clip/{token}/{filename}`), so Safari needs no
+extra header. Any future "save/share a host file from the
 app" should reuse `openExternal`, not the Web Share / download paths.
 
 ### In-app navigation back to the shell pages is a full cross-origin navigation to `capacitor://localhost`
@@ -3661,7 +3659,7 @@ WKWebView.
 (8.7.0):** don't try to load the loopback bundle into the remote host page — instead
 move the *page* to the loopback first, and reverse-proxy everything else back to the
 host so no feature is lost. `lpPlay` → `_appTryLocalHandoff` starts the LMS in **proxy
-mode** (`lms.start({playerRoot, proxyHost, proxyToken})`) over the `__player__` snapshot
+mode** (`lms.start({playerRoot, proxyHost, proxyDeviceId})`) over the `__player__` snapshot
 and `location.replace`s to it with `?proxied=1&host=<origin>&item=&file=&seek=&profile=&am=`.
 On that same-origin snapshot page the bundle plays exactly like offline, **but
 `_appOffline` stays false** so it boots as a full online dashboard — SSE, Play-to-TV,
@@ -6193,8 +6191,7 @@ device used that IP in the last 10 minutes.
 
 **Secrets never reach the store.** `?device_token=` and `?profile_token=` are real
 query parameters the app sends; `devactivity.redact_query` blanks them before the
-tuple is even queued. Pairing tokens appear only as a SHA-256 prefix in
-`token_map`.
+tuple is even queued.
 
 ## A bookmark's NEW dot is a transition, not a state (19.1.0)
 

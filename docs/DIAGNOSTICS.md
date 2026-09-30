@@ -729,11 +729,14 @@ It is also mirrored into a host **cookie**, because hls.js segment requests,
 `EventSource` and `<img>` send cookies but no custom headers. When that isn't
 there, the ladder is:
 
-1. **Pairing token** (Bearer / `X-Device-Token`): the iOS app's AVPlayer and
-   background downloader send nothing else. Mapped to the device id last seen
-   together with that token (`token_map`, persisted, **stored as a SHA-256
-   prefix, never the token**). A token never seen beside an id becomes
-   `app-<hash>`.
+1. **The app's own native requests** (progress/session posts, the background
+   downloader, the loopback proxy, the TV-remote buttons, the AirPlay door) send
+   the same id as `X-Device-Id`, so they hit the first rule directly. Their
+   User-Agent marks them `via: app`, and an `app` request never relabels the
+   device the dashboard named. Until 19.8.0 they sent a **pairing token** instead,
+   mapped through `token_map`, which only worked for paired phones. The table and
+   the `paired` column remain, unused. AVPlayer's own media fetches carry no
+   custom header and fall through to the next rule.
 2. **Inferred**: the same IP + User-Agent as an identified device in the last
    10 min. For the iOS media player / native client only, the **one** identified
    device on that IP. Two or more there (a NAT, the Tailscale subnet router, so

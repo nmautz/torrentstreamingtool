@@ -269,7 +269,7 @@
       <div class="bg-gray-900 border border-gray-800">
         <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3 flex-wrap">
           <div class="min-w-0">
-            <h2 class="text-sm font-black uppercase tracking-wide">All Devices<span class="help-tip" tabindex="0" data-tip="Every device that has ever connected, kept until you forget it. How it was recognised: Browser = the dashboard's own device id. App token = the paired iOS app. Inferred = matched to a known device by address and client. Anonymous = no id at all (curl, an old page); these are grouped by address + client.">?</span></h2>
+            <h2 class="text-sm font-black uppercase tracking-wide">All Devices<span class="help-tip" tabindex="0" data-tip="Every device that has ever connected, kept until you forget it. How it was recognised: Browser = the dashboard's own device id. App = the iOS app's own requests (downloads, progress), carrying that same id. Inferred = matched to a known device by address and client. Anonymous = no id at all (curl, an old page); these are grouped by address + client.">?</span></h2>
             <p id="devStoreLine" class="text-xs text-gray-500 mt-0.5"></p>
           </div>
           <input id="devFilter" type="search" placeholder="Filter…" oninput="_devRenderAll()"
@@ -2391,7 +2391,8 @@ function _devClock(sec){
   return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s).padStart(2, "0");
 }
 const _DEV_DOT = {active: "bg-emerald-500", recent: "bg-amber-500", idle: "bg-gray-600"};
-const _DEV_VIA = {browser: "Browser", "app token": "App token", inferred: "Inferred", anonymous: "Anonymous"};
+// "app token" is a pre-19.8.0 value (pairing tokens), still on old rows.
+const _DEV_VIA = {browser: "Browser", app: "App", "app token": "App token", inferred: "Inferred", anonymous: "Anonymous"};
 
 async function loadDevices(btn){
   if(btn){ btn.disabled = true; _markLoading(btn, true); }
@@ -2472,7 +2473,6 @@ function _devRenderAll(){
       <span class="w-2 h-2 flex-shrink-0 ${_DEV_DOT[x.presence]}"></span>
       <div class="min-w-0 flex-1">
         <div class="text-gray-200 truncate">${_esc(x.display)}
-          ${x.paired ? `<span class="text-[9px] font-bold uppercase tracking-widest text-sky-400 ml-1">Paired</span>` : ""}
           <span class="text-[9px] font-bold uppercase tracking-widest text-gray-600 ml-1">${_esc(_DEV_VIA[x.via] || x.via || "")}</span>${_devAppTag(x)}</div>
         <div class="text-[10px] text-gray-500 truncate">${_esc(x.ua_summary || "")} · ${_esc(x.ip || "")}${x.profile_name ? ` · ${_esc(x.profile_name)}` : ""} · first seen ${_esc(_devTime(x.first_seen))}</div>
       </div>

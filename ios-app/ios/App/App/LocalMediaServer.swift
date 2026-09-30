@@ -12,7 +12,7 @@
 //  interface only, so nothing on the LAN can reach it.
 //
 //  JS surface (Capacitor plugin "LocalMediaServer"):
-//    start({ path? , bundledPath? , playerRoot? , proxyHost? , proxyToken? }) -> { url, port, root }
+//    start({ path? , bundledPath? , playerRoot? , proxyHost? , proxyDeviceId? }) -> { url, port, root }
 //    stop()                          -> {}
 //    info()                          -> { running, url?, port?, root? }
 //    ensureRunning()                 -> { running, url?, port?, healed }
@@ -23,10 +23,10 @@
 //  `playerRoot`  offline cached-dashboard snapshot dir (docs/PLAYER_CACHE_PLAN.md):
 //                served at /, with the StreamLinkBundles storage dir mounted at
 //                /StreamLinkBundles/.
-//  `proxyHost`   + `proxyToken` (v8.7 — proxied playback session): when set, ANY
+//  `proxyHost`   + `proxyDeviceId` (v8.7 — proxied playback session): when set, ANY
 //                request that isn't a local snapshot/bundle file is reverse-proxied
-//                to this host (e.g. https://192.168.1.20:8000) with the bearer token
-//                injected — so the loopback page behaves as a full online dashboard
+//                to this host (e.g. https://192.168.1.20:8000), carrying X-Device-Id
+//                for the admin Devices tab — so the loopback page behaves as a full online dashboard
 //                (`/api/*`, SSE, server-stream media) while downloaded bundles play
 //                same-origin. See docs/STREAMING.md § proxied playback.
 //
@@ -94,12 +94,12 @@ public class LocalMediaServer: CAPPlugin, CAPBridgedPlugin {
             while trimmed.hasSuffix("/") { trimmed.removeLast() }
             proxyURL = URL(string: trimmed)
         }
-        let proxyToken = call.getString("proxyToken")
+        let proxyDeviceId = call.getString("proxyDeviceId")
 
         // Single active server — tear down any previous one first.
         server?.stop()
         let srv = HLSStaticServer(root: root, bundlesMount: bundlesMount,
-                                  proxyHost: proxyURL, proxyToken: proxyToken)
+                                  proxyHost: proxyURL, proxyDeviceId: proxyDeviceId)
         server = srv
         srv.start { [weak self] result in
             switch result {
@@ -177,7 +177,7 @@ final class HLSStaticServer {
     /// Proxied playback session (v8.7): when set, requests that don't resolve to a
     /// local snapshot/bundle file are reverse-proxied to this host. See `proxy()`.
     let proxyHost: URL?
-    let proxyToken: String?
+    let proxyDeviceId: String?
     private let queue = DispatchQueue(label: "com.streamlink.localmediaserver", attributes: .concurrent)
     private var listener: NWListener?
     private(set) var boundPort: UInt16?
@@ -220,11 +220,11 @@ final class HLSStaticServer {
         "map":   "application/json",
     ]
 
-    init(root: URL, bundlesMount: URL? = nil, proxyHost: URL? = nil, proxyToken: String? = nil) {
+    init(root: URL, bundlesMount: URL? = nil, proxyHost: URL? = nil, proxyDeviceId: String? = nil) {
         self.root = root.standardizedFileURL
         self.bundlesMount = bundlesMount?.standardizedFileURL
         self.proxyHost = proxyHost
-        self.proxyToken = proxyToken
+        self.proxyDeviceId = proxyDeviceId
     }
 
     enum StartError: Error, LocalizedError {
@@ -510,7 +510,7 @@ final class HLSStaticServer {
     }
 
     /// Reverse-proxy a request to the configured host, streaming the response back
-    /// (JSON, SSE, or ranged media) with the device bearer token injected.
+    /// (JSON, SSE, or ranged media), tagged with this phone's device id.
     private func proxy(_ conn: NWConnection, method: String, target: String,
                        headerLines: [String], body: Data, host: URL) {
         guard let url = URL(string: host.absoluteString + target) else {
@@ -520,11 +520,12 @@ final class HLSStaticServer {
         req.httpMethod = method
         if !body.isEmpty { req.httpBody = body }
         // Forward client headers except hop-by-hop / managed ones. We override
-        // Authorization (device token) and Accept-Encoding (identity → the host's
-        // Content-Length stays accurate to relay).
+        // Accept-Encoding (identity → the host's Content-Length stays accurate to
+        // relay). Authorization passes through: it is the page's own (an admin
+        // session), and until 19.8.0 was dropped for a pairing token.
         let drop: Set<String> = ["host", "connection", "keep-alive", "proxy-connection",
                                  "transfer-encoding", "te", "upgrade", "content-length",
-                                 "accept-encoding", "authorization"]
+                                 "accept-encoding"]
         for line in headerLines.dropFirst() {
             guard let idx = line.firstIndex(of: ":") else { continue }
             let name = String(line[..<idx]).trimmingCharacters(in: .whitespaces)
@@ -533,8 +534,10 @@ final class HLSStaticServer {
             req.setValue(value, forHTTPHeaderField: name)
         }
         req.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-        if let tok = proxyToken, !tok.isEmpty {
-            req.setValue("Bearer \(tok)", forHTTPHeaderField: "Authorization")
+        // hls.js segment fetches from the loopback page carry no id of their own
+        // (the host's device cookie belongs to the host's origin, not this one).
+        if let d = proxyDeviceId, !d.isEmpty, req.value(forHTTPHeaderField: "X-Device-Id") == nil {
+            req.setValue(d, forHTTPHeaderField: "X-Device-Id")
         }
 
         let fwd = ProxyForwarder(conn: conn)
@@ -921,7 +924,9 @@ final class AirPlayDoor {
     private(set) var host: String?
     private var token = ""
     private var upstream: URL?     // scheme://host:port, no path
-    private var bearer: String?
+    /// The phone's device id, sent upstream as X-Device-Id so the TV's fetches are
+    /// filed under this phone in the admin Devices tab (a pairing token until 19.8.0).
+    private var deviceId: String?
 
     var isOpen: Bool { listener != nil && port != nil }
 
@@ -937,7 +942,7 @@ final class AirPlayDoor {
     }
 
     /// Open (or re-point) the door at the origin of `media`. Completion on main.
-    func open(for media: URL, bearer: String?, completion: @escaping (Result<Void, DoorError>) -> Void) {
+    func open(for media: URL, deviceId: String?, completion: @escaping (Result<Void, DoorError>) -> Void) {
         guard let origin = Self.origin(of: media) else {
             DispatchQueue.main.async { completion(.failure(.badUpstream)) }
             return
@@ -947,7 +952,7 @@ final class AirPlayDoor {
             return
         }
         upstream = origin
-        self.bearer = bearer
+        self.deviceId = deviceId
         host = ip
         if isOpen {
             DispatchQueue.main.async { completion(.success(())) }
@@ -989,7 +994,7 @@ final class AirPlayDoor {
         listener = nil
         port = nil
         upstream = nil
-        bearer = nil
+        deviceId = nil
         token = ""
         DiagLog.shared.write("airplay-door-closed", [:], cat: "ext")
     }
@@ -1078,7 +1083,7 @@ final class AirPlayDoor {
             }
         }
         req.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-        if let b = bearer, !b.isEmpty { req.setValue("Bearer \(b)", forHTTPHeaderField: "Authorization") }
+        if let d = deviceId, !d.isEmpty { req.setValue(d, forHTTPHeaderField: "X-Device-Id") }
         let fwd = ProxyForwarder(conn: conn)
         conn.stateUpdateHandler = { state in
             switch state { case .failed, .cancelled: fwd.clientGone(); default: break }

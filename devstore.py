@@ -16,10 +16,10 @@ Three tables, three lifetimes:
                     streaming sends a segment every few seconds), so bounded by age
                     AND by row count, whichever bites first.
 
-Plus `token_map`: a hashed pairing token -> the device that last sent it. The
-iOS app's native player (AVPlayer, background downloads) sends no cookie and no
-device header, only its token; this map is how those requests land on the right
-phone after a restart. The token itself is never stored.
+Plus `token_map`: a hashed pairing token -> the device that last sent it. Unused
+since 19.8.0 removed pairing (the app's native requests now send `X-Device-Id`
+themselves); the table stays so an existing store opens unchanged. Likewise the
+`paired` column on `devices`, which no longer changes.
 
 Writes happen in batches from one background task (`device_activity_loop` in
 `main.py`), through `asyncio.to_thread`; the lock serialises the writer against

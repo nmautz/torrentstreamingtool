@@ -19443,7 +19443,7 @@ async function _appFlushOfflineProgress() {
       }
       for (const [pid, evs] of byProfile) {
         const r = await fetch("/api/sync/progress", {
-          method: "POST", headers: { "Content-Type": "application/json", ..._appAuthHeaders() },
+          method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ profile_id: pid, events: evs.map((e) => ({
             item_id: e.itemId, file_path: e.filePath,
             position_sec: e.positionSec, duration_sec: e.durationSec,
@@ -19498,7 +19498,7 @@ async function _appSeedFromServer() {
       .map((it) => ({ item_id: it.itemId, file_path: it.filePath }));
     if (!files.length) return;
     const r = await fetch("/api/sync/pull", {
-      method: "POST", headers: { "Content-Type": "application/json", ..._appAuthHeaders() },
+      method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ profile_id: profile.id, files }),
     });
     if (!r.ok) return;
@@ -19634,7 +19634,7 @@ async function _appApplyConflictResolutions() {
   try {
     for (const [pid, resolutions] of byProfile) {
       const r = await fetch("/api/sync/resolve", {
-        method: "POST", headers: { "Content-Type": "application/json", ..._appAuthHeaders() },
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ profile_id: pid, resolutions }),
       });
       if (!r.ok) continue;
@@ -19976,19 +19976,6 @@ const _APP_PLAYER_KEY = "__player__";
 // offKey(itemId,filePath) → { complete?, downloading?, prepping?, fraction?, sha?, dir?, bytesTotal?, bytesDone? }
 const offlineBundles = new Map();
 
-// Pairing token (M5). The dashboard runs on the host origin and can't read the
-// shell's localStorage, so the token is stored natively (OfflineStore) by the
-// connect shell and read back here at startup. `_appAuthHeaders()` adds the
-// Bearer header to every device-facing request (sync, bundle-manifest); the host
-// only enforces it when REQUIRE_DEVICE_AUTH is on, so this is harmless otherwise.
-let _pairToken = "";
-function _appPairingToken() { return _pairToken; }
-function _appAuthHeaders() { return _pairToken ? { "Authorization": "Bearer " + _pairToken } : {}; }
-async function _appInitPairToken() {
-  if (!(isApp && _cap.os)) return;
-  try { const r = await _cap.os.getPairingToken(); _pairToken = (r && r.token) || ""; } catch (_) {}
-}
-
 // ── iOS app: TV remote Live Activity (Dynamic Island) ───────────────────────
 // When something is playing on the TV (host VLC or YouTube kiosk) AND the
 // fullscreen controls are open, surface a Live Activity with pause + volume
@@ -20018,7 +20005,8 @@ async function _tvRemoteSync() {
         volume: parseInt(app.vlc_volume, 10) || 100,
         // The dashboard is served by the host, so its own origin IS the host.
         serverUrl: location.origin,
-        token: _appPairingToken() || "",
+        // Identifies this phone to the Devices tab on the remote's requests.
+        deviceId: _pbDeviceId(),
       };
       if (!_tvRemoteActive) {
         // paused defaults false; the native side flips it optimistically on tap
@@ -20482,7 +20470,6 @@ function _npPayload() {
     // phone locked the page's timers are frozen, so nothing else would record
     // the episode. An older app build ignores this and just skips.
     offline: !!_appOffline,
-    token: _appPairingToken() || "",
     // Cross-device sessions. While backgrounded the WebView's timers are frozen,
     // so _pbBeat stops firing and this device would vanish from every other
     // device's banner mid-episode — exactly when someone is most likely to want
@@ -20963,7 +20950,7 @@ async function _appTryLocalHandoff(itemId, filePath, seekTo, queue) {
     // Start the LMS in PROXY mode: snapshot + bundles local, everything else
     // forwarded to this host with the device bearer token injected.
     const started = await _cap.lms.start({
-      playerRoot: snap.dir, proxyHost: location.origin, proxyToken: _appPairingToken() || "",
+      playerRoot: snap.dir, proxyHost: location.origin, proxyDeviceId: _pbDeviceId(),
     });
     const base = String((started && started.url) || "").replace(/\/+$/, "");
     if (!base) return false;
@@ -21103,7 +21090,7 @@ async function _appFetchSavedTracks(itemId, filePath) {
   try {
     const u = `/api/library/${itemId}/saved-tracks?file_path=${encodeURIComponent(filePath)}`
             + `&profile_id=${encodeURIComponent(pid)}`;
-    const r = await _appFetchT(u, { headers: _appAuthHeaders() }, 4000);
+    const r = await _appFetchT(u, {}, 4000);
     if (!r.ok) return {};
     return (await r.json()).saved_tracks || {};
   } catch (_) { return {}; }
@@ -21186,13 +21173,12 @@ async function _appFetchManifest(itemId, filePath, quality) {
   const u = `/api/library/${itemId}/bundle-manifest?file_path=${encodeURIComponent(filePath)}`
           + (profile.id ? `&profile_id=${encodeURIComponent(profile.id)}` : "")
           + (quality ? `&quality=${encodeURIComponent(quality)}` : "");
-  let r = await _appFetchT(u, { headers: _appAuthHeaders() }, 20000);
-  if (r.status === 401) throw new Error("This device isn’t paired with the host — re-pair from Settings.");
+  let r = await _appFetchT(u, {}, 20000);
   if (r.status === 409) {
     const info = await r.json().catch(() => ({}));
     if (info.ondemand_only) throw new Error("This title is on-demand only — it can’t be downloaded.");
     await _appPrepBundle(itemId, filePath);
-    r = await _appFetchT(u, { headers: _appAuthHeaders() }, 20000);
+    r = await _appFetchT(u, {}, 20000);
   }
   if (!r.ok) {
     const e = await r.json().catch(() => ({ detail: "Manifest unavailable." }));
@@ -21204,7 +21190,7 @@ async function _appFetchManifest(itemId, filePath, quality) {
 // POST /offline-prepare then poll /offline-job until the host bundle is built.
 async function _appPrepBundle(itemId, filePath) {
   const r = await _appFetchT(`/api/library/${itemId}/offline-prepare`, {
-    method: "POST", headers: { "Content-Type": "application/json", ..._appAuthHeaders() },
+    method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ file_path: filePath, profile_id: profile.id || "" }),
   }, 20000);
   if (!r.ok) throw new Error("Could not start host-side prep.");
@@ -21399,7 +21385,7 @@ async function appDownloadBundle(itemId, filePath, name, btn, quality) {
       const files = (manifest.files || []).map((f) => ({ name: f.name, size: f.size }));
       await _cap.dl.download({
         itemId, filePath, cacheKey: manifest.cache_key, name,
-        baseUrl: origin + manifest.bundle_url, files, token: _appPairingToken(),
+        baseUrl: origin + manifest.bundle_url, files, deviceId: _pbDeviceId(),
         // Trimmed master.m3u8 (the chosen rung only) written verbatim by the native
         // side so we never fetch — nor reference — the dropped ABR rungs.
         masterContent: manifest.master_m3u8 || null,
@@ -21472,7 +21458,7 @@ async function appDownloadAllBundles(itemId, title, paths){
   if (!files){
     try {
       const pid = profile.id ? `?profile_id=${encodeURIComponent(profile.id)}` : "";
-      const r = await fetch(`/api/library/${itemId}/files${pid}`, { headers: _appAuthHeaders() });
+      const r = await fetch(`/api/library/${itemId}/files${pid}`, {});
       if (r.ok){ files = (await r.json()).files; downloadFilesData.set(itemId, files); }
     } catch (_) {}
   }
@@ -21739,7 +21725,7 @@ async function _appResumeDownloadQueue() {
 async function _appRefreshPlayerSnapshot() {
   if (!isApp || _appOffline || !_cap.dl) return;
   try {
-    const r = await _appFetchT("/api/player-manifest", { headers: _appAuthHeaders() }, 15000);
+    const r = await _appFetchT("/api/player-manifest", {}, 15000);
     if (!r.ok) return;
     const man = await r.json();
     if (!man || !man.version || !Array.isArray(man.files) || !man.files.length) return;
@@ -21754,7 +21740,7 @@ async function _appRefreshPlayerSnapshot() {
       name: "Player snapshot",
       baseUrl: window.location.origin + "/",   // the StaticFiles mount serves every manifest entry
       files: man.files,
-      token: _appPairingToken() || "",
+      deviceId: _pbDeviceId(),
       meta: { version: man.version, player_snapshot: true },
     });
   } catch (_) {}
@@ -21827,7 +21813,7 @@ async function _appOfflineTryReconnect(manual) {
 // The dashboard is served by the host, so once we navigate here there's no
 // browser chrome to get back to the app shell. This injects a small always-on
 // menu (app only) so the user can ALWAYS reach Downloads and the Settings /
-// change-server / re-pair screen, online or off. Local pages live on the
+// change-server screen, online or off. Local pages live on the
 // capacitor:// origin; full-page navigation crosses back to them.
 const _APP_LOCAL_ORIGIN = "capacitor://localhost";
 function _appGoSettings() { window.location.href = _APP_LOCAL_ORIGIN + "/index.html?setup=1"; }
@@ -21856,7 +21842,7 @@ function _appInitNav() {
   // navigates away.) `_appGoDownloads`/`_appGoSettings` remain for the offline pages.
   menu.appendChild(mk("Downloads", _appOpenDashboard));
   menu.appendChild(mk("Settings", _appOpenAppSettings));
-  menu.appendChild(mk("Change Server / Re-pair", _appOpenChangeServer));
+  menu.appendChild(mk("Change Server", _appOpenChangeServer));
   menu.lastChild.style.borderBottom = "0";
   // Out-of-date app (19.6.0): an entry at the top of the menu and a dot on the
   // button, both hidden until _appCheckUpdate finds the app behind.
@@ -21954,7 +21940,7 @@ async function _appCheckUpdate() {
   _appUpdCheckedAt = Date.now();
   let latest = null;
   try {
-    const r = await fetch("/api/app/latest", { headers: _appAuthHeaders(), cache: "no-store" });
+    const r = await fetch("/api/app/latest", { cache: "no-store" });
     if (r.ok) latest = (await r.json()).version;
   } catch (_) {}
   if (!/^\d+\.\d+\.\d+$/.test(latest || "")) return;
@@ -22625,14 +22611,14 @@ async function _appCancelDownload(key) {
   _appRenderDashboard();
 }
 
-// ── iOS app: Change Server / Re-pair overlay ─────────────────────────────────
+// ── iOS app: Change Server overlay ───────────────────────────────────────────
 // An overlay ON the live host page (app only) so opening it NEVER disconnects —
 // unlike the old menu item that navigated straight to the shell setup page and
-// killed the SSE link + in-flight downloads. Re-pairing the CURRENT host is a
-// same-origin POST and keeps the connection up. Only "Connect to a different
+// killed the SSE link + in-flight downloads. Only "Connect to a different
 // server" actually navigates (the legitimate disconnect the user asked for) — and
-// it hands off to the shell setup page, which already owns the connect + pair +
-// persist flow (the shell origin owns the saved-server localStorage).
+// it hands off to the shell setup page, which owns the connect + persist flow
+// (the shell origin owns the saved-server localStorage). Device pairing, and the
+// Re-pair card that lived here, were removed in 19.8.0.
 function _appOpenChangeServer() {
   if (!isApp) return;
   let ov = document.getElementById("appSrv");
@@ -22643,7 +22629,6 @@ function _appOpenChangeServer() {
     + "background:#0b0b0d;color:#f2f2f4;font-family:-apple-system,'Segoe UI',Roboto,sans-serif;"
     + "padding:max(env(safe-area-inset-top),16px) 18px max(env(safe-area-inset-bottom),16px);overflow-y:auto;";
   const host = localStorage.getItem("streamlink_server_url") || window.location.origin;
-  const paired = !!_appPairingToken();
   ov.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
       <div style="font-size:20px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;">Server</div>
@@ -22653,18 +22638,6 @@ function _appOpenChangeServer() {
     <div style="border:1px solid #2a2a30;background:#141417;padding:13px 14px;margin-bottom:18px;">
       <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;">Connected to</div>
       <div style="font-size:14px;margin-top:5px;word-break:break-all;">${escHtml(host)}</div>
-      <div style="font-size:12px;color:#8a8a92;margin-top:6px;">${paired ? "This device is paired." : "Not paired — re-pair below for secure remote access."}</div>
-    </div>
-
-    <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;margin:2px 0 8px;">Re-pair this device</div>
-    <div style="border:1px solid #2a2a30;background:#141417;padding:13px 14px;margin-bottom:18px;">
-      <div style="font-size:12px;color:#8a8a92;margin-bottom:9px;line-height:1.45;">Refresh this device's pairing with the current host without disconnecting. Enter the host's admin password.</div>
-      <input id="appSrvPw" type="password" autocapitalize="off" autocorrect="off" spellcheck="false"
-        placeholder="Host admin password" style="width:100%;background:#0b0b0d;border:1px solid #2a2a30;color:#f2f2f4;
-        font-size:16px;padding:13px 12px;border-radius:0;outline:none;-webkit-appearance:none;" />
-      <div id="appSrvMsg" style="font-size:12px;margin-top:9px;min-height:14px;"></div>
-      <button id="appSrvPair" style="all:unset;cursor:pointer;display:block;text-align:center;width:100%;margin-top:6px;
-        background:#3a7afe;color:#fff;padding:14px;font-size:14px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;">Re-pair</button>
     </div>
 
     <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;margin:2px 0 8px;">Different server</div>
@@ -22680,39 +22653,6 @@ function _appOpenChangeServer() {
     if (!window.confirm("Disconnect from this server and choose a different one?")) return;
     _appGoSettings();   // hand off to the shell setup page (the only real disconnect)
   });
-  ov.querySelector("#appSrvPair").addEventListener("click", async () => {
-    const msg = ov.querySelector("#appSrvMsg");
-    const pw = ov.querySelector("#appSrvPw").value.trim();
-    if (!pw) { msg.style.color = "#e0a23d"; msg.textContent = "Enter the host admin password."; return; }
-    const btn = ov.querySelector("#appSrvPair"); btn.style.opacity = ".6"; btn.style.pointerEvents = "none";
-    msg.style.color = "#8a8a92"; msg.textContent = "Pairing…";
-    try {
-      const token = await _appPairCurrentHost(pw);
-      _pairToken = token;
-      if (_cap.os) { try { await _cap.os.setPairingToken({ token }); } catch (_) {} }
-      msg.style.color = "#3ec46d"; msg.textContent = "Paired. This device is now authorized.";
-      setTimeout(close, 900);
-    } catch (e) {
-      msg.style.color = "#e0533d"; msg.textContent = e.message || "Pairing failed.";
-      btn.style.opacity = "1"; btn.style.pointerEvents = "auto";
-    }
-  });
-}
-
-// Pair this device with the CURRENT host (same origin — no CORS) using its admin
-// password. Returns the issued token or throws a user-facing message. Mirrors the
-// shell's pairWithHost (www/index.html) but against window.location.origin.
-async function _appPairCurrentHost(password) {
-  const r = await fetch("/api/pair", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ admin_password: password, label: "iOS app" }),
-  });
-  if (r.status === 401) throw new Error("That host password was rejected.");
-  if (r.status === 503) throw new Error("This host has no admin password set, so it can’t pair.");
-  if (!r.ok) throw new Error("Pairing failed (HTTP " + r.status + ").");
-  const j = await r.json().catch(() => ({}));
-  if (!j.token) throw new Error("Pairing returned no token.");
-  return j.token;
 }
 
 // ── iOS app: Settings overlay + auto-managed downloads ───────────────────────
@@ -22761,7 +22701,7 @@ async function _appEnsureLib() {
   if (!Array.isArray(items) || !items.length) {
     try {
       const pid = profile.id ? `?profile_id=${encodeURIComponent(profile.id)}` : "";
-      const r = await fetch(`/api/library${pid}`, { headers: _appAuthHeaders() });
+      const r = await fetch(`/api/library${pid}`, {});
       if (r.ok) { items = (await r.json()).items || []; window._libCache = items; }
     } catch (_) {}
   }
@@ -23398,7 +23338,7 @@ async function _appAutoSeriesFiles(seriesKey) {
   try {
     const pid = profile.id ? `?profile_id=${encodeURIComponent(profile.id)}` : "";
     const r = await fetch(`/api/library/series/${encodeURIComponent(seriesKey)}${pid}`,
-                          { headers: _appAuthHeaders() });
+                          {});
     if (!r.ok) return null;
     files = (await r.json()).files || [];
   } catch (_) { return null; }
@@ -23672,7 +23612,7 @@ async function prepForStreaming(itemId, filePath, fileName) {
 async function _libRefreshCache() {
   try {
     const pid = profile.id ? `?profile_id=${encodeURIComponent(profile.id)}` : "";
-    const r = await fetch(`/api/library${pid}`, { headers: _appAuthHeaders() });
+    const r = await fetch(`/api/library${pid}`, {});
     if (!r.ok) return false;
     const items = (await r.json()).items || [];
     if (items.length) window._libCache = items;
@@ -24436,7 +24376,7 @@ async function _shareOrDownload(url, filename) {
   // and <a download> / window.open are no-ops in the WebView — none of the paths
   // below can deliver the clip. Hand the clip's host URL to Safari instead, which
   // previews the MP4 with a native Save-to-Files/Photos + Share sheet. The clip
-  // URL carries its own random capability token, so it needs no pairing header.
+  // URL carries its own random capability token, so it needs no extra header.
   if (isApp && _cap && _cap.dl && _cap.dl.openExternal) {
     const abs = /^https?:/i.test(url) ? url : (location.origin + url);
     try { await _cap.dl.openExternal({ url: abs }); return; }
@@ -30676,10 +30616,8 @@ document.addEventListener("DOMContentLoaded",async()=>{
   _renderOnlineBadge();
   _renderSearchModeToggle();  // paint the Smart/Classic search toggle from the saved pref
   _applyPhoneLandLayout();   // position the footer fullscreen btn for the current orientation
-  // iOS app: load the pairing token (M5) before any device-facing fetch, add the
-  // always-on app nav (Downloads / Change server), subscribe to BundleDownloader
+  // iOS app: add the always-on app nav (Downloads / Change server), subscribe to BundleDownloader
   // events + hydrate the offline-download state. All no-ops in a plain browser.
-  await _appInitPairToken();
   _appInitNav();
   _appInitOfflineBundles();
   // iOS: subscribe to the background player's events (ended / advanced / a
@@ -30794,6 +30732,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.7.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.8.0</div>
 </body>
 </html>

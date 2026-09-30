@@ -4,8 +4,8 @@
 //
 //  The TV-remote App Intents (TVRemoteIntents.swift) run in the *app's* process
 //  but are triggered from the Live Activity in the widget extension. They need to
-//  know where to POST control commands. We stash the host base URL + pairing
-//  token + which playback path is active (VLC vs YouTube) in the shared App Group
+//  know where to POST control commands. We stash the host base URL + this phone's
+//  device id + which playback path is active (VLC vs YouTube) in the shared App Group
 //  UserDefaults. The TVRemote Capacitor plugin writes these on start/update; the
 //  intents read them at tap time.
 //
@@ -21,7 +21,7 @@ public enum AppGroupConfig {
 
     private enum Key {
         static let serverUrl   = "tvremote.serverUrl"
-        static let deviceToken = "tvremote.deviceToken"
+        static let deviceId    = "tvremote.deviceId"
         static let isYouTube   = "tvremote.isYouTube"
         static let pendingCmd  = "playback.pendingCommand"
         static let strandedBri = "playback.strandedBrightness"
@@ -32,9 +32,11 @@ public enum AppGroupConfig {
         set { defaults?.set(newValue, forKey: Key.serverUrl) }
     }
 
-    public static var deviceToken: String? {
-        get { defaults?.string(forKey: Key.deviceToken) }
-        set { defaults?.set(newValue, forKey: Key.deviceToken) }
+    /// The dashboard's device id, sent as `X-Device-Id` so the admin Devices tab
+    /// knows which phone pressed the button. (Was a pairing token until 19.8.0.)
+    public static var deviceId: String? {
+        get { defaults?.string(forKey: Key.deviceId) }
+        set { defaults?.set(newValue, forKey: Key.deviceId) }
     }
 
     public static var isYouTube: Bool {
@@ -69,10 +71,10 @@ public enum AppGroupConfig {
     }
 
     /// Write all remote-control config at once (called by the TVRemote plugin).
-    public static func setRemote(serverUrl: String?, token: String?, isYouTube: Bool) {
+    public static func setRemote(serverUrl: String?, deviceId: String?, isYouTube: Bool) {
         let d = defaults
         d?.set(serverUrl, forKey: Key.serverUrl)
-        d?.set(token, forKey: Key.deviceToken)
+        d?.set(deviceId, forKey: Key.deviceId)
         d?.set(isYouTube, forKey: Key.isYouTube)
     }
 }

@@ -315,25 +315,14 @@ carries a pick across a device↔TV switch today, and it is fresher than anythin
 a session snapshot could hold, so the destination's own resolver runs
 unmodified. `audio_sel` / `subtitle_sel` ride on the wire for diagnostics.
 
-## Device pairing (iOS app, M5)
+## Device pairing — removed (19.8.0)
 
-Lets the native client authenticate for **remote** use. Enforcement is gated by the
-`REQUIRE_DEVICE_AUTH` setting (default **off** — LAN/browser use and online HLS
-playback are unaffected). When **on**, `/api/sync/progress`, `/api/sync/pull`,
-`/api/sync/resolve` and `/api/library/{id}/bundle-manifest` require a valid **device
-token** (`Authorization: Bearer …`, also accepted as `X-Device-Token` or
-`?device_token=`) **or** a valid admin session token; unpaired callers get **401**.
-Shared online-playback surfaces (`offline-cache/*`, `offline-prepare`, `/api/library`)
-are intentionally left open so the browser dashboard keeps working — see
-[IOS_APP_PLAN.md](IOS_APP_PLAN.md).
-
-| Method | Path | Notes |
-|--------|------|-------|
-| POST | `/api/pair` | Body `{admin_password, label?}`. Pairs a device: the host's `ADMIN_PASSWORD` is the secret. Returns `{ok:true, token}` — a long-lived bearer token persisted to host-local `device_tokens.json` (survives restart). **503** if the host has no admin password; **401** on a wrong password |
-| GET | `/api/pair/status` | `{required (REQUIRE_DEVICE_AUTH), admin_configured, paired (this request's token is recognised)}`. Lets the app decide whether to show the pairing screen |
-| DELETE | `/api/pair` | Revokes the **calling** device's own token (read from the Bearer header). Used on app sign-out. Always `{ok:true}` |
-| GET | `/api/admin/paired-devices` | **Admin.** Lists paired devices (pairing tokens), 19.7.1; before that it sat at `/api/admin/devices`, shadowed by the Devices tab: `{devices:[{id (8-char token prefix), label, created_at, last_seen}]}` — never the full token |
-| DELETE | `/api/admin/paired-devices/{id}` | **Admin.** Revokes a paired device's token by its 8-char `id`. `{ok:true, revoked}`. No UI calls it yet |
+`/api/pair`, `/api/pair/status`, `DELETE /api/pair`, `/api/admin/paired-devices[/{id}]`
+and the `REQUIRE_DEVICE_AUTH` setting are gone. Pairing only ever guarded the sync and
+bundle-manifest endpoints while the rest of the API stayed open to anything that could
+reach the host, and it was off by default; access control is whatever keeps strangers
+off the network (a home LAN, Tailscale). The app's native requests now identify their
+phone with `X-Device-Id` instead of a token (see [DIAGNOSTICS.md § Devices](DIAGNOSTICS.md)).
 
 ## Clip (save & share the last N seconds)
 
@@ -491,7 +480,7 @@ All require admin auth.
 | GET | `/api/admin/components` | Status of installable portable deps: `{components:{ffmpeg,fpcalc,whisper,whisper_model,flaresolverr:{label,installed,path,installable,purpose,job?}}, platform, model_sizes, stt_available, nvenc}`. `nvenc` = an NVIDIA GPU is present (UI recommends a CUDA whisper build). `job` (when present) = `{status:"pending"\|"downloading"\|"done"\|"error", progress, error}`. Polled while an install runs |
 | POST | `/api/admin/components/install` | `{component:"ffmpeg"\|"fpcalc"\|"whisper"\|"whisper_model"\|"flaresolverr", model?, build?}` → starts a background download+install (streamed for progress), writes the path into `.env`, clears the ffmpeg-version/NVENC/STT caches. `model` (whisper_model only) ∈ base/small/medium. `build` (whisper only) ∈ `cpu`/`cuda12`/`cuda11` (CUDA = GPU; runtime auto-falls-back to CPU via `-ng` if CUDA can't init). `flaresolverr` auto-launches after install. ffmpeg/whisper binaries are **400** off-Windows; flaresolverr is **400** off Windows/Linux (use the OS package manager / Docker). See [SETUP.md](SETUP.md) |
 | POST | `/api/diag/client-log?device=<name>` | Receives a diagnostic transcript from the iOS app (raw `text/plain` NDJSON body) and **merges** it into `logs/client/<slug>.log`, taking only the rows the server has never seen (`clientlog.merge`). The device always sends its whole file; the server de-duplicates by hashed line, so re-sending is free. **Unauthenticated**, like `/api/library/{id}/progress` — LAN service, inert text body. Body capped at **8 MB** (413 beyond); `device` is slugged to `[A-Za-z0-9_-]` so a client can never choose a path. Returns `{ok, device, name, added, skipped, dropped, dropped_pre_clear, rows, bytes, clear_local}` — **`clear_local: true` tells the app to delete its own copy**, which is how `DELETE /api/admin/client-logs` finishes on a device the server cannot reach. Sent by ☰ App → Settings → Playback → **Send log to server** (`NativePlayback.sendLog`) |
-| GET | `/api/admin/devices` | **Devices tab (19.0.0).** Every device ever seen, newest first: stored fields (`id, label, name, ua, ua_summary, ip, via, first_seen, last_seen, requests, profile_id, paired, app_version`) plus `display`, `profile_name`, `presence` (`active` = request in 2 min or an open `/api/events` stream; `recent` = 30 min; `idle`), `connected` (open event streams), `doing` (`{kind, text, since, until, count}` or null), `playback` (the device's live `playback_sessions` entry: title, position, duration, playing/paused, `source` server\|offline) and `last_activity`. Top level: `tv` (VLC now playing), `app_latest` (newest iOS app on SideStore, see `/api/app/latest`), `stats` (row counts, bytes), `retention`. `available:false` if the store failed to open. Admin |
+| GET | `/api/admin/devices` | **Devices tab (19.0.0).** Every device ever seen, newest first: stored fields (`id, label, name, ua, ua_summary, ip, via, first_seen, last_seen, requests, profile_id, paired (always 0 since 19.8.0), app_version`) plus `display`, `profile_name`, `presence` (`active` = request in 2 min or an open `/api/events` stream; `recent` = 30 min; `idle`), `connected` (open event streams), `doing` (`{kind, text, since, until, count}` or null), `playback` (the device's live `playback_sessions` entry: title, position, duration, playing/paused, `source` server\|offline) and `last_activity`. Top level: `tv` (VLC now playing), `app_latest` (newest iOS app on SideStore, see `/api/app/latest`), `stats` (row counts, bytes), `retention`. `available:false` if the store failed to open. Admin |
 | GET | `/api/admin/devices/{id}/activity?before=&limit=` | Simple view: collapsed activities newest first, each with `text` ("Watching Frieren · S01E12"), `kind, subject, start, end, count, errors, profile_name`. Page with `before` = last row's `end`. Admin |
 | GET | `/api/admin/devices/{id}/requests?before=&limit=&q=` | Raw view: every request newest first (`ts, method, path, query, status, ms, ip, ua, profile_id, kind, via`). `q` matches path, query or kind. Query-string secrets were replaced with `***` before storage. Page with `before` = last row's `ts`. Admin |
 | POST | `/api/admin/devices/{id}/label` | `{label}` — admin-side name; empty clears. 404 for an unknown device. Admin |

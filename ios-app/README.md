@@ -78,8 +78,8 @@ not live — re-run `npx cap copy ios` and rebuild.)
 ## First run
 
 1. The **Connect** screen asks for your host address (e.g.
-   `https://192.168.1.20:8000`). Leave the pairing token blank on a home network
-   (it's reserved for remote use in a later milestone).
+   `http://192.168.1.20`). There is no password: anything that can reach the
+   host can use it.
 2. Tap **Connect** — the app loads your dashboard.
 
 **Self-signed host cert:** the host serves HTTPS with a self-signed cert

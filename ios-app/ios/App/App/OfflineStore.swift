@@ -38,14 +38,6 @@
 //    markSynced({ applied:[ { itemId, filePath, serverUpdatedAt, profileId? } ] }) -> {}
 //    all()                                                   -> { events:[ <event> ] }
 //    clear()                                                 -> {}
-//    setPairingToken({ token })                              -> {}   // M5 device pairing
-//    getPairingToken()                                       -> { token }
-//
-//  Why the token lives here (M5): the connect shell (capacitor://localhost) and
-//  the host dashboard (https://host) are different origins and can't share a
-//  pairing token via localStorage. The shell pairs and stores the token natively;
-//  the dashboard reads it back to send `Authorization: Bearer <token>` on the
-//  device-facing endpoints. Same cross-origin reason the progress log is native.
 //
 //  <event> = { profileId, itemId, filePath, positionSec, durationSec, completed,
 //              clientUpdatedAt, baseSyncedAt, playedSec?, subtitleSel?, audioSel?,
@@ -77,8 +69,6 @@ public class OfflineStore: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "markSynced",   returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "all",          returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "clear",        returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "setPairingToken", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "getPairingToken", returnType: CAPPluginReturnPromise),
     ]
 
     private let store = OfflineProgressStore.shared
@@ -165,17 +155,6 @@ public class OfflineStore: CAPPlugin, CAPBridgedPlugin {
         store.clear()
         call.resolve()
     }
-
-    // MARK: - Pairing token (M5)
-
-    @objc func setPairingToken(_ call: CAPPluginCall) {
-        store.setToken(call.getString("token") ?? "")
-        call.resolve()
-    }
-
-    @objc func getPairingToken(_ call: CAPPluginCall) {
-        call.resolve(["token": store.getToken()])
-    }
 }
 
 // MARK: - Store (process-wide, file-backed, serialized)
@@ -237,20 +216,6 @@ final class OfflineProgressStore {
 
     private func activeProfileLocked(_ obj: [String: Any]) -> String {
         return ((obj["profile"] as? [String: Any])?["id"] as? String) ?? ""
-    }
-
-    // MARK: pairing token (M5)
-
-    func setToken(_ token: String) {
-        queue.sync {
-            var obj = read()
-            obj["token"] = token
-            write(obj)
-        }
-    }
-
-    func getToken() -> String {
-        queue.sync { (read()["token"] as? String) ?? "" }
     }
 
     // MARK: progress

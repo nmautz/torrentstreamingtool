@@ -28,7 +28,7 @@
 //  identifier must be owned by exactly one long-lived delegate.
 //
 //  JS surface (Capacitor plugin "BundleDownloader"):
-//    download({ itemId, filePath, cacheKey, name?, baseUrl, files:[{name,size}], token?, masterContent?, meta? })
+//    download({ itemId, filePath, cacheKey, name?, baseUrl, files:[{name,size}], deviceId?, masterContent?, meta? })
 //                                   -> { sha, dir, alreadyComplete }
 //    `masterContent` (optional) = the host's master.m3u8 trimmed to the highest
 //    video rung; written to disk verbatim so the dropped ABR down-rungs (absent
@@ -202,7 +202,7 @@ public class BundleDownloader: CAPPlugin, CAPBridgedPlugin {
             let res = try BundleDownloadManager.shared.startDownload(
                 itemId: itemId, filePath: filePath, cacheKey: cacheKey,
                 name: call.getString("name") ?? filePath,
-                baseUrl: baseUrl, files: files, token: call.getString("token"),
+                baseUrl: baseUrl, files: files, deviceId: call.getString("deviceId"),
                 masterContent: call.getString("masterContent"), meta: meta)
             call.resolve(["sha": cacheKey, "dir": res.dir, "alreadyComplete": res.alreadyComplete])
         } catch {
@@ -292,7 +292,7 @@ public class BundleDownloader: CAPPlugin, CAPBridgedPlugin {
     // and <a download> / window.open are no-ops in the WebView — the clip MP4 can't
     // be delivered in-app. Opening the clip's host URL in Safari instead lets iOS
     // preview the MP4 with a native Save-to-Files/Photos + Share sheet. The clip URL
-    // carries its own random capability token, so no pairing header is needed.
+    // carries its own random capability token, so no extra header is needed.
     // MARK: download policy (device-local; see DownloadPolicy)
 
     /// Current policy plus the live conditions, so the UI can explain *why* the
@@ -1022,7 +1022,10 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
 
     // Active downloads keyed by cache sha.
     private final class Job {
-        let itemId: String, filePath: String, name: String, baseUrl: String, token: String?
+        /// deviceId: the dashboard's device id, sent as X-Device-Id so the admin
+        /// Devices tab files these requests under this phone (was a pairing
+        /// token until 19.8.0).
+        let itemId: String, filePath: String, name: String, baseUrl: String, deviceId: String?
         var files: [BundleFile]
         var doneBytes: [String: Int64] = [:]   // fileName -> bytes confirmed on disk
         var liveBytes: [String: Int64] = [:]    // fileName -> bytes written by an in-flight task
@@ -1032,9 +1035,9 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         var backoff: Set<String> = []           // files waiting on a retry timer — the pump must not jump them
         var cancels: [String: Int] = [:]        // fileName -> cancels seen, ever (see didCompleteWithError)
         var cancelGen: [String: Int] = [:]      // fileName -> migration generation of its last cancel
-        init(itemId: String, filePath: String, name: String, baseUrl: String, token: String?, files: [BundleFile]) {
+        init(itemId: String, filePath: String, name: String, baseUrl: String, deviceId: String?, files: [BundleFile]) {
             self.itemId = itemId; self.filePath = filePath; self.name = name
-            self.baseUrl = baseUrl; self.token = token; self.files = files
+            self.baseUrl = baseUrl; self.deviceId = deviceId; self.files = files
         }
         var totalBytes: Int64 { files.reduce(0) { $0 + max($1.size, 0) } }
     }
@@ -1229,7 +1232,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
 
     func startDownload(itemId: String, filePath: String, cacheKey: String,
                        name: String, baseUrl: String, files: [BundleFile],
-                       token: String?, masterContent: String? = nil,
+                       deviceId: String?, masterContent: String? = nil,
                        meta: [String: Any]? = nil) throws -> StartResult {
         var result: StartResult!
         var thrown: Error?
@@ -1264,7 +1267,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
 
             // Which files are already fully on disk (resume / no-op re-download)?
             let job = Job(itemId: itemId, filePath: filePath, name: name,
-                          baseUrl: baseUrl, token: token, files: files)
+                          baseUrl: baseUrl, deviceId: deviceId, files: files)
             var toFetch: [BundleFile] = []
             for f in files {
                 let dest = dir.appendingPathComponent(f.name)
@@ -1436,7 +1439,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             emitError(sha: sha, job: job, message: "Bad file URL: \(urlStr)"); return
         }
         var req = URLRequest(url: url)
-        if let tok = job.token, !tok.isEmpty { req.setValue("Bearer \(tok)", forHTTPHeaderField: "Authorization") }
+        if let d = job.deviceId, !d.isEmpty { req.setValue(d, forHTTPHeaderField: "X-Device-Id") }
         // PER-REQUEST, NOT PER-SESSION. A background session's configuration is
         // frozen at creation and its identifier is fixed, so a session-level flag
         // could only be changed by tearing down a session with live tasks in it.

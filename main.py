@@ -338,13 +338,6 @@ class Settings(BaseSettings):
     windows_admin_user: str = ""
     windows_admin_password: str = ""
 
-    # iOS client app (M5) device pairing. When True, the device-facing sync +
-    # bundle-manifest endpoints require a valid pairing token (issued by
-    # POST /api/pair against admin_password) OR a valid admin session token.
-    # Default False → fully LAN-trust, backward compatible: the browser dashboard
-    # and online HLS playback are unaffected. Turn on only for remote use.
-    require_device_auth: bool = False
-
     # OpenSubtitles legacy REST API (rest.opensubtitles.org) needs no key, only a
     # User-Agent. "TemporaryUserAgent" is OpenSubtitles' documented testing UA.
     opensubtitles_user_agent: str = "TemporaryUserAgent"
@@ -1641,32 +1634,6 @@ def _profile_session_id(request: Request) -> Optional[str]:
         return None
     return meta["profile_id"]
 
-# ── iOS app device-pairing tokens (M5, plan A4) ────────────────────────────────
-# Long-lived bearer tokens issued to paired client apps (POST /api/pair). Unlike
-# _admin_sessions these are persisted to disk so a paired device survives a host
-# restart. Map: token → {"created_at": iso, "label": str, "last_seen": iso}.
-DEVICE_TOKENS_FILE = Path(__file__).parent / "device_tokens.json"
-_device_tokens: dict[str, dict] = {}
-
-
-def _load_device_tokens() -> None:
-    global _device_tokens
-    try:
-        if DEVICE_TOKENS_FILE.exists():
-            data = json.loads(DEVICE_TOKENS_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                _device_tokens = {k: v for k, v in data.items() if isinstance(v, dict)}
-    except Exception as e:  # corrupt file shouldn't break startup
-        log.warning("Could not load device tokens: %s", e)
-        _device_tokens = {}
-
-
-def _save_device_tokens() -> None:
-    try:
-        DEVICE_TOKENS_FILE.write_text(json.dumps(_device_tokens, indent=2), encoding="utf-8")
-    except Exception as e:
-        log.warning("Could not persist device tokens: %s", e)
-
 # ── Outbound HTTP clients ─────────────────────────────────────────────────────
 # Constructing an `httpx.AsyncClient` builds a fresh SSL context and loads the
 # whole certifi CA bundle into it — ~150 ms of synchronous CPU, on the event
@@ -2017,42 +1984,6 @@ def _require_delete_auth(request: Request, lib: dict) -> None:
         return
     raise HTTPException(
         403, "Deleting requires a PIN-verified profile or the admin password.")
-
-
-def _request_bearer(request: Request) -> Optional[str]:
-    """Pull a bearer token from Authorization / X-Device-Token / ?device_token."""
-    auth = request.headers.get("authorization", "")
-    if auth.lower().startswith("bearer "):
-        tok = auth[7:].strip()
-        if tok:
-            return tok
-    tok = request.headers.get("x-device-token", "").strip()
-    if tok:
-        return tok
-    tok = request.query_params.get("device_token", "").strip()
-    return tok or None
-
-
-def _check_device_token(request: Request) -> bool:
-    """True if the request carries a recognised paired-device token (M5)."""
-    tok = _request_bearer(request)
-    if not tok or tok not in _device_tokens:
-        return False
-    # Best-effort last-seen bookkeeping (not persisted on every hit to avoid I/O).
-    _device_tokens[tok]["last_seen"] = _now_iso()
-    return True
-
-
-def _require_device_auth(request: Request) -> None:
-    """Gate the device-facing endpoints (sync, bundle-manifest) when pairing is
-    enforced. A valid admin session also passes (admin is a superset). When
-    `require_device_auth` is off this is a no-op, so LAN / browser use is
-    completely unaffected (the no-regression invariant)."""
-    if not settings.require_device_auth:
-        return
-    if _check_device_token(request) or _check_admin(request):
-        return
-    raise HTTPException(401, "Device pairing required — pair this app with the host first.")
 
 
 def _finite(value: float, default: float = 0.0) -> float:
@@ -13775,7 +13706,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     _lib_lock = diag.InstrumentedLock(asyncio.Lock(), "library")
     _jackett_cookie_lock = asyncio.Lock()
     _analysis_gate = asyncio.Semaphore(ANALYSIS_CONCURRENCY)
-    _load_device_tokens()   # M5: restore paired-device bearer tokens
     _load_profile_sessions()   # PIN-verified profile sessions (survive a restart)
     qbit = _http_client(timeout=10.0)
     _vlc_http()   # build the persistent keep-alive VLC client up front
@@ -14004,9 +13934,12 @@ async def diag_track_requests(request: Request, call_next):
 #      EventSource and <img> carry the cookie but no custom header). It is the
 #      same localStorage UUID the playback sessions key on, so a device's live
 #      "Watching …" joins up with its history.
-#   2. a paired-device token (Bearer / X-Device-Token): the iOS app's native
-#      player and background downloader send only this. Mapped to the device id
-#      last seen WITH that token (`token_map`, persisted, stored hashed).
+#      The iOS app's native requests (progress/session posts, the background
+#      downloader, the loopback proxy, the TV remote, the AirPlay door) send the
+#      same id as `X-Device-Id`; their User-Agent marks them `via: app`, so they
+#      never relabel the device the dashboard identified. (Pairing tokens did
+#      this job until 19.8.0 removed pairing.) AVPlayer's own media fetches carry
+#      no custom header and fall to the inference below.
 #   3. inferred: same IP + same User-Agent as an identified device in the last
 #      10 minutes, or — for the iOS media player only — the ONE identified device
 #      on that IP. More than one there (a NAT, the Tailscale subnet router) and
@@ -14020,7 +13953,6 @@ _dev_store: "Optional[devstore.DeviceStore]" = None
 _dev_events: deque = deque(maxlen=50000)
 _dev_live: dict[str, dict] = {}          # device_id -> live facts + open activity lanes
 _dev_connected: dict[str, int] = {}      # device_id -> open event streams
-_dev_token_map: dict[str, str] = {}      # sha256(token)[:16] -> device_id
 _dev_ipua_seen: dict[tuple, tuple] = {}  # (ip, ua) -> (device_id, ts), identified only
 _dev_ip_seen: dict[str, dict] = {}       # ip -> {device_id: ts}, identified only
 _dev_watch_hint: dict[str, dict] = {}    # device_id -> {title, ts} from playback heartbeats
@@ -14050,13 +13982,11 @@ def _dev_capture(request: Request, status: int, ms: float) -> None:
     path = request.url.path
     if path == "/healthz":
         return                       # the in-process self-probe, every few seconds
-    tok = _request_bearer(request)
-    th = hashlib.sha256(tok.encode()).hexdigest()[:16] if tok and tok in _device_tokens else ""
     _dev_events.append((
         time.time(), request.method, path, devactivity.redact_query(request.url.query),
         int(status or 0), round(ms, 1), _dev_client_ip(request),
         request.headers.get("user-agent", "")[:300], _dev_request_device_id(request),
-        unquote(request.headers.get("x-device-name", ""))[:80], th, _profile_session_id(request) or "",
+        unquote(request.headers.get("x-device-name", ""))[:80], _profile_session_id(request) or "",
         request.headers.get("x-app-version", "")[:20],
     ))
 
@@ -14154,17 +14084,17 @@ async def _dev_subject(kind: str, ref: dict, device_id: str) -> tuple:
     return "", ""
 
 
-def _dev_identify(ts, ip, ua, did, th) -> tuple:
+_DEV_NATIVE_UA = ("iOS media player", "iOS app (native)")
+
+
+def _dev_identify(ts, ip, ua, did) -> tuple:
     """`(device_id, via)` for one request — see the identity ladder above."""
     if did:
-        return did, "browser"
-    if th:
-        mapped = _dev_token_map.get(th)
-        return (mapped, "app token") if mapped else ("app-" + th[:12], "app token")
+        return did, ("app" if devactivity.ua_summary(ua) in _DEV_NATIVE_UA else "browser")
     hit = _dev_ipua_seen.get((ip, ua))
     if hit and ts - hit[1] < _DEV_INFER_SEC:
         return hit[0], "inferred"
-    if devactivity.ua_summary(ua) in ("iOS media player", "iOS app (native)"):
+    if devactivity.ua_summary(ua) in _DEV_NATIVE_UA:
         near = [d for d, t in (_dev_ip_seen.get(ip) or {}).items() if ts - t < _DEV_INFER_SEC]
         if len(near) == 1:
             return near[0], "inferred"
@@ -14183,18 +14113,14 @@ async def _dev_drain() -> None:
     # so an anonymous request that arrived a moment BEFORE its page's first
     # identified one (the dashboard document, before its JS set the cookie) is
     # still attributed.
-    tokens = []
-    for (ts, _m, _p, _q, _s, _ms, ip, ua, did, _n, th, _pid, _av) in batch:
+    for (ts, _m, _p, _q, _s, _ms, ip, ua, did, _n, _pid, _av) in batch:
         if did:
             _dev_ipua_seen[(ip, ua)] = (did, ts)
             _dev_ip_seen.setdefault(ip, {})[did] = ts
-            if th and _dev_token_map.get(th) != did:
-                _dev_token_map[th] = did
-                tokens.append((th, did, ts))
 
     reqs, devs, dirty = [], {}, {}
-    for (ts, method, path, query, status, ms, ip, ua, did, dname, th, pid, appv) in batch:
-        dev_id, via = _dev_identify(ts, ip, ua, did, th)
+    for (ts, method, path, query, status, ms, ip, ua, did, dname, pid, appv) in batch:
+        dev_id, via = _dev_identify(ts, ip, ua, did)
         kind, ref = devactivity.classify(method, path, query)
         reqs.append({"device_id": dev_id, "ts": ts, "method": method, "path": path,
                      "query": query, "status": status, "ms": ms, "ip": ip, "ua": ua,
@@ -14203,19 +14129,18 @@ async def _dev_drain() -> None:
         if d is None:
             d = devs[dev_id] = {"id": dev_id, "name": "", "ua": "", "ua_summary": "", "ip": "",
                                 "via": "", "first_seen": ts, "last_seen": ts, "requests": 0,
-                                "profile_id": "", "paired": False, "app_version": ""}
+                                "profile_id": "", "app_version": ""}
         d["requests"] += 1
         d["last_seen"] = max(d["last_seen"], ts)
         d["first_seen"] = min(d["first_seen"], ts)
         d["ip"] = ip or d["ip"]
-        if via in ("browser", "anonymous") or dev_id.startswith("app-"):
-            # A request matched by token or inference is usually a different
-            # program on the same phone (AVPlayer, the background downloader); it
-            # must not relabel the device the browser identified.
+        if via in ("browser", "anonymous"):
+            # A native (`app`) or inferred request is a different program on the
+            # same phone (AVPlayer, the background downloader); it must not
+            # relabel the device the dashboard identified.
             d["ua"], d["ua_summary"], d["via"] = ua, devactivity.ua_summary(ua), via
         d["name"] = dname or d["name"]
         d["profile_id"] = pid or d["profile_id"]
-        d["paired"] = d["paired"] or bool(th)
         # The iOS app's version (X-App-Version, 19.7.0). Only the app's own page
         # sends it, so a request without it never clears a known one.
         if appv:
@@ -14252,7 +14177,7 @@ async def _dev_drain() -> None:
         dirty[id(lane)] = lane
 
     acts = list(dirty.values())
-    ids = await asyncio.to_thread(_dev_store.write, reqs, list(devs.values()), acts, tokens)
+    ids = await asyncio.to_thread(_dev_store.write, reqs, list(devs.values()), acts)
     for lane, aid in zip(acts, ids):
         lane["id"] = aid
     # Drop lanes and inference memory nobody can extend any more.
@@ -14277,7 +14202,6 @@ async def device_activity_loop() -> None:
     global _dev_store
     try:
         _dev_store = await asyncio.to_thread(devstore.DeviceStore, DEVICE_DB)
-        _dev_token_map.update(await asyncio.to_thread(_dev_store.token_map))
     except Exception:
         log.warning("devices: store unavailable — the Devices tab will be empty", exc_info=True)
         return
@@ -14429,8 +14353,6 @@ async def admin_device_forget(request: Request, device_id: str) -> JSONResponse:
         raise HTTPException(503, "Device store unavailable.")
     n = await asyncio.to_thread(_dev_store.forget, device_id)
     _dev_live.pop(device_id, None)
-    for th in [t for t, d in _dev_token_map.items() if d == device_id]:
-        _dev_token_map.pop(th, None)
     return JSONResponse({"ok": True, "removed": n})
 
 
@@ -20171,7 +20093,6 @@ class SyncProgressReq(BaseModel):
 @app.post("/api/sync/progress")
 async def sync_progress(req: SyncProgressReq, request: Request) -> JSONResponse:
     """Batch offline-progress sync with conflict detection (plan A2)."""
-    _require_device_auth(request)
     applied: list[dict] = []
     conflicts: list[dict] = []
     now = _now_iso()
@@ -20329,7 +20250,6 @@ async def sync_pull(req: SyncPullReq, request: Request) -> JSONResponse:
     watch history accrued online** (and on other devices). Read-only; the device's
     `seedProgress` only adopts a baseline when it wouldn't clobber unsynced local
     offline progress."""
-    _require_device_auth(request)
     lib = await get_library()
     items_by_id = {it["id"]: it for it in lib.get("items", [])}
     out: list[dict] = []
@@ -20384,7 +20304,6 @@ async def sync_resolve(req: SyncResolveReq, request: Request) -> JSONResponse:
     "server"` leaves the host untouched (the device adopts the returned server values
     as its new baseline). Either way the response carries the authoritative `server`
     values + `server_updated_at` the device records as the file's new watermark."""
-    _require_device_auth(request)
     resolved: list[dict] = []
     now = _now_iso()
     _TRACK_KEYS = ("audio_track", "subtitle_track", "local_audio_idx",
@@ -25341,7 +25260,6 @@ async def player_manifest(request: Request) -> JSONResponse:
     size-match resume makes a same-version refresh a no-op). The version is read
     from the live index.html badge (the file on disk is the source of truth;
     the UI_VERSION constant historically drifts)."""
-    _require_device_auth(request)
 
     def _build() -> tuple[str, list[dict]]:
         static_dir = Path(__file__).parent / "static"
@@ -25835,81 +25753,6 @@ async def admin_logout(request: Request) -> JSONResponse:
     token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
     _admin_sessions.pop(token, None)
     return JSONResponse({"ok": True})
-
-
-# ── Routes: iOS app device pairing (M5, plan A4) ──────────────────────────────
-
-class PairReq(BaseModel):
-    admin_password: str
-    label: str = ""
-
-
-@app.get("/api/pair/status")
-async def pair_status(request: Request) -> JSONResponse:
-    """Let the client app discover whether pairing is required and whether its
-    stored token is still valid (so it can show the pairing screen when needed)."""
-    return JSONResponse({
-        "required":         bool(settings.require_device_auth),
-        "admin_configured": bool(settings.admin_password),
-        "paired":           _check_device_token(request),
-    })
-
-
-@app.post("/api/pair")
-async def pair_device(req: PairReq) -> JSONResponse:
-    """Issue a long-lived device token for the iOS client (plan A4).
-
-    The host's admin password is the pairing secret. The returned token is sent
-    as `Authorization: Bearer <token>` on the device-facing endpoints (sync,
-    bundle-manifest) and is enforced only when REQUIRE_DEVICE_AUTH is on."""
-    if not settings.admin_password:
-        raise HTTPException(503, "Pairing is unavailable — set ADMIN_PASSWORD on the host.")
-    if req.admin_password != settings.admin_password:
-        raise HTTPException(401, "Incorrect host password.")
-    token = secrets.token_hex(32)
-    _device_tokens[token] = {
-        "created_at": _now_iso(),
-        "last_seen":  _now_iso(),
-        "label":      (req.label or "iOS device").strip()[:64],
-    }
-    _save_device_tokens()
-    return JSONResponse({"ok": True, "token": token})
-
-
-@app.delete("/api/pair")
-async def unpair_device(request: Request) -> JSONResponse:
-    """Revoke the calling device's own pairing token (used by the app on sign-out)."""
-    tok = _request_bearer(request)
-    if tok and _device_tokens.pop(tok, None) is not None:
-        _save_device_tokens()
-    return JSONResponse({"ok": True})
-
-
-# Paired devices = pairing TOKENS, not the Devices tab's devices. These two used
-# to live at /api/admin/devices, where the Devices-tab routes (registered first)
-# shadowed both — so a lost phone's token could not be revoked at all. Own path
-# since 19.7.1.
-@app.get("/api/admin/paired-devices")
-async def admin_list_devices(request: Request) -> JSONResponse:
-    """Admin view of paired devices (token prefix only, never the full secret)."""
-    _require_admin(request)
-    return JSONResponse({"devices": [
-        {"id": tok[:8], "label": meta.get("label", ""),
-         "created_at": meta.get("created_at", ""), "last_seen": meta.get("last_seen", "")}
-        for tok, meta in _device_tokens.items()
-    ]})
-
-
-@app.delete("/api/admin/paired-devices/{token_prefix}")
-async def admin_revoke_device(token_prefix: str, request: Request) -> JSONResponse:
-    """Admin revoke of a paired device by the 8-char id from /api/admin/paired-devices."""
-    _require_admin(request)
-    victims = [t for t in _device_tokens if t[:8] == token_prefix]
-    for t in victims:
-        _device_tokens.pop(t, None)
-    if victims:
-        _save_device_tokens()
-    return JSONResponse({"ok": True, "revoked": len(victims)})
 
 
 @app.get("/api/admin/indexers")
@@ -36613,7 +36456,6 @@ async def bundle_manifest(item_id: str, request: Request, file_path: str = "", p
     never builds one); the app then triggers a normal POST /offline-prepare and
     polls /offline-job/{id} before retrying. JIT on-demand stays online-only.
     """
-    _require_device_auth(request)
     if not HLS_AVAILABLE:
         raise HTTPException(503, HLS_UNAVAILABLE_MSG)
     lib = await get_library()

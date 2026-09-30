@@ -14,7 +14,7 @@
 //  Gated to iOS 17 — interactive Live Activity buttons are the whole point.
 //
 //  JS surface (Capacitor plugin "TVRemote"):
-//    start({ title, isYouTube, paused, volume, serverUrl, token }) -> { started }
+//    start({ title, isYouTube, paused, volume, serverUrl, deviceId }) -> { started }
 //    update({ title?, isYouTube?, paused?, volume? })              -> {}
 //    stop()                                                        -> {}
 //
@@ -75,7 +75,7 @@ public class TVRemote: CAPPlugin, CAPBridgedPlugin {
 
         // Stash control config for the App Intents.
         AppGroupConfig.setRemote(serverUrl: call.getString("serverUrl"),
-                                 token: call.getString("token"),
+                                 deviceId: call.getString("deviceId"),
                                  isYouTube: isYouTube)
 
         let state = TVRemoteAttributes.ContentState(
@@ -108,9 +108,9 @@ public class TVRemote: CAPPlugin, CAPBridgedPlugin {
     @objc func update(_ call: CAPPluginCall) {
         guard #available(iOS 17.0, *), let act = activity else { call.resolve(); return }
 
-        if call.getString("serverUrl") != nil || call.getString("token") != nil || call.hasOption("isYouTube") {
+        if call.getString("serverUrl") != nil || call.getString("deviceId") != nil || call.hasOption("isYouTube") {
             AppGroupConfig.setRemote(serverUrl: call.getString("serverUrl") ?? AppGroupConfig.serverUrl,
-                                     token: call.getString("token") ?? AppGroupConfig.deviceToken,
+                                     deviceId: call.getString("deviceId") ?? AppGroupConfig.deviceId,
                                      isYouTube: call.getBool("isYouTube") ?? AppGroupConfig.isYouTube)
         }
 

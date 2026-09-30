@@ -50,7 +50,7 @@ _ITEM = r"(?P<item>[A-Za-z0-9_-]{4,64})"
 # and `profile` named groups become the ref.
 _RULES = [
     (None, r"^/healthz$", "poll"),
-    (None, r"^/api/(state|events|version|player-manifest|setup-status|offline-active|pair/status)$", "poll"),
+    (None, r"^/api/(state|events|version|player-manifest|setup-status|offline-active)$", "poll"),
     ("GET", r"^/api/playback/sessions$", "poll"),
     (None, r"^/api/diag/", "diag"),
     (None, r"^/api/library/offline-cache/(?P<bundle>[0-9a-f]{8,64})/", "stream"),
@@ -79,7 +79,6 @@ _RULES = [
     ("POST", r"^/api/library/(prepare|upload)$", "download"),
     ("POST", r"^/api/profiles/(?P<profile>[^/]+)/verify-pin$", "sign-in"),
     ("POST", r"^/api/admin/login$", "sign-in"),
-    (None, r"^/api/pair$", "pair"),
     (None, r"^/api/admin(/|$)", "admin"),
     ("GET", r"^/api/library/series/(?P<series>[^/]+)$", "browse"),
     ("GET", r"^/api/library/" + _ITEM + r"/(files|metadata|subs|skip-data|saved-tracks|prep-status)$", "browse"),
@@ -207,7 +206,7 @@ _VERB = {
     "tv":       "Controlling the TV",
     "download": "Downloading",
     "sign-in":  "Signed in",
-    "pair":     "Paired the app",
+    "pair":     "Paired the app",       # pre-19.8.0 rows; pairing is gone
     "admin":    "Admin panel",
     "diag":     "Sent diagnostics",
     "open":     "Opened the dashboard",

@@ -1,5 +1,25 @@
 # Changelog
 
+## [19.8.0] — 2026-09-29
+### Device pairing removed
+
+- **Removed: device pairing.** The app's Connect screen no longer has a password field,
+  and the Server screen no longer has a Re-pair card. The server drops `/api/pair`,
+  `/api/pair/status`, the paired-devices admin routes, `device_tokens.json` handling and
+  the `REQUIRE_DEVICE_AUTH` setting. Pairing was off by default and only ever guarded
+  five app endpoints while the rest of the dashboard stayed open. Keeping strangers off
+  the network (home LAN, Tailscale) is what actually protects the host. A leftover
+  `REQUIRE_DEVICE_AUTH` line in `.env` is ignored.
+- **Changed: the app identifies its phone with `X-Device-Id` instead of a token** on
+  every native request (downloads, progress, the TV-remote buttons, the AirPlay door,
+  the loopback proxy). The admin Devices tab now attributes these to the right phone for
+  every phone, where before only paired phones could be recognised. They show as
+  "App" there.
+- **Fixed: the loopback proxy dropped the page's own `Authorization` header.** It now
+  passes it through.
+- An app from before 19.8.0 still works against this server. Only typing a password on
+  its old Connect screen fails, because there is no longer anything to pair with.
+
 ## [19.7.1] — 2026-09-29
 ### Revoking a paired phone works again
 

@@ -77,7 +77,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "19.5.0"
+let NP_BUILD = "19.8.0"
 
 // MARK: - Armed state
 
@@ -100,7 +100,6 @@ struct ArmedPlayback {
     var filePath = ""
     var profileId = ""
     var serverUrl = ""
-    var token = ""
     /// The page is the OFFLINE snapshot: there is no host, so progress goes to
     /// OfflineProgressStore — the same record the page writes, which the page
     /// syncs to the host on reconnect. Without this, an episode watched offline
@@ -1127,7 +1126,6 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         a.filePath       = call.getString("filePath") ?? ""
         a.profileId      = call.getString("profileId") ?? ""
         a.serverUrl      = call.getString("serverUrl") ?? ""
-        a.token          = call.getString("token") ?? ""
         a.offline        = call.getBool("offline") ?? false
         a.deviceId       = call.getString("deviceId") ?? ""
         a.deviceName     = call.getString("deviceName") ?? ""
@@ -1933,7 +1931,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if !armed.token.isEmpty { req.setValue(armed.token, forHTTPHeaderField: "X-Device-Token") }
+        if !armed.deviceId.isEmpty { req.setValue(armed.deviceId, forHTTPHeaderField: "X-Device-Id") }
         req.timeoutInterval = 8
         req.httpBody = try? JSONSerialization.data(withJSONObject: [
             "profile_id":   armed.profileId,
@@ -2010,7 +2008,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if !armed.token.isEmpty { req.setValue(armed.token, forHTTPHeaderField: "X-Device-Token") }
+        if !armed.deviceId.isEmpty { req.setValue(armed.deviceId, forHTTPHeaderField: "X-Device-Id") }
         req.timeoutInterval = 8
         let paused = cast != nil ? armed.paused : (player?.timeControlStatus != .playing)
         // No continuity payload: the web player sent its playlist / shuffle on the
@@ -2058,7 +2056,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             var req = URLRequest(url: url)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            if !armed.token.isEmpty { req.setValue(armed.token, forHTTPHeaderField: "X-Device-Token") }
+            if !armed.deviceId.isEmpty { req.setValue(armed.deviceId, forHTTPHeaderField: "X-Device-Id") }
             req.timeoutInterval = 8
             req.httpBody = try? JSONSerialization.data(withJSONObject: [
                 "device_id":    armed.deviceId,
@@ -2935,7 +2933,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             if self.extWindow != nil {
                 done(["ok": false, "error": "Already playing on a connected display."]); return
             }
-            AirPlayDoor.shared.open(for: url, bearer: self.armed.token) { [weak self] result in
+            AirPlayDoor.shared.open(for: url, deviceId: self.armed.deviceId) { [weak self] result in
                 guard let self = self else { return }
                 if case .failure(let err) = result {
                     DiagLog.shared.write("airplay-refused", ["err": err.localizedDescription], cat: "ext")
@@ -3082,7 +3080,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             guard let dev = CastDiscovery.shared.device(deviceId) else {
                 done(["ok": false, "error": "That TV is no longer on this Wi-Fi."]); return
             }
-            AirPlayDoor.shared.open(for: url, bearer: self.armed.token) { [weak self] result in
+            AirPlayDoor.shared.open(for: url, deviceId: self.armed.deviceId) { [weak self] result in
                 guard let self = self else { return }
                 if case .failure(let err) = result {
                     DiagLog.shared.write("cast-refused", ["err": err.localizedDescription], cat: "cast")

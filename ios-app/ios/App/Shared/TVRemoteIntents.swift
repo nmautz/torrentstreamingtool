@@ -5,7 +5,7 @@
 //  These LiveActivityIntents back the Dynamic Island / lock-screen buttons. A
 //  LiveActivityIntent's perform() runs in the *app's* process (the system spins
 //  it up briefly even while the app is suspended), so it can make a network call
-//  to the host control endpoints. Config (host URL, token, VLC-vs-YouTube path)
+//  to the host control endpoints. Config (host URL, device id, VLC-vs-YouTube path)
 //  comes from the shared App Group (AppGroupConfig), written by the TVRemote
 //  plugin when playback starts.
 //
@@ -28,7 +28,7 @@ enum TVRemoteClient {
         guard let base = AppGroupConfig.serverUrl, !base.isEmpty,
               let baseURL = URL(string: base) else { return }
         let isYouTube = AppGroupConfig.isYouTube
-        let token = AppGroupConfig.deviceToken
+        let deviceId = AppGroupConfig.deviceId
 
         var request: URLRequest
         if isYouTube {
@@ -56,7 +56,7 @@ enum TVRemoteClient {
             request = URLRequest(url: url)
             request.httpMethod = "POST"
         }
-        if let t = token, !t.isEmpty { request.setValue(t, forHTTPHeaderField: "X-Device-Token") }
+        if let d = deviceId, !d.isEmpty { request.setValue(d, forHTTPHeaderField: "X-Device-Id") }
         request.timeoutInterval = 8
 
         _ = try? await URLSession.shared.data(for: request)

@@ -2590,7 +2590,7 @@ delivers the result:
   runs in the WebView over a plain-http host origin (not a secure context), so
   `navigator.share`'s file API is unavailable and `<a download>` / `window.open`
   are no-ops inside the WebView. The clip URL's random token is the capability, so
-  no pairing header is needed. See [GOTCHAS.md](GOTCHAS.md).
+  no extra header is needed. See [GOTCHAS.md](GOTCHAS.md).
 - **Web/desktop:** hands the file to the OS **share sheet** when the platform can
   share files (`navigator.canShare({files})` — iOS/Android Safari/Chrome), else
   triggers a download (desktop), with a `window.open` last resort.
@@ -3307,11 +3307,11 @@ hangs). Two paths keep page and media same-origin:
   `/api` progress + track sync). `lpPlay` (host side) calls **`_appTryLocalHandoff(itemId,
   filePath, seekTo)`**: if the episode **and** the player snapshot (`__player__`) are
   both fully downloaded, it starts the LMS in **proxy mode** — `lms.start({playerRoot,
-  proxyHost: location.origin, proxyToken})` — and `location.replace`s to the loopback
+  proxyHost: location.origin, proxyDeviceId})` — and `location.replace`s to the loopback
   page with `?proxied=1&host=<origin>&item=&file=&seek=&profile=&am=<automanage prefs>&did=&dnm=&tok=`.
   In proxy mode the native `LocalMediaServer` serves the snapshot + bundles locally and
   **reverse-proxies every non-local request (`/api/*`, SSE, server-stream media) to the
-  host** with the bearer token injected (see below + [GOTCHAS.md](GOTCHAS.md)). On the
+  host**, tagged with the phone's `X-Device-Id` (see below + [GOTCHAS.md](GOTCHAS.md)). On the
   loopback page `_appProxied` is set but **`_appOffline` stays false**, so it takes the
   **normal online boot** — SSE, library, Play-to-TV, auto-manage, and real `/api` sync
   all run, just served from the loopback. `_appProxiedSeedStorage` seeds the profile,
@@ -3337,15 +3337,16 @@ hangs). Two paths keep page and media same-origin:
 See [GOTCHAS.md § On-device (loopback) playback is SAME-ORIGIN only](GOTCHAS.md).
 
 **Native reverse proxy (proxied session).** `LocalMediaServer.start({proxyHost,
-proxyToken})` makes the hand-rolled `NWListener` server (`HLSStaticServer`) route each
+proxyDeviceId})` makes the hand-rolled `NWListener` server (`HLSStaticServer`) route each
 request: a path that resolves to a local snapshot/bundle file (GET/HEAD) is served from
 disk (existing `serveFile` + Range); **everything else is forwarded to `proxyHost`** via
 a per-request `URLSession` (`ProxyForwarder`). The forwarder streams JSON, long-lived
 **SSE** (`/api/events` — the response never ends; chunks relay until the client
 disconnects), and **ranged media** (`206`/`Content-Range` relayed verbatim) identically,
 with **back-pressure** (the delegate queue blocks on a semaphore until the socket accepts
-each chunk — the same discipline `streamBody` uses for local files), injects
-`Authorization: Bearer <proxyToken>`, sets `Accept-Encoding: identity` (so the host's
+each chunk — the same discipline `streamBody` uses for local files), passes the
+page's own `Authorization` through and adds `X-Device-Id: <proxyDeviceId>` when the
+page didn't send one (hls.js segment fetches don't), sets `Accept-Encoding: identity` (so the host's
 `Content-Length` stays accurate to relay), and **accepts the host's self-signed TLS**
 (URLSession server-trust challenge → `.useCredential`, matching the app's
 `NSAllowsArbitraryLoads`). Because `master.m3u8`/segments are served at the **relative**

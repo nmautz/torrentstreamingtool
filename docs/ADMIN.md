@@ -34,7 +34,7 @@ The important tips are **contextual**: settings loaders rewrite them from the cu
 
 ### Devices (19.0.0)
 
-**Right Now** lists every device that is active (a request in the last 2 min, or the dashboard open) or recent (30 min). Each row shows its name, profile, what it is doing, and for a phone that is playing, a position bar and whether it streams from the box or plays its own downloaded copy. The TV gets its own row while VLC is playing. **All Devices** is every device that ever connected: name, how it was recognised (Browser / App token / Inferred / Anonymous), Paired badge, first and last seen, request count, and a filter. Refreshes every 5 s while the tab is open.
+**Right Now** lists every device that is active (a request in the last 2 min, or the dashboard open) or recent (30 min). Each row shows its name, profile, what it is doing, and for a phone that is playing, a position bar and whether it streams from the box or plays its own downloaded copy. The TV gets its own row while VLC is playing. **All Devices** is every device that ever connected: name, how it was recognised (Browser / App / Inferred / Anonymous; "App token" on rows from before 19.8.0), the iOS app version, first and last seen, request count, and a filter. Refreshes every 5 s while the tab is open.
 
 Click a device for its history: **Simple** (what it did, one row per run of the same activity, with time span, request count and failures) or **Raw** (every request, searchable by path or kind, paged with Load older). **Rename** sets an admin-side name; **Forget** deletes the device and its whole history. Mechanics, identity rules and retention: [DIAGNOSTICS.md § Devices](DIAGNOSTICS.md).
 
