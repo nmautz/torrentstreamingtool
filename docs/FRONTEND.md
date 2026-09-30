@@ -1189,7 +1189,18 @@ zero never wraps — it just squashes. Past that floor the clock + **Play Here**
 block drops onto a second line, which is what happens on a phone once the nav's
 right-hand cluster has taken its share of the row. The clock is no longer hidden
 below 400px (the old `.xs\:block` shim is gone) — wrapping gives it somewhere to
-go.
+go. That block is itself `flex-wrap` and **not** `flex-shrink-0` (19.9.1): clock +
+button are ~165px, wider than the banner's 7.5rem floor, so a non-shrinking block
+ran Play Here out past the banner's border. Now the button wraps under the clock.
+
+**Phone-width navbar (19.9.1).** Below `sm`, the right-hand cluster shows only what
+needs attention: `#dlBadge` is always hidden, and `#vpnPill` / `#sseWrap` (the SSE
+dot + LIVE label) hide while they carry `.nav-ok`. `_navOk(id, ok)` sets that class
+from `renderVpn` (connected or kill switch off = ok) and every SSE state write (LIVE =
+ok; reconnecting/offline = not). While the banner is up, `#navProfileName` is hidden
+too (`header:has(#elsewhereBanner:not(.hidden))`). All of it is CSS in the one media
+rule next to `#elsewhereBanner`. The `.nav-ok` flag goes on a **wrapper** for the SSE
+pair because `sseDot`/`sseLabel` have their `className` rewritten wholesale.
 
 **Identity (device-local, `localStorage`).**
 

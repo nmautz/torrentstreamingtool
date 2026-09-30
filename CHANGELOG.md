@@ -1,5 +1,17 @@
 # Changelog
 
+## [19.9.1] — 2026-09-29
+### A tidier navbar on a phone
+
+- **Fixed: Play Here sat outside the "Playing on …" banner** on a phone. The clock and
+  the button could not shrink or wrap, and together they were wider than the banner.
+  The button now drops under the clock.
+- **Phone width: the navbar shows a status only when something is wrong.** The download
+  icon is gone (the Library tiles show the same thing). The VPN pill and the LIVE
+  indicator are hidden while they are healthy and come back on a VPN drop or a lost
+  server connection. The profile name is hidden while the "Playing on" banner is up,
+  but the avatar letter stays. Wider screens are unchanged.
+
 ## [19.9.0] — 2026-09-29
 ### The remote's More menu
 

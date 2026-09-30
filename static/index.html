@@ -398,6 +398,18 @@
        its width. That floor is a real `min-width` rather than `min-w-0`: a flex
        item allowed to shrink to zero never wraps, it just squashes. */
     #elsewhereBanner { pointer-events: auto; }
+    /* Phone-width navbar: the right-hand cluster only shows what needs you.
+       The download badge always goes (the Library tiles say the same thing),
+       and the VPN pill and the LIVE indicator go while they are healthy —
+       their code toggles `.nav-ok` (_navOk). A VPN drop or a lost server
+       connection still shows, because that is when it matters. The profile
+       name also goes while the "playing elsewhere" banner is up; the avatar
+       letter still says who you are. All of this hands its width to the
+       banner, whose Play Here button otherwise runs out of room. */
+    @media (max-width: 639.98px) {
+      #dlBadge, #vpnPill.nav-ok, #sseWrap.nav-ok { display: none !important; }
+      header:has(#elsewhereBanner:not(.hidden)) #navProfileName { display: none !important; }
+    }
     /* `.hidden` and `.flex` are the same specificity, so state the winner
        outright rather than relying on Tailwind's emit order for the swap. */
     #navLogo.hidden { display: none !important; }
@@ -2697,9 +2709,12 @@
             <div id="vpnDot" class="w-2 h-2 bg-gray-600 transition-colors flex-shrink-0"></div>
             <span id="vpnLabel" class="text-xs font-medium text-gray-500 whitespace-nowrap hidden sm:inline">VPN: checking</span>
           </div>
-          <!-- SSE dot -->
-          <div id="sseDot" class="w-2 h-2 bg-gray-700 transition-colors flex-shrink-0 hidden sm:block"></div>
-          <span id="sseLabel" class="text-[11px] text-gray-700 hidden sm:block"></span>
+          <!-- SSE dot + label. The wrapper carries `.nav-ok` (the dot and
+               label classes are rewritten wholesale on every state change). -->
+          <div id="sseWrap" class="flex items-center gap-1 sm:gap-2 flex-shrink-0">
+            <div id="sseDot" class="w-2 h-2 bg-gray-700 transition-colors flex-shrink-0 hidden sm:block"></div>
+            <span id="sseLabel" class="text-[11px] text-gray-700 hidden sm:block"></span>
+          </div>
           <!-- Profile -->
           <button onclick="showProfilePicker()"
             class="flex items-center gap-1.5 pl-1 pr-1 sm:pr-2 py-1 hover:bg-gray-800 transition-colors flex-shrink-0 min-h-[36px]">
@@ -5417,6 +5432,12 @@ function renderFcNotice(){
 }
 
 // ── VPN UI ─────────────────────────────────────────────────────────────────
+// Marks a navbar status indicator healthy, which hides it at phone width
+// (CSS: `.nav-ok` under the navbar media rule). Unhealthy ones always show.
+function _navOk(id, ok){
+  document.getElementById(id)?.classList.toggle("nav-ok", !!ok);
+}
+
 function renderVpn(secure,statusText,blockUi,mode){
   if(mode===undefined) mode = (typeof app!=="undefined" && app.vpn_mode) ? app.vpn_mode : "mullvad";
   // Kill switch disabled by the admin: qBit runs freely, there's no overlay, and
@@ -5427,6 +5448,7 @@ function renderVpn(secure,statusText,blockUi,mode){
     dot.className="w-2 h-2 bg-gray-500 flex-shrink-0 transition-colors";
     label.className="text-xs font-medium text-gray-400 whitespace-nowrap hidden sm:inline";
     label.textContent="VPN: OFF"; pill.classList.remove("border-red-800");
+    _navOk("vpnPill", true);
     overlay.classList.add("hidden");
     applyVpnGate(true);   // nothing is VPN-gated when the kill switch is off
     return;
@@ -5443,11 +5465,13 @@ function renderVpn(secure,statusText,blockUi,mode){
     dot.className="w-2 h-2 bg-green-500 flex-shrink-0 transition-colors";
     label.className="text-xs font-medium text-green-400 whitespace-nowrap hidden sm:inline";
     label.textContent="VPN: Connected"; pill.classList.remove("border-red-800");
+    _navOk("vpnPill", true);
     overlay.classList.add("hidden");
   } else {
     dot.className="w-2 h-2 bg-red-500 flex-shrink-0 transition-colors blink";
     label.className="text-xs font-medium text-red-400 whitespace-nowrap hidden sm:inline";
     label.textContent="VPN: DISCONNECTED"; pill.classList.add("border-red-800");
+    _navOk("vpnPill", false);
     overlay.classList.toggle("hidden",!blockUi);
     if(statusText) detail.textContent=statusText;
   }
@@ -24361,7 +24385,10 @@ function renderElsewhere(){
     // would let it squash to nothing and so never wrap) drops the clock and
     // Play Here onto a second line on a phone, where the nav's right-hand
     // cluster has already taken its share of the row. The clock is no longer
-    // hidden under 400px — wrapping gives it somewhere to go.
+    // hidden under 400px — wrapping gives it somewhere to go. The clock + button
+    // block wraps too (never flex-shrink-0): together they are wider than the
+    // banner's 7.5rem floor, and a block that can't shrink pushed Play Here out
+    // past the banner's border.
     return `
     <div class="flex flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5">
       <span class="flex-shrink-0 text-indigo-400">${ic(icon)}</span>
@@ -24371,7 +24398,7 @@ function renderElsewhere(){
         </div>
         <div class="text-xs text-gray-300 truncate">${escHtml(s.title || "Library item")}</div>
       </div>
-      <div class="flex items-center gap-2 flex-shrink-0 ml-auto">
+      <div class="flex flex-wrap items-center justify-end gap-x-2 gap-y-1 ml-auto max-w-full">
         <div class="text-[11px] font-mono text-gray-500 tabular-nums"
              data-pb-clock="${escHtml(s.id)}">${clock}</div>
         <button type="button" data-pb-pull="${escHtml(s.id)}"
@@ -30016,6 +30043,7 @@ function _renderOnlineBadge() {
   if (!navigator.onLine) {
     sseDot.className = "w-2 h-2 bg-amber-500 transition-colors";
     sseLabel.textContent = "offline"; sseLabel.className = "text-[11px] text-amber-500 hidden sm:block";
+    _navOk("sseWrap", false);
   }
 }
 
@@ -30211,6 +30239,7 @@ function connectSSE(){
     // Show "LIVE" on mobile too so the user can tell at a glance whether
     // realtime updates are flowing. The label was previously sm:block only.
     sseLabel.textContent="LIVE"; sseLabel.className="text-[10px] font-black uppercase tracking-wide text-green-500";
+    _navOk("sseWrap", true);
     if(wasOffline) hideAlert();
     // iOS app: server progress may have moved while this device was away (TV /
     // another device) — sweep the auto-managed download windows. Inert on web.
@@ -30501,9 +30530,11 @@ function connectSSE(){
       // to amber, or a long outage oscillates.
       sseDot.className="w-2 h-2 bg-red-600 transition-colors";
       sseLabel.textContent="OFFLINE"; sseLabel.className="text-[10px] font-black uppercase tracking-wide text-red-500";
+      _navOk("sseWrap", false);
     } else {
       sseDot.className="w-2 h-2 bg-amber-500 transition-colors";
       sseLabel.textContent="RECONNECTING"; sseLabel.className="text-[10px] font-black uppercase tracking-wide text-amber-500";
+      _navOk("sseWrap", false);
     }
     if(!_sseDisconnectTimer){
       _sseDisconnectTimer = setTimeout(()=>{
@@ -30511,6 +30542,7 @@ function connectSSE(){
         _sseDisconnectTimer = null;
         sseDot.className="w-2 h-2 bg-red-600 transition-colors";
         sseLabel.textContent="OFFLINE"; sseLabel.className="text-[10px] font-black uppercase tracking-wide text-red-500";
+        _navOk("sseWrap", false);
         // ONCE per outage, not once per retry. Each failed reconnect re-enters
         // this handler, and the toast only lives 4 s — so a stream that can't
         // come back (the loopback server died under a proxied session) painted
@@ -30835,6 +30867,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.9.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.9.1</div>
 </body>
 </html>
