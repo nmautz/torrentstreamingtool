@@ -6198,6 +6198,63 @@ def _files_absent_on_disk(pairs: list[tuple[str, int]],
     return gone
 
 
+# item id → monotonic time of the last rebind attempt (qbit_info_all is a full list).
+_hashless_tried: dict[str, float] = {}
+
+
+async def _rebind_hashless(item: dict) -> bool:
+    """Give a `downloading` item with no torrent hash back its torrent.
+
+    Its file list could only have been built from qBit, so it HAD a hash; the
+    writer that lost it has not been identified (nothing logs). Without one the
+    monitor can't manage the item, and it never turns ready. Match the item's
+    files against qBit's torrents: exactly one torrent that holds them and that
+    no other live item owns gets rebound. An add still in flight
+    (`pending_download`) is `_recover_interrupted_downloads`' job, not this. The
+    WARNING records what the item looked like, so the next case names its writer.
+    Returns True when the hash was restored."""
+    if item.get("pending_download"):
+        return False
+    now = time.monotonic()
+    if now - _hashless_tried.get(item["id"], -1e9) < 300:
+        return False
+    _hashless_tried[item["id"]] = now
+    want = {_norm_path(f["path"]) for f in item.get("files", []) if f.get("path")}
+    if not want:
+        return False
+    torrents = await qbit_info_all()
+    if not torrents:
+        return False
+    lib = await get_library()
+    owned = {h for it in lib.get("items", []) if it.get("id") != item["id"]
+             for h in _item_live_torrent_hashes(it)}
+    hits = []
+    for t in torrents:
+        th = (t.get("hash") or "").lower()
+        cp = t.get("content_path") or ""
+        if not th or th in owned or not cp:
+            continue
+        root = _norm_path(cp)
+        if any(p == root or p.startswith(root + os.sep) for p in want):
+            hits.append(th)
+    if len(hits) != 1:
+        log.warning("[dl] %s: no torrent hash and %d candidate torrent(s) hold its "
+                    "files - left as is", item.get("title", ""), len(hits))
+        return False
+    async with mutate_library() as lib_w:
+        cur = next((x for x in lib_w["items"] if x["id"] == item["id"]), None)
+        if cur is None or cur.get("torrent_hash"):
+            raise LibraryUnchanged
+        cur["torrent_hash"] = hits[0]
+        item["torrent_hash"] = hits[0]
+    log.warning("[dl] %s: had NO torrent hash (status=%s, race=%s, download_source=%s, "
+                "attempts=%d) - rebound to %s, the torrent holding its files",
+                item.get("title", ""), item.get("status"), bool(item.get("race")),
+                bool(item.get("download_source")),
+                len(item.get("download_attempts") or []), hits[0])
+    return True
+
+
 # hash → monotonic time of the last recheck we forced for a ghost file.
 _ghost_recheck_at: dict[str, float] = {}
 _GHOST_RECHECK_GAP_S = 15 * 60
@@ -11808,6 +11865,13 @@ async def library_download_monitor() -> None:
         await asyncio.sleep(5)
         try:
             lib = await get_library()
+            # What each watched item looked like BEFORE this tick touched it, so
+            # the write-back can merge only the keys the tick changed (see below).
+            # Deep, because the tick mutates nested records (race entries) in
+            # place; and only for the watched handful, never the whole library.
+            base = {it["id"]: copy.deepcopy(it) for it in lib["items"]
+                    if it.get("status") == "downloading"
+                    or (it.get("race") or {}).get("state") in ("racing", "upgrading")}
             repaired = await _repair_empty_ready_items(lib)
             pending = [it for it in lib["items"] if it.get("status") == "downloading"]
             state.downloading_count = len(pending)
@@ -11909,6 +11973,12 @@ async def library_download_monitor() -> None:
                     continue      # `racing` item - the race tick was all it needed
                 h = item.get("torrent_hash")      # RE-READ: the race may have repointed it
                 if not h:
+                    # Skipped here for good, a hash-less "downloading" item sits
+                    # at its last percentage forever with a finished file on disk
+                    # (SpongeBob S01E08, 19.10.1). Rebind it to the torrent that
+                    # holds its files, if one exists and nobody owns it.
+                    if await _rebind_hashless(item):
+                        changed = True
                     continue
                 info = await qbit_info(h)
                 if not info:
@@ -12133,13 +12203,30 @@ async def library_download_monitor() -> None:
                 #
                 # An item that vanished mid-tick stays vanished: skipping it is what
                 # stops the monitor resurrecting a download the user just deleted.
+                #
+                # And only the KEYS it touched. `cur.update(mutated)` wrote every
+                # key of every watched item back, so a field another writer set
+                # during the tick reverted to the snapshot's value. That covers a
+                # hash the pipeline recorded, a race promotion, a schedule change.
+                # SpongeBob S01E08 ended up downloaded, with its file list, and NO
+                # torrent hash: the monitor then skipped it for good (19.10.1).
                 touched = {it["id"]: it for it in watch + repaired}
                 async with mutate_library() as fresh:
                     by_id = {it["id"]: it for it in fresh["items"]}
                     for iid, mutated in touched.items():
                         cur = by_id.get(iid)
-                        if cur is not None:
+                        if cur is None:
+                            continue
+                        b = base.get(iid)
+                        if b is None:
                             cur.update(mutated)
+                            continue
+                        for k, v in mutated.items():
+                            if k not in b or b[k] != v:
+                                cur[k] = v
+                        for k in b:
+                            if k not in mutated:
+                                cur.pop(k, None)
         except Exception:
             # This used to be a bare `pass`, which meant a bug anywhere in the
             # tick (the race engine now included) stalled every download with

@@ -1,5 +1,19 @@
 # Changelog
 
+## [19.10.1] — 2026-09-29
+### A finished download can no longer lose its torrent
+
+- **Fixed: the download monitor could undo other changes to a downloading item.**
+  Each 5-second pass wrote *every* field of every downloading item back from a copy
+  taken before its qBittorrent round trips. So a change made in between was reverted,
+  whether a newly recorded torrent, a race promotion or a schedule edit. It now
+  writes back only the fields it changed itself.
+- **Fixed: a download with no torrent attached stayed "downloading" forever.**
+  SpongeBob S01E08 was complete on disk but had lost its torrent reference, and the
+  monitor skips such items. The monitor now finds the one torrent holding the
+  item's files that nothing else owns, reattaches it, and logs what the item looked
+  like so the cause can be traced.
+
 ## [19.10.0] — 2026-09-29
 ### Library integrity: the right episode, really on disk, and playable
 

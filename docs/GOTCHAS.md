@@ -6267,6 +6267,25 @@ after it is free again. The loop-block sampler (`diagnostics._loop_watchdog`) sa
 the loop thread from outside while it is blocked and logs `LOOP BLOCKED …` naming the
 frame. Read that line first. See [DIAGNOSTICS.md § Loop-block sampler](DIAGNOSTICS.md).
 
+## The monitor's write-back must merge keys, not items (19.10.1)
+
+`library_download_monitor` reads a snapshot, spends seconds on qBit round trips, and
+then writes its changes back under the lock. Until 19.10.1 that write was
+`cur.update(mutated)` for every watched item: **every key**, including ones the
+tick never touched. Anything written to a downloading item mid-tick reverted to the
+snapshot's value: the pipeline recording `torrent_hash`, `_race_promote`, a user's
+`file-schedule`. Now `base` deep-copies the watched items (downloading or racing,
+never the whole library) at tick start. The merge writes only keys whose value
+differs from `base`, and drops only keys the tick deleted.
+
+SpongeBob S01E08 was the evidence: complete on disk, a file list (which only a
+hashed tick can build), and `torrent_hash: ""`. The monitor skipped it
+(`if not h: continue`), so it sat at "downloading" for good. `_rebind_hashless` now
+reattaches such an item to the single unowned qBit torrent whose `content_path`
+holds its files, at most every 5 min per item, never while `pending_download` is set.
+It logs `[dl] … had NO torrent hash (…)` with the item's shape. If that line ever
+appears again, the merge was not the (only) writer.
+
 ## A release's number is not its episode: check the title it states (19.10.0)
 
 Numbering schemes disagree. TMDb lists SpongeBob's 11-minute segments as S01E01-41,
