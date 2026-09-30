@@ -48,6 +48,20 @@ navigation, so the host page can call the native plugins.
   → Components) and an Apple ID for free on-device signing.
 - **Node 18+** (`npm`). Capacitor 8 uses **Swift Package Manager** — no CocoaPods.
 
+## Install from SideStore (no build)
+
+In SideStore (or AltStore) go to **Sources → +** and add
+`https://raw.githubusercontent.com/nmautz/streamlink-ios/main/apps.json`,
+then install **StreamLink** from that source. New versions show up as updates.
+
+**Publishing a version** (on the Mac, `gh` logged in): bump the badge in
+`static/index.html`, then run `./publish-ipa.sh`. It runs the full
+`build-ipa.sh`, uploads `StreamLink.ipa` as release `v<version>` on
+`nmautz/streamlink-ios`, and prepends the version to that repo's `apps.json`.
+`--dry-run` builds and prints the entry without publishing. `--notes "…"` replaces
+the default notes, which are the version's CHANGELOG heading. The app's metadata
+(name, description, icon, tint) lives in `sidestore/source.json`.
+
 ## Build & run on a device
 
 ```bash

@@ -163,12 +163,16 @@ summary with an unmissable callout saying so**:
 Never let an `ios-app/` change ship without this callout — a stale `public/` looks like
 "my change didn't work" and has bitten three times (see docs/GOTCHAS.md § stale builds).
 
-**The app's own version is not the dashboard's.** `CFBundleShortVersionString` is
-`$(MARKETING_VERSION)`, pinned at **1.0** in `App.xcodeproj` and never bumped — so
-`build-ipa.sh`'s closing `Version:` line always prints `1.0` and proves nothing about
-whether a change compiled in. Don't point the user at it. The dashboard badge in
-`static/index.html` is the version that moves; confirm an app change landed by its
-behaviour on-device instead.
+**The app's version is the dashboard badge, but that proves nothing about a change.**
+Since 19.4.0 `build-ipa.sh` stamps the badge into `CFBundleShortVersionString`
+(an Xcode build still says `1.0`). The badge also moves for host-only changes, so the
+closing `Version:` line doesn't show whether a change compiled in. Confirm an app
+change landed by its behaviour on-device instead.
+
+**Publishing to SideStore:** `ios-app/publish-ipa.sh` builds, uploads a GitHub Release
+to the public `nmautz/streamlink-ios` repo, and updates its `apps.json` (the source
+users add). A version can be published once, so bump the badge first. See
+docs/GOTCHAS.md § SideStore source.
 
 ## Style conventions
 

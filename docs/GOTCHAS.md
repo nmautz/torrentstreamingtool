@@ -5501,9 +5501,11 @@ So when a new plugin method appears to be missing, the order is **relaunch
 first, rebuild second** — and don't let a diagnostic's own error message assert
 the rarer cause. Two related traps:
 
-- **`CFBundleShortVersionString` cannot settle this.** It is
-  `$(MARKETING_VERSION)`, pinned at 1.0 and never bumped, so `build-ipa.sh`'s
-  closing `Version:` line proves nothing (see § stale builds). The trustworthy
+- **`CFBundleShortVersionString` cannot settle this.** Since 19.4.0
+  `build-ipa.sh` stamps the dashboard badge into it (an Xcode build still says
+  1.0), but the badge moves with host-only changes too, so the closing
+  `Version:` line says which *release* was built, not whether this Swift
+  change compiled in (see § stale builds). The trustworthy
   signal is `NP_BUILD` in `NativePlayback.swift`, stamped onto every `launch`
   row and the external-display diagnostic header — **bump it with any change to
   that file**. It was two separate string literals until 18.7.1; a field whose
@@ -6176,3 +6178,28 @@ tuple is even queued. Pairing tokens appear only as a SHA-256 prefix in
 - `POST /bookmarks` fetches the status **before** the write. Adding first and letting the loop fill it in would leave a theaters-only film un-awaited for up to six hours, and if it went digital in that window the dot would never come.
 - The explore tile is a `<button>`, so the bookmark toggle inside it is a `span[role=button]` whose handler stops propagation. A nested `<button>` is invalid HTML and browsers hoist it out of the tile.
 - Not in the iOS offline boot (`_appOfflineBoot`) on purpose: bookmarks are server state, with no on-device copy. Offline, `loadBookmarks` just fails silently.
+
+## SideStore source: a version can be published once (19.4.0)
+
+`ios-app/publish-ipa.sh` publishes the unsigned `.ipa` as a GitHub Release on the
+public `nmautz/streamlink-ios` repo and prepends it to that repo's `apps.json`,
+the source SideStore/AltStore users add. Three things bite:
+
+- **SideStore offers an update only when the version changes.** The app is
+  stamped with the dashboard badge, and the script refuses a tag that already
+  exists. To ship an app change, bump the badge first. Re-publishing the same
+  number would leave installed phones silently on the old binary.
+- **Both targets must carry the same version.** iOS refuses an app whose
+  Live Activities extension disagrees with it. `build-ipa.sh` passes
+  `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` on the `xcodebuild` command
+  line, which covers both. Setting them in one target's build settings would not.
+- **`appPermissions` is read from the built app, never written by hand.**
+  SideStore/AltStore 2 refuse to install an app that uses a permission (an
+  `NS…UsageDescription` or entitlement) its source entry didn't declare. A new
+  usage description in `Info.plist` shows up in the next publish on its own.
+  The unsigned build carries **no** entitlements, so the `App.entitlements` app
+  group is not granted to a SideStore install. That was already true of every
+  sideloaded build.
+
+A dev build from Xcode says 1.0, so on the developer's own phone SideStore
+will keep offering the published version as an update.

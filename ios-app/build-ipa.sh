@@ -14,6 +14,11 @@
 #   3. npx cap sync ios       — copies www/ into the app AND updates native deps
 #   4. xcodebuild + package the unsigned .ipa
 #
+# The app is stamped with the DASHBOARD version (the badge at the bottom of
+# static/index.html) as both CFBundleShortVersionString and CFBundleVersion, so
+# SideStore/AltStore can tell one release from the next (publish-ipa.sh). Set
+# APP_VERSION=x.y.z to override. A plain Xcode build still says 1.0.
+#
 # Usage:
 #   ./build-ipa.sh                 # full, update-safe build (recommended)
 #   ./build-ipa.sh --fast          # skip deps + sync (web/native already current)
@@ -45,6 +50,13 @@ for arg in "$@"; do
     *) echo "Unknown option: $arg" >&2; exit 2 ;;
   esac
 done
+
+# The version to stamp: the dashboard badge unless APP_VERSION is set.
+APP_VERSION="${APP_VERSION:-$(sed -n 's/.*data-ui-version[^>]*>\([0-9][0-9.]*\)<.*/\1/p' "$SCRIPT_DIR/../static/index.html" | tail -1)}"
+if [[ ! "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "ERROR: could not read an x.y.z version from the static/index.html badge (got '$APP_VERSION'). Set APP_VERSION." >&2
+  exit 1
+fi
 
 cd "$SCRIPT_DIR"
 
@@ -79,7 +91,7 @@ else
 fi
 
 # 4. Build the unsigned Release app for device.
-echo "==> Building unsigned Release app for device"
+echo "==> Building unsigned Release app for device (version $APP_VERSION)"
 xcodebuild \
   -project "$APP_DIR/App.xcodeproj" \
   -scheme App \
@@ -89,6 +101,8 @@ xcodebuild \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY="" \
+  MARKETING_VERSION="$APP_VERSION" \
+  CURRENT_PROJECT_VERSION="$APP_VERSION" \
   build
 
 APP_BUNDLE="$PRODUCTS/App.app"

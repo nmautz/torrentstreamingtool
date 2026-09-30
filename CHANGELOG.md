@@ -1,5 +1,18 @@
 # Changelog
 
+## [19.4.0] — 2026-09-29
+### Install the app from SideStore
+
+- **New: StreamLink can be installed and updated from SideStore or AltStore,**
+  no building required. Add the source
+  `https://raw.githubusercontent.com/nmautz/streamlink-ios/main/apps.json`
+  under Sources, then install StreamLink from it. SideStore offers each new
+  version as an update.
+- **Changed: the app now carries the dashboard's version** (it said 1.0 on
+  every build). `ios-app/build-ipa.sh` stamps it in, and the new
+  `ios-app/publish-ipa.sh` builds, uploads the release and updates the source.
+  A plain Xcode build still says 1.0.
+
 ## [19.3.1] — 2026-09-29
 ### A new season pack of a show you already have lines up with its episodes
 
