@@ -422,6 +422,47 @@
        Pointer-events are set by ID so they survive the className rewrites in
        renderServerAttention(). */
     #serverAttentionBanner { pointer-events: auto; }
+    /* ── Notice stack (server banner + global toast) ─────────────────────────
+       Fixed and out of the flow: a notice floats over the top of the page and
+       never reflows it. Its top edge clears the status bar / Dynamic Island the
+       same way `.safe-top` does — pinned constants in the app (env() is
+       unreliable in the WKWebView, see `.safe-top` above), live env() on the
+       web. Cards are OPAQUE with a shadow: the old /70 tints let the page show
+       through and were unreadable over posters. */
+    #noticeStack {
+      position:fixed; left:0; right:0; z-index:70; pointer-events:none;
+      top:calc(env(safe-area-inset-top, 0px) + 8px);
+      padding:0 16px; display:flex; flex-direction:column; align-items:center; gap:6px;
+    }
+    @media (orientation: portrait)  { html.is-app #noticeStack { top:67px; } }
+    @media (orientation: landscape) { html.is-app #noticeStack { top:8px; } }
+    #noticeStack .hidden { display:none !important; }
+    #globalToast { width:100%; max-width:42rem; }
+    .notice-card {
+      width:100%; max-width:42rem; display:flex; align-items:center; gap:10px;
+      padding:10px 12px; font-size:13px; line-height:1.35; font-weight:600;
+      color:var(--nt); background:var(--nb); border-left:4px solid var(--nc);
+      box-shadow:0 10px 28px rgba(0,0,0,.6), 0 0 0 1px rgba(255,255,255,.07);
+      animation:noticeIn .18s ease-out;
+    }
+    #globalToastInner.notice-card { justify-content:center; text-align:center; }
+    @keyframes noticeIn { from { opacity:0; transform:translateY(-8px); } to { opacity:1; transform:none; } }
+    .notice-red    { --nc:#dc2626; --nb:#2a1014; --nt:#fecaca; }
+    .notice-amber  { --nc:#d97706; --nb:#271a0a; --nt:#fde68a; }
+    .notice-yellow { --nc:#ca8a04; --nb:#262008; --nt:#fef08a; }
+    .notice-indigo { --nc:#6366f1; --nb:#1a1a3a; --nt:#e0e7ff; }
+    .notice-blue   { --nc:#3b82f6; --nb:#0f1d36; --nt:#dbeafe; }
+    .notice-green  { --nc:#16a34a; --nb:#0d2416; --nt:#bbf7d0; }
+    .notice-action {
+      flex-shrink:0; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.05em;
+      padding:6px 10px; border:1px solid var(--nc); color:var(--nt);
+    }
+    .notice-action:hover { background:var(--nc); color:#fff; }
+    .notice-close {
+      flex-shrink:0; margin:-6px -4px -6px 0; padding:6px 8px; font-size:18px; line-height:1;
+      color:var(--nt); opacity:.7;
+    }
+    .notice-close:hover { opacity:1; }
     /* Global prep pill collapse/expand. Collapsed = just the pulsing dot + chevron
        (everything below the header hidden, the title text hidden), so the pill
        shrinks to a small tab in the corner. Chevron flips up when expanded. */
@@ -2634,28 +2675,25 @@
   </div>
 </div>
 
-<!-- ── Global Toast (visible from any tab) ────────────────────────────────── -->
-<!-- top-24 on mobile (two-row navbar ≈ 92 px), top-16 on sm+ (single-row navbar ≈ 56 px). -->
-<div id="globalToast"
-  class="hidden fixed top-24 sm:top-16 inset-x-0 z-[70] px-4 pointer-events-none">
-  <div id="globalToastInner"
-    class="max-w-2xl mx-auto px-4 py-2.5 text-sm text-center fade-in"></div>
-</div>
-
-<!-- ── Server-attention banner (missing env keys / pending update) ──────── -->
-<!-- Shown below the navbar when the server is reachable but a feature is
-     disabled because the admin hasn't supplied a required API key, or when
-     an update is being applied. Stays out of the way otherwise. -->
-<div id="serverAttentionBanner"
-  class="hidden sticky top-0 z-[70] bg-amber-950/70 border-b border-amber-800 text-amber-200 text-xs sm:text-sm px-3 py-2 flex items-center justify-between gap-3">
-  <div id="serverAttentionMsg" class="min-w-0 flex-1 leading-tight"></div>
-  <a id="serverAttentionLink" href="/admin"
-    class="flex-shrink-0 text-[11px] font-bold uppercase tracking-wide px-3 py-1.5 border border-amber-700 hover:bg-amber-900 transition-colors">
-    Admin Panel
-  </a>
-  <button id="serverAttentionDismiss" type="button" onclick="dismissServerAttention()"
-    aria-label="Dismiss" title="Dismiss"
-    class="flex-shrink-0 -my-1.5 -mr-1 p-1.5 leading-none text-base opacity-70 hover:opacity-100 transition-opacity">×</button>
+<!-- ── Notice stack: server banner + global toast ───────────────────────── -->
+<!-- ONE fixed layer, pinned just under the status bar / Dynamic Island, holding
+     opaque cards that float OVER the page. Nothing here is in the flow, so a
+     notice never pushes the navbar down (the banner used to be a sticky strip
+     above the header with no safe-area inset of its own: in the iOS app it sat
+     under the Island, unreadable, while shoving the whole UI down). -->
+<div id="noticeStack">
+  <!-- Server-attention banner (missing env keys / update or reboot in flight).
+       Painted by renderServerAttention(); dismissable, auto-hides after 5s. -->
+  <div id="serverAttentionBanner" class="hidden notice-card notice-amber">
+    <div id="serverAttentionMsg" class="min-w-0 flex-1"></div>
+    <a id="serverAttentionLink" href="/admin" class="notice-action">Admin</a>
+    <button id="serverAttentionDismiss" type="button" onclick="dismissServerAttention()"
+      aria-label="Dismiss" title="Dismiss" class="notice-close">&times;</button>
+  </div>
+  <!-- Global toast (visible from any tab). Painted by showAlert(). -->
+  <div id="globalToast" class="hidden">
+    <div id="globalToastInner" class="notice-card"></div>
+  </div>
 </div>
 
 <!-- Host-performance banner removed: CPU/GPU/RAM/network busy/overloaded states
@@ -5270,6 +5308,8 @@ const ALERT_STYLES = {
   info:"border-l-4 border-blue-600 bg-blue-950/70 text-blue-300",
   success:"border-l-4 border-green-600 bg-green-950/70 text-green-300",
 };
+// Toast card tone per alert type (the .notice-* classes on #noticeStack).
+const NOTICE_TONES = { error:"red", warn:"yellow", info:"blue", success:"green" };
 let alertTimer;
 function showAlert(msg,type="error") {
   // In-tab alert (search tab)
@@ -5279,7 +5319,7 @@ function showAlert(msg,type="error") {
   // Global toast (always visible regardless of active tab)
   const toast=document.getElementById("globalToast");
   const inner=document.getElementById("globalToastInner");
-  inner.className=`px-4 py-2.5 text-sm text-center ${ALERT_STYLES[type]||ALERT_STYLES.error}`;
+  inner.className=`notice-card notice-${NOTICE_TONES[type]||"red"}`;
   inner.textContent=msg; toast.classList.remove("hidden");
   renderFcNotice(); // mirror into the fullscreen-controls notice strip if open
   clearTimeout(alertTimer);
@@ -5326,23 +5366,19 @@ function renderServerAttention(d){
   const updaterMsg = d.updater_message || "";
 
   // Resolve the single active notice (or null) in priority order.
-  const base = "sticky top-0 z-[70] border-b text-xs sm:text-sm px-3 py-2 flex items-center justify-between gap-3";
   let notice = null;
   const UPDATE_PHASES = new Set(["applying","setup","refreshing-service","reinstalling-service","rebooting","restarting"]);
   if(UPDATE_PHASES.has(phase)){
     // Updater — surface while an update is in flight so the user knows why the
     // page is about to lurch. Idle "up to date" never shows.
-    const tone = (phase === "rebooting")
-      ? "bg-red-950/70 border-red-700 text-red-200"
-      : "bg-indigo-950/70 border-indigo-700 text-indigo-200";
+    const tone = (phase === "rebooting") ? "red" : "indigo";
     const friendly = updaterMsg || phase;
     const verb = (phase === "rebooting") ? "Rebooting server" : "Updating server";
-    notice = { key: `update:${phase}`, className: `${base} ${tone}`, text: `${verb}… ${friendly}` };
+    notice = { key: `update:${phase}`, tone, text: `${verb}… ${friendly}` };
   } else if(requiredMissing.length){
     // Required env keys missing — banner everyone sees.
     const labels = requiredMissing.map(k => k.label).join(", ");
-    notice = { key: `missing:${labels}`,
-      className: `${base} bg-amber-950/70 border-amber-800 text-amber-200`,
+    notice = { key: `missing:${labels}`, tone: "amber",
       text: `Server needs admin attention: ${labels} not configured.` };
   }
   // Note: "some search sources degraded" (d.indexers_degraded) is intentionally
@@ -5367,7 +5403,7 @@ function renderServerAttention(d){
     renderFcNotice();
     return;
   }
-  el.className = notice.className;
+  el.className = `notice-card notice-${notice.tone}`;
   msg.textContent = notice.text;
   el.classList.remove("hidden");
   renderFcNotice();
@@ -5397,7 +5433,9 @@ function renderServerAttention(d){
 // blocks them (pointer-events:none). It reads the live banner/toast DOM as the
 // single source of truth, so there's no parallel notice state to keep in sync.
 function _fcNoticeTone(cls){
-  // Map a Tailwind colour found in the source element's classes to a tone.
+  // Map the source card's .notice-<tone> (or a Tailwind colour) to a strip tone.
+  const m=/\bnotice-(red|green|indigo)\b/.exec(cls||"");
+  if(m) return m[1];
   if(/\bred-|bg-red/.test(cls)) return "red";
   if(/\bgreen-|bg-green/.test(cls)) return "green";
   if(/\bindigo-|bg-indigo/.test(cls)) return "indigo";
@@ -30918,6 +30956,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.11.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.11.1</div>
 </body>
 </html>

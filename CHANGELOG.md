@@ -1,5 +1,16 @@
 # Changelog
 
+## [19.11.1] — 2026-09-29
+### Notices float over the page instead of pushing it down
+
+- **Fixed: on a phone, a server notice pushed the whole UI down and couldn't be
+  read.** The update/reboot banner was a strip in the page flow *above* the navbar,
+  with no safe-area inset of its own, so in the app it sat under the Dynamic Island
+  (a sliver of colour at the top) while shoving everything below it down. The
+  banner and the error/info toast now share one fixed stack pinned just below the
+  status bar. They are opaque cards that float over the page, so nothing reflows
+  and the text is readable over any poster.
+
 ## [19.11.0] — 2026-09-29
 ### The player bar hides when nothing is playing on the TV
 
