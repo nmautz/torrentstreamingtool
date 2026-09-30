@@ -1,5 +1,17 @@
 # Changelog
 
+## [19.4.2] — 2026-09-29
+### Library posters stop flickering
+
+- **Fixed: library cards flashed between their poster and the title text,**
+  sometimes rapidly. Every progress save (anyone watching) and every download
+  tick rebuilt the whole card grid, and each rebuilt card started posterless
+  until its image was re-applied. Painted posters are now carried across the
+  rebuild, so a refresh no longer repaints them. A poster changed by a metadata
+  edit still reloads.
+- **Fixed: overlapping library refreshes could paint out of order,** an older
+  response replacing a newer one. A stale response is now dropped.
+
 ## [19.4.1] — 2026-09-29
 ### The app connects over HTTP by default
 

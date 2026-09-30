@@ -7346,11 +7346,16 @@ async function submitProfile(btn){
 }
 
 // ── Library ────────────────────────────────────────────────────────────────
+// SSE fires loadLibrary back-to-back (progress saves, download ticks), and the
+// requests overlap. Responses can land out of order, so a slow older one must
+// not paint over a newer one — that swapped the grid between two states.
+let _libLoadSeq=0, _libPaintedSeq=0;
 async function loadLibrary(btn){
   // `btn` is only passed by the manual Refresh button — show its spinner while
   // we wait on the server. Programmatic (SSE-driven) callers pass nothing, so
   // _markLoading is a no-op for them and their concurrency isn't affected.
   _markLoading(btn, true);
+  const seq=++_libLoadSeq;
   try {
     const pid=profile.id?`?profile_id=${profile.id}`:"";
     const [libRes] = await Promise.all([
@@ -7361,6 +7366,8 @@ async function loadLibrary(btn){
     ]);
     if(!libRes.ok) throw new Error(`GET /api/library ${libRes.status}`);
     const items=(await libRes.json()).items||[];
+    if(seq<_libPaintedSeq) return;   // a newer load already painted
+    _libPaintedSeq=seq;
     // Cache the latest library list so continueLibraryItem() can consult resume hints
     // before deciding whether to show the local-vs-VLC chooser.
     window._libCache = items;
@@ -8238,13 +8245,45 @@ async function _libLoadPoster(itemId,img,tries){
     else _libPosterCache.set(itemId,"");
   }
 }
+// The grid is rebuilt with innerHTML on every library refresh — once per progress
+// save while anyone watches, once per download tick — and a fresh card starts
+// with its <img> hidden and the title placeholder showing. Re-applying the poster
+// is async (observer callback, then an image load), so without this every refresh
+// blinked every card to text and back: rapid flashing across the whole screen.
+// Instead, lift the painted <img> nodes out before the rebuild and drop them into
+// the new cards. A moved node keeps its decoded bitmap, so nothing repaints.
+function _libKeepPosters(el){
+  const kept=new Map();
+  el.querySelectorAll(".lib-poster-img").forEach(img=>{
+    const id=img.dataset.itemId;
+    // Only while it is still the poster on file: a metadata edit clears the URL
+    // cache, and that must re-fetch the art, not keep the old picture.
+    if(id && !kept.has(id) && !img.classList.contains("hidden") && img.complete && img.naturalWidth>0
+       && _libPosterCache.get(id)===img.getAttribute("src"))
+      kept.set(id,img);
+  });
+  return kept;
+}
+function _libRestorePosters(el,kept){
+  if(!kept || !kept.size) return;
+  el.querySelectorAll(".lib-poster-img").forEach(img=>{
+    const old=kept.get(img.dataset.itemId); if(!old) return;
+    kept.delete(img.dataset.itemId);   // one node can only live in one card
+    img.replaceWith(old);
+    const ph=old.closest(".lib-cardv-poster")?.querySelector(".lib-poster-ph");
+    if(ph) ph.classList.add("hidden");
+  });
+}
+
 // Observe card posters and load each as it scrolls near the viewport. We observe
 // the poster CONTAINER (always laid out), never the <img> — the img starts
 // `hidden` (display:none), which has a zero-size box the observer would never
 // report as intersecting, so posters would never load.
 function _libWirePosters(el){
   if(_libPosterObs){ try{_libPosterObs.disconnect();}catch(_){} _libPosterObs=null; }
-  const posters=el.querySelectorAll(".lib-cardv-poster");
+  // A poster carried over by _libRestorePosters is already showing — leave it be.
+  const posters=[...el.querySelectorAll(".lib-cardv-poster")]
+    .filter(p=>{ const img=p.querySelector(".lib-poster-img"); return !img || img.classList.contains("hidden"); });
   const load=(poster)=>{ const img=poster.querySelector(".lib-poster-img"); if(img) _libLoadPoster(img.dataset.itemId,img); };
   if(typeof IntersectionObserver==="undefined"){
     posters.forEach(load);
@@ -9379,8 +9418,11 @@ function renderLibrary(items){
   units.sort((a,b)=> a.at===b.at ? 0 : (!a.at ? 1 : (!b.at ? -1 : (a.at<b.at ? 1 : -1))));
   units.forEach(u=>{ html+=u.html; });
   if(isCard) html+=`</div>`;
+  // Carry already-painted posters across the rebuild, or every repaint (one per
+  // progress save, one per download tick) blinks the whole grid to title text.
+  const keptPosters=isCard?_libKeepPosters(el):null;
   el.innerHTML=html;
-  if(isCard) _libWirePosters(el);
+  if(isCard){ _libRestorePosters(el,keptPosters); _libWirePosters(el); }
   // Wire restart buttons via data attributes so paths never need JS-string escaping
   el.querySelectorAll(".lib-restart-btn").forEach(btn=>{
     btn.addEventListener("click",()=>playLibraryWithChooser(btn.dataset.itemId,[btn.dataset.path],0,""));
@@ -30380,6 +30422,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.4.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.4.2</div>
 </body>
 </html>

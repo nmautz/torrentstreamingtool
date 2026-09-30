@@ -6203,3 +6203,17 @@ the source SideStore/AltStore users add. Three things bite:
 
 A dev build from Xcode says 1.0, so on the developer's own phone SideStore
 will keep offering the published version as an update.
+
+## Library refreshes rebuild the grid — keep painted posters (19.4.2)
+
+`loadLibrary()` runs on every `progress_saved` (every progress write, from any
+device) and every `library_update` (every download tick), and `renderLibrary`
+replaces the whole grid with `innerHTML`. A card is born with its `<img>` hidden
+and the `.lib-poster-ph` title showing, and the poster only returns after an
+IntersectionObserver callback and an image load. So every refresh blinked every
+card to text and back, and during a download or a watch session that was rapid,
+full-screen flashing. `_libKeepPosters` / `_libRestorePosters` move the painted
+`<img>` nodes into the rebuilt cards (a moved node keeps its decoded bitmap). Any
+new poster-bearing tile has to survive a rebuild the same way, or be rendered
+with its `src` already set. Overlapping `loadLibrary` calls could also paint out
+of order, so a response older than the last one painted is dropped.
