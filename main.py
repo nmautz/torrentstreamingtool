@@ -25885,7 +25885,11 @@ async def unpair_device(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
-@app.get("/api/admin/devices")
+# Paired devices = pairing TOKENS, not the Devices tab's devices. These two used
+# to live at /api/admin/devices, where the Devices-tab routes (registered first)
+# shadowed both — so a lost phone's token could not be revoked at all. Own path
+# since 19.7.1.
+@app.get("/api/admin/paired-devices")
 async def admin_list_devices(request: Request) -> JSONResponse:
     """Admin view of paired devices (token prefix only, never the full secret)."""
     _require_admin(request)
@@ -25896,9 +25900,9 @@ async def admin_list_devices(request: Request) -> JSONResponse:
     ]})
 
 
-@app.delete("/api/admin/devices/{token_prefix}")
+@app.delete("/api/admin/paired-devices/{token_prefix}")
 async def admin_revoke_device(token_prefix: str, request: Request) -> JSONResponse:
-    """Admin revoke of a paired device by the 8-char id from /api/admin/devices."""
+    """Admin revoke of a paired device by the 8-char id from /api/admin/paired-devices."""
     _require_admin(request)
     victims = [t for t in _device_tokens if t[:8] == token_prefix]
     for t in victims:

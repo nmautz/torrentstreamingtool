@@ -151,7 +151,7 @@
 > ([main.py](../main.py)) issues a long-lived bearer token (admin password = pairing
 > secret), persisted to host-local `device_tokens.json` so paired devices survive a
 > restart; **`GET /api/pair/status`** and **`DELETE /api/pair`** (self-revoke) round it
-> out, with admin **`/api/admin/devices`** list/revoke. `_require_device_auth` gates
+> out, with admin **`/api/admin/paired-devices`** list/revoke (at `/api/admin/devices` until 19.7.1, where the Devices tab shadowed it). `_require_device_auth` gates
 > the device-facing endpoints (`/api/sync/progress|pull|resolve`,
 > `/api/library/{id}/bundle-manifest`) on a valid device-or-admin token **only when
 > the new `REQUIRE_DEVICE_AUTH` setting is on** — it defaults **off**, so LAN/browser

@@ -1,5 +1,14 @@
 # Changelog
 
+## [19.7.1] — 2026-09-29
+### Revoking a paired phone works again
+
+- **Fixed: the paired-devices list and revoke endpoints were unreachable.** They
+  shared `/api/admin/devices` with the Devices tab, whose routes were registered
+  first and won, so `DELETE` meant "forget this device record" and a lost phone's
+  pairing token could not be revoked. They now live at `/api/admin/paired-devices`
+  and `DELETE /api/admin/paired-devices/{id}`.
+
 ## [19.7.0] — 2026-09-29
 ### The admin Devices tab shows each phone's app version
 
@@ -9,8 +18,6 @@
   gets an **N apps out of date** chip. Browsers show nothing. The version comes from a
   new `X-App-Version` header the app's dashboard sends with each request. Phones
   running an app older than 19.5.0 show as "before 19.5.0".
-- **Docs:** noted that the older paired-token `/api/admin/devices` route is shadowed
-  by the Devices-tab route and never reached.
 
 ## [19.6.0] — 2026-09-29
 ### The app tells you when it's out of date
