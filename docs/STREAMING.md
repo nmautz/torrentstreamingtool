@@ -192,6 +192,12 @@ for the full mechanism; the short version is that a source with holes in it
 ffmpeg duplicate the last frame and pad silence, exit `0`, and land the result on
 the key the *finished* file resolves to — so it is never rebuilt.
 
+**A still, silent ending is content, not a hole (19.10.0).** On the final pre-swap
+rejection, `_dead_span_is_content` decodes only the dead window of the source. When it
+comes back clean, the bundle is published with `bundle_check.content_verified: true`,
+and the audit keeps that verdict. See [GOTCHAS.md § A still, silent ending is not a
+hole](GOTCHAS.md).
+
 ### What the check is
 
 `bundlecheck.py` — a leaf module (stdlib only, no `main` import, tests in

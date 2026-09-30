@@ -1,5 +1,34 @@
 # Changelog
 
+## [19.10.0] — 2026-09-29
+### Library integrity: the right episode, really on disk, and playable
+
+- **Fixed: Get could download the wrong episode** when a release names a different
+  episode than its number says. SpongeBob's TMDb season 1 lists the 11-minute
+  segments as 41 episodes, while half the releases number the 20 half-hours. So
+  "S01E02 Bubblestand & Ripped Pants" was taken as E02 "Reef Blower", and seven of
+  season 1's episodes came down wrong. Automatic picks and download races now skip
+  a release whose episode title is another episode's name in that season. The show
+  page still lists it for a manual pick. Checked against the 1,691 hand-labelled
+  search results: it rejects nothing the labels call right, apart from *Cowboy
+  Bebop*, where TMDb's episode order differs from the releases' (the same
+  numbering mismatch).
+- **Fixed: an episode that ends on a still, silent picture could never be prepped.**
+  The bundle check can't tell a hole in an unfinished download from a quiet ending,
+  so South Park S14E06 "201" was rejected twice and marked unbuildable. Before
+  giving up, prep now decodes just that stretch of the source. If it decodes
+  cleanly, the bundle is kept, and the audit leaves it alone.
+- **Fixed: a season pack could be marked ready with an episode missing.** qBittorrent
+  still reports a file as complete after its bytes are deleted, until it rechecks the
+  torrent. A pack re-created after "Delete files" was trusted on that and went ready
+  with an episode missing. Code Geass S01E24 sat at 0.4 % for two weeks. The ready
+  check now looks at the disk. A missing file makes qBittorrent recheck and download
+  it again.
+- **New: a self-repair sweep every 30 minutes.** A finished show with a wanted
+  episode missing from disk goes back to downloading. It never acts when *every*
+  file is missing (a drive that is unplugged or was moved), and it leaves skipped,
+  compressed and space-reclaimed episodes alone.
+
 ## [19.9.3] — 2026-09-29
 ### No more 20-second freezes when opening a big show
 

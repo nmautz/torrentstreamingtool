@@ -12422,8 +12422,10 @@ async function epPlayEpisode(season, episode, btn){
   if(!cands.length && eps.length){
     eps=uniq(eps);
     const pick=_bgAutoPick(ctx, eps, filt);
-    const rc=_ssAutoPickRace(eps, filt, {pick, match:s=>_bgAudioMatch(ctx,s)});
-    cands=rc.candidates.length ? rc.candidates : [slim(pick)];
+    if(pick){
+      const rc=_ssAutoPickRace(eps, filt, {pick, match:s=>_bgAudioMatch(ctx,s), meta:ctx.meta});
+      cands=rc.candidates.length ? rc.candidates : [slim(pick)];
+    }
   }
   if(!cands.length && packs.length){
     // No pack passed the filters and no episode release turned up — race the
@@ -17108,14 +17110,16 @@ const _SS_EPTAG=/^(\d{3,4}p|2160p|4k|uhd|web|webdl|web-dl|webrip|hdtv|pdtv|blura
 // Does the episode title in the release agree with TMDb's? +1 agrees, 0 says
 // nothing, -1 contradicts. "Doctor Who S01E01 Rose" cannot be the 1963 show,
 // whose first episode is "An Unearthly Child".
-function _ssEpTitleVerdict(res, season, episode){
-  const te=_tmdbSeasonEpisodes(_ssMeta, season).find(x=>+x.episode===+episode);
-  const drop=new Set(["the","a","an","of","to","and","in","on","at","for","with","from","episode","chapter","ep","pt"]);
-  const key=t=>new Set(_ssTitleWords(t).filter(w=>!drop.has(w) && !/^\d+$/.test(w)));
-  const want=key(te&&te.name);
-  if(!want.size) return 0;
+const _SS_EPT_DROP=new Set(["the","a","an","of","to","and","in","on","at","for","with","from","episode","chapter","ep","pt"]);
+function _ssEpTitleKey(t){
+  return new Set(_ssTitleWords(t).filter(w=>!_SS_EPT_DROP.has(w) && !/^\d+$/.test(w)));
+}
+// The words a release puts after its SxxEyy code, up to the first quality tag:
+// its episode title, if it states one. "&" splits into words like any other
+// punctuation, so a two-episode release yields both titles.
+function _ssEpTitleSeg(res){
   const m=/[Ss]\d{1,2}[Ee]\d{1,3}(?!\d)/.exec(res.title||"");
-  if(!m) return 0;
+  if(!m) return new Set();
   const seg=[];
   for(const w of String(res.title).slice(m.index+m[0].length).split(/[ ._\[\]()]+/)){
     if(!w) continue;
@@ -17123,9 +17127,40 @@ function _ssEpTitleVerdict(res, season, episode){
     seg.push(w);
     if(seg.length>=8) break;
   }
-  const got=key(seg.join(" "));
+  return _ssEpTitleKey(seg.join(" "));
+}
+function _ssEpTitleVerdict(res, season, episode, meta){
+  const te=_tmdbSeasonEpisodes(meta===undefined?_ssMeta:meta, season).find(x=>+x.episode===+episode);
+  const want=_ssEpTitleKey(te&&te.name);
+  if(!want.size) return 0;
+  const got=_ssEpTitleSeg(res);
   if(!got.size) return 0;
   return [...got].some(w=>want.has(w)) ? 1 : -1;
+}
+// Is this release really a DIFFERENT episode of the same season, going by the
+// title it states? True only when its episode title contradicts TMDb's name for
+// the number it carries AND contains another episode's whole name. A title that
+// merely disagrees (a translation, an alternate title) is only demoted, by
+// _ssSourceTier. This one is a wrong file.
+//
+// SpongeBob is the case: TMDb lists its 11-minute segments as episodes 1-41, and
+// half the releases number the 20 half-hours instead. "S01E02 Bubblestand &
+// Ripped Pants" is TMDb's E04 + E05, not E02 "Reef Blower". Without this, Get
+// filed seven wrong episodes into season 1 (19.10.0). Auto-picks and race
+// shortlists skip these; the show page still lists them for a manual pick.
+function _srcNamesOtherEpisode(res, meta){
+  if(!res || res.kind!=="episode") return false;
+  const eps=_tmdbSeasonEpisodes(meta, res.season);
+  if(eps.length<2) return false;
+  if(_ssEpTitleVerdict(res, res.season, res.episode, meta)!==-1) return false;
+  const got=_ssEpTitleSeg(res);
+  return eps.some(x=>{
+    if(+x.episode===+res.episode) return false;
+    const k=_ssEpTitleKey(x.name);
+    // A whole name, with at least one real word in it: "Day" alone must not
+    // make "Opposite Day" read as "Valentine's Day".
+    return k.size>0 && [...k].some(w=>w.length>=4) && [...k].every(w=>got.has(w));
+  });
 }
 function _ssYearsIn(title){
   return String(title||"").split(/[^0-9A-Za-z]+/).filter(t=>/^(19|20)\d{2}$/.test(t)).map(Number);
@@ -17862,7 +17897,7 @@ function _bgAudioMatch(ctx, s){
 function _bgAutoPick(ctx, sources, filt){
   if(!sources||!sources.length) return null;
   const pref=sources.filter(s=>_bgAudioMatch(ctx,s));
-  return _ssAutoPickFrom(pref.length?pref:sources, filt);
+  return _ssAutoPickFrom(pref.length?pref:sources, filt, ctx.meta);
 }
 
 // Make sure every episode in scope has had a genuine chance at a source.
@@ -18392,7 +18427,12 @@ function _pickCmp(a,b){
       || ((b.tracks||0)-(a.tracks||0))
       || ((b.seeders||0)-(a.seeders||0));
 }
-function _ssAutoPickFrom(sources, filt){
+function _ssAutoPickFrom(sources, filt, meta){
+  // A release that is really another episode is never an automatic answer,
+  // however well seeded. None left means no pick: better than a wrong file.
+  const m=meta===undefined?_ssMeta:meta;
+  sources=sources.filter(s=>!_srcNamesOtherEpisode(s, m));
+  if(!sources.length) return null;
   const okSeed=s=>(s.seeders||0)>=filt.minSeed;
   const okSize=s=>{ const z=s.size||0; return z>=filt.minBytes && z<=filt.maxBytes; };
   let c=sources.filter(s=>okSeed(s)&&okSize(s)).sort(_pickCmp);
@@ -18444,7 +18484,8 @@ function _ssAutoPickRace(sources, filt, opts){
   if(!pick) return {pick:null, candidates:[]};
   if(!app.download_race || !sources || sources.length<2) return {pick, candidates:[]};
   const pref=sources.filter((opts&&opts.match)||_ssAudioMatch);
-  const pool=pref.length?pref:sources;
+  const meta=(opts&&opts.meta!==undefined)?opts.meta:_ssMeta;
+  const pool=(pref.length?pref:sources).filter(x=>!_srcNamesOtherEpisode(x, meta));
   // De-duplicate by release identity, mirroring the server's _release_key: the
   // same release indexed by two trackers must never eat two race slots.
   const key=x=>((x&&x.title)||"").toLowerCase().replace(/[^a-z0-9]+/g,"");
@@ -30867,6 +30908,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.9.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.10.0</div>
 </body>
 </html>

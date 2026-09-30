@@ -6267,6 +6267,74 @@ after it is free again. The loop-block sampler (`diagnostics._loop_watchdog`) sa
 the loop thread from outside while it is blocked and logs `LOOP BLOCKED …` naming the
 frame. Read that line first. See [DIAGNOSTICS.md § Loop-block sampler](DIAGNOSTICS.md).
 
+## A release's number is not its episode: check the title it states (19.10.0)
+
+Numbering schemes disagree. TMDb lists SpongeBob's 11-minute segments as S01E01-41,
+while scene/SKST releases number the 20 half-hours. "S01E02 Bubblestand & Ripped
+Pants" parses as E02 but is TMDb's E04 + E05. TMDb's 1998 *Cowboy Bebop* is in
+broadcast order, so "S01E01 Asteroid Blues" is not TMDb's E01 "Stray Dog Strut". An
+indexer can also simply mislabel. `_ssEpTitleVerdict` (16.6.0) already saw this, but
+it only fed the show page's sort tier. `_pickCmp` ignores tiers, so every auto-pick
+and race shortlist was blind to it. Get filed seven wrong SpongeBob episodes.
+
+`_srcNamesOtherEpisode(res, meta)` is a hard gate inside `_ssAutoPickFrom` and
+`_ssAutoPickRace`, the two functions every automatic pick passes through. It fires
+only when **both** are true:
+- the release's episode title contradicts TMDb's name for its number, and
+- it contains **another** episode's whole name, with a word of 4+ letters.
+
+A title that merely disagrees (a translation, an alternate title) is still only
+demoted. On `tests/search_eval/labels.json` (1,691 results) it rejects nothing
+labelled right except the Cowboy Bebop row, which is the same mismatch. Pass the
+run's metadata explicitly (`meta:` / `ctx.meta`): `_ssMeta` is null when no show page
+is open. When every source is rejected, the pick is **null**: no download beats a
+wrong one.
+
+## A still, silent ending is not a hole (19.10.0)
+
+`bundlecheck` judges from segment sizes. A sparse-file hole (a source prepped
+mid-download) and an episode that ends on a still card over silence both show up as
+"dead video over dead audio". South Park S14E06 "201" ends on 31 s of that. Its
+source deep-decodes clean, yet prep rejected it twice and marked it `unbuildable`,
+and auto prep never tried again. On the **final** rejection, `_dead_span_is_content`
+now decodes only the dead window of the source (`-v error -xerror`, ±3 s). Clean
+means rc 0 **and** an empty stderr tail, because Matroska resyncs over zeroed bytes
+print errors without always failing. When it is clean, the bundle is published, and
+the verdict is stored with `damaged: false, content_verified: true`.
+`_run_bundle_audit` keeps a content-verified verdict instead of purging and
+re-prepping that bundle forever. Tested locally: a synthetic still/silent tail was
+accepted, and the same file with a zeroed 30 % hole was rejected.
+
+## qBit's progress is not a file (19.10.0)
+
+qBittorrent keeps a file at 100 % after its bytes are deleted behind its back (Delete
+Files, Explorer, a reaper) until the torrent is **rechecked**. Anything that reads
+"complete" off qBit's per-file progress can therefore be looking at a file that isn't
+there. Code Geass S01E24: on 09-15, Delete Files removed episodes from the old item
+(marked skip, so qBit never noticed). On 09-16 the item was re-created from the same
+torrent. E24 was wanted again, qBit still said 100 %, and `_all_nonskip_complete`
+flipped the pack **ready**. The monitor only watches `downloading` items, so nothing
+looked at it again for two weeks. Smart Skip's `file_missing` was the only trace.
+
+19.10.0:
+- **The ready gate checks the disk.** On the tick that would flip an item ready,
+  `_files_absent_on_disk` stats every wanted file (non-skip, not compressed, not
+  source-evicted). It runs in a thread, and only on that tick. A missing file, or
+  one smaller than qBit's size, keeps the item downloading and forces a
+  `qbit_recheck` (`_recheck_for_ghosts`, at most one per torrent per 15 min, because
+  a recheck reads the whole torrent). qBit then knows the pieces are gone and fetches
+  them.
+- **`_ready_ghost_sweep` heals items that are already ready.** It runs every 30 min
+  from `background_maintenance_loop`, not idle-gated, stats only. A ready item with a
+  wanted file **missing** is rechecked and flipped back to downloading. Two guards:
+  it checks **absence only, never size** (an in-place repair legitimately shrinks a
+  file), and an item with **every** wanted file missing is logged and left alone.
+  That is a drive that is offline or was moved, and re-downloading the library onto
+  it is the wrong answer. If qBit has lost the torrent too, it logs and points at
+  Admin › Cleanup › Recover.
+
+Grep `[ghost]` in `streamlink_app.log` to see it act.
+
 ## One torrent, two library items (19.9.3)
 
 An indexer can list one torrent under another episode's name. UIndex's "SpongeBob

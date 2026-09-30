@@ -6158,6 +6158,126 @@ def _all_nonskip_complete(item: dict, qfiles: list, save_path: str) -> bool:
     return saw
 
 
+def _wanted_files_on_disk_check(item: dict, qfiles: list, save_path: str
+                                ) -> list[tuple[str, int]]:
+    """(path, size) of every file the ready gate will count: non-skip, not
+    compressed, not source-evicted. The input to `_files_absent_on_disk`."""
+    cfg = _download_cfg(item)
+    by_path = {f.get("path", ""): f for f in item.get("files", [])}
+    out = []
+    for qf in qfiles:
+        full = str(Path(save_path) / qf.get("name", ""))
+        if _effective_file_mode(cfg, full) == "skip":
+            continue
+        f = by_path.get(full) or {}
+        if _file_is_compressed(f) or _file_evicted(f):
+            continue
+        out.append((full, int(qf.get("size", 0) or 0)))
+    return out
+
+
+def _files_absent_on_disk(pairs: list[tuple[str, int]],
+                          check_size: bool = True) -> list[str]:
+    """The paths that are NOT really there: missing, or smaller than qBit says
+    the finished file is. Blocking stats; call through `asyncio.to_thread`.
+
+    qBit's per-file progress is not evidence a file exists. It keeps 100 % for
+    a file deleted behind its back (Delete Files, Explorer, a reaper) until the
+    torrent is rechecked, so a pack re-created from that torrent passed the
+    ready gate with an episode missing: Code Geass S01E24, "ready" for two
+    weeks at 0.4 %. See docs/GOTCHAS.md § qBit's progress is not a file."""
+    gone = []
+    for path, size in pairs:
+        try:
+            st = os.stat(path)
+        except OSError:
+            gone.append(path)
+            continue
+        if check_size and size and st.st_size < size * 0.99:
+            gone.append(path)
+    return gone
+
+
+# hash → monotonic time of the last recheck we forced for a ghost file.
+_ghost_recheck_at: dict[str, float] = {}
+_GHOST_RECHECK_GAP_S = 15 * 60
+
+
+_GHOST_SWEEP_EVERY_S = 30 * 60
+_ghost_sweep_at = 0.0
+
+
+async def _ready_ghost_sweep() -> int:
+    """Reactivate READY items with a wanted file missing from disk. Returns how
+    many were reactivated.
+
+    The ready gate now checks the disk, but an item that went ready before that
+    (or lost a file afterwards) is never looked at again: the monitor only
+    watches `downloading` items. This finds them.
+
+    Absence only, never size: an in-place repair legitimately shrinks a file.
+    And an item with EVERY wanted file gone is left alone and logged. That is a
+    drive that is offline or was moved, and "re-download everything" is the
+    wrong answer to it."""
+    lib = await get_library()
+    cands = []
+    for it in lib.get("items", []):
+        if it.get("status") != "ready" or not it.get("torrent_hash"):
+            continue
+        cfg = _download_cfg(it)
+        pairs = [(f["path"], int(f.get("size_bytes") or 0)) for f in it.get("files", [])
+                 if f.get("path") and _effective_file_mode(cfg, f["path"]) != "skip"
+                 and not _file_is_compressed(f) and not _file_evicted(f)]
+        if pairs:
+            cands.append((it["id"], it.get("title", ""), it["torrent_hash"], pairs))
+
+    def _scan() -> list:
+        return [(iid, t, h, pairs, _files_absent_on_disk(pairs, check_size=False))
+                for iid, t, h, pairs in cands]
+
+    revived: list[str] = []
+    for iid, title, h, pairs, gone in await asyncio.to_thread(_scan):
+        if not gone:
+            continue
+        if len(gone) == len(pairs):
+            log.warning("[ghost] %s: every wanted file is missing - drive offline or "
+                        "moved? Not re-downloading.", title)
+            continue
+        if not await qbit_info(h):
+            log.warning("[ghost] %s: %d file(s) missing and qBit no longer has the "
+                        "torrent - use Admin > Cleanup > Recover", title, len(gone))
+            continue
+        await _recheck_for_ghosts(h, title, gone)
+        revived.append(iid)
+    if not revived:
+        return 0
+    async with mutate_library() as lib_w:
+        for it in lib_w["items"]:
+            if it["id"] in revived and it.get("status") == "ready":
+                it["status"] = "downloading"
+                state.downloading_count += 1
+                if not it.get("admin_only"):
+                    state.downloading_count_visible += 1
+    for iid in revived:
+        await broadcast("library_update", {"item_id": iid, "status": "downloading"})
+    return len(revived)
+
+
+async def _recheck_for_ghosts(h: str, title: str, gone: list[str]) -> bool:
+    """Force a qBit recheck so it learns the pieces are gone and fetches them
+    again. Rate-limited per torrent: a recheck reads the whole torrent off disk.
+    Returns True when one was issued."""
+    now = time.monotonic()
+    if now - _ghost_recheck_at.get(h, -1e9) < _GHOST_RECHECK_GAP_S:
+        return False
+    _ghost_recheck_at[h] = now
+    log.warning("[ghost] %s: qBit says %d file(s) are complete but they are not on "
+                "disk (%s) - rechecking so they download again", title, len(gone),
+                ", ".join(Path(p).name for p in gone[:3]))
+    await qbit_recheck(h)
+    return True
+
+
 # ── Pack slicing: one episode out of a whole-season torrent ────────────────────
 # The auto picker prefers a season pack over a single-episode release whenever one
 # covers what was asked for (see `_pack_first_cfg` and `_bgPackForEpisodes` in
@@ -11853,6 +11973,16 @@ async def library_download_monitor() -> None:
                 # idle-deferred files haven't fetched yet; flipping ready on that would
                 # both mislabel a partial download as whole and fingerprint a missing set.
                 nonskip_done = _all_nonskip_complete(item, qfiles, save_path)
+                if nonskip_done:
+                    # qBit's 100 % is a claim, not a file. Check the bytes are
+                    # really there before calling the item ready (rare: runs only
+                    # on the tick that would flip it).
+                    gone = await asyncio.to_thread(
+                        _files_absent_on_disk,
+                        _wanted_files_on_disk_check(item, qfiles, save_path))
+                    if gone:
+                        nonskip_done = False
+                        await _recheck_for_ghosts(h, item.get("title", ""), gone)
                 if qstate in ("error", "missingFiles"):
                     item["status"] = "error"
                     item.pop("stalled_since", None)
@@ -31606,6 +31736,39 @@ def _bundle_check_record(verdict, key: str, path: str) -> dict:
     return rec
 
 
+async def _dead_span_is_content(src: Path, verdict) -> bool:
+    """Is the bundle's dead stretch really in the episode: a still picture over
+    silence that the source itself decodes cleanly?
+
+    The bundle check reads segment sizes, and a sparse-file hole and a still,
+    silent ending look identical to it. South Park S14E06 "201" ends on 31 s of
+    exactly that. Its source deep-decodes without a single error, yet prep
+    rejected the bundle twice and marked it unbuildable, so the episode could
+    never play on a phone. A hole in a source is a decode error: a Matroska
+    resync, a broken NAL, an AAC element error. So decode only the dead window
+    of the source, a few seconds of work, and trust it when it comes back clean
+    (rc 0 AND nothing on stderr at `-v error`)."""
+    ffmpeg = analyzer.ffmpeg_bin()
+    spans = list(getattr(verdict, "spans", None) or [])
+    if not ffmpeg or not spans:
+        return False
+    a = max(0.0, min(sp.start for sp in spans) - 3.0)
+    b = max(sp.end for sp in spans) + 3.0
+    args = [ffmpeg, "-hide_banner", "-v", "error", "-xerror",
+            "-ss", f"{a:.3f}", "-t", f"{b - a:.3f}", "-i", str(src),
+            "-map", "0:v?", "-map", "0:a?", "-f", "null", "-"]
+    rc, tail = await _run_ffmpeg_capture(args, lambda _p: None)
+    return rc == 0 and not tail
+
+
+def _bundle_content_verified(f: dict, key: str) -> bool:
+    """True when this file's bundle was judged dead, and the dead stretch was then
+    proved to be the episode's own content (`_dead_span_is_content`). The audit
+    must leave such a bundle alone, or it purges and re-preps it forever."""
+    rec = _bundle_check_current(f, key)
+    return bool(rec and rec.get("content_verified"))
+
+
 def _bundle_unbuildable(f: dict, key: str) -> bool:
     """True when prep has already produced a damaged bundle for this exact file
     twice and gave up. Gates AUTOMATIC prep only — an explicit press still tries,
@@ -32329,11 +32492,32 @@ async def _run_offline_job(job_id: str) -> None:
             if verdict is not None and verdict.damaged:
                 attempts = int(job.get("_damage_retries", 0)) + 1
                 job["_damage_retries"] = attempts
-                hls_log.error(
-                    "job %s REJECTED (attempt %d): %s — src=%s",
-                    job_id, attempts, verdict.detail, src,
-                )
-                await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
+                content = (attempts >= BUNDLE_DAMAGE_RETRIES
+                           and await _dead_span_is_content(src, verdict))
+                if content:
+                    # Same verdict after a re-encode AND the source decodes
+                    # cleanly across the dead window: it is the episode, not a
+                    # hole. Publish, and record why so the audit leaves it be.
+                    hls_log.warning(
+                        "job %s ACCEPTED (attempt %d) — the dead stretch decodes "
+                        "cleanly in the source, so it is content: %s — src=%s",
+                        job_id, attempts, verdict.detail, src)
+                    rec = _bundle_check_record(verdict, out_dir.name, str(src))
+                    rec["damaged"] = False
+                    rec["content_verified"] = True
+                    try:
+                        await _persist_bundle_checks({str(src): rec})
+                    except Exception as exc:
+                        hls_log.warning("job %s: could not record verdict: %s", job_id, exc)
+                    verdict = None
+                else:
+                    hls_log.error(
+                        "job %s REJECTED (attempt %d): %s — src=%s",
+                        job_id, attempts, verdict.detail, src,
+                    )
+                    await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
+            if verdict is not None and verdict.damaged:
+                attempts = int(job.get("_damage_retries", 0))
                 if attempts < BUNDLE_DAMAGE_RETRIES:
                     # Almost always a source that wasn't all there yet. Re-queue:
                     # the completeness gate at the top parks the job until qBit
@@ -33469,11 +33653,11 @@ async def _run_bundle_audit(scope: str = "all", *, auto: bool = False,
                     continue
                 targets.append((item.get("id", ""), _item_display_names(item)[0],
                                 f.get("path", ""),
-                                f.get("name") or Path(f.get("path", "")).name))
+                                f.get("name") or Path(f.get("path", "")).name, f))
                 await asyncio.sleep(0)
         ba["total"] = len(targets)
         ba["scanned"] = 0
-        for (iid, title, path, name) in targets:
+        for (iid, title, path, name, fsnap) in targets:
             if state.bundle_audit_stop:
                 ba["stopped"] = True
                 break
@@ -33500,6 +33684,11 @@ async def _run_bundle_audit(scope: str = "all", *, auto: bool = False,
                 continue
             records[path] = _bundle_check_record(verdict, key, path)
             if not verdict.damaged:
+                continue
+            if _bundle_content_verified(fsnap, key):
+                # Its dead stretch was proved to be the episode's own still,
+                # silent footage when it was prepped. Keep that verdict.
+                records[path] = fsnap.get("bundle_check")
                 continue
             hls_log.warning("bundle audit: %s is damaged — %s", name, verdict.detail)
             ba["damaged"].append({"item_id": iid, "item_title": title, "path": path,
@@ -34164,6 +34353,7 @@ async def background_maintenance_loop() -> None:
     NB: idle is checked WITHOUT `for_prep=True` on purpose — an admin watching the
     Activity tab (which holds an SSE connection) must not block the very work the
     tab exists to show. Genuine playback / recent interaction still pauses it."""
+    global _ghost_sweep_at
     await asyncio.sleep(20)   # let startup settle before the first sweep
     while True:
         try:
@@ -34174,6 +34364,13 @@ async def background_maintenance_loop() -> None:
                 await _reconcile_evicted_sources()
             except Exception as exc:
                 log.warning("evict reconcile: %s", exc)
+            # Also unconditional, and not idle-gated: stats only, every 30 min.
+            if time.monotonic() - _ghost_sweep_at >= _GHOST_SWEEP_EVERY_S:
+                _ghost_sweep_at = time.monotonic()
+                try:
+                    await _ready_ghost_sweep()
+                except Exception as exc:
+                    log.warning("ghost sweep: %s", exc)
             cfg = _auto_maint_cfg(lib)
             if (cfg["fingerprint"] or cfg["validate"] or cfg["bundles"]
                     ) and not await _machine_in_use(300):
