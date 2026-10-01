@@ -1155,6 +1155,13 @@ after the numbered ones, by date), by date in release mode — then shows by fir
 is persisted. A queued film whose metadata hasn't resolved yet still joins its shelf:
 `_collection_of` falls back to the parts cache (`_cached_collection_for_movie`).
 
+**Virtual groups (19.13.0).** A collection reached from Search or Explore may have no shelf
+here — none of it owned, or one film of nine (an auto group needs two). With `browse=1`,
+`GET /api/library/group/coll:<id>` answers with `_virtual_collection_group`: the same shape,
+`virtual: true`, name and artwork from TMDb's `/collection/{id}`, members = any visible item
+in the collection. **Nothing is written to `settings.groups`**; the real auto group takes
+over under the same id once a second film lands.
+
 **`all_seasons` vs `seasons`.** `all_seasons` is every season TMDb knows the show has, taken straight off `/tv/{id}` (so it's free — no extra request) and including season 0. `seasons` only holds the seasons someone actually fetched episode lists for: `_fetch_item_metadata` asks for the seasons present *on disk*, so a show can HAVE season 4 while `seasons` covers 1–3. Keeping "this season exists" separate from "we have its episode list" is what lets the library page show a season you own nothing from (count from `episode_count`) and then fill in its real episode rows once the lazy top-up lands. `/api/tmdb/lookup` (by `tmdb_id` or title) fetches **every** season (in parallel, off the TMDb response cache below), and is the top-up the frontend uses — see [FRONTEND.md](FRONTEND.md) § missing content.
 
 Populated by `_fetch_item_metadata` ([main.py](../main.py)) on first hit of `GET /api/library/{id}/metadata`, then served from cache. Per-id `asyncio.Lock` coalesces concurrent first-loads. **The first-access fetch never blocks the endpoint**: it runs as a background task (`_spawn_metadata_fetch`) the endpoint waits on for ≤4 s before answering `pending:true`; a `metadata_update` SSE event fires when the fetch lands. Cached entries answer instantly regardless of internet state. Force refresh via `POST /api/library/{id}/metadata/refresh` (admin); the same endpoint accepts an optional `{tmdb_id, kind}` to manually bind the item to a TMDb entry when auto-match picks the wrong show.

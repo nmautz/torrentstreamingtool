@@ -28,6 +28,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 import zipfile
 from collections import deque
@@ -16373,18 +16374,24 @@ def _group_payload(lib: dict, group: dict, visible: list, profile_id: str) -> di
     }
 
 
-async def _group_missing(lib: dict, group: dict, entries: list) -> dict:
+async def _group_missing(lib: dict, group: dict, entries: list,
+                         browse: bool = False) -> dict:
     """Films in the group's TMDb collection that this library does not hold.
 
     Measured against the WHOLE library, not just the shelf's members — a film
     that is here but was never grouped is still not "missing". Unreleased films
     follow the same admin policy as unaired episodes (settings.missing_content):
-    hidden, or listed as Upcoming with nothing to get."""
+    hidden, or listed as Upcoming with nothing to get.
+
+    `browse` is a shelf opened from Search or Explore. There the films you don't
+    have are the whole point of the page, not a reminder on top of it, so the
+    missing-content policy (which governs what the LIBRARY nags about) does not
+    apply — the same films are one search away as loose tiles either way."""
     cid = int(group.get("collection_id") or 0)
     if not cid:
         return {"missing": [], "missing_supported": False}
     cfg = (lib.get("settings") or {}).get("missing_content") or {}
-    if cfg.get("enabled", True) is False:
+    if cfg.get("enabled", True) is False and not browse:
         return {"missing": [], "missing_supported": False}
     parts = await _tmdb_collection_parts(cid)
     if parts is None:
@@ -16392,7 +16399,7 @@ async def _group_missing(lib: dict, group: dict, entries: list) -> dict:
     have = {_item_movie_tmdb_id(it) for it in lib["items"]} - {0}
     have |= {int(e.get("tmdb_id") or 0) for e in entries} - {0}
     today = datetime.now(timezone.utc).date().isoformat()
-    show_unaired = bool(cfg.get("show_unaired", False))
+    show_unaired = browse or bool(cfg.get("show_unaired", False))
     missing = []
     for pt in parts:
         if pt["tmdb_id"] in have:
@@ -16422,21 +16429,71 @@ async def get_library_groups(request: Request, profile_id: str = "") -> JSONResp
     })
 
 
+async def _virtual_collection_group(visible: list, cid: int) -> Optional[dict]:
+    """A TMDb collection as a shelf, for a library that has no shelf for it.
+
+    A shelf only forms once two of its films are here, so a collection found in
+    Search — none of it owned, or one film of nine — has nothing to open. This
+    is that shelf, built from TMDb alone and never stored: the moment a second
+    film lands, the real auto group takes over under the same `coll:<id>`."""
+    coll = await _tmdb_get(f"/collection/{cid}")
+    if not coll:
+        return None
+    part_ids = {int(p.get("id") or 0) for p in coll.get("parts") or []} - {0}
+    members = []
+    for it in visible:
+        if int(_collection_of(it).get("id") or 0) == cid \
+                or _item_movie_tmdb_id(it) in part_ids:
+            k = _member_key(it)
+            if k not in members:
+                members.append(k)
+    return {
+        "id":            _auto_group_id(cid),
+        "name":          coll.get("name") or "",
+        "source":        "tmdb_collection",
+        "collection_id": cid,
+        "poster_path":   coll.get("poster_path") or "",
+        "backdrop_path": coll.get("backdrop_path") or "",
+        "order":         "story",
+        "members":       members,
+        "virtual":       True,
+    }
+
+
 @app.get("/api/library/group/{group_id:path}")
 async def get_library_group(request: Request, group_id: str,
-                            profile_id: str = "", include_missing: int = 0) -> JSONResponse:
+                            profile_id: str = "", include_missing: int = 0,
+                            browse: int = 0) -> JSONResponse:
     """One group, with every member resolved — what the group page renders.
     `include_missing=1` adds the collection's films this library lacks (see
     _group_missing); off by default because the first call per collection costs
-    one TMDb round trip per film."""
+    one TMDb round trip per film.
+
+    `coll:<id>` also finds the hand-built group that ABSORBED that collection
+    (Search only knows the TMDb id, not what the shelf was renamed to), and with
+    `browse=1` a collection this library has no shelf for is served as a
+    `virtual` one — see _virtual_collection_group."""
     lib = await get_library()
     visible = _visible_items(request, lib, profile_id)
-    group = next((g for g in _build_groups(lib, visible) if g["id"] == group_id), None)
+    groups = _build_groups(lib, visible)
+    group = next((g for g in groups if g["id"] == group_id), None)
+    cid = 0
+    if group_id.startswith("coll:"):
+        try:
+            cid = int(group_id[5:])
+        except ValueError:
+            cid = 0
+    if not group and cid > 0:
+        group = next((g for g in groups if g["collection_id"] == cid), None)
+        if not group and browse:
+            group = await _virtual_collection_group(visible, cid)
     if not group:
         raise HTTPException(404, "Group not found.")
     payload = _group_payload(lib, group, visible, profile_id)
-    if include_missing:
-        payload.update(await _group_missing(lib, group, payload["members"]))
+    payload["virtual"] = bool(group.get("virtual"))
+    if include_missing or browse:
+        payload.update(await _group_missing(lib, group, payload["members"],
+                                            browse=bool(browse)))
     return JSONResponse({**payload, "img_base": LOCAL_IMG_BASE})
 
 
@@ -16898,21 +16955,100 @@ async def tmdb_watch(tmdb_id: int = 0, kind: str = "", region: str = "") -> JSON
                          **_watch_offers(payload, region)})
 
 
+# ── Collections in search ──────────────────────────────────────────────────
+# "star wars" used to answer with a dozen loose films in popularity order — the
+# saga scattered between a holiday special and a Lego short. TMDb can name the
+# franchise itself (/search/collection), so the result list leads with ONE tile
+# per matching collection and the page folds that collection's films into it.
+#
+# The fold is decided by the NAME, the same rule the library's own search uses
+# for a shelf: "star wars" matches "Star Wars Collection" and folds; "empire
+# strikes back" does not, so the film stays a film. Search results don't carry
+# `belongs_to_collection`, so a membership rule would cost a details call per
+# result — and would hide the one film somebody typed the exact title of.
+
+_COLLECTION_SEARCH_MAX = 3       # tiles that may lead a result list
+_COLLECTION_SEARCH_PROBE = 8     # name matches worth a /collection/{id} call
+
+
+def _coll_words(s: str) -> list:
+    s = unicodedata.normalize("NFKD", s or "")
+    s = "".join(ch for ch in s if not unicodedata.combining(ch)).lower()
+    return re.findall(r"[a-z0-9]+", s)
+
+
+def _collection_name_matches(query: str, name: str) -> bool:
+    """Every typed word begins some word of the collection's name. A prefix, not
+    a whole word, because Explore searches as you type: "star war" is on its way
+    to "star wars" and should not flicker the tile away."""
+    q, n = _coll_words(query), _coll_words(name)
+    if len("".join(q)) < 3:
+        return False
+    return all(any(w.startswith(t) for w in n) for t in q)
+
+
+async def _tmdb_search_collections(q: str) -> list:
+    """Up to `_COLLECTION_SEARCH_MAX` TMDb collections whose name matches `q`,
+    most popular first. A collection with fewer than two RELEASED films is not a
+    shelf (TMDb opens one the day a sequel is announced), so it is skipped."""
+    if not _collection_name_matches(q, q):
+        return []
+    data = await _tmdb_get("/search/collection",
+                           {"query": q, "include_adult": "false"})
+    cands = [r for r in (data or {}).get("results", []) or []
+             if r.get("id") and _collection_name_matches(q, r.get("name") or "")]
+    cands = cands[:_COLLECTION_SEARCH_PROBE]
+    if not cands:
+        return []
+    # The search row has no film list and no popularity; /collection/{id} has
+    # both, and is cached on disk for a week.
+    details = await asyncio.gather(
+        *(_tmdb_get(f"/collection/{int(r['id'])}") for r in cands))
+    today = datetime.now(timezone.utc).date().isoformat()
+    out = []
+    for r, coll in zip(cands, details):
+        parts = [p for p in (coll or {}).get("parts") or [] if p.get("id")]
+        dates = sorted(p["release_date"] for p in parts
+                       if (p.get("release_date") or "") and p["release_date"] <= today)
+        if len(dates) < 2:
+            continue
+        out.append({
+            "id":            int(r["id"]),
+            "name":          r.get("name") or (coll or {}).get("name") or "",
+            "overview":      r.get("overview") or (coll or {}).get("overview") or "",
+            "poster_path":   r.get("poster_path") or "",
+            "backdrop_path": r.get("backdrop_path") or "",
+            # Every film, announced ones included: they all fold into the tile.
+            "film_ids":      [int(p["id"]) for p in parts],
+            "film_count":    len(dates),
+            "first_year":    dates[0][:4],
+            "last_year":     dates[-1][:4],
+            "_pop":          max((p.get("popularity") or 0) for p in parts),
+        })
+    out.sort(key=lambda c: c["_pop"], reverse=True)
+    out = out[:_COLLECTION_SEARCH_MAX]
+    for c in out:
+        c.pop("_pop", None)
+    return out
+
+
 @app.get("/api/tmdb/search")
 async def tmdb_search(query: str = "", kind: str = "") -> JSONResponse:
     """TMDb candidate shows/movies for a free-text query — the entry point of the
     TMDb-first search flow. Returns `{enabled, img_base, results:[{id, kind, title,
-    year, overview, poster_path}]}` (same candidate shape as the metadata /search
-    endpoint but keyed off a bare query, not a library item). Not admin-gated.
-    `kind` filters "tv"/"movie"; empty searches both. `enabled=false` (no key) is
-    the frontend's signal to fall back to the Jackett-first grouped search."""
+    year, overview, poster_path}], collections:[…]}` (same candidate shape as the
+    metadata /search endpoint but keyed off a bare query, not a library item).
+    Not admin-gated. `kind` filters "tv"/"movie"; empty searches both.
+    `collections` are the film franchises the query NAMES (see
+    _tmdb_search_collections); never present for `kind=tv`. `enabled=false` (no
+    key) is the frontend's signal to fall back to the Jackett-first grouped search."""
     if not await _tmdb_effective_key():
         return JSONResponse({"enabled": False, "img_base": LOCAL_IMG_BASE,
-                             "results": []})
+                             "results": [], "collections": []})
     q = (query or "").strip()
     if not q:
         return JSONResponse({"enabled": True, "img_base": LOCAL_IMG_BASE,
-                             "results": []})
+                             "results": [], "collections": []})
 
     kind = kind if kind in ("tv", "movie") else ""
     results: list[dict] = []
@@ -16955,8 +17091,10 @@ async def tmdb_search(query: str = "", kind: str = "") -> JSONResponse:
     for r in results:
         r.pop("popularity", None)
 
+    collections = await _tmdb_search_collections(q) if kind != "tv" else []
+
     return JSONResponse({"enabled": True, "img_base": LOCAL_IMG_BASE,
-                         "results": results})
+                         "results": results, "collections": collections})
 
 
 # ── TMDb Explore (browse: trending / popular / new releases / genres) ─────────

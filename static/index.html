@@ -8547,6 +8547,13 @@ function closeGroupPage(){
 
 // Open the shelf. `spec` is either {kind:"group", id} for a franchise or
 // {kind:"show", seriesKey, itemId, title} for a multi-section show.
+//
+// `browse:true` is a franchise reached from Search or Explore (id "coll:<tmdb
+// collection id>"). The films you don't have are what that visit is FOR, so they
+// are always listed — the "Show not downloaded" preference and the admin's
+// missing-content policy are about the library, and neither applies. The library
+// may have no shelf for it at all; the server then answers with a `virtual` one
+// built from TMDb, which has nothing stored to rename, reorder or add to.
 async function openGroupPage(spec){
   // refreshGroupPage re-opens with the SAME spec object, so a live selection
   // survives a repaint; navigating to a different shelf drops it.
@@ -8564,7 +8571,7 @@ async function openGroupPage(spec){
 
   const pid = profile.id ? `profile_id=${encodeURIComponent(profile.id)}` : "";
   const url = spec.kind==="group"
-    ? `/api/library/group/${encodeURIComponent(spec.id)}?${pid}&include_missing=${(grpShowMissing&&missingContentEnabled)?1:0}`
+    ? `/api/library/group/${encodeURIComponent(spec.id)}?${pid}&include_missing=${(grpShowMissing&&missingContentEnabled)?1:0}${spec.browse?"&browse=1":""}`
     : `/api/library/series/${encodeURIComponent(spec.seriesKey)}?${pid}`;
   let d=null;
   try{ const r=await fetch(url); if(r.ok) d=await r.json(); }catch(_){}
@@ -8574,6 +8581,8 @@ async function openGroupPage(spec){
       `<p class="text-red-400 text-sm text-center py-12">Could not load this.</p>`;
     return;
   }
+  // A virtual shelf's order lives only on this visit (see setGroupOrder).
+  if(d.virtual && spec.order) d.order=spec.order;
   grpData=d;
   renderGroupPage();
 }
@@ -8674,7 +8683,7 @@ function _grpMemberRows(){
 // yet) only arrive here when the admin chose to show unaired content, and get no
 // Get button — there is nothing to find.
 function _grpMissingRows(){
-  if(!(grpShowMissing && missingContentEnabled)) return [];
+  if(!((grpCtx&&grpCtx.browse) || (grpShowMissing && missingContentEnabled))) return [];
   return (grpData.missing||[]).map(f=>({
     id: `missing:${f.tmdb_id}`,
     title: f.title,
@@ -8892,14 +8901,15 @@ function renderGroupPage(){
   }
   // Only a shelf backed by a TMDb collection knows what it is missing; a purely
   // hand-built one (a few shows put together) has no list to compare against.
-  if(isGroup && grpData.collection_id && missingContentEnabled){
+  const browse=isGroup && !!grpCtx.browse, virtual=isGroup && !!grpData.virtual;
+  if(isGroup && grpData.collection_id && missingContentEnabled && !browse){
     actions+=`<label class="flex items-center gap-2 px-3 py-1.5 border border-gray-700 bg-gray-900 cursor-pointer select-none
                      text-[10px] font-black uppercase tracking-widest ${grpShowMissing?"text-white":"text-gray-400 hover:text-white"}">
       <input id="grpMissingToggle" type="checkbox" class="accent-indigo-500" ${grpShowMissing?"checked":""}/>
       Show not downloaded
     </label>`;
   }
-  if(isGroup){
+  if(isGroup && !virtual){
     actions+=`<button onclick="openGroupAdd()" class="px-3 py-1.5 border border-gray-700 bg-gray-900
                 text-gray-400 hover:text-white text-[10px] font-black uppercase tracking-widest transition-colors">+ Add title</button>`;
     actions+=`<button onclick="grpSelectMode(${grpSelMode?"false":"true"})"
@@ -8907,11 +8917,11 @@ function renderGroupPage(){
                        text-[10px] font-black uppercase tracking-widest transition-colors">${grpSelMode?"Cancel":"Select"}</button>`;
   }
   act.innerHTML=actions;
-  document.getElementById("grpRenameBtn").classList.toggle("hidden", !isGroup);
+  document.getElementById("grpRenameBtn").classList.toggle("hidden", !isGroup || virtual);
 
   document.getElementById("grpList").innerHTML =
     `<div class="p-2 sm:p-4 space-y-2">${rows.map(r=>r._missing?_grpMissingRowHtml(r):_grpRowHtml(r)).join("")}</div>
-     ${(isGroup && grpShowMissing && grpData.missing_error)
+     ${(isGroup && (grpShowMissing||browse) && grpData.missing_error)
        ?`<p class="text-[11px] text-gray-600 text-center pb-4">Couldn't reach TMDb to list the films you don't have yet.</p>`:""}`;
 
   // Wire rows. `data-row` is the member key or section key; the row objects are
@@ -9114,6 +9124,9 @@ async function setGroupOrder(mode){
   if((grpData.order||"story")===mode) return;
   grpData.order=mode;
   renderGroupPage();                       // optimistic — the sort is server-side
+  // Nothing is stored for a virtual shelf, so there is nothing to save the
+  // order ON; it rides the spec instead and survives a repaint after Get.
+  if(grpData.virtual){ grpCtx.order=mode; return; }
   try{
     await fetch(`/api/library/groups/${encodeURIComponent(grpData.id)}`,{
       method:"POST", headers:{"Content-Type":"application/json"},
@@ -15046,6 +15059,63 @@ async function _exFetch(p, page){
   return d;
 }
 
+// ── Collections in search ──
+// A query that NAMES a franchise ("star wars") gets one tile for it, leading the
+// results, with its films folded inside — instead of the saga scattered through
+// a popularity sort. The server decides which collections match (by name, up to
+// three; see _tmdb_search_collections); this folds their films out of the list.
+// `owns(kind,id)` is the surface's own "is this in the library" test.
+//
+// Television has no collections in TMDb, so a show joins only where the library
+// already says it belongs: a shelf that absorbed this collection brings its name
+// ("Star Wars", not "Star Wars Collection") and the shows added to it by hand.
+function _collFold(d, owns){
+  const folded=new Set();
+  const colls=((d&&d.collections)||[]).map(c=>{
+    const g=(libGroups||[]).find(x=>x.collection_id===c.id);
+    const shows=g ? (g.members||[]).filter(m=>m.kind==="tv") : [];
+    (c.film_ids||[]).forEach(id=>folded.add(`movie:${id}`));
+    shows.forEach(m=>{ if(m.tmdb_id) folded.add(`tv:${m.tmdb_id}`); });
+    return {...c, name:(g&&g.name)||c.name, shows:shows.length,
+            owned:(c.film_ids||[]).filter(id=>owns("movie",id)).length};
+  });
+  return {colls, items:((d&&d.results)||[]).filter(r=>!folded.has(`${r.kind}:${r.id}`))};
+}
+function _collBits(c){
+  const bits=[`${c.film_count} film${c.film_count===1?"":"s"}`];
+  if(c.shows) bits.push(`${c.shows} show${c.shows===1?"":"s"}`);
+  if(c.first_year) bits.push(c.first_year===c.last_year?c.first_year:`${c.first_year}\u2013${c.last_year}`);
+  return bits;
+}
+function _collOpen(c){
+  openGroupPage({kind:"group", id:`coll:${c.id}`, title:c.name, browse:true});
+}
+
+// A collection's poster tile, in the Explore search grid.
+function _exCollTile(c){
+  const t=document.createElement("button");
+  t.type="button";
+  t.className="w-full text-left bg-gray-900 border border-gray-800 hover:border-indigo-600 transition-colors overflow-hidden";
+  const img=c.poster_path
+    ? `<img src="${_exImgBase}/w185${c.poster_path}" alt="" loading="lazy"
+           class="w-full aspect-[2/3] object-cover bg-gray-950"/>`
+    : `<div class="w-full aspect-[2/3] bg-gray-950 flex items-center justify-center p-2">
+         <span class="text-[10px] font-black uppercase tracking-widest text-gray-700 text-center line-clamp-4">${escHtml(c.name)}</span>
+       </div>`;
+  const owned=c.owned
+    ? `<span class="bg-green-700/90 text-white text-[8px] font-black uppercase tracking-widest px-1 py-0.5 leading-none">${c.owned} of ${c.film_count} in Library</span>` : "";
+  t.innerHTML=`<div class="relative">${img}
+      <div class="absolute top-1 left-1 right-1 flex flex-col gap-0.5 items-start">
+        <span class="bg-indigo-700 text-white text-[8px] font-black uppercase tracking-widest px-1 py-0.5 leading-none">Collection</span>${owned}
+      </div></div>
+    <div class="p-1.5">
+      <p class="text-[11px] font-bold uppercase tracking-wide text-gray-200 truncate">${escHtml(c.name)}</p>
+      <div class="text-[9px] text-gray-500 font-bold mt-0.5 truncate">${escHtml(_collBits(c).join(" \u00b7 "))}</div>
+    </div>`;
+  t.addEventListener("click",()=>_collOpen(c));
+  return t;
+}
+
 // One poster tile. `grid` = fluid width (grid cell) vs fixed rail width.
 function _exTile(c, grid){
   const t=document.createElement("button");
@@ -15485,11 +15555,15 @@ async function _exShowSearch(){
     const d=r.ok?await r.json():{results:[]};
     if(seq!==_exSearchSeq) return;
     _exImgBase=d.img_base||_exImgBase;
-    let items=(d.results||[]);
-    if(_exHideOwned) items=items.filter(c=>!_exInLib(c));
+    let {colls, items}=_collFold(d, (kind,id)=>_exLibKeys.has(`${kind}:${id}`));
+    if(_exHideOwned){
+      items=items.filter(c=>!_exInLib(c));
+      colls=colls.filter(c=>c.owned<c.film_count);
+    }
     grid.innerHTML="";
+    colls.forEach(c=>grid.appendChild(_exCollTile(c)));
     items.forEach(c=>grid.appendChild(_exTile(c,true)));
-    document.getElementById("exGridEmpty").classList.toggle("hidden",items.length>0);
+    document.getElementById("exGridEmpty").classList.toggle("hidden",colls.length+items.length>0);
   }catch(e){
     if(seq!==_exSearchSeq) return;
     grid.innerHTML="";
@@ -15560,17 +15634,45 @@ async function doSearch(q){
 // Render the TMDb candidate list as poster cards. Clicking one opens the show
 // page (openSearchShowFromTmdb), which is where Jackett is finally queried.
 function _renderTmdbResults(q, tmdb, grid, wrap, count){
-  const results=tmdb.results||[];
+  const {colls, items:results}=_collFold(tmdb, (kind,id)=>!!_covFor(kind,id));
   const imgBase=tmdb.img_base||"/api/metadata/img";
   _tmdbResultsById={};
-  count.textContent=`${results.length} result${results.length===1?"":"s"}`;
+  const total=colls.length+results.length;
+  count.textContent=`${total} result${total===1?"":"s"}`;
   grid.innerHTML="";
+  // Collections lead: the query named the franchise, so it is the best answer.
+  colls.forEach((c,i)=>{
+    const card=document.createElement("div");
+    card.className="result-row bg-gray-900 border border-gray-800 overflow-hidden cursor-pointer hover:border-indigo-700 transition-colors flex";
+    card.style.animationDelay=`${i*18}ms`;
+    card.setAttribute("role","button"); card.tabIndex=0;
+    const poster=c.poster_path
+      ? `<img src="${imgBase}/w185${c.poster_path}" alt="" loading="lazy"
+             class="w-16 sm:w-20 h-24 sm:h-28 object-cover bg-gray-950 flex-shrink-0"/>`
+      : `<div class="w-16 sm:w-20 h-24 sm:h-28 bg-gray-950 border-r border-gray-800 flex items-center justify-center flex-shrink-0">
+           <span class="text-[9px] font-black uppercase tracking-widest text-gray-700 text-center px-1 line-clamp-3">${escHtml(c.name)}</span>
+         </div>`;
+    if(c.owned) card.classList.add("border-l-4","border-l-emerald-700");
+    card.innerHTML=`${poster}
+      <div class="min-w-0 flex-1 p-3 flex flex-col">
+        <div class="flex items-center gap-2 mb-1">
+          <span class="text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 bg-indigo-700 text-white">Collection</span>
+          <span class="text-[11px] text-gray-500 font-bold truncate">${escHtml(_collBits(c).join(" \u00b7 "))}</span>
+        </div>
+        <p class="text-sm font-black uppercase tracking-wide text-gray-100 leading-snug line-clamp-2">${escHtml(c.name)}</p>
+        ${c.owned?`<p class="text-[11px] text-emerald-400/90 mt-1 font-bold uppercase tracking-wide truncate">${c.owned} of ${c.film_count} in library</p>`:""}
+        <p class="text-[11px] text-gray-500 mt-1 line-clamp-2 flex-1">${escHtml(c.overview||"")}</p>
+      </div>`;
+    card.addEventListener("click",()=>_collOpen(c));
+    card.addEventListener("keydown",e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); _collOpen(c); }});
+    grid.appendChild(card);
+  });
   results.forEach((c,i)=>{
     const cid=`${c.id}-${c.kind}`;
     _tmdbResultsById[cid]=c;
     const card=document.createElement("div");
     card.className="result-row bg-gray-900 border border-gray-800 overflow-hidden cursor-pointer hover:border-indigo-700 transition-colors flex";
-    card.style.animationDelay=`${i*18}ms`;
+    card.style.animationDelay=`${(i+colls.length)*18}ms`;
     const poster=c.poster_path
       ? `<img src="${imgBase}/w185${c.poster_path}" alt="" loading="lazy"
              class="w-16 sm:w-20 h-24 sm:h-28 object-cover bg-gray-950 flex-shrink-0"/>`
@@ -31186,6 +31288,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.12.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.13.0</div>
 </body>
 </html>

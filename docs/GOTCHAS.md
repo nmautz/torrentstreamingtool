@@ -2001,6 +2001,25 @@ Shows are attached through the group page's "+ Add title" (`POST /api/library/gr
 the same id** that still absorbs the collection, so a film added later still joins; removing a
 collection film drops the absorption and pins the remaining films explicitly.
 
+### A collection in Search folds by NAME, and its shelf may not exist
+
+Search and Explore lead with a collection tile when the query names one (19.13.0). Two things
+about that are deliberate and easy to "fix" wrongly:
+
+- **The fold is a name match, not a membership test.** TMDb's `/search/movie` rows carry no
+  `belongs_to_collection`, so folding by membership costs a details call per result — and would
+  swallow the one film somebody typed the exact title of. "star wars" folds the saga; "empire
+  strikes back" returns the film. Words match as **prefixes** because Explore searches as you
+  type; a whole-word rule makes the tile vanish at "star war" and return at "star wars".
+- **The tile's shelf is addressed as `coll:<id>` and may be virtual.** An auto group needs two
+  owned films, and a renamed shelf has a hex id Search can't know. So `GET /api/library/group`
+  resolves `coll:<id>` to whichever group absorbs that collection, and with `browse=1` invents a
+  `virtual` one from TMDb. Nothing is stored for it — every write endpoint still 404s — so the
+  page must hide rename / + Add title / Select and keep the order toggle local. Gate those on
+  `grpData.virtual`, not on `grpCtx.browse`: a real shelf opened from Search is fully editable.
+- `browse=1` ignores `settings.missing_content` on purpose. That policy governs what the
+  library reminds you about; in Search the unowned films ARE the result.
+
 ### Frontend drops saveProgress writes under t=5 s
 
 Originally the server recomputed `completed` from `position/duration` on every `/api/library/{id}/progress` write, so a save at `t≈0` wiped a watched episode back to unwatched. `completed` is monotonic now (see "A position is not evidence" below), but a t≈0 write still destroys the **resume point**. The local player can fire those near-zero writes from at least three places: the very first `timeupdate` event before the resume seek lands, the `pause` event that browsers fire during initial load, and `lpStop` if the user opens the player and closes immediately. `saveProgress` and `_lpFlushProgress` both early-return when `posSec < 5` to keep watched marks stable. The 5 s threshold matches the resume hint's "meaningful in-progress" cutoff, so dropping these writes also has no resume-UX cost.

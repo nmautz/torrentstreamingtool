@@ -1,5 +1,24 @@
 # Changelog
 
+## [19.13.0] — 2026-09-30
+### Searching for a franchise gives you the collection, not a pile of films
+
+- **New: collections in Search and Explore.** Search for "star wars" and the first result is
+  one Star Wars tile holding all the films, the same kind of tile the Library uses. Before, the
+  films came back scattered through the results in popularity order.
+- Opening the tile shows the whole collection in story or release order. Films you have play
+  from there; films you don't have each get a **Get** button. It works even when you own none
+  of the collection.
+- The films only fold into the tile when what you typed matches the collection's name.
+  Searching for one film by its own title still gives you that film.
+- A broad search can match several collections ("star" finds Star Wars and Star Trek); up to
+  three are shown, most popular first. Collections with fewer than two released films are
+  skipped.
+- If your library already has a shelf for the collection, the tile uses its name and includes
+  any shows you added to it by hand. Other shows stay as their own results, because TMDb only
+  links films to a collection.
+- The Trending, Popular and genre rows on Explore are unchanged.
+
 ## [19.12.2] — 2026-09-30
 ### Skip Intro works on shows whose audio is DTS
 
