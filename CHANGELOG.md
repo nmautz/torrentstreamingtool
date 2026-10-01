@@ -1,5 +1,20 @@
 # Changelog
 
+## [19.13.1] — 2026-10-01
+### Skipping back on the phone no longer leaves the picture stopping and starting
+
+- **Fixed (not yet confirmed on a phone): after a few −10 presses the episode played in
+  fits and starts.** On an iPhone the player deliberately holds about two minutes of video
+  ahead, more than iOS asks for. Skipping back past what was held made iOS throw part of it
+  away, the player fetched it again, and the two kept undoing each other. The player now
+  notices iOS discarding video near where you are watching and holds only what iOS wants
+  for the next three minutes.
+- **−10 past the held video responds sooner.** Each press out there used to sit for about
+  two seconds before anything loaded. The player now restarts loading at the press.
+- The app's diagnostic log now records this kind of stutter, and what the phone was doing
+  to the video buffer at the time. The report that led to this fix arrived with nothing
+  written for the moment it happened.
+
 ## [19.13.0] — 2026-09-30
 ### Searching for a franchise gives you the collection, not a pile of films
 

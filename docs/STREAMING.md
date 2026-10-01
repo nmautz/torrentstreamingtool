@@ -1171,7 +1171,10 @@ Two ways to populate the cache:
 >    override (`_lpInstallIosPreroll`, v5.42.0): it overrides the hls.js
 >    instance's `pauseBuffering` on true iOS devices so the MMS `endstreaming`
 >    stop is ignored until the forward buffer reaches `IOS_PREROLL_TARGET_SECS`
->    (`backBufferLength` is trimmed to 30 s on iOS to offset the memory). Outages
+>    (`backBufferLength` is trimmed to 30 s on iOS to offset the memory). The
+>    override **stands down for 3 min** whenever iOS evicts media near the
+>    playhead or an append hits the quota (`_lpNotePressure`, 19.13.1) —
+>    refusing the OS while it is short of memory makes the picture stutter. Outages
 >    beyond the banked buffer still fall through to the reconnect loop.
 >    See [GOTCHAS.md](GOTCHAS.md) § ManagedMediaSource.
 > 2. **Indefinite reconnect loop** (`_lpNetLost` / `_lpNetRetryNow` /

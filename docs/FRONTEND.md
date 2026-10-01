@@ -641,6 +641,15 @@ Don't re-add the `controls` attribute. Pieces:
     It never looks at frames, so it works while paused. **`readyState` cannot
     substitute for this** — it answers "do I have data", not "do I have data
     *here*", and reads 4 throughout the wedge.
+  - `_lpResumeIfParked` (19.13.1) runs first: if hls.js's stream controller is
+    `STOPPED` (the OS paused the loaders), it calls `resumeBuffering()` at the
+    press instead of leaving the watch to find out 2.2 s later.
+- **Buffer pressure** (19.13.1, iOS) — `_lpNotePressure` / `_lpUnderPressure` /
+  `_lpOnBufferedChange` / `_lpBufferGovern`. When the OS evicts media near the
+  playhead or an append hits the quota, the preroll override stands down and
+  hls.js's buffer targets shrink for 3 min; `_lpBufferGovern` (on the 3 s
+  `_lpStallWatch` tick) restores them and restarts parked loaders before a
+  playing buffer runs dry. `_lpNoteWaiting` / `_lpNoteHlsWarn` only log.
 
   See [GOTCHAS.md](GOTCHAS.md) § ManagedMediaSource and
   [DIAGNOSTICS.md](DIAGNOSTICS.md) § "the picture is frozen but the seek bar

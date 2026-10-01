@@ -25504,6 +25504,9 @@ function _lpDestroyHls() {
   // the full ceiling for an event that can no longer come.
   lp._hlsAttached = null;
   lp.everPlayed = false;
+  // Pressure belongs to the instance whose buffer was evicted; the next file
+  // starts with the full preroll and earns the clamp again if the OS objects.
+  _lpPressureUntil = 0; _lpPressureCfg = null; _lpHlsFlushes = []; _lpWaits = [];
   _lpStallSince = 0; _lpStallLastT = 0;
   _lpOdKeepAliveAt = 0;   // touch any new OD session promptly on the next tick
   _lpDisarmColdStartKick();
@@ -25750,6 +25753,7 @@ function _lpStallWatch() {
   // Keep the on-demand session warm even while paused / fully buffered (the
   // branches below early-return), so the reaper doesn't delete it mid-watch.
   _lpOdKeepAlive();
+  _lpBufferGovern();
   const v = document.getElementById("lpVideo");
   if (!v || !lp.itemId || v.paused || !lp.everPlayed || _lpScrub) {
     _lpStallSince = 0; _lpStallLastT = v ? (v.currentTime || 0) : 0;
@@ -25824,9 +25828,159 @@ function _lpInstallIosPreroll(hls, video) {
   hls.pauseBuffering = function () {
     // MMS hit its ~30 s comfort point. Keep prerolling until we've banked the
     // bigger iOS target; only then let the OS actually pause the loaders.
-    if (_lpFwdBuffer(video) < IOS_PREROLL_TARGET_SECS) return;
+    // Not while the OS is throwing our media away, though — see _lpNotePressure.
+    if (!_lpUnderPressure() && _lpFwdBuffer(video) < IOS_PREROLL_TARGET_SECS) return;
     return origPause();
   };
+}
+
+// ── Buffer pressure ─────────────────────────────────────────────────────────
+// The preroll override above tells the OS "no" when it asks us to stop
+// buffering. That is only safe while the OS is asking out of habit. When it is
+// asking because it is short of memory, refusing starts a fight we lose: it
+// evicts, hls.js sees the hole and refetches, it evicts again, and the picture
+// stutters with a full-looking buffer and no error anywhere. Measured
+// 2026-10-01 15:54: three -10 presses past the buffered edge, then the buffer
+// went from "1152.0-1367.3" to "1147.1-1212.0" with the playhead at 1148.4 —
+// trimmed to 1.3 s BEHIND the playhead, which neither hls.js (it keeps
+// backBufferLength) nor an ordinary append-time eviction (it keeps ~30 s either
+// side) ever does — and the next 22 s of wall clock played 13 s of episode.
+//
+// Two signs count, and both mean "the OS will not hold what we are giving it":
+// a QuotaExceededError on append (hls.js's BUFFER_FULL_ERROR), and media removed
+// NEAR the playhead that hls.js did not ask to have removed. A removal far out
+// on the tail is routine quota housekeeping after a backward seek and is not one.
+// While either is recent, defer to the OS's own cadence and shrink hls.js's own
+// target to match; the full preroll comes back once it has been quiet a while.
+const LP_PRESSURE_COOLDOWN_MS = 180000;
+const LP_PRESSURE_BUF_SECS = 30;       // hls.js's own target while under pressure
+const LP_PRESSURE_MAX_BUF_SECS = 45;
+const LP_EVICT_NEAR_BEHIND = 10;       // an eviction this close to the playhead
+const LP_EVICT_NEAR_AHEAD = 90;        // (seconds either side) is distress
+let _lpPressureUntil = 0;
+let _lpPressureCfg = null;             // the instance's targets, to put back afterwards
+let _lpHlsFlushes = [];                // removals hls.js itself asked for, just now
+
+function _lpUnderPressure() { return Date.now() < _lpPressureUntil; }
+
+function _lpLoaderState() {
+  try { return (lp.hls && lp.hls.streamController && lp.hls.streamController.state) || ""; }
+  catch (_) { return ""; }
+}
+
+function _lpNotePressure(hls, why, extra) {
+  _lpPressureUntil = Date.now() + LP_PRESSURE_COOLDOWN_MS;
+  if (hls && hls.config && !_lpPressureCfg) {
+    _lpPressureCfg = { hls: hls, maxBufferLength: hls.config.maxBufferLength,
+                       maxMaxBufferLength: hls.config.maxMaxBufferLength };
+    hls.config.maxBufferLength = Math.min(hls.config.maxBufferLength, LP_PRESSURE_BUF_SECS);
+    hls.config.maxMaxBufferLength = Math.min(hls.config.maxMaxBufferLength, LP_PRESSURE_MAX_BUF_SECS);
+  }
+  const v = _lpV();
+  _npLogThrottled("buf-pressure", 5000, "buf-pressure", Object.assign({
+    why: why, t: v ? (v.currentTime || 0) : 0, ready: v ? v.readyState : -1,
+    buffered: v ? _lpBufferedDesc(v) : "", fwd: v ? +(_lpFwdBuffer(v).toFixed(2)) : 0,
+    loader: _lpLoaderState(), mode: lp.mode || "", src: lp.source || "",
+  }, extra || {}), "play");
+}
+
+// A removal hls.js did not ask for is the OS evicting. hls.js announces its own
+// (back-buffer trim, a flush on a track switch) with BUFFER_FLUSHING first.
+function _lpNoteHlsFlush(d) {
+  const now = Date.now();
+  _lpHlsFlushes = _lpHlsFlushes.filter(f => now - f.at < 4000);
+  _lpHlsFlushes.push({ at: now, s: d.startOffset || 0, e: d.endOffset });
+}
+function _lpOnBufferedChange(hls, type, ev) {
+  if (hls !== lp.hls) return;
+  const rr = ev && ev.removedRanges, v = _lpV();
+  if (!rr || !rr.length || !v) return;
+  const now = Date.now(), ct = v.currentTime || 0;
+  for (let i = 0; i < rr.length; i++) {
+    const s = rr.start(i), e = rr.end(i);
+    if (_lpHlsFlushes.some(f => now - f.at < 4000 && s >= f.s - 1 && e <= f.e + 1)) continue;
+    if (e < ct - LP_EVICT_NEAR_BEHIND || s > ct + LP_EVICT_NEAR_AHEAD) continue;
+    _lpNotePressure(hls, "evicted", { sb: type, removed: s.toFixed(1) + "-" + e.toFixed(1) });
+    return;
+  }
+}
+
+// Start the loaders if they are parked. hls.js answers the OS's `endstreaming`
+// with stopLoad(), which leaves its stream controllers STOPPED with no tick
+// running, and from there NOTHING inside hls.js restarts them — not a seek, not
+// an empty buffer. Only the OS's `startstreaming` does, and iOS does not reliably
+// send it. That is the 2.2 s of dead air before every `seek-stuck` kick.
+// resumeBuffering() is exactly what `startstreaming` would have called.
+function _lpResumeIfParked(why, at) {
+  if (!lp.hls || !lp.itemId || lp.netDown || _lpReloading) return false;
+  if (_lpLoaderState() !== "STOPPED" || typeof lp.hls.resumeBuffering !== "function") return false;
+  try { lp.hls.resumeBuffering(); } catch (_) { return false; }
+  const v = _lpV();
+  _npLogThrottled("loader-resume:" + why, 3000, "loader-resume", {
+    why: why, to: at, buffered: v ? _lpBufferedDesc(v) : "",
+    fwd: v ? +(_lpFwdBuffer(v).toFixed(2)) : 0, pressure: _lpUnderPressure(),
+  }, "play");
+  return true;
+}
+
+// Runs on the 3 s stall-watch tick. Puts the buffer targets back once the
+// pressure has passed, and — because deferring to the OS means trusting it to
+// say `startstreaming` again — restarts parked loaders before a playing buffer
+// runs dry, rather than after.
+const LP_PARKED_LOW_WATER_SECS = 10;
+function _lpBufferGovern() {
+  const c = _lpPressureCfg;
+  if (c && !_lpUnderPressure()) {
+    if (c.hls === lp.hls && c.hls.config) {
+      c.hls.config.maxBufferLength = c.maxBufferLength;
+      c.hls.config.maxMaxBufferLength = c.maxMaxBufferLength;
+    }
+    _lpPressureCfg = null;
+  }
+  const v = _lpV();
+  if (!v || !lp.hls || v.paused || v.ended || !lp.everPlayed) return;
+  const d = v.duration || 0;
+  if (d && (v.currentTime || 0) + LP_PARKED_LOW_WATER_SECS >= d) return;   // nothing left to fetch
+  if (_lpFwdBuffer(v) < LP_PARKED_LOW_WATER_SECS) _lpResumeIfParked("low-water", v.currentTime || 0);
+}
+
+// The element stalls for data and recovers, over and over. Each stall is a
+// `waiting`; one is ordinary, a run of them is the viewer watching the picture
+// stop and start. Until 19.13.1 nothing wrote a row for this, so the report of
+// it arrived against a transcript that went silent at exactly that moment.
+let _lpWaits = [];
+let _lpUserSeekAt = 0;
+function _lpNoteWaiting(v) {
+  const now = Date.now();
+  if (now - _lpUserSeekAt < 2500) return;      // a seek is supposed to wait
+  _lpWaits = _lpWaits.filter(t => now - t < 12000);
+  _lpWaits.push(now);
+  if (_lpWaits.length < 3) return;
+  _npLogThrottled("stutter", 10000, "stutter", {
+    waits: _lpWaits.length, sinceSeek: _lpUserSeekAt ? now - _lpUserSeekAt : -1,
+    seeking: !!v.seeking, pressure: _lpUnderPressure(), loader: _lpLoaderState(),
+    ..._lpStartFacts(v),
+  }, "play");
+}
+
+// hls.js's non-fatal errors are where it says what it is struggling with — a
+// full buffer, a stall it nudged past, a hole it jumped — and the ERROR handler
+// returned on `!fatal` without a word.
+const _lpHlsWarnN = {};
+function _lpNoteHlsWarn(hls, data) {
+  const d = (data && data.details) || "";
+  if (!d || data.type !== window.Hls.ErrorTypes.MEDIA_ERROR) return;
+  if (d === window.Hls.ErrorDetails.BUFFER_FULL_ERROR) _lpNotePressure(hls, "full", { sb: data.sourceBufferName || "" });
+  _lpHlsWarnN[d] = (_lpHlsWarnN[d] || 0) + 1;
+  const v = _lpV();
+  const now = Date.now();
+  if (now - (_npLogLast["hls-warn:" + d] || 0) < 5000) return;
+  _npLogLast["hls-warn:" + d] = now;
+  _npLog("hls-warn", { details: d, n: _lpHlsWarnN[d], t: v ? (v.currentTime || 0) : 0,
+                       ready: v ? v.readyState : -1, buffered: v ? _lpBufferedDesc(v) : "",
+                       fwd: v ? +(_lpFwdBuffer(v).toFixed(2)) : 0,
+                       pressure: _lpUnderPressure(), loader: _lpLoaderState() }, "play");
+  _lpHlsWarnN[d] = 0;
 }
 
 // iOS cold-start kick. On iOS the only MSE is ManagedMediaSource, and the OS
@@ -26360,6 +26514,18 @@ async function _lpLoadIndex(seekTo) {
     // iOS prerolls only ~30 s under ManagedMediaSource; force a larger forward
     // buffer there (no-op on every other platform).
     _lpInstallIosPreroll(hls, v);
+    // Watch for the OS evicting media we did not ask it to (ManagedMediaSource
+    // only — a classic SourceBuffer has no `bufferedchange`, and never evicts
+    // on its own). Re-fires after recoverMediaError, which makes new buffers.
+    hls.on(window.Hls.Events.BUFFER_FLUSHING, (_evt, data) => _lpNoteHlsFlush(data || {}));
+    hls.on(window.Hls.Events.BUFFER_CREATED, (_evt, data) => {
+      const tracks = (data && data.tracks) || {};
+      Object.keys(tracks).forEach((type) => {
+        const sb = tracks[type] && tracks[type].buffer;
+        if (!sb || typeof sb.addEventListener !== "function") return;
+        try { sb.addEventListener("bufferedchange", (ev) => _lpOnBufferedChange(hls, type, ev)); } catch (_) {}
+      });
+    });
     hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
       if (lp.filePath !== filePath) return;
       // hls.js exposes renditions in the same order as the master playlist —
@@ -26389,7 +26555,7 @@ async function _lpLoadIndex(seekTo) {
           httpCode: code, url,
         });
       }
-      if (!data.fatal) return;
+      if (!data.fatal) { _lpNoteHlsWarn(hls, data); return; }
       // Fatal NETWORK_ERROR = the connection dropped (tunnel, Wi-Fi↔LTE swap,
       // host briefly unreachable). hls.js stops loading but the <video> keeps
       // playing whatever's buffered — so DON'T tear down or alert. Retry
@@ -28192,7 +28358,7 @@ function _lpWatchBufferFreeze(v, target) {
     // all. Either way it is alive and this is an ordinary slow fetch.
     if (_lpBufferedHas(v, target) || _lpBufferedDesc(v) !== before) return;
     _npLog("seek-stuck", { stage: "kick", to: target, buffered: before,
-                           ready: v.readyState, paused: !!v.paused,
+                           ready: v.readyState, paused: !!v.paused, loader: _lpLoaderState(),
                            engine: lp.hls ? "hls.js" : "native-hls",
                            mode: lp.mode || "" }, "play");
     _lpKickLoader(target);
@@ -28261,15 +28427,18 @@ function _lpCommitSeek(t) {
     from: anchor, to: t, back: t < anchor,
     engine: lp.hls ? "hls.js" : "native-hls", mode: lp.mode || "",
     buffered: _lpBufferedDesc(v), inBuf: _lpBufferedHas(v, t),
-    ready: v.readyState, paused: !!v.paused,
+    ready: v.readyState, paused: !!v.paused, loader: _lpLoaderState(),
   }, "play");
+  _lpUserSeekAt = Date.now();
   try { v.currentTime = t; } catch (_) {}
   _lpVerifySeek(v, anchor, t);
   // Out of the buffer is the only shape that can wedge the loaders, and it is
   // also the only shape where "the ranges never moved" is unambiguous — an
   // in-buffer seek legitimately needs no fetch at all. Armed after
   // _lpVerifySeek, which cancels the previous watch on its way in.
-  if (!_lpBufferedHas(v, t)) _lpWatchBufferFreeze(v, t);
+  // Parked loaders are restarted here, now, rather than left for the watch to
+  // find 2.2 s later; the watch stays armed for a wedge that is something else.
+  if (!_lpBufferedHas(v, t)) { _lpResumeIfParked("seek", t); _lpWatchBufferFreeze(v, t); }
 }
 
 function _lpVerifySeek(v, anchor, target) {
@@ -30027,7 +30196,18 @@ function _lpAttachVideoEvents() {
     _lpCtlSync(); _lpCtlShow(); _lpOdKeepAlive(true); _npArm(); _lpNightSync();
     _npSyncAwake();
   });
-  v.addEventListener("pause", () => { _lpCtlSync(); _lpCtlShow(); _lpFlushProgress(false); _npArm(); _npSyncAwake(); });
+  v.addEventListener("pause", () => {
+    // A pause nobody asked for, with the page in front of the viewer. Intent is
+    // written only by the transport paths, so this is the element being paused
+    // by something else — the other shape "it keeps pausing" can take.
+    if (lp.itemId && lp.everPlayed && !_npVisiblePaused && !_npHolding && !v.ended
+        && document.visibilityState === "visible") {
+      _npLogThrottled("unasked-pause", 3000, "unasked-pause",
+                      { seeking: !!v.seeking, pressure: _lpUnderPressure(),
+                        loader: _lpLoaderState(), ..._lpStartFacts(v) }, "play");
+    }
+    _lpCtlSync(); _lpCtlShow(); _lpFlushProgress(false); _npArm(); _npSyncAwake();
+  });
   // The element's own failures. `error` is the one that used to reach the user
   // as a blank player with no explanation anywhere.
   v.addEventListener("error", () => {
@@ -30072,6 +30252,7 @@ function _lpAttachVideoEvents() {
   // into an already-generated region never fires `waiting`, so it stays instant.
   v.addEventListener("waiting", () => {
     lp._devStalls = (lp._devStalls || 0) + 1;   // dev-mode HUD stall counter
+    if (lp.itemId) _lpNoteWaiting(v);
     // Stalled for data → square Metro spinner (shown even when the control
     // overlay is hidden, YouTube-style), plus keep the overlay from auto-hiding.
     document.getElementById("localPlayer").classList.add("lp-buffering");
@@ -31288,6 +31469,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.13.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.13.1</div>
 </body>
 </html>
