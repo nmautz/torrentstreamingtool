@@ -9,7 +9,9 @@ Audio-fingerprint-driven intro/credits detection. Runs per-series; results store
   bundled Windows path, which silently demoted every Windows host to the brittle ffmpeg-stderr fallback — and
   that fallback's `re.search` then crashed every series. See
   [GOTCHAS.md](GOTCHAS.md#derive-the-ffprobe-path-from-ffmpegs-filename--a-blanket-strreplace-breaks-every-windows-install)
-- **`fpcalc`** (chromaprint) — fingerprinting (`-raw` mode emits integer frames)
+- **`fpcalc`** (chromaprint) — fingerprinting (`-raw` mode emits integer frames). **Not a general decoder:** the
+  static 1.5.1 build `setup.py` installs has no DTS, so it cannot be trusted to open a file by itself — see
+  step 1 and [GOTCHAS.md](GOTCHAS.md#fpcalc-is-not-a-decoder--the-static-build-has-no-dts-so-the-head-fingerprint-must-fall-back-to-ffmpeg)
 - Every one of these subprocesses is captured with **`encoding="utf-8", errors="replace"`**, never bare
   `text=True` — on Windows that decodes with the ANSI code page and a non-Latin track title or path makes
   the call return empty output with `rc=0`, no exception. See
@@ -21,7 +23,7 @@ Audio-fingerprint-driven intro/credits detection. Runs per-series; results store
 
 Chromaprint emits ~7.8 32-bit hash frames per second of audio.
 
-1. **Fingerprint** ([analyzer.py:69](../analyzer.py#L69)): For each episode, call `fpcalc -raw -length 360 <path>` for the head (first 6 min) and `ffmpeg -ss <tail_start> -t 600 | fpcalc -raw -length 600 -` for the tail (last 10 min). Episodes are fingerprinted `FP_CONCURRENCY` (2) at a time
+1. **Fingerprint** ([analyzer.py:69](../analyzer.py#L69)): For each episode, call `fpcalc -raw -length 360 <path>` for the head (first 6 min) and `ffmpeg -ss <tail_start> -t 600 | fpcalc -raw -length 600 -` for the tail (last 10 min). Episodes are fingerprinted `FP_CONCURRENCY` (2) at a time. **The head falls back to the same ffmpeg pipe** (`_fpcalc_direct` → `_fpcalc_piped`, `-ss 0`) whenever fpcalc returns nothing on its own — it has no DTS decoder, so on a DTS release the direct read fails for every file. The two paths are frame-aligned (measured: shift 0, every frame matching), so a series may mix them freely
 2. **Greedy clustering** ([analyzer.py:307](../analyzer.py#L307)): pick first un-clustered episode as anchor; pairwise `_find_longest_match` against every other. The longest run ≥ `MIN_MATCH_FRAMES` (~15 s) with Hamming distance ≤ 6 bits per frame is kept — **bridging mismatch gaps** up to `MATCH_GAP_FRAMES` (~4 s) as long as the merged run stays ≥ `MATCH_MIN_RATIO` matched (each chromaprint frame spans ~2.4 s of audio, so 1 s of episode-specific audio inside the theme smears across ~20 frames; a strict-consecutive matcher truncated real intros). A match only counts where the frame is **informative** (`MIN_FRAME_DELTA_BITS` vs its predecessor, in both episodes) — stationary audio (silence/drones/tones) emits runs of near-identical hashes that bogus-match for tens of seconds otherwise. Matching is numpy-vectorized (`_find_longest_match_np`, XOR + 16-bit popcount LUT, ~50-100× the pure-Python `_find_longest_match_py` fallback used when numpy is missing — the fallback is strict: no gap bridging, no informative mask). Unmatched episodes recurse on the next pass (new anchor)
 3. **Consensus window + projection**: within a cluster, the anchor-side range is a **trimmed-quantile** intersection of the pair windows (`_intersect_match`) — the worst `CLUSTER_TRIM_Q` at each edge is ignored so one short match can't truncate a whole season. `int(n * 0.2)` is 0 for n < 5, so small clusters are bit-identical to the old hard intersection. That single window is then **projected into every member's own frame coordinates** (`_project`) through its pair alignment, clamped to that member's matched evidence and fingerprint length, so every episode in a cluster reports the same intro duration. A member the projection can't place keeps its raw pair match rather than losing its skip point. When the intersection collapses entirely, `_medoid_window` picks the real member interval with the greatest total overlap (the old fallback took the median offset and median length *independently*, which could synthesise a window matching no actual pair)
 4. **Consensus filtering** (`_filter_cluster_consensus`): real shared intro/credits make every cluster member match the **same** anchor region, so their anchor-side offsets agree. An outlier episode whose real intro/credits is absent can still pairwise-match the anchor on some *other* recurring audio (a stinger, a repeated gag, a transition sting) at a different anchor offset — left in, it produces a bogus skip point (the "credits kick in early, cut off the end" bug). Members whose `offset_in_anchor` deviates from the cluster median by more than `CLUSTER_OFFSET_TOL_FRAMES` (~8 s) are pruned (the median member always survives, so genuine clusters are untouched). Applied to **both** intro and outro clusters
@@ -31,7 +33,7 @@ Chromaprint emits ~7.8 32-bit hash frames per second of audio.
 
 | Name | Value | Meaning |
 |------|-------|---------|
-| `ANALYZER_VERSION` | 9 | Bumped to force re-analysis when the algorithm changes (9 = chapters outrank the subtitle credits estimate; 8 = credits from subtitles, structural audio pass removed; 7 = structural credits + boundary refinement; 5 = correct frame rate + consensus projection + edge trim; 4 = fingerprint-only credits + consensus filtering; 3 = gap-tolerant matcher) |
+| `ANALYZER_VERSION` | 10 | Bumped to force re-analysis when the algorithm changes (10 = head fingerprint falls back to ffmpeg, so DTS releases get intros; 9 = chapters outrank the subtitle credits estimate; 8 = credits from subtitles, structural audio pass removed; 7 = structural credits + boundary refinement; 5 = correct frame rate + consensus projection + edge trim; 4 = fingerprint-only credits + consensus filtering; 3 = gap-tolerant matcher) |
 | `FP_FRAMES_PER_SEC` | 8.0768 | Chromaprint's emission rate. **Was 7.8, which was wrong** — see §Frame timing |
 | `FP_FRAME_LEADIN` | 21.43 | Constant frame shortfall; makes `_rate_for` affine |
 | `FP_RATE_SANITY` | (7.5, 8.6) | Self-calibration outside this band is rejected |
@@ -339,7 +341,7 @@ Error codes (defined as constants at the top of `analyzer.py`):
 | `no_binary`        | ffmpeg or fpcalc missing on host | Re-run `setup.py` after installing the dep |
 | `file_missing`     | Path exists in library.json but not on disk | Library scan / clean orphans |
 | `no_duration`      | ffprobe couldn't read the container | Re-encode or remux; check codec support |
-| `fp_empty`         | fpcalc produced no fingerprint for the head | Unsupported audio codec, silent track, corruption |
+| `fp_empty`         | No head fingerprint from fpcalc **or** the ffmpeg fallback | Silent track, corruption, a codec ffmpeg can't decode either. **Only reported when the file also got no credits** — a file with an empty head and a matched tail is stored as an ordinary credits-only success, which is how the DTS bug hid |
 | `no_skip_points`   | No qualifying match: no shared intro, no credits run that passes consensus + end-anchoring, **or** a lone file with no peer episodes to match against | Admin re-run after more peers in the series are prepped (no longer auto-retries) |
 | `exception`        | Unhandled error inside `analyze_series` | See `streamlink_app.log` for the traceback |
 

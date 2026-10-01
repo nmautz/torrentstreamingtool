@@ -1,5 +1,22 @@
 # Changelog
 
+## [19.12.2] — 2026-09-30
+### Skip Intro works on shows whose audio is DTS
+
+- **Fixed: some shows offered Skip Credits on every episode but never Skip Intro.**
+  Hunter x Hunter was the one that showed it: 122 episodes with the same opening and
+  no intro skip on any of them. The opening is found by fingerprinting the first six
+  minutes of each episode's audio, and the tool that did that could not read DTS
+  audio at all, so it came back with nothing and no intro could ever be matched. The
+  end of each episode was read a different way that does handle DTS, which is why
+  credits worked. The start is now read that way too whenever the first attempt
+  comes back empty.
+- Nothing was reported when this happened. An episode with credits but no intro
+  looks like a show that simply has no opening.
+- Every show is re-checked once, in the background while the box is idle, so shows
+  that were missing an intro skip for this reason pick it up without doing anything.
+  To get one straight away, use **Analyze** on the show in Admin, Smart Skip.
+
 ## [19.12.1] — 2026-09-30
 ### The pack size limit counts the season you asked for, not the whole pack
 

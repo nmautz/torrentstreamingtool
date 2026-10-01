@@ -28,6 +28,7 @@ test:
 	python3 tests/test_devactivity.py
 	python3 tests/test_bookmarks.py
 	python3 tests/test_diagnostics.py
+	python3 tests/test_analyzer_fp.py
 
 clean:
 	rm -rf .venv __pycache__ .env

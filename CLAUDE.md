@@ -109,6 +109,7 @@ make test                 # pure unit tests for the leaf modules (no deps, no ve
                           #   python tests/test_devactivity.py
                           #   python tests/test_bookmarks.py
                           #   python tests/test_diagnostics.py
+                          #   python tests/test_analyzer_fp.py
                           # tests/search_eval/ is the LIVE search-accuracy kit
                           # (69 hand-labelled shows) - run verify.py against a
                           # box before trusting a change to episode matching.

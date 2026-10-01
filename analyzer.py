@@ -43,7 +43,7 @@ except Exception:           # pragma: no cover - numpy missing
     _np = None
     _POP16 = None
 
-ANALYZER_VERSION = 9
+ANALYZER_VERSION = 10
 
 # Per-file failure codes recorded in skip_data[path].analysis when fingerprinting
 # could not produce usable skip points. The user-facing UI shows a "Skip
@@ -235,43 +235,63 @@ def _fpcalc_raw(file_path: str, length_sec: int, start_sec: float = 0.0) -> list
     fpcalc has a -ts flag for seeking; for chunks that don't start at 0 we
     pre-decode with ffmpeg and pipe WAV to stdin (fpcalc accepts `-` as a
     pseudo-path on most builds, but piping via ffmpeg is more portable).
+
+    The head (start 0) reads the file with fpcalc directly, and falls back to the same
+    ffmpeg pipe when that yields nothing. The fallback is not optional: the static
+    fpcalc build setup.py installs carries only a handful of decoders and has NO DTS,
+    so on a DTS release it exits 2 ("Could not find any audio stream ... Decoder not
+    found") for every file. The tail never noticed, because ffmpeg decodes it — which
+    is how a whole series ended up with credits on every episode and an intro on none.
+    See docs/GOTCHAS.md.
     """
     binp = fpcalc_bin()
     if not binp:
         return []
     if start_sec <= 0:
-        proc = subprocess.run(
-            _lp([binp, "-raw", "-length", str(length_sec), file_path]),
-            capture_output=True, text=True, timeout=120,
-            encoding="utf-8", errors="replace",   # never the locale code page (see GOTCHAS.md)
-            **_LOWPRIO_KW,
-        )
-    else:
-        ff = ffmpeg_bin()
-        if not ff:
-            return []
-        # Pipe a mono 11025 Hz WAV chunk through ffmpeg → fpcalc on stdin
-        ff_proc = subprocess.Popen(
-            _lp([ff, "-loglevel", "error", "-ss", f"{start_sec:.3f}", "-t", str(length_sec),
-                 "-i", file_path, "-ac", "1", "-ar", "11025", "-f", "wav", "pipe:1"]),
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **_LOWPRIO_KW,
-        )
-        proc = subprocess.run(
-            _lp([binp, "-raw", "-length", str(length_sec), "-"]),
-            input=ff_proc.stdout.read() if ff_proc.stdout else b"",
-            capture_output=True, timeout=120, **_LOWPRIO_KW,
-        )
-        ff_proc.wait(timeout=10)
-        proc = subprocess.CompletedProcess(
-            proc.args, proc.returncode,
-            stdout=proc.stdout.decode("utf-8", errors="replace") if proc.stdout else "",
-            stderr=proc.stderr.decode("utf-8", errors="replace") if proc.stderr else "",
-        )
+        fp = _fpcalc_direct(binp, file_path, length_sec)
+        if fp:
+            return fp
+    return _fpcalc_piped(binp, file_path, length_sec, max(0.0, start_sec))
 
+
+def _fpcalc_direct(binp: str, file_path: str, length_sec: int) -> list[int]:
+    """fpcalc decoding the file itself, from the start. [] when it can't."""
+    proc = subprocess.run(
+        _lp([binp, "-raw", "-length", str(length_sec), file_path]),
+        capture_output=True, text=True, timeout=120,
+        encoding="utf-8", errors="replace",   # never the locale code page (see GOTCHAS.md)
+        **_LOWPRIO_KW,
+    )
     if proc.returncode != 0:
         return []
+    return _parse_fingerprint(proc.stdout)
+
+
+def _fpcalc_piped(binp: str, file_path: str, length_sec: int, start_sec: float) -> list[int]:
+    """ffmpeg decodes, fpcalc fingerprints the WAV on stdin. [] when either can't."""
+    ff = ffmpeg_bin()
+    if not ff:
+        return []
+    # Pipe a mono 11025 Hz WAV chunk through ffmpeg → fpcalc on stdin
+    ff_proc = subprocess.Popen(
+        _lp([ff, "-loglevel", "error", "-ss", f"{start_sec:.3f}", "-t", str(length_sec),
+             "-i", file_path, "-ac", "1", "-ar", "11025", "-f", "wav", "pipe:1"]),
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **_LOWPRIO_KW,
+    )
+    proc = subprocess.run(
+        _lp([binp, "-raw", "-length", str(length_sec), "-"]),
+        input=ff_proc.stdout.read() if ff_proc.stdout else b"",
+        capture_output=True, timeout=120, **_LOWPRIO_KW,
+    )
+    ff_proc.wait(timeout=10)
+    if proc.returncode != 0:
+        return []
+    return _parse_fingerprint(proc.stdout.decode("utf-8", errors="replace") if proc.stdout else "")
+
+
+def _parse_fingerprint(stdout: str) -> list[int]:
     fp_line = ""
-    for line in proc.stdout.splitlines():
+    for line in stdout.splitlines():
         if line.startswith("FINGERPRINT="):
             fp_line = line[len("FINGERPRINT="):].strip()
             break

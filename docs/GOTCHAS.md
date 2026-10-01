@@ -620,6 +620,45 @@ Note the asymmetry that hid this for so long: the **async** ffmpeg paths (`creat
 
 `ffmpeg_bin()` on Windows returns `tools/ffmpeg/ffmpeg-8.1.1-essentials_build/bin/ffmpeg.exe`. `ff.replace("ffmpeg", "ffprobe")` rewrites **all three** segments → `tools/ffprobe/ffprobe-…/bin/ffprobe.exe`, which never exists. That silently demoted every Windows host to the stderr-parsing fallback in `_media_duration`, whose `re.search` then raised `TypeError: expected string or bytes-like object, got 'NoneType'` on a `None` stderr — surfacing as `Analysis crashed` for **every series in the library**, with no hint of the real cause. Use `Path(ff).with_name(Path(ff).name.replace(...))`, and keep the fallback `None`-safe.
 
+### fpcalc is not a decoder — the static build has no DTS, so the head fingerprint must fall back to ffmpeg
+
+**Symptom:** a whole series with a credits skip on every episode and an intro skip on none
+(Hunter x Hunter, 19.12.2: 122 episodes), on a show whose opening is plainly the same every week.
+No error anywhere, no "Skip unavailable" chip.
+
+The head and the tail were fingerprinted by different tools. The tail has to seek, so it always
+went ffmpeg → WAV → fpcalc. The head starts at zero, so it handed the file straight to fpcalc —
+and the static fpcalc 1.5.1 that `setup.py` installs (Windows, Linux and macOS alike) is built
+with a short decoder list that does **not** include DTS. On an `A_DTS` release it exits 2 with
+`Could not find any audio stream in the file (Decoder not found)` for every single file. ffmpeg
+decodes DTS fine, so the tails worked, credits clustered, and the series looked analysed.
+
+Three things made it invisible, and each is worth keeping in mind:
+
+1. **`fp_empty` is only reported when a file has no intro AND no credits.** An empty head with a
+   matched tail is stored as a normal credits-only success. Five of the 122 episodes did carry
+   `fp_empty` — the five whose tails also failed to cluster — and read as five odd files rather
+   than as the visible tip of all of them.
+2. **"No intro" is a legitimate result.** Plenty of shows have none, so nothing treats it as a
+   fault.
+3. **The same show can be half fine.** HxH episodes 1–26 had intros; the audio layout of that
+   release evidently differs from the rest. A bug that spares the first season is not one
+   anyone goes looking for in the decoder.
+
+`_fpcalc_raw` now tries fpcalc directly and, if that yields nothing, runs the same ffmpeg pipe
+the tail uses at `-ss 0`. Rules:
+
+- **Never fingerprint anything with fpcalc alone.** If a new call site needs a fingerprint, go
+  through `_fpcalc_raw`; a bare `fpcalc <file>` silently returns nothing on DTS.
+- **Don't "simplify" this to ffmpeg-only without re-measuring.** It would be correct (the two
+  paths are frame-aligned: shift 0, 100 % of frames within Hamming 6 on the same audio), but it
+  changes the head fingerprint of every file in the library for no gain. The direct path stays
+  first so files that work today produce byte-identical prints.
+- **To diagnose the next one from outside the box:** `GET /api/library/{id}/download?file_path=…`
+  honours `Range`, so the first 40 MB of a source can be pulled and fed to the same static fpcalc
+  locally. That is how this was found — the bundle's AAC audio matched perfectly, which cleared
+  the matcher and pointed at the source decode.
+
 ### A chromaprint frame index is a window START, and the rate is 8.0768 — not 7.8
 
 `FP_FRAMES_PER_SEC` was `7.8` for the analyzer's whole life and it was simply wrong. fpcalc
