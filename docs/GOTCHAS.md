@@ -950,6 +950,16 @@ deliberately unlike an episode slice:
    until they are culled; ninety seconds of three complete-series packs is tens of
    gigabytes spent to save one. `_packSeasonSlice` sends no candidates.
 
+**The ceiling is judged on the season, not the torrent (19.12.1).**
+`settings.pack_first.max_bytes` exists to stop a complete-franchise torrent being adopted
+for one *episode*, where the share is always tiny and so can't be the test. For a season
+slice the share is the honest cost: a 500 GB S01-S13 pack whose Season 1 is 30 GB
+downloads 30 GB. 19.12.0 applied the whole-torrent rule here too and passed over
+SpongeBob's best-seeded pack for being 206.9 GB when its Season 1 is ~16. `_packScopePool`
+now compares `_packScopeBytes` to the cap; when TMDb can't give the divisor that *is* the
+whole size, so an unknown pack is still judged whole. Don't "unify" this with
+`_bgPackForEpisodes` in either direction.
+
 The size the UI quotes up front (`_packScopeBytes`) is an estimate from TMDb's episode
 counts — the file list does not exist until the torrent is added. Every surface that
 shows it says "about"; the library card's `pack_scope` is the real figure once the

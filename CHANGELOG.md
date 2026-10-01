@@ -1,5 +1,18 @@
 # Changelog
 
+## [19.12.1] — 2026-09-30
+### The pack size limit counts the season you asked for, not the whole pack
+
+- **Fixed: a big multi-season pack was passed over even when the season you wanted
+  was small.** Getting one season out of a multi-season pack only downloads that
+  season, but the "Biggest Pack To Use" limit was being checked against the whole
+  torrent. A 500 GB seasons 1-13 pack whose Season 1 is 30 GB is now fine under a
+  200 GB limit. SpongeBob's best-seeded pack (206.9 GB, Season 1 about 16 GB) is
+  picked again instead of a lower-quality one.
+- If the season's size can't be worked out, the pack is still judged whole.
+- Getting a single episode out of a pack is unchanged: there the limit still applies
+  to the whole torrent.
+
 ## [19.12.0] — 2026-09-30
 ### Downloads that stop part-way get replaced, and a big pack gives you only the season you asked for
 

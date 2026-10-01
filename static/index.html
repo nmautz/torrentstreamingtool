@@ -18404,23 +18404,34 @@ function _bestPackFrom(cand, match, cmp, filt, sizeOf){
   }
   return [...pool].sort(cmp)[0];
 }
-// A pack that would have to be sliced to answer a one-season request is held
-// to the same whole-torrent ceiling as one sliced for an episode
-// (`app.pack_first_max_bytes`): past it, qBittorrent is carrying a
-// complete-franchise torrent's file list for the sake of one season. Refused
-// only when something else covers the scope — a limit steers the choice but
-// never leaves you with no pack when one exists.
-function _packScopePool(packs, want, seasons){
+// A pack that has to be sliced to answer a one-season request is held to
+// `app.pack_first_max_bytes` on the SEASON'S share of it, not on the whole
+// torrent (19.12.1). A 500 GB S01–S13 pack whose Season 1 is 30 GB costs 30 GB
+// — only the season's files are ever set to download — so against a 200 GB
+// limit it is fine, and refusing it handed the season to a worse release for
+// the sake of bytes that were never going to be fetched. (19.12.0 judged the
+// whole torrent, which passed over SpongeBob's best-seeded pack at 206.9 GB.)
+//
+// The share is _packScopeBytes' estimate; when TMDb can't give the divisor it
+// IS the whole size, so an unknown pack is still judged whole — the
+// conservative direction. Refused only when something else covers the scope: a
+// limit steers the choice but never leaves you with no pack when one exists.
+//
+// NOT the same rule as _bgPackForEpisodes, which still caps the whole torrent:
+// an episode's share is always tiny, so judging the share there would be no
+// ceiling at all.
+function _packScopePool(packs, want, seasons, meta){
   const pool=(packs||[]).filter(p=>_packCoversScope(p, want, seasons));
   const cap=+app.pack_first_max_bytes||0;
   if(!cap) return pool;
-  const under=pool.filter(p=>!_packNeedsSeasonSlice(p, want) || (p.size||0)<=cap);
+  const under=pool.filter(p=>!_packNeedsSeasonSlice(p, want)
+                           || _packScopeBytes(meta, p, want)<=cap);
   return under.length?under:pool;
 }
 function _ssBestPackForScope(want, filt){
   if(want===undefined) want=_ssBulkScope;
   const seasons=_ssSeasonsWithEpisodes();
-  return _bestPackFrom(_packScopePool(_ssPacks, want, seasons),
+  return _bestPackFrom(_packScopePool(_ssPacks, want, seasons, _ssMeta),
                        _ssAudioMatch, _ssPackCmp, filt,
                        p=>_packScopeBytes(_ssMeta, p, want));
 }
@@ -18430,7 +18441,7 @@ function _ssBestPackForScope(want, filt){
 // page's audio preference. The library's Get button has no show page open to
 // read any of those from.
 function _bgBestPackForScope(ctx, want, filt){
-  return _bestPackFrom(_packScopePool(ctx.packs, want, ctx.seasons||[]),
+  return _bestPackFrom(_packScopePool(ctx.packs, want, ctx.seasons||[], ctx.meta),
                        s=>_bgAudioMatch(ctx,s), _bgPackCmp(ctx), filt,
                        p=>_packScopeBytes(ctx.meta, p, want));
 }
@@ -31175,6 +31186,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.12.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.12.1</div>
 </body>
 </html>
