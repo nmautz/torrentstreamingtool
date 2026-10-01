@@ -928,6 +928,34 @@ torrent adopted to fetch one episode is real bookkeeping for no gain.
 name — "Complete" means nothing arithmetical. It returns 0 when it cannot tell, which
 the callers read as "don't divide", judging the pack whole: the conservative direction.
 
+### A season slice never falls back to the whole pack (19.12.0)
+
+"Get Season 1" can be answered by a multi-season pack — and on a long-running show the
+best-seeded release usually *is* one (SpongeBob: `Season 1-13 1080p COMPLETE`, 206.9 GB,
+327 seeders, against a 15.3 GB season pack with 45). Before 19.12.0 that pack came down
+whole. It is now sliced with `pack_slice.want_seasons`, and three things about it are
+deliberately unlike an episode slice:
+
+1. **It is expressed as seasons, not as every `(season, episode)` pair.** A pack that
+   ships the season as twenty double-length files still has all twenty attributed to
+   season 1; an episode list built from TMDb's forty-one would keep only the files whose
+   numbers happened to line up, and silently drop half the season.
+2. **It is strict.** An episode slice with no fallback drops the slice and lets the pack
+   download ("a season nobody quite asked for beats a row that never moves"). For a
+   season slice the thing being avoided is two hundred gigabytes, so
+   `_pack_slice_fallback` errors the item instead, with every file still at `"skip"`.
+   And it only does so once the file list has been **seen** — a magnet that is merely
+   slow to resolve is not a slicing failure.
+3. **It is never raced.** A race's challengers are whole torrents that run unsliced
+   until they are culled; ninety seconds of three complete-series packs is tens of
+   gigabytes spent to save one. `_packSeasonSlice` sends no candidates.
+
+The size the UI quotes up front (`_packScopeBytes`) is an estimate from TMDb's episode
+counts — the file list does not exist until the torrent is added. Every surface that
+shows it says "about"; the library card's `pack_scope` is the real figure once the
+slice resolves. Don't present the estimate as exact, and don't print the card's figure
+while `pack_scope.resolved` is false (it would read "0 B of 206.9 GB").
+
 ### Stream-now's pack deselection is permanent; stream focus's is not (17.9.0)
 
 Two mechanisms deselect siblings in the same torrent and they are **not** the same thing.
@@ -1031,6 +1059,56 @@ Stream-now uses sequential. Library downloads do NOT — they should download no
 ### The download scheduler is the single writer of scheduled items' file priority + pause
 
 For any item with `download.mode=="idle"` or per-file overrides, `download_scheduler_loop` reconciles qBit **every 15 s** from `library.json → item.download`. So a raw `qbit_set_file_priority` / `qbit_pause` / `qbit_resume` written **outside** `_reconcile_item_downloads` for such an item is reverted on the next tick. If you add a new "boost this file" / "pause this torrent" path, write the **model** (`download.files[path]=…`, `download.mode=…` or `item["stream_focus"]`) and call `_reconcile_item_downloads` — don't poke qBit directly. This is exactly why `queue-play` and `library_download_pipeline` were rewritten to set the model instead of calling `filePrio` (v4.7.0). Plain `mode=="now"` items with no overrides are left untouched (fast path), so unscheduled downloads behave exactly as before.
+
+### A download that stops part-way is not a dead swarm — and must not be deleted like one (19.12.0)
+
+`_retry_dead_download` deletes the torrent **with its files** and swaps in another
+release. That is safe only because `_note_download_stall` gates on `completed == 0`. The
+gap it left: a torrent whose last seeder walks away at 70 % is never retried, never
+errors, and shows a percentage with no speed for ever. Four SpongeBob episodes sat at
+41-83 %, 0 B/s, for twenty-four hours — each with a perfectly good other release one
+search away.
+
+The fix is **not** to widen the zero-byte rule. Three things it gets wrong for a
+part-download, and what `stallrule` + `_rescue_stalled_download` do instead:
+
+* **Don't delete on a guess.** The replacements are added *beside* the stuck torrent as
+  a race (`_race_start(rescue=True)`). The stuck one goes only when a challenger has
+  plainly won (it is under `KEEP_PROGRESS` and gets culled) or has **finished** (below).
+  If the replacements are all dead too, the original is untouched.
+* **Don't measure idle time from a timestamp.** `stalled_since` can afford to (the boot
+  grace covers it, and being wrong costs nothing at zero bytes). Here the box's routine
+  restarts and every VPN drop would be charged to the torrent, so `item["stall"].idle` is
+  accrued a tick at a time and only while qBit says the torrent is *trying* —
+  `queuedDL`, `pausedDL`, `checking*` and `moving` are idle for reasons that are not the
+  swarm's fault.
+* **Don't error the item.** Its bytes are real and its seeder may return. The rescue
+  backs off (10 min → 6 h) and keeps looking.
+
+**First to finish wins** is what makes the rescue terminate, and it closed a hole in
+ordinary races too. `racerules.should_cull` refuses to cull an entry past 60 % ("its
+bytes outweigh its speed"), and promotion only ever happened when the incumbent *left*
+the race. So an incumbent at 83 % that then stalled was never culled, a challenger that
+completed beside it was never promoted, and when the incumbent's seeder finally came
+back the **complete** copy was the one dropped (`incumbent-finished`). A non-HQ
+challenger that is complete on disk while the incumbent is not is now promoted on the
+spot. The HQ track is excluded; it has its own swap.
+
+**A challenger that never moves has to be dropped by someone.** With a stalled incumbent
+there is no leader (`racerules.leader` needs a rate), so nothing is ever "outpaced", and
+a challenger that resolved its metadata and then fetched nothing would hold the race —
+and its `max_items` slot, and the suppression of the stall clock — open for good.
+`_RACE_CHALLENGER_IDLE` (600 s, accrued the same way) drops it as `stalled`.
+
+**A rescue ignores `download_race.enabled`.** That setting is about spending bandwidth
+on a download that is working. It still honours `max_items`, so with two rescues running
+a third waits for its backoff.
+
+Only single-video items are rescued. A pack that stalls half-way has finished episodes
+worth keeping and no like-for-like release to race (`_retry_candidates` on a
+season-shaped item accepts anything the show's name returns); it is flagged `stalled`
+and left. All of this is driven end to end in `tests/test_race_rescue.py` — read it
+before touching either rule.
 
 ### A racing item still has exactly ONE `torrent_hash` — the challengers live beside it
 

@@ -409,6 +409,28 @@ monitor additionally ignores it for `_DOWNLOAD_STALL_BOOT_GRACE` (3 min) after
 startup: qBit restarts with the service and deserves a moment to find peers before
 being judged on a stamp written before the reboot.
 
+### `stall` (part-download stall clock, 19.12.0)
+
+```jsonc
+"stall": {"bytes": 353541324, "idle": 1830.0, "seen": 1790822378.2, "tries": 1, "retry_at": 1790822978.2}
+```
+
+The counterpart of `stalled_since` for a download that **has** fetched something.
+Written every monitor tick by `stallrule.advance()`:
+
+| Field | Meaning |
+|-------|---------|
+| `bytes` | `completed` at the last look. Any growth zeroes `idle`, `tries` and `retry_at`. |
+| `idle` | Seconds **accrued** with no new byte — at most 30 per look, and only while qBit reports the torrent as trying (`downloading` / `stalledDL` / `forcedDL`), the VPN is up and no race is running. Deliberately not a timestamp: time the box was down, or the torrent was paused or queued, must not count. |
+| `seen` | Epoch of the last look (what caps the next increment). |
+| `tries` / `retry_at` | Rescue attempts so far and the epoch before which the next is not due (`stallrule.note_try`: 10 min, 30 min, 1 h, 2 h, then every 6 h — it never gives up and never errors the item). |
+
+`stallrule.is_stuck` (idle ≥ 30 min + 20 min per GiB fetched, capped at 6 h) triggers
+`_rescue_stalled_download`. The field is never removed (see GOTCHAS § You cannot DELETE
+a field from an item inside a monitor tick); a stale one on a `ready` item is inert.
+
+A race started by a rescue carries `"rescue": true` in `item["race"]`.
+
 ### `stream_focus` (transient, 16.1.0)
 
 One absolute path — the file of a **multi-file** torrent currently being watched
@@ -498,6 +520,7 @@ the episodes, not the season.
 ```jsonc
 "pack_slice": {
   "want":       [[1, 5]],             // [[season, episode], …] — what was asked for
+  "want_seasons": [1],                // …or whole seasons of a multi-season pack (19.12.0)
   "settled":    false,                // slots are final; stop re-deriving
   "since":      "2026-09-18T20:11:04Z",
   "skipped":    ["D:\\media\\Show S01\\Show.S01E01.mkv", …],  // the paths WE wrote
@@ -521,7 +544,8 @@ identified.
 
 | Field | Meaning |
 |-------|---------|
-| `want` | The `[season, episode]` pairs to keep. Empty ⇒ the slice is inert. |
+| `want` | The `[season, episode]` pairs to keep. Empty (and no `want_seasons`) ⇒ the slice is inert. |
+| `want_seasons` | **19.12.0.** Whole seasons to keep, for a multi-season / complete-series pack picked to answer "get Season N". Every file *attributed to* one of them is kept — seasons, not an episode list, because a pack's own numbering need not match TMDb's count. Makes the slice **strict** (`_pack_slice_strict`): unresolved past the grace window it does **not** fall back to the whole pack; the item goes to `error` with every file still skipped. |
 | `settled` | Set by `_pack_slice_settle` once the episodes are identified **and** the metadata driving their attribution has bound — or the moment a person edits the schedule (`/api/library/pack-fetch`). From then on `_pack_slice_apply` is a permanent no-op and the schedule belongs to the user. |
 | `since` | When the slice was requested. After `_PACK_SLICE_GRACE_SECS` (300 s) still unresolved, `_pack_slice_fallback` abandons the pack. |
 | `skipped` | The ledger of paths this slice wrote. Re-derivation only ever revises **these**, so a file the user un-skipped by hand is never quietly re-skipped. |

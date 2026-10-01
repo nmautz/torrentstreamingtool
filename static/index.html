@@ -1766,6 +1766,7 @@
 
       <!-- File selection — hidden in save-stream mode -->
       <div id="dlFilePickerRow">
+        <p id="dlPackHint" class="hidden text-[11px] text-amber-300 bg-amber-950/40 border border-amber-900 px-3 py-2 mb-2"></p>
         <button id="dlPickFilesToggle" onclick="toggleDlFilePicker()"
           class="text-[11px] text-gray-600 hover:text-indigo-400 transition-colors flex items-center gap-1.5 uppercase tracking-wide">
           <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1775,6 +1776,7 @@
           <span id="dlPickFilesLabel">Select specific files (optional)</span>
         </button>
         <div id="dlFilePickerSection" class="hidden mt-2">
+          <div id="dlFileSeasonChips" class="hidden flex gap-1.5 flex-wrap mb-2"></div>
           <div id="dlFilePickerList"
             class="max-h-44 overflow-y-auto border border-gray-800 divide-y divide-gray-800/50"></div>
           <p id="dlFilePickerCount" class="text-[11px] text-gray-600 mt-1.5"></p>
@@ -5080,6 +5082,14 @@ function formatDlStat(d){
   else {
     if(d.speed_bps>0) parts.push(`↓ ${fmtSpeed(d.speed_bps)}`);
     if(d.eta_secs>0) parts.push(`ETA ${fmtTime(d.eta_secs)}`);
+    // Has bytes, is trying, and hasn't gained one in minutes (19.12.0). A bare
+    // percentage with no speed read as "downloading" for a whole day; say what
+    // it is, and that something is being done about it. On a merged show tile
+    // `stalled` is a COUNT of members, on a single item a boolean.
+    if(d.stalled){
+      const n=(typeof d.stalled==="number")?d.stalled:0;
+      parts.push(ic("warn")+(n>1?` ${n} stalled`:" stalled")+" — looking for another copy");
+    }
   }
   return parts.join(" · ");
 }
@@ -5099,11 +5109,12 @@ function _recent24h(iso){
 
 function _libDlAgg(ids){
   let total=0, done=0, speed=0, eta=0, any=false, allPaused=true, awaiting=false;
-  let racing=false;
+  let racing=false, stalled=0;
   ids.forEach(id=>{
     const d=libDownloadStats.get(id);
     if(!d) return;
     any=true;
+    if(d.stalled) stalled++;
     total+=d.total_bytes||0; done+=d.downloaded_bytes||0; speed+=d.speed_bps||0;
     eta=Math.max(eta, d.eta_secs||0);          // the show is done when the slowest is
     if(!d.paused) allPaused=false;
@@ -5123,6 +5134,7 @@ function _libDlAgg(ids){
     // stalled member of a six-episode show must not hide the other five.
     awaiting_metadata: awaiting && total<=0,
     racing,
+    stalled,
   };
 }
 
@@ -7941,7 +7953,14 @@ function _libItemChrome(item){
     }
   }
 
-  const partialBadge = item.download_partial
+  // A pack cut down to whole seasons says so, with what it costs against the
+  // size of the torrent it came out of — a 200 GB row in the library must never
+  // be mistaken for a 200 GB download. Falls back to the plain Partial badge.
+  const _ps=item.pack_scope;
+  const partialBadge = (_ps && _ps.seasons && _ps.seasons.length)
+    ? `<span class="text-[10px] px-1.5 py-0.5 bg-indigo-950 text-indigo-300 border border-indigo-900" title="This pack holds more than you asked for. Only ${escHtml(_packScopeName(_ps.seasons))} is set to download; the rest is off and can be pulled later from the episode list without another search.">${escHtml(_packScopeName(_ps.seasons))} only${
+        _ps.resolved&&_ps.total_bytes>0?` · ${fmtSize(_ps.bytes)} of ${fmtSize(_ps.total_bytes)}`:" · working out which files"}</span>`
+    : item.download_partial
     ? `<span class="text-[10px] px-1.5 py-0.5 bg-orange-950 text-orange-300 border border-orange-900" title="Some files in this download were skipped — not everything is here."><svg class="ic" aria-hidden="true"><use href="#i-ban"/></svg> Partial</span>`
     : "";
 
@@ -14052,6 +14071,18 @@ async function openDownloadModal(magnet,title,overrides){
   // onto the item at download time so the server never re-guesses the show.
   _dlTmdb=overrides.tmdb||{};
   document.getElementById("dlFilePickerRow").classList.remove("hidden");
+  // A multi-season pack downloads WHOLE from this dialog unless files are
+  // picked — say how much that is before the button is pressed, and point at
+  // the picker, which sorts the files into seasons (19.12.0).
+  const hint=document.getElementById("dlPackHint");
+  const pk=overrides.pack;
+  if(hint){
+    const multi=pk && pk.kind==="multiseason";
+    hint.classList.toggle("hidden", !multi);
+    if(multi) hint.innerHTML=ic("warn")+` This pack holds ${escHtml(_ssPackLabel(pk).toLowerCase())} — `
+      +`${escHtml(pk.size_human||"a lot")} if you download all of it. To take only some `
+      +`seasons, tap <b>Select specific files</b> below and choose them.`;
+  }
   await Promise.all([ensureDefaultSavePath(true), ensureLibraryPaths()]);
 
   document.getElementById("dlModalTitle").textContent=title;
@@ -14104,6 +14135,7 @@ function renderDlVisibilityProfiles(){
 
 function closeDownloadModal(){
   downloadTarget=null; _saveStreamMode=false; _dlTmdb={};
+  const _ph=document.getElementById("dlPackHint"); if(_ph) _ph.classList.add("hidden");
   // Cancel any in-flight library prepare
   if(_libPrepAbort){ _libPrepAbort.abort(); _libPrepAbort=null; }
   if(_libPrepData?.hash){
@@ -14124,6 +14156,7 @@ function closeDownloadModal(){
 async function openSaveStreamModal(){
   _saveStreamMode=true;
   document.getElementById("dlFilePickerRow").classList.add("hidden");
+  const _ph=document.getElementById("dlPackHint"); if(_ph) _ph.classList.add("hidden");
   await Promise.all([ensureDefaultSavePath(true), ensureLibraryPaths()]);
   const title=app.active_title||"";
   document.getElementById("dlModalTitle").textContent=title;
@@ -14164,6 +14197,7 @@ async function toggleDlFilePicker(){
     }
     _libPrepData=null; _libPickerOpen=false;
     document.getElementById("dlFilePickerSection").classList.add("hidden");
+    document.getElementById("dlFileSeasonChips").classList.add("hidden");
     document.getElementById("dlPickFilesLabel").textContent="Select specific files (optional)";
     return;
   }
@@ -14196,12 +14230,14 @@ async function toggleDlFilePicker(){
       const display=parts.length>2?parts.slice(-2).join("/"):f.name;
       return `<label class="flex items-center gap-3 px-3 py-2.5 hover:bg-gray-800/70 cursor-pointer">
         <input type="checkbox" class="dl-file-cb flex-shrink-0 rounded accent-indigo-500" checked
-               data-index="${f.index}" onchange="updateDlFileCount()">
+               data-index="${f.index}" data-size="${+f.size_bytes||0}" data-season="${_dlFileSeason(f.name)}"
+               onchange="updateDlFileCount()">
         <div class="flex-1 min-w-0">
           <div class="text-xs text-gray-300 break-all leading-snug">${escHtml(display)}</div>
           <div class="text-[11px] text-gray-600 mt-0.5">${escHtml(f.size_human)}</div>
         </div></label>`;
     }).join("");
+    _dlRenderSeasonChips();
     updateDlFileCount();
   }catch(err){
     if(err.name==="AbortError") return;
@@ -14209,11 +14245,63 @@ async function toggleDlFilePicker(){
   }finally{ _libPrepAbort=null; }
 }
 
+// Which season a file in a pack belongs to, read off its path: `S03E07`, a
+// `3x07`, or a `Season 3` folder. 0 when it doesn't say. Only used to GROUP the
+// picker's rows so a season can be ticked in one tap — what actually downloads
+// is still the list of ticked rows, so a wrong guess here is visible and
+// correctable, never silent.
+function _dlFileSeason(name){
+  const n=String(name||"").replace(/\\/g,"/");
+  const base=n.split("/").pop();
+  let m=/(?:^|[^a-z0-9])S(\d{1,2})[ ._-]?E\d{1,3}(?![0-9])/i.exec(base)
+     || /(?:^|[^a-z0-9])(\d{1,2})x\d{2,3}(?![0-9])/i.exec(base);
+  if(m) return +m[1];
+  m=/(?:^|\/)[^\/]*\bSeason[ ._-]?(\d{1,2})\b[^\/]*\//i.exec(n) || /(?:^|\/)S(\d{1,2})\//i.exec(n);
+  return m?+m[1]:0;
+}
+
+// Season chips over the file list: tap one to tick exactly that season's files
+// (tap more to add them), All / None for the rest. Shown only when the pack
+// really spans more than one season.
+function _dlRenderSeasonChips(){
+  const box=document.getElementById("dlFileSeasonChips"); if(!box) return;
+  const cbs=[...document.querySelectorAll(".dl-file-cb")];
+  const seasons=[...new Set(cbs.map(c=>+c.dataset.season).filter(n=>n>0))].sort((a,b)=>a-b);
+  if(seasons.length<2){ box.classList.add("hidden"); box.innerHTML=""; return; }
+  const on=sn=>{ const mine=cbs.filter(c=>+c.dataset.season===sn);
+                 return mine.length && mine.every(c=>c.checked); };
+  const chip=(label,call,active)=>`<button type="button" onclick="${call}"
+    class="text-[10px] px-2 py-1 uppercase tracking-wide font-bold transition-colors
+           ${active?"bg-indigo-600 text-white":"bg-gray-800 text-gray-400 hover:bg-gray-700"}">${label}</button>`;
+  box.innerHTML=chip("All","_dlPickSeason('all')",cbs.every(c=>c.checked))
+    +chip("None","_dlPickSeason('none')",cbs.every(c=>!c.checked))
+    +seasons.map(sn=>chip("S"+sn,`_dlPickSeason(${sn})`,on(sn))).join("");
+  box.classList.remove("hidden");
+}
+function _dlPickSeason(v){
+  const cbs=[...document.querySelectorAll(".dl-file-cb")];
+  if(v==="all"||v==="none"){ cbs.forEach(c=>{ c.checked=(v==="all"); }); }
+  else{
+    const mine=cbs.filter(c=>+c.dataset.season===+v);
+    // From "everything ticked" a season tap means "only this one" — the reason
+    // anyone opens the picker on a complete-series pack. After that it toggles.
+    if(cbs.every(c=>c.checked)) cbs.forEach(c=>{ c.checked=(+c.dataset.season===+v); });
+    else{ const turnOn=!mine.every(c=>c.checked); mine.forEach(c=>{ c.checked=turnOn; }); }
+  }
+  updateDlFileCount();
+}
+
 function updateDlFileCount(){
-  const cbs=document.querySelectorAll(".dl-file-cb");
-  const n=Array.from(cbs).filter(c=>c.checked).length;
+  const cbs=[...document.querySelectorAll(".dl-file-cb")];
+  const sel=cbs.filter(c=>c.checked);
+  const sum=a=>a.reduce((t,c)=>t+(+c.dataset.size||0),0);
+  const all=sum(cbs), got=sum(sel);
+  // The size is the point: "12 of 260 files" says nothing about whether that
+  // is 4 GB or 40.
   document.getElementById("dlFilePickerCount").textContent=
-    `${n} of ${cbs.length} file${cbs.length!==1?"s":""} selected`;
+    `${sel.length} of ${cbs.length} file${cbs.length!==1?"s":""} selected`
+    +(all>0?` · ${fmtSize(got)} of ${fmtSize(all)} will download`:"");
+  _dlRenderSeasonChips();
 }
 
 // ── Upload Modal (M3.3) ────────────────────────────────────────────────────
@@ -16749,6 +16837,22 @@ async function ssSimpleGetSeason(season, btn){
         // below hands off to ssBulkAuto (per-episode), which deliberately does
         // NOT - a ten-episode season would otherwise put thirty torrents in
         // qBittorrent at once.
+        //
+        // ...unless the pack holds more than this season, in which case it is
+        // cut down to it and says so (see _packSeasonSlice).
+        const slice=_packSeasonSlice(_ssMeta, pack, sn);
+        if(slice){
+          const done=await _ssDownloadOne(pack, sn, 0, {
+            silent:true, ..._ssRuntimeHint(sn, 0), ...slice.opts});
+          if(done && !done.unreleased){
+            showAlert(done.duplicate
+              ? "That copy is already downloading — nothing new was started."
+              : _packSeasonSliceToast(pack, sn, slice)+" Switch to Library to track progress.",
+              done.duplicate?"warn":"success");
+            closeSearchShow(); switchTab("library");
+          }
+          return;
+        }
         const rc=_ssAutoPickRace(_ssPacksForSeason(sn), _ssParseBulkFilters(), {});
         await _ssDownloadOne(pack, sn, 0, {
           race:true,
@@ -17558,7 +17662,7 @@ function _ssTmdbBinding(){
 // visibility) prefilled with the show's series so it coheres in the library.
 function ssDownloadPack(i){
   const p=_ssPacks[i]; if(!p) return;
-  openDownloadModal(p.magnet, p.title, {series:_ssGroup.title, tmdb:_ssTmdbBinding()});
+  openDownloadModal(p.magnet, p.title, {series:_ssGroup.title, tmdb:_ssTmdbBinding(), pack:p});
 }
 
 // ── Per-episode source picker ────────────────────────────────────────────────
@@ -17654,6 +17758,8 @@ async function _ssDownloadOne(src, season, episode, opts={}){
       body.pack_fallback={magnet:opts.pack_fallback.magnet,
                           title:opts.pack_fallback.title||""};
   }
+  // ...or whole seasons: a multi-season pack answering a one-season request.
+  if(opts.want_seasons && opts.want_seasons.length) body.want_seasons=opts.want_seasons;
   const r=await postLibraryDownload(body, {silent:!!opts.silent,
                                           alternatives:opts.silent?[]:_ssAlternativeSources(season, episode)});
   if(r.cancelled) return false;
@@ -18154,18 +18260,29 @@ function _ssRenderBulkChoose(){
   // consistent release (audio/subs/quality) — recommend it above the per-
   // episode modes instead of hiding it on the other tab.
   const rec=_ssBestPackForScope();
+  // The recommended pack may hold far more than the season in scope. Then the
+  // button takes only that season out of it, and the card says what that costs
+  // rather than quoting the size of thirteen seasons under "Season 1".
+  const recSlice=rec?_packSeasonSlice(_ssMeta, rec, _ssBulkScope):null;
   const recHtml=rec?`
     <div class="p-3 bg-indigo-950/50 border border-indigo-800">
-      <p class="text-[10px] font-black uppercase tracking-widest text-indigo-300 mb-1">Whole season available</p>
+      <p class="text-[10px] font-black uppercase tracking-widest text-indigo-300 mb-1">${recSlice?`Season ${_ssBulkScope} is inside a bigger pack`:"Whole season available"}</p>
       <p class="text-xs text-gray-200 line-clamp-2">${escHtml(rec.title)}</p>
       <p class="text-[11px] text-gray-500 mt-1 flex items-center gap-1.5 flex-wrap">
         <span class="text-[10px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-indigo-900/60 text-indigo-300">${escHtml(_ssPackLabel(rec))}</span>
         ${_ssAudioBadgeHtml(rec)}
         ${_availHtml(rec.seeders)} · ${escHtml(rec.size_human)}
       </p>
+      ${recSlice?`
+      <p class="text-[11px] text-indigo-200 mt-1.5 font-bold">Only Season ${_ssBulkScope} will download — ${escHtml(recSlice.cost)}.</p>
+      <p class="text-[10px] text-gray-500 mt-1">The other seasons in it are set to not download. One group's encode and audio across the season, and any other season is then one tap away with no new search.</p>
+      <button onclick="ssBulkUsePack()"
+        class="mt-2 w-full bg-indigo-600 hover:bg-indigo-500 py-2.5 text-xs font-black uppercase tracking-wide min-h-[40px]">Get only Season ${_ssBulkScope} from this pack</button>
+      <button onclick="ssBulkUsePack(true)"
+        class="mt-1.5 w-full bg-gray-800 hover:bg-gray-700 py-2 text-[10px] font-bold uppercase tracking-wide text-gray-300">Choose files myself…</button>`:`
       <p class="text-[10px] text-gray-500 mt-1.5">One download, consistent quality and audio across every episode — usually better than grabbing episodes one by one.</p>
       <button onclick="ssBulkUsePack()"
-        class="mt-2 w-full bg-indigo-600 hover:bg-indigo-500 py-2.5 text-xs font-black uppercase tracking-wide min-h-[40px]">Get the whole season instead</button>
+        class="mt-2 w-full bg-indigo-600 hover:bg-indigo-500 py-2.5 text-xs font-black uppercase tracking-wide min-h-[40px]">Get the whole season instead</button>`}
     </div>`:"";
   body.innerHTML=`
     <div>
@@ -18271,22 +18388,41 @@ function _packCoversScope(p, want, seasons){
 // The cascade mirrors `_ssAutoPickFrom`'s exactly — fits the window, else
 // ignore the window — so a limit steers the choice but can never leave you with
 // no pack when one exists.
-function _bestPackFrom(cand, match, cmp, filt){
+//
+// `sizeOf` (19.12.0) is what a pack COSTS for this scope — its season's share
+// when it is a multi-season pack that will be sliced, see _packScopeBytes. The
+// size window is judged on that, for the same reason _bgPackForEpisodes judges
+// the per-episode share: it is what actually downloads.
+function _bestPackFrom(cand, match, cmp, filt, sizeOf){
   if(!cand.length) return null;
   const pref=cand.filter(match);
   const pool=pref.length?pref:cand;
   if(filt){
-    const fits=pool.filter(p=>{ const z=p.size||0;
+    const fits=pool.filter(p=>{ const z=sizeOf?sizeOf(p):(p.size||0);
       return (p.seeders||0)>=filt.minSeed && z>=filt.minBytes && z<=filt.maxBytes; });
     if(fits.length) return fits.sort(cmp)[0];
   }
   return [...pool].sort(cmp)[0];
 }
+// A pack that would have to be sliced to answer a one-season request is held
+// to the same whole-torrent ceiling as one sliced for an episode
+// (`app.pack_first_max_bytes`): past it, qBittorrent is carrying a
+// complete-franchise torrent's file list for the sake of one season. Refused
+// only when something else covers the scope — a limit steers the choice but
+// never leaves you with no pack when one exists.
+function _packScopePool(packs, want, seasons){
+  const pool=(packs||[]).filter(p=>_packCoversScope(p, want, seasons));
+  const cap=+app.pack_first_max_bytes||0;
+  if(!cap) return pool;
+  const under=pool.filter(p=>!_packNeedsSeasonSlice(p, want) || (p.size||0)<=cap);
+  return under.length?under:pool;
+}
 function _ssBestPackForScope(want, filt){
   if(want===undefined) want=_ssBulkScope;
   const seasons=_ssSeasonsWithEpisodes();
-  return _bestPackFrom(_ssPacks.filter(p=>_packCoversScope(p, want, seasons)),
-                       _ssAudioMatch, _ssPackCmp, filt);
+  return _bestPackFrom(_packScopePool(_ssPacks, want, seasons),
+                       _ssAudioMatch, _ssPackCmp, filt,
+                       p=>_packScopeBytes(_ssMeta, p, want));
 }
 
 // _ssBestPackForScope against a detached run's snapshot — `ctx.packs` for
@@ -18294,8 +18430,9 @@ function _ssBestPackForScope(want, filt){
 // page's audio preference. The library's Get button has no show page open to
 // read any of those from.
 function _bgBestPackForScope(ctx, want, filt){
-  return _bestPackFrom((ctx.packs||[]).filter(p=>_packCoversScope(p, want, ctx.seasons||[])),
-                       s=>_bgAudioMatch(ctx,s), _bgPackCmp(ctx), filt);
+  return _bestPackFrom(_packScopePool(ctx.packs, want, ctx.seasons||[]),
+                       s=>_bgAudioMatch(ctx,s), _bgPackCmp(ctx), filt,
+                       p=>_packScopeBytes(ctx.meta, p, want));
 }
 
 // When every gap in a season lives in a NEIGHBOURING release pack, which grid
@@ -18366,10 +18503,24 @@ function _bgForeignPackScope(ctx, sn, missing){
           season:+bulk||sn, covers:absTo-absFrom+1};
 }
 
-function ssBulkUsePack(){
+// `manual` opens the full modal even for a pack that would otherwise be sliced
+// — the "Choose files myself…" escape hatch on the card.
+async function ssBulkUsePack(manual){
   const p=_ssBestPackForScope(); if(!p) return;
+  const sn=_ssBulkScope;
+  const slice=manual?null:_packSeasonSlice(_ssMeta, p, sn);
   ssCloseBulkSheet();
-  openDownloadModal(p.magnet, p.title, {series:_ssGroup.title});
+  if(!slice){
+    openDownloadModal(p.magnet, p.title, {series:_ssGroup.title, tmdb:_ssTmdbBinding(), pack:p});
+    return;
+  }
+  const done=await _ssDownloadOne(p, sn, 0, {silent:true, ..._ssRuntimeHint(sn, 0), ...slice.opts});
+  if(!done || done.unreleased) return;
+  showAlert(done.duplicate
+    ? "That copy is already downloading — nothing new was started."
+    : _packSeasonSliceToast(p, sn, slice)+" Switch to Library to track progress.",
+    done.duplicate?"warn":"success");
+  closeSearchShow(); switchTab("library");
 }
 
 // Step 2 (manual): a <select> of sources per episode, defaulting to best.
@@ -18742,6 +18893,34 @@ function _packEpisodeCount(ctx, p){
   return 0;
 }
 
+// "Season 1" / "Seasons 1, 2" — the name of what a sliced pack is keeping.
+function _packScopeName(seasons){
+  const a=(seasons||[]).map(Number).filter(n=>n>0);
+  return a.length===1?`Season ${a[0]}`:`Seasons ${a.join(", ")}`;
+}
+
+// Does picking `p` to answer "get season `want`" need SLICING — does it hold
+// more than that season? A multi-season or complete-series pack does; a season
+// pack is the thing itself.
+function _packNeedsSeasonSlice(p, want){
+  return !!p && p.kind==="multiseason" && typeof want==="number" && want>0;
+}
+
+// What `p` will actually cost on disk when it answers "get season `want`":
+// its whole size for a season pack, and the season's SHARE of it for a
+// multi-season one (19.12.0). An estimate — the divisor is TMDb's episode
+// inventory, not the file list, which nobody has until the torrent is added —
+// so every surface that shows it says "about". Falls back to the whole size
+// when the inventory can't say, which is the conservative direction.
+function _packScopeBytes(meta, p, want){
+  const z=(p&&p.size)||0;
+  if(!_packNeedsSeasonSlice(p, want)) return z;
+  const ctx={meta};
+  const all=_packEpisodeCount(ctx, p);
+  const mine=_packEpisodeCount(ctx, {kind:"season", season:want});
+  return (all>0 && mine>0 && mine<all) ? Math.round(z*mine/all) : z;
+}
+
 // The best pack to slice for `wanted` episodes of `season`, or null.
 //
 // Deliberately NOT _bgBestPackForScope with a different filter: that one is the
@@ -18921,6 +19100,37 @@ async function _bgStartPackSlice(ctx, ctl, report, pack, season, wanted, filt, f
   return true;
 }
 
+// What to send, and what to say, when `pack` answers a request for one season
+// but holds more than that season (19.12.0).
+//
+// Before this a "get Season 1" answered by the best-seeded SpongeBob release —
+// a 206.9 GB `Season 1-13 COMPLETE` — downloaded all thirteen. Now the pack is
+// adopted and every file outside the season is set to "do not download"; the
+// server works out which those are once the file list and the attribution are
+// in (`want_seasons` → _pack_slice_apply in main.py).
+//
+// Never raced. A race's challengers are whole torrents that run unsliced until
+// they are culled, and ninety seconds of three complete-series packs is tens of
+// gigabytes spent to save one.
+function _packSeasonSlice(meta, pack, season){
+  if(!_packNeedsSeasonSlice(pack, +season)) return null;
+  const share=_packScopeBytes(meta, pack, +season);
+  const known=share>0 && share<(pack.size||0);
+  return {
+    opts:{want_seasons:[+season], race:false, candidates:[]},
+    share, known,
+    // "about 15.9 GB of its 206.9 GB" — or, when TMDb can't give the divisor,
+    // an honest "part of its 206.9 GB".
+    cost: known?`about ${fmtSize(share)} of its ${pack.size_human}`
+               :`part of its ${pack.size_human}`,
+  };
+}
+function _packSeasonSliceToast(pack, season, sl){
+  return `Getting only Season ${season} out of the ${_ssPackLabel(pack).toLowerCase()} pack — `
+        +`${sl.cost}. Every other season in it is set to not download; you can pull any `
+        +`of them later from the episode list without another search.`;
+}
+
 // One pack instead of N episodes — the twin of _bgStartDownloads for the case
 // where the whole scope is answered by a single torrent. Returns false when
 // nothing was started, so the caller can fall through to the gap fill.
@@ -18938,8 +19148,14 @@ async function _bgStartPack(ctx, ctl, report, pack, season, filt, foreign){
   const lbl=_ssPackLabel(pack);
   report(`Starting download — ${lbl}`, pack.title, 0.95);
   const scope=foreign?foreign.gridSeason:season;
+  // A multi-season pack answering a one-season request is cut down to that
+  // season. Not for a FOREIGN pack: that one is wanted whole, by definition —
+  // it was chosen because the missing episodes live in a neighbouring group's
+  // season, and it duplicates nothing already here.
+  const slice=foreign?null:_packSeasonSlice(ctx.meta, pack, +season);
   const pool=(ctx.packs||[]).filter(p=>p===pack||_packCoversScope(p, scope, ctx.seasons||[]));
-  const rc=_ssAutoPickRace(pool, filt, {pick:pack, match:s=>_bgAudioMatch(ctx,s)});
+  const rc=slice?{pick:pack, candidates:[]}
+                :_ssAutoPickRace(pool, filt, {pick:pack, match:s=>_bgAudioMatch(ctx,s)});
   // `season` with episode 0, so the item is series-shaped from the moment it is
   // created whatever the release name looks like. Still right for a pack whose
   // season numbering disagrees with TMDb's (every long-running anime): this only
@@ -18950,7 +19166,8 @@ async function _bgStartPack(ctx, ctl, report, pack, season, filt, foreign){
     silent:true, race:true,
     candidates:(rc.pick&&rc.pick.magnet===pack.magnet)?rc.candidates:[],
     series:ctx.title, locked:ctx.locked, tmdb:ctx.tmdb,
-    ..._bgRuntimeHint(ctx, season, 0)});
+    ..._bgRuntimeHint(ctx, season, 0),
+    ...(slice?slice.opts:{})});
   // `silent` is not optional: _ssDownloadOne's loud path ends in
   // closeSearchShow() + switchTab("library"), and there is no search show open —
   // it would yank the user off the episode page they are standing on, which is
@@ -18971,6 +19188,8 @@ async function _bgStartPack(ctx, ctl, report, pack, season, filt, foreign){
         ? `Downloading the ${foreign.label.toLowerCase()} pack — it holds the missing `
          +`episodes and ${foreign.covers} in total, none of which you already have. `
          +`${stats[0].toUpperCase()}${stats.slice(1)}. `
+        : slice
+        ? _packSeasonSliceToast(pack, season, slice)+` ${stats[0].toUpperCase()}${stats.slice(1)}. `
         : `Downloading the whole of Season ${season} in one go — `
          +`${lbl.toLowerCase()}, ${stats}. `)
       +`Switch to Library to track progress.`,
@@ -30956,6 +31175,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.11.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.12.0</div>
 </body>
 </html>

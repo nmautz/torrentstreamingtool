@@ -288,6 +288,8 @@ Chooses how far the Mullvad kill switch reaches when the VPN drops. A single tog
 
 #### Race Download Sources
 
+**One thing runs regardless of this switch (19.12.0):** a download that has *stalled part-way* is rescued by racing other releases beside it (`_rescue_stalled_download`) — that is a repair, not a speed-up, and it still honours **Max items**. See [GOTCHAS.md](GOTCHAS.md) § A download that stops part-way.
+
 **Ships disabled.** When on, a download the user started **without choosing a torrent** runs several candidate releases at once and progressively drops the slow ones, so a dead or crawling pick costs seconds rather than the ten minutes the serial dead-swarm retry takes to notice. Scope is deliberately narrow: one-press **Get** (a film, a season pack) and **Stream Now** on an auto-picked source. Picking a specific release from the source list always downloads exactly that one, and bulk season downloads never race — ten episodes x three candidates would put thirty torrents in qBittorrent at once.
 
 The help text says the cost out loud and should keep doing so: **for the length of a race every candidate downloads in full**, so with the defaults (3 candidates, 2 concurrent races) six torrents share one connection and each is individually slower. Racing improves time-to-first-byte and immunity to a bad pick; it does not improve aggregate throughput.

@@ -15,6 +15,7 @@ main.py fails this loudly rather than silently testing nothing.
 import ast, io, sys
 from pathlib import Path
 from datetime import datetime, timezone
+from typing import Optional
 
 MAIN = Path(__file__).resolve().parent.parent / "main.py"
 src = io.open(MAIN, encoding="utf-8").read()
@@ -22,12 +23,13 @@ tree = ast.parse(src)
 
 WANT = {"_pack_slice_want", "_pack_slice_apply", "_pack_slice_settle",
         "_pack_slice_expired", "_pack_available", "_pack_first_cfg",
-        "_pack_slice_retire",
+        "_pack_slice_retire", "_pack_slice_want_seasons", "_pack_slice_strict",
+        "_pack_scope_summary",
         "_download_cfg", "_effective_file_mode", "_file_mode_to_priority"}
 CONSTS = {"_PACK_EXTRA_MAX_BYTES", "_PACK_SLICE_GRACE_SECS",
           "_PACK_FIRST_MAX_BYTES", "_FILE_MODES", "_DL_PRIORITIES"}
 
-ns = {"Path": Path, "Optional": None, "datetime": datetime, "timezone": timezone,
+ns = {"Path": Path, "Optional": Optional, "datetime": datetime, "timezone": timezone,
       "_now_iso": lambda: datetime.now(timezone.utc).isoformat(),
       "_series_key": lambda it: it.get("series", "")}
 pieces = []
@@ -168,6 +170,91 @@ merged = {"pack_slice": {"want": [[1, 99]], "settled": False,
 merged.update(popped)
 check("(a pop, by contrast, would have been undone — the bug)",
       merged["pack_slice"].get("settled") is False)
+
+# ── 8. A SEASON out of a multi-season pack (19.12.0). "Get Season 1" answered by the
+# best-seeded SpongeBob release - a 206.9 GB `Season 1-13 COMPLETE` - downloaded all
+# thirteen. The slice is expressed as seasons, not as an episode list, because a pack's
+# own numbering need not match TMDb's count.
+print("8. slice a three-season pack down to Season 1")
+SP3 = r"D:\media\Show Season 1-3 COMPLETE"
+def lf3(name, s, e, bucket=""):
+    d = {"path": str(Path(SP3) / name), "name": name, "season": s, "episode": e,
+         "size_bytes": 800_000_000}
+    if bucket:
+        d["bucket"] = bucket
+    return d
+names = [(f"Season {s}/Show.S{s:02d}E{e:02d}.mkv", s, e) for s in (1, 2, 3) for e in range(1, 6)]
+qf3 = ([qf(n, 800_000_000) for n, _s, _e in names]
+       + [qf("Season 1/Show.S01E03.eng.srt", 50_000),
+          qf("Specials/Show.S00E01.mkv", 700_000_000),
+          qf("Season 1/Extras/making-of.mkv", 600_000_000)])
+it3 = {"id": "i3",
+       "files": [lf3(n, s_, e_) for n, s_, e_ in names]
+                + [lf3("Specials/Show.S00E01.mkv", 0, 1),
+                   lf3("Season 1/Extras/making-of.mkv", 1, 0, bucket="extras")],
+       "pack_slice": {"want": [], "want_seasons": [1], "settled": False,
+                      "since": ns["_now_iso"](), "skipped": [], "fallback": {}}}
+check("verdict is ok", _apply(it3, qf3, SP3) == "ok")
+mode3 = lambda n: _cfgmode(_dlcfg(it3), str(Path(SP3) / n))
+check("every Season 1 episode kept",
+      all(mode3(f"Season 1/Show.S01E{e:02d}.mkv") != "skip" for e in range(1, 6)))
+check("every Season 2 episode skipped",
+      all(mode3(f"Season 2/Show.S02E{e:02d}.mkv") == "skip" for e in range(1, 6)))
+check("every Season 3 episode skipped",
+      all(mode3(f"Season 3/Show.S03E{e:02d}.mkv") == "skip" for e in range(1, 6)))
+check("the specials are skipped", mode3("Specials/Show.S00E01.mkv") == "skip")
+check("a bucketed extra inside the season folder is skipped",
+      mode3("Season 1/Extras/making-of.mkv") == "skip")
+check("the small subtitle sidecar rides along", mode3("Season 1/Show.S01E03.eng.srt") != "skip")
+summ = ns["_pack_scope_summary"](it3)
+check("the summary names Season 1", summ and summ["seasons"] == [1])
+check("...and what it costs: 5 of 17 videos, 4 GB of 13.3 GB",
+      summ["files"] == 5 and summ["total_files"] == 17
+      and summ["bytes"] == 5 * 800_000_000 and summ["total_bytes"] == 17 * 800_000_000
+      and summ["resolved"] is True)
+check("a season slice is strict", ns["_pack_slice_strict"](it3) is True)
+check("an episode slice is not", ns["_pack_slice_strict"](item) is False)
+check("an item with no slice has no scope summary", ns["_pack_scope_summary"]({"files": []}) is None)
+
+# The numbering mismatch that an episode list would get wrong: the release ships the
+# season as double-length files numbered 1..3 where TMDb counts 6 segments.
+print("9. a season slice survives the pack's own episode numbering")
+it4 = {"id": "i4",
+       "files": [lf3(f"Show.S01E{e:02d}.mkv", 1, e) for e in (1, 2, 3)]
+                + [lf3(f"Show.S02E{e:02d}.mkv", 2, e) for e in (1, 2, 3)],
+       "pack_slice": {"want": [], "want_seasons": [1], "settled": False,
+                      "since": ns["_now_iso"](), "skipped": [], "fallback": {}}}
+q4 = [qf(f"Show.S{s:02d}E{e:02d}.mkv", 800_000_000) for s in (1, 2) for e in (1, 2, 3)]
+check("verdict is ok", _apply(it4, q4, SP3) == "ok")
+check("all three Season 1 files kept, whatever TMDb calls them",
+      sum(1 for e in (1, 2, 3)
+          if _cfgmode(_dlcfg(it4), str(Path(SP3) / f"Show.S01E{e:02d}.mkv")) != "skip") == 3)
+
+# Nothing attributed to the season yet: hold EVERYTHING, exactly as an episode slice does.
+print("10. an unresolved season slice holds the whole pack at zero")
+it5 = {"id": "i5", "files": [lf3(f"ep{e}.mkv", 0, 0) for e in range(1, 4)],
+       "pack_slice": {"want": [], "want_seasons": [1], "settled": False,
+                      "since": ns["_now_iso"](), "skipped": [], "fallback": {}}}
+q5 = [qf(f"ep{e}.mkv", 800_000_000) for e in range(1, 4)]
+check("verdict is pending", _apply(it5, q5, SP3) == "pending")
+check("every file skipped",
+      all(_cfgmode(_dlcfg(it5), str(Path(SP3) / f"ep{e}.mkv")) == "skip" for e in range(1, 4)))
+s5 = ns["_pack_scope_summary"](it5)
+check("the summary says it is not resolved yet (so the card won't print '0 B of ...')",
+      s5["resolved"] is False and s5["seasons"] == [1])
+# ...and once attribution lands the same slice re-derives, like an episode slice.
+for f, sn in zip(it5["files"], (1, 1, 2)):
+    f["season"], f["episode"] = sn, 1
+check("re-derives to ok once the seasons are known", _apply(it5, q5, SP3) == "ok")
+check("ep3 (season 2) stays skipped, ep1 and ep2 are released",
+      _cfgmode(_dlcfg(it5), str(Path(SP3) / "ep3.mkv")) == "skip"
+      and _cfgmode(_dlcfg(it5), str(Path(SP3) / "ep1.mkv")) != "skip"
+      and _cfgmode(_dlcfg(it5), str(Path(SP3) / "ep2.mkv")) != "skip")
+# After the user pulls Season 2 as well, the label must follow the files, not the request.
+it5["download"]["files"].pop(str(Path(SP3) / "ep3.mkv"))
+it5["pack_slice"]["settled"] = True
+check("the summary follows what is actually kept (Seasons 1 and 2)",
+      ns["_pack_scope_summary"](it5)["seasons"] == [1, 2])
 
 print()
 print("FAILED: " + "; ".join(fails) if fails else "all checks passed")

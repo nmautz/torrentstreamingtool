@@ -63,6 +63,7 @@ import epgroups
 import episodes
 import racerules
 import relquality
+import stallrule
 import reltracks
 import srcevict
 import reaper
@@ -6346,6 +6347,7 @@ async def _recheck_for_ghosts(h: str, title: str, gone: list[str]) -> bool:
 #
 #   item["pack_slice"] = {
 #       "want":     [[season, episode], ...],   # what the caller asked for
+#       "want_seasons": [season, ...],          # ...or whole seasons of it (19.12.0)
 #       "settled":  bool,                       # slots are final; stop re-deriving
 #       "since":    "<iso>",                    # when the slice was requested
 #       "skipped":  ["<abs path>", ...],        # the paths WE wrote (ours to revise)
@@ -6418,6 +6420,42 @@ def _pack_slice_want(item: dict) -> set:
     return out
 
 
+def _pack_slice_want_seasons(item: dict) -> set:
+    """The whole seasons an item's pack slice was asked for (19.12.0).
+
+    The other shape of the same request. "Get Season 1" answered by a
+    thirteen-season pack is a slice exactly as "get S01E05" answered by a season
+    pack is - and without it the best-seeded SpongeBob release, a 206.9 GB
+    `Season 1-13 COMPLETE`, came down whole to satisfy a request for one season.
+    Expressed as seasons rather than as every (season, episode) pair because a
+    pack's own numbering need not match TMDb's count: a release that ships the
+    season as twenty double-length files still has every one of them attributed
+    to season 1, and an episode list would keep only the ones whose numbers
+    happened to line up.
+    """
+    out = set()
+    for s in (item.get("pack_slice") or {}).get("want_seasons") or []:
+        try:
+            n = int(s)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            out.add(n)
+    return out
+
+
+def _pack_slice_strict(item: dict) -> bool:
+    """True when an unresolvable slice must NOT be answered by the whole pack.
+
+    An episode slice with nothing to fall back to drops the slice and lets the
+    pack download - a season nobody quite asked for beats a row that never moves.
+    That trade inverts for a season slice: the pack is a whole series, the thing
+    being avoided is two hundred gigabytes, and "we couldn't tell which files are
+    Season 1" is a reason to stop and say so, not to fetch all thirteen.
+    """
+    return bool(_pack_slice_want_seasons(item))
+
+
 def _pack_slice_apply(item: dict, qfiles: list, save_path: str) -> str:
     """Re-derive an item's pack slice against its CURRENT file attribution.
 
@@ -6434,7 +6472,8 @@ def _pack_slice_apply(item: dict, qfiles: list, save_path: str) -> str:
     """
     ps = item.get("pack_slice") or {}
     want = _pack_slice_want(item)
-    if not want or ps.get("settled"):
+    want_seasons = _pack_slice_want_seasons(item)
+    if (not want and not want_seasons) or ps.get("settled"):
         return ""
     dl = item.setdefault("download", {"mode": "now", "files": {}})
     modes = dl.setdefault("files", {})
@@ -6445,7 +6484,8 @@ def _pack_slice_apply(item: dict, qfiles: list, save_path: str) -> str:
             modes.pop(p, None)
 
     matched = {f.get("path", "") for f in item.get("files") or []
-               if (int(f.get("season", 0) or 0), int(f.get("episode", 0) or 0)) in want
+               if ((int(f.get("season", 0) or 0), int(f.get("episode", 0) or 0)) in want
+                   or int(f.get("season", 0) or 0) in want_seasons)
                and not (f.get("bucket") or "")}
     matched.discard("")
     # Every video the release holds, so "not wanted" is decided over the same set
@@ -6471,6 +6511,37 @@ def _pack_slice_apply(item: dict, qfiles: list, save_path: str) -> str:
     ps["skipped"] = skipped
     item["pack_slice"] = ps
     return "ok" if matched else "pending"
+
+
+def _pack_scope_summary(item: dict) -> Optional[dict]:
+    """`{seasons, bytes, total_bytes, files, total_files, resolved}` for an item
+    whose pack was sliced to whole seasons, else None.
+
+    `bytes` is what is actually set to download (videos not at "skip"); the card
+    renders it as "Season 1 only - 15.2 GB of 206.9 GB" so a 200 GB row in the
+    library is never mistaken for a 200 GB download. `resolved` is False while
+    the season's files have not been identified yet - everything is held at zero
+    then, and "0 B of 206.9 GB" would read as a broken download.
+    """
+    ps = item.get("pack_slice") or {}
+    want = sorted(_pack_slice_want_seasons(item))
+    if not want:
+        return None
+    cfg = _download_cfg(item)
+    files = item.get("files") or []
+    kept = [f for f in files if _effective_file_mode(cfg, f.get("path", "")) != "skip"]
+    resolved = bool(kept) and (len(kept) < len(files) or bool(ps.get("settled")))
+    # Once resolved, name the seasons actually being kept rather than the ones
+    # first asked for: `/api/library/pack-fetch` can un-skip another season later
+    # and "Season 1 only" would then be a lie.
+    held = sorted({int(f.get("season") or 0) for f in kept} - {0})
+    return {
+        "seasons": held if (resolved and held) else want,
+        "bytes": sum(int(f.get("size_bytes") or 0) for f in kept),
+        "total_bytes": sum(int(f.get("size_bytes") or 0) for f in files),
+        "files": len(kept), "total_files": len(files),
+        "resolved": resolved,
+    }
 
 
 def _pack_slice_retire(item: dict, why: str) -> None:
@@ -10291,9 +10362,28 @@ async def _pack_slice_fallback(item: dict) -> bool:
                  or settings.qbit_download_path)
     log.warning("[pack] %r never resolved %s — %s",
                 item.get("title", ""),
-                ", ".join(f"S{s:02d}E{e:02d}" for s, e in sorted(_pack_slice_want(item))),
+                ", ".join([f"S{s:02d}E{e:02d}" for s, e in sorted(_pack_slice_want(item))]
+                          + [f"Season {n}" for n in sorted(_pack_slice_want_seasons(item))]),
                 "falling back to a single-episode release" if magnet else
+                "holding it at zero and saying so" if _pack_slice_strict(item) else
                 "no fallback in hand, letting the pack download in full")
+    if not magnet and _pack_slice_strict(item):
+        # A SEASON slice. Do not answer it with the whole pack - see
+        # `_pack_slice_strict`. Every file stays at "skip" (an unresolved slice
+        # wrote them all, and retiring it leaves the modes where they are), so
+        # nothing downloads, and the item says why.
+        seasons = ", ".join(str(n) for n in sorted(_pack_slice_want_seasons(item)))
+        _pack_slice_retire(item, "season-unidentified")
+        item.pop("stalled_since", None)
+        item["status"] = "error"
+        item["error"] = (
+            f"Couldn't tell which files in this pack are Season {seasons}, so it was "
+            "not downloaded - fetching the whole pack instead is exactly what you "
+            "didn't ask for. Delete it and pick a pack for that season alone, or add "
+            "it again and tick the files yourself.")
+        await broadcast("library_update", {"item_id": item["id"], "status": "error",
+                                           "message": item["error"]})
+        return True
     if not magnet:
         # Nothing to swap to. Drop the slice so `_reconcile_item_downloads` stops
         # holding the torrent at zero — a pack the user did not quite ask for beats
@@ -10474,6 +10564,88 @@ async def _retry_dead_download(item: dict, lib: dict) -> str:
     except Exception:
         log.exception("[race] could not start a race behind the retry for %s", iid)
     return "retried"
+
+
+async def _rescue_stalled_download(item: dict, lib: dict) -> bool:
+    """A download that stopped PART-way: race another release beside it.
+
+    The counterpart of `_retry_dead_download`, for the case that function
+    deliberately leaves alone. A torrent whose only seeder left at 70 % has
+    bytes worth keeping and a seeder who may return, so it must not simply be
+    deleted - but it must not sit at "downloading" for a day either, which is
+    what it did (four SpongeBob episodes at 41-83 %, 0 B/s, 24 h on the box).
+
+    So nothing is thrown away on a guess. The next-best releases are added
+    ALONGSIDE the stuck torrent as a race (`_race_start(..., rescue=True)`), and
+    the engine's ordinary rules decide the rest: a stuck incumbent under 60 % is
+    culled once a challenger is plainly moving, one past 60 % is kept until a
+    challenger actually FINISHES (`_reconcile_item_race`'s first-to-finish
+    rule), and if the old seeder comes back first the challengers are dropped
+    instead. The item keeps its id, its place and its history throughout.
+
+    Returns True when `item` was mutated (the caller persists). Schedules its
+    own next attempt in `item["stall"]` whatever happens - an unconditional
+    retry would be one indexer query per five-second tick.
+    """
+    now = time.time()
+    mark = stallrule.note_try(item.get("stall"), now)
+    item["stall"] = mark
+    title = item.get("title", "")
+    # One video only. A pack that stalls half-way is a different problem: the
+    # finished episodes are worth keeping, there is no like-for-like release to
+    # race it against, and `_retry_candidates` on a season-shaped item accepts
+    # anything the show's name returns. It is flagged to the UI and left alone.
+    if len(item.get("files") or []) != 1:
+        if mark.get("tries") == 1:
+            log.warning("[stall] %s has not moved in %d min at %d bytes - a multi-file "
+                        "download is not auto-replaced", title,
+                        int(float(mark.get("idle") or 0) // 60), int(mark.get("bytes") or 0))
+        return True
+    if not state.vpn_secure:
+        return True
+    cur_hash = (item.get("torrent_hash") or "").lower()
+    attempts = item.get("download_attempts") or []
+    tried = {a.get("key", "") for a in attempts if a.get("key")}
+    tried |= {_release_key(a.get("title", "")) for a in attempts if a.get("title")}
+    tried.add(_release_key(title))
+    tried.add(cur_hash)
+    tried.discard("")
+    query = _retry_query_for(item)
+    if not query.strip():
+        return True
+    try:
+        shaped = await _indexer_query(query, lib)
+    except Exception as exc:
+        log.warning("[stall] rescue search failed for %s: %s", query, exc)
+        return True
+    cands = _retry_candidates(item, shaped, tried, _proven_release_groups(lib))
+    if not cands:
+        if mark.get("tries") == 1:
+            log.warning("[stall] %s is stuck at %d bytes and no other release of it "
+                        "was found - will keep looking", title, int(mark.get("bytes") or 0))
+        return True
+    cfg = _download_race_cfg(lib)
+    src = item.get("download_source") or {}
+    shape = [{"magnet": src.get("magnet") or f"magnet:?xt=urn:btih:{cur_hash}",
+              "title": title, "size": int(item.get("size_bytes") or 0), "seeders": 0}]
+    shape += [{"magnet": c.get("magnet", ""), "title": c.get("title", ""),
+               "size": int(c.get("size") or 0), "seeders": int(c.get("seeders") or 0)}
+              for _k, c in cands[:max(2, cfg["size"]) - 1]]
+    log.warning("[stall] %s has not moved in %d min at %d%% - racing %d other release(s) "
+                "beside it (%s)", title, int(float(mark.get("idle") or 0) // 60),
+                int(100 * int(mark.get("bytes") or 0) / max(1, int(item.get("size_bytes") or 1))),
+                len(shape) - 1, "; ".join(c["title"] for c in shape[1:]))
+    _rt, _ec = _race_runtime_hint(item)
+    _spawn_bg(_race_start(item["id"], shape, _rt, _ec, expect_hash=cur_hash, rescue=True))
+    await broadcast("library_update", {
+        "item_id": item["id"], "status": "downloading",
+        "message": f"{_stall_name(item)} stopped part-way - trying another copy alongside it"})
+    return True
+
+
+def _stall_name(item: dict) -> str:
+    """What to call a stalled item in a toast - never the raw release name."""
+    return (item.get("display_title") or item.get("series") or item.get("title") or "A download")
 
 
 def _fail_dead_download(item: dict, tried_count: int) -> str:
@@ -10773,6 +10945,21 @@ _RACE_CULL_RATIO = racerules.CULL_RATIO
 # can afford to be patient because it has nothing else running. A race cannot.
 _RACE_META_GRACE = 120
 _RACE_HQ_DEAD_SECS = 900
+# A challenger that has not gained a byte in this much OBSERVED, trying time is
+# dropped. Without it a challenger that resolves its metadata and then fetches
+# nothing is never removed - there is no leader to outpace it when the incumbent
+# is not moving either - and a rescue race (`_rescue_stalled_download`) whose
+# replacements are all dead would hold its slot, and suppress the stall clock
+# that could try the next ones, for good. Matches `_DOWNLOAD_STALL_SECS`.
+_RACE_CHALLENGER_IDLE = 600
+# How long a race may sit claimed-but-unpopulated before the monitor treats it as
+# a real one. `_race_start` claims the slot with only the incumbent in `entries`,
+# then adds the challengers to qBittorrent (seconds each) and appends them in a
+# second transaction. A tick that reconciled the race inside that window saw a
+# field of one, settled it, and wrote the settled race back - so the challengers
+# were appended to a race nobody ticks any more and ran on unmanaged. The claim
+# is marked `arming`; this bounds the wait in case the process died mid-add.
+_RACE_ARMING_SECS = 120
 _RACE_HQ_MAX_ETA = 12 * 3600
 _RACE_MISS_TICKS = 2
 # Free space required on the save drive before a race is allowed to start,
@@ -10874,6 +11061,12 @@ def _item_live_torrent_hashes(item: dict) -> list:
 _race_entry_progress = racerules.entry_progress
 _race_leader = racerules.leader
 _race_should_cull = racerules.should_cull
+
+
+def _race_entry_done(e: dict) -> bool:
+    """True when this candidate's sampled bytes say it is complete on disk."""
+    total = int(e.get("total") or 0)
+    return total > 0 and int(e.get("completed") or 0) >= total
 
 
 def _race_active(race: dict) -> list:
@@ -11089,7 +11282,8 @@ async def _race_settle(item: dict, winner: Optional[dict], reason: str) -> None:
 
 
 async def _race_start(item_id: str, candidates: list, runtime_min: float,
-                      episode_count: int, expect_hash: str = "") -> None:
+                      episode_count: int, expect_hash: str = "",
+                      rescue: bool = False) -> None:
     """Plan and launch a race for an item whose incumbent is already downloading.
 
     Runs detached from `library_download_pipeline` so the normal add path keeps
@@ -11102,6 +11296,15 @@ async def _race_start(item_id: str, candidates: list, runtime_min: float,
     detached, so it can briefly still be reading the previous value - and
     racing against a hash that is about to be replaced would add challengers
     to a torrent nobody owns any more.
+
+    `rescue` is the stalled-part-way case (`_rescue_stalled_download`): the
+    incumbent is known to be stuck and the challengers are its replacements.
+    Two things differ. It runs even with racing switched off in Admin - that
+    setting is about spending bandwidth on a download that is working, and this
+    one is not - and it never plans an HQ track, because an "upgrade" that is
+    exempt from the speed rules is the wrong shape for a field whose whole
+    purpose is to find something that moves. The global `max_items` cap still
+    applies; a rescue that loses the slot is retried by its caller's backoff.
     """
     try:
         if expect_hash:
@@ -11120,7 +11323,7 @@ async def _race_start(item_id: str, candidates: list, runtime_min: float,
                 return
         lib = await get_library()
         cfg = _download_race_cfg(lib)
-        if not cfg["enabled"] or len(candidates) < 2:
+        if (not cfg["enabled"] and not rescue) or len(candidates) < 2:
             return
         item = next((it for it in lib.get("items", []) if it["id"] == item_id), None)
         if not item or item.get("status") != "downloading":
@@ -11183,7 +11386,7 @@ async def _race_start(item_id: str, candidates: list, runtime_min: float,
         # When the auto-pick already IS the best 1080p - the common case - there
         # is no two-track and all the candidates race as peers.
         hq = None
-        if cfg["hq_upgrade"]:
+        if cfg["hq_upgrade"] and not rescue:
             eligible = [c for c in rest if c["quality"].get("hq_eligible")]
             if eligible:
                 best = max(eligible, key=lambda c: relquality.rank_key(c["quality"]))
@@ -11231,6 +11434,14 @@ async def _race_start(item_id: str, candidates: list, runtime_min: float,
                     for e in _race_active(it.get("race") or {})}
             busy.discard("")
             cur["race"] = {"v": 1, "state": "racing", "reason": "",
+                           "rescue": bool(rescue),
+                           # The challengers are added to qBittorrent AFTER this
+                           # claim and written in a second transaction. Until
+                           # then the race has one entry, and a monitor tick that
+                           # read it in between would settle it as "nothing left
+                           # to race" - and then write that back over the
+                           # challengers. See `_RACE_ARMING_SECS`.
+                           "arming": True,
                            "started_at": _now_iso(), "settled_at": "",
                            "ceiling": ceiling, "runtime_min": runtime_min,
                            "episode_count": episode_count, "upgraded_from": None,
@@ -11261,6 +11472,7 @@ async def _race_start(item_id: str, candidates: list, runtime_min: float,
                     await _qbit_delete_reaped(e["hash"])
                 return
             race = cur.get("race") or {}
+            race["arming"] = False
             if not added:
                 race["state"] = "skipped"
                 race["reason"] = "single"
@@ -11285,6 +11497,11 @@ async def _reconcile_item_race(item: dict, by_hash: Optional[dict]) -> bool:
     race = item.get("race") or {}
     if race.get("state") not in ("racing", "upgrading"):
         return False
+    if race.get("arming"):
+        _armed = _parse_iso_dt(race.get("started_at"))
+        if (_armed is not None and (datetime.now(timezone.utc) - _armed).total_seconds()
+                < _RACE_ARMING_SECS):
+            return False          # still being populated - see _RACE_ARMING_SECS
 
     # THE most important guard in the feature. A kill-switch blip or an
     # unreachable qBittorrent looks exactly like every candidate dying at once,
@@ -11400,11 +11617,23 @@ async def _reconcile_item_race(item: dict, by_hash: Optional[dict]) -> bool:
                 0.3 * inst + 0.7 * prior)
             e["samples"] = int(e.get("samples") or 0) + 1
             e["last_sample_at"] = now
+            # Accrued, like `stallrule`: only time we watched it trying counts.
+            if completed > int(e.get("completed") or 0):
+                e["idle_secs"] = 0.0
+            elif stallrule.is_trying(qstate) or qstate == "metaDL":
+                e["idle_secs"] = float(e.get("idle_secs") or 0.0) + min(dt, stallrule.TICK_CAP)
             e["completed"] = completed
             e["total"] = total
             if completed > 0 and not e.get("first_bytes_at"):
                 e["first_bytes_at"] = _now_iso()
             changed = True
+
+        if (h != incumbent and e.get("role") != "hq" and e.get("status") == "live"
+                and completed < total
+                and float(e.get("idle_secs") or 0.0) >= _RACE_CHALLENGER_IDLE):
+            await _race_drop(item, e, "stalled")
+            changed = True
+            continue
 
         # An HQ track is exempt from being outpaced, not from being hopeless.
         if e.get("role") == "hq" and h != incumbent:
@@ -11486,6 +11715,27 @@ async def _reconcile_item_race(item: dict, by_hash: Optional[dict]) -> bool:
         changed = True
         incumbent = (item.get("torrent_hash") or "").lower()
         inc_entry = repl
+    else:
+        # ...with ONE exception: first to finish wins. A challenger that is
+        # complete on disk while the incumbent is not has stopped being a
+        # momentary lead - there is nothing left to trade places over. Without
+        # this an incumbent past `KEEP_PROGRESS` that then stalls is never
+        # culled (its bytes outweigh its speed), the finished challenger is
+        # never promoted, and the race sits there until the incumbent's seeder
+        # returns - at which point the COMPLETE copy is the one deleted. That is
+        # the whole of a stalled-download rescue, and it was a latent hole in an
+        # ordinary race too. The HQ track is excluded: it has its own, more
+        # careful swap (`_apply_race_upgrade`).
+        fin = next((e for e in active if e is not inc_entry and e.get("role") != "hq"
+                    and _race_entry_done(e)), None)
+        if fin is not None and not _race_entry_done(inc_entry):
+            log.warning("[race] %s: %r finished first - replacing the unfinished %r",
+                        item.get("id", ""), fin.get("title", ""), item.get("title", ""))
+            await _race_promote(item, fin)
+            changed = True
+            incumbent = (item.get("torrent_hash") or "").lower()
+            inc_entry = fin
+            active = _race_active(race)
 
     hq = next((e for e in active if e.get("role") == "hq"
                and (e.get("hash") or "").lower() != incumbent), None)
@@ -12032,7 +12282,12 @@ async def library_download_monitor() -> None:
                         # but time — and past the grace window it is time spent on a
                         # pack that is not going to answer the question.
                         await _reconcile_item_downloads(item, state.download_idle_open)
-                        if _pack_slice_expired(item) and await _pack_slice_fallback(item):
+                        # A season slice only gives up once the file list has
+                        # actually been SEEN: its failure is an error, and a
+                        # magnet that is merely slow to resolve is not one.
+                        if (_pack_slice_expired(item)
+                                and (qfiles or not _pack_slice_strict(item))
+                                and await _pack_slice_fallback(item)):
                             changed = True
                             continue
 
@@ -12131,15 +12386,31 @@ async def library_download_monitor() -> None:
                     # rather than a slow one, so rather than stranding the user with
                     # a card that never moves, swap in the next-best release for the
                     # same episode. See `_retry_dead_download`.
+                    # The part-download stall clock (`stallrule`). Accrued every
+                    # tick, and only while the torrent is genuinely trying - a
+                    # paused, queued, checking or VPN-less torrent is idle for a
+                    # reason that is not the swarm's fault.
+                    _racing_now = (item.get("race") or {}).get("state") in ("racing", "upgrading")
+                    _mark = stallrule.advance(
+                        item.get("stall"), int(info.get("completed", 0) or 0), time.time(),
+                        (not waiting_idle and not _racing_now and state.vpn_secure
+                         and stallrule.is_trying(qstate)))
+                    item["stall"] = _mark
                     if waiting_idle:
                         item.pop("stalled_since", None)
-                    elif (item.get("race") or {}).get("state") in ("racing", "upgrading"):
+                    elif _racing_now:
                         # A race has its own, much faster clocks (120 s with no
                         # metadata, 90 s before a speed cull) AND alternatives
                         # already running. Letting the 600 s serial stall timer
                         # fire underneath it would swap the torrent out from
                         # under the race engine.
                         item.pop("stalled_since", None)
+                    elif (stallrule.is_stuck(_mark) and stallrule.due(_mark, time.time())
+                          and time.monotonic() - _PROCESS_START >= _DOWNLOAD_STALL_BOOT_GRACE):
+                        # Stopped PART-way. Nothing is deleted: replacements are
+                        # raced beside it and the engine keeps whichever finishes.
+                        await _rescue_stalled_download(item, lib)
+                        _mark = item.get("stall") or _mark
                     elif _note_download_stall(item, info):
                         outcome = await _retry_dead_download(item, lib)
                         if outcome:
@@ -12175,6 +12446,12 @@ async def library_download_monitor() -> None:
                         # Intentionally halted (idle window closed) — the UI shows
                         # "Waiting for idle window" instead of "Downloading".
                         "paused": waiting_idle,
+                        # Has bytes, is trying, and has not gained one in minutes.
+                        # The card says "Stalled" instead of "Downloading" at
+                        # 0 B/s, which is how four episodes hid for a day.
+                        "stalled": (not waiting_idle and not _racing_now
+                                    and stallrule.is_visible(_mark)),
+                        "stalled_secs": int(float(_mark.get("idle") or 0.0)),
                     })
                     changed = True  # file list updated
                     # Check if a specific queued file finished (even while torrent is still going)
@@ -14867,6 +15144,10 @@ class DownloadReq(BaseModel):
     # after the add. `selected_file_indices` remains the right shape for the
     # download modal, where a person picked rows off a resolved file list.
     want_episodes: list[list[int]] = []
+    # ...or whole SEASONS of it (19.12.0): a multi-season / complete-series pack
+    # picked to answer "get Season 1". Every file attributed to one of these
+    # seasons is kept and the rest are skipped. See _pack_slice_want_seasons.
+    want_seasons: list[int] = []
     # The single-episode release to fall back to if the episode turns out not to
     # be identifiable inside the pack. Same slim shape as `candidates`.
     pack_fallback: dict = {}
@@ -15554,6 +15835,9 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
             **{f"skip_{k}": v for k, v in _item_skip_summary(it).items()},  # skip_status, skip_affected, skip_total
             "download_mode": _download_cfg(it)["mode"],   # now | idle — drives the card's Pause/Resume control
             "download_partial": any(m == "skip" for m in _download_cfg(it)["files"].values()),  # some files deselected → "Partial" badge
+            # A pack cut down to whole seasons: which ones, and what that costs
+            # against the size of the torrent it came out of. None otherwise.
+            "pack_scope": _pack_scope_summary(it),
             "compressed": _item_has_compressed(it),       # any file re-encoded in place → "Compressed" badge (local-only)
             # Files that will render with the Dolby Vision green cast (Profile 5,
             # no compatible base layer). 0 until the file has been probed.
@@ -17831,11 +18115,13 @@ async def library_download(request: Request, req: DownloadReq) -> JSONResponse:
             # the numbering is not final until metadata binds.
             **({"pack_slice": {"want": [[int(p[0]), int(p[1])] for p in req.want_episodes
                                         if len(p) >= 2],
+                               "want_seasons": sorted({int(n) for n in req.want_seasons
+                                                       if int(n) > 0}),
                                "settled": False,
                                "since": _now_iso(),
                                "skipped": [],
                                "fallback": req.pack_fallback or {}}}
-               if req.want_episodes else {}),
+               if (req.want_episodes or req.want_seasons) else {}),
             # Pinned TMDb binding from the search page the user came from. Read
             # by _fetch_item_metadata INSTEAD of running the fuzzy match. See
             # DownloadReq.tmdb_id.

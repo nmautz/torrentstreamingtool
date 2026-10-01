@@ -1,5 +1,41 @@
 # Changelog
 
+## [19.12.0] — 2026-09-30
+### Downloads that stop part-way get replaced, and a big pack gives you only the season you asked for
+
+- **Fixed: a download that stalled part-way stayed "downloading" forever.** The
+  automatic swap to another release only ever fired for a torrent that had fetched
+  *nothing*. One whose last seeder left at 70% was deliberately left alone, with no
+  error and no retry: four SpongeBob episodes sat at 41-83% and 0 B/s for a day.
+  After 30 idle minutes (longer the more is already on disk, up to 6 hours) the
+  next-best releases are now started **alongside** the stuck one. The stuck torrent
+  is only deleted once a replacement has actually finished, or is plainly winning
+  while the stuck one is under 60%. If its own seeder comes back first, it wins and
+  the replacements are dropped. This works with download racing switched off.
+- A download in that state now reads **"stalled — looking for another copy"** on its
+  card instead of a bare percentage.
+- Only single-file downloads are replaced this way. A multi-file pack that stalls is
+  flagged as stalled but left in place.
+- **A finished copy now always wins a race.** A challenger that completed while the
+  original was still unfinished used to be thrown away when the original eventually
+  caught up.
+- **A multi-season pack picked for one season downloads only that season.** "Get
+  Season 1" could be answered by a complete-series pack (SpongeBob's best-seeded
+  release is 206.9 GB for seasons 1-13) and all of it came down. The pack is now cut
+  to the season you asked for, and the message says so with the size: *"Getting only
+  Season 1 out of the seasons 1-13 pack — about 16.3 GB of its 206.9 GB."* The other
+  seasons stay in the pack, switched off, and can be pulled later without a search.
+- The library card for such a pack shows **"Season 1 only · 15.2 GB of 206.9 GB"**.
+- If the files in a pack can't be matched to the season, nothing is downloaded and
+  the item says why, rather than falling back to the whole pack.
+- Auto-pick's size limits judge a multi-season pack by the season's share, and a
+  pack over the admin "largest pack" ceiling (200 GB by default) is passed over when
+  another one covers the season.
+- **Choosing files by hand:** the file picker in Add to Library now has season
+  buttons (tap one to keep just that season) and shows how much the ticked files add
+  up to — *"41 of 260 files selected · 15.2 GB of 206.9 GB will download"*. Opening a
+  multi-season pack warns how big the whole thing is.
+
 ## [19.11.1] — 2026-09-29
 ### Notices float over the page instead of pushing it down
 
