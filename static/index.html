@@ -737,9 +737,12 @@
        manual mapping is the seek bar's pointer math (_lpSeekPosFromEvent
        scrubs along clientY while rotated). NOTE: the transform makes
        #localPlayer a containing block for fixed descendants — keep the
-       player's children position:absolute (they all are), never fixed. */
+       player's children position:absolute (they all are), never fixed.
+       The iOS app turns the real interface instead (.lp-lock-native, 20.3.0):
+       a CSS turn inside a portrait interface leaves the status bar and the
+       safe areas portrait on top of the picture. */
     @media (orientation: portrait) {
-      #localPlayer.lp-lock-landscape:not(.lp-tiny) {
+      #localPlayer.lp-lock-landscape:not(.lp-tiny):not(.lp-lock-native) {
         inset: auto;
         top: 50%; left: 50%;
         width: 100vh;  width: 100dvh;
@@ -30131,15 +30134,27 @@ function _lpExitFullscreen() {
 
 // ── Orientation lock ─────────────────────────────────────────────────────────
 // .lp-lock-landscape on #localPlayer is the source of truth (it also tints
-// #lpRotBtn via CSS). The native Screen Orientation lock is attempted as a
-// bonus — it only succeeds on platforms/states that allow it (Android in OS
-// fullscreen); when it holds, the real viewport stays landscape and the CSS
-// rotation fallback's (orientation:portrait) media query simply never fires.
-// iPhone Safari has no lock API at all, so there the CSS fallback is the
-// whole mechanism. Both paths coexist safely for the same reason.
-function lpToggleOrientLock() {
+// #lpRotBtn via CSS). Three mechanisms, tried in this order:
+//   1. The iOS app (20.3.0) turns the real interface: AppShell.setOrientationLock.
+//      Only this one hides the status bar, moves the safe areas with the picture
+//      and overrides iOS's own rotation lock. .lp-lock-native holds the CSS turn
+//      back while it does, so the picture doesn't turn twice.
+//   2. The Screen Orientation API, where a browser allows it (Android in OS
+//      fullscreen). When it holds, the viewport is landscape and the CSS rule's
+//      (orientation:portrait) query never matches.
+//   3. The CSS 90° turn. iPhone Safari has no lock API, and an app older than
+//      20.3.0 rejects the call in 1, so there this is the whole mechanism.
+function _lpOrientApply(on) {
   const c = document.getElementById("localPlayer");
-  const on = c.classList.toggle("lp-lock-landscape");
+  if (isApp && _cap.shell) {
+    c.classList.toggle("lp-lock-native", on);
+    let r = null;
+    try { r = _cap.shell.setOrientationLock({ on }); } catch (_) {}
+    // The proxy answers any method on an older shell with a rejecting promise.
+    if (r && r.then) r.then(() => {}, () => c.classList.remove("lp-lock-native"));
+    else c.classList.remove("lp-lock-native");
+    return;
+  }
   try {
     if (on && screen.orientation && screen.orientation.lock) {
       screen.orientation.lock("landscape").catch(() => {});
@@ -30147,18 +30162,25 @@ function lpToggleOrientLock() {
       screen.orientation.unlock();
     }
   } catch (_) {}
+}
+function lpToggleOrientLock() {
+  const c = document.getElementById("localPlayer");
+  _lpOrientApply(c.classList.toggle("lp-lock-landscape"));
   _lpCtlShow();
 }
 function _lpClearOrientLock() {
   const c = document.getElementById("localPlayer");
   if (!c.classList.contains("lp-lock-landscape")) return;
   c.classList.remove("lp-lock-landscape");
-  try { if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch (_) {}
+  _lpOrientApply(false);
 }
-// True while the CSS rotation fallback is actually rendering (lock engaged AND
-// the viewport really is portrait) — screen-space pointer math must swap axes.
+// True while the CSS rotation fallback is actually rendering (lock engaged, not
+// held by the app, AND the viewport really is portrait) — screen-space pointer
+// math must swap axes.
 function _lpRotated() {
-  return document.getElementById("localPlayer").classList.contains("lp-lock-landscape")
+  const c = document.getElementById("localPlayer");
+  return c.classList.contains("lp-lock-landscape")
+      && !c.classList.contains("lp-lock-native")
       && matchMedia("(orientation: portrait)").matches;
 }
 
@@ -32463,6 +32485,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.2.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.3.0</div>
 </body>
 </html>

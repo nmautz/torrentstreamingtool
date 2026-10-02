@@ -1361,10 +1361,13 @@ Two ways to populate the cache:
    the video also minimizes the browser bar (app-shell escape hatch — see
    [FRONTEND.md](FRONTEND.md) § Layout). An **orientation-lock button**
    (`#lpRotBtn`, touch devices only) keeps playback landscape even when the
-   phone auto-rotates to portrait: native `screen.orientation.lock` where it
-   works (Android + OS fullscreen), CSS 90°-rotation fallback everywhere
-   else (iPhone Safari has no lock API) — see the footgun in
-   [GOTCHAS.md](GOTCHAS.md). Auto-hides 3 s into playback; tap to toggle.
+   phone auto-rotates to portrait. Three mechanisms (`_lpOrientApply`): the
+   **iOS app** turns the real interface and pins one landscape side
+   (`AppShell.setOrientationLock`, 20.3.0; it also overrides iOS's own
+   rotation lock); a browser uses `screen.orientation.lock` where it works
+   (Android + OS fullscreen); everywhere else, and in an app older than
+   20.3.0, a CSS 90° rotation (iPhone Safari has no lock API) — see both
+   footguns in [GOTCHAS.md](GOTCHAS.md). Auto-hides 3 s into playback; tap to toggle.
    Full detail in [FRONTEND.md](FRONTEND.md); the iOS/fullscreen footgun is
    in [GOTCHAS.md](GOTCHAS.md).
 

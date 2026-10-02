@@ -3497,9 +3497,20 @@ Two things fell out of that and are load-bearing:
 
 ### Orientation lock rotates the player with a CSS transform — two traps
 
+**This is the browser's lock only. The iOS app turns the real interface (20.3.0, see § The app's orientation lock is native below) and adds `.lp-lock-native`, which switches this rule off.**
+
 The player's orientation lock (`#lpRotBtn` → `.lp-lock-landscape`) needs a CSS fallback because iPhone Safari has no `screen.orientation.lock()`: in a portrait viewport the whole `#localPlayer` is sized to the swapped viewport dimensions and `rotate(90deg)`-ed (the native lock and the CSS rule can't fight — when the native lock holds, the `(orientation:portrait)` media query never matches). Traps: **(1)** the `transform` makes `#localPlayer` the containing block for `position:fixed` descendants — every child of the player must stay `position:absolute` (they all are today; a `fixed` child would silently anchor to the rotated box on lock and to the viewport otherwise). **(2)** Browser hit-testing follows the transform, but any **manual screen-coordinate math** does not: the seek bar renders vertically while rotated, so `_lpSeekPosFromEvent` swaps to `clientY`/`r.height` when `_lpRotated()` is true — any new drag/scrub interaction inside the player must do the same.
 
 ## iOS client app (Capacitor)
+
+### The app's orientation lock is native, and a CSS turn can never stand in for it (20.3.0)
+
+Until 20.3.0 the app used the browser's CSS turn. Inside the app that is wrong in ways no stylesheet can fix, because the interface underneath is still portrait: the status bar and the clock draw over the turned player, the pinned safe-area insets (`html.is-app .safe-top`, keyed on `(orientation: portrait)`) pad the wrong edges, and with iOS's own rotation lock on the app cannot leave portrait at all. Only the app can ask iOS to turn the interface: `AppShell.setOrientationLock({on})` → `OrientationLock` in `AppShell.swift`, answered through `MainViewController.supportedInterfaceOrientations` plus `requestGeometryUpdate`. That overrides the system rotation lock, as VLC and YouTube do.
+
+- **One landscape side, not both.** The lock is for watching lying down; a lock that still flips between the two landscape sides turns the picture over when you shift. Locked while landscape, that side is pinned. Locked while upright there is no side yet, so both are allowed until the phone is first turned to one. **Under iOS's rotation lock `UIDevice.orientation` stops updating**, so that first turn is never seen and the picture stays on the side iOS chose. To get the other side: turn the phone to it with the system lock off, then lock in the player.
+- **`UIDeviceOrientation` and `UIInterfaceOrientation` name the landscape sides oppositely** (device `.landscapeLeft` is interface `.landscapeRight`). `OrientationLock.side(of:)` is the one place that maps them.
+- **The lock must not outlive the page that set it.** A reload, the offline snapshot or the grey-screen recovery replaces the page without `_lpClearOrientLock` running, and the new page would be stuck sideways with no button lit. `AppShell.load()` watches the web view's `isLoading` and releases the lock when a new document starts.
+- **`.lp-lock-native` holds the CSS turn back** while the app turns the interface, or the picture would turn twice. An app older than 20.3.0 rejects the call and the page removes the class, so it keeps the CSS turn. `_lpRotated()` is false under the native lock: the seek bar is horizontal again and must scrub along `clientX`.
 
 ### The sleep timer must run natively, and must not fire twice (19.5.0)
 

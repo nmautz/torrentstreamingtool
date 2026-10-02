@@ -36,6 +36,12 @@ class MainViewController: CAPBridgeViewController {
         ExternalDisplayAccessory.register(on: self)
     }
 
+    // The player's orientation lock (AppShell.swift). Unlocked, this is
+    // Capacitor's answer: the list in Info.plist.
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        OrientationLock.shared.mask ?? super.supportedInterfaceOrientations
+    }
+
     // THE GREY SCREEN. Reported 2026-09-23 after ~20 minutes backgrounded with
     // 2.3 GB of downloads running: coming back to the app showed a blank grey
     // view, and only a force-quit fixed it. The transcript carries NO `crash` and

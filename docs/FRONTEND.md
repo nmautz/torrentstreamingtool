@@ -671,6 +671,12 @@ Don't re-add the `controls` attribute. Pieces:
   button when it fires (Prev/Next episode, Stop, Clip…), and setting the sleep timer.
   Never for something that just happened (an auto-skip, a timer running out). Download
   completion buzzes natively (`Haptics.downloadFinished`, one per 3 s burst).
+- **Orientation lock** (`#lpRotBtn`, `lpToggleOrientLock` → `_lpOrientApply`): in the
+  iOS app (20.3.0) `AppShell.setOrientationLock({on})` turns the real interface and pins
+  one landscape side; `.lp-lock-native` on `#localPlayer` holds the CSS turn back. A
+  browser, or an older app (the call rejects), keeps the CSS turn, and only then is
+  `_lpRotated()` true. `_lpClearOrientLock` releases it on minimise and stop. See
+  [GOTCHAS.md](GOTCHAS.md) § The app's orientation lock is native.
 - **Home-screen quick actions** (iOS app only, 19.5.0): **Continue Watching / Downloads /
   Search**, declared in `Info.plist` (`UIApplicationShortcutItems`) and delivered to
   `SceneDelegate`. `AppShell.swift` holds the action across the connect-shell → host

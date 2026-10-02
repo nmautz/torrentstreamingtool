@@ -1,5 +1,28 @@
 # Changelog
 
+## [20.3.0] — 2026-10-02
+### The player's rotation lock really rotates the app
+
+- **Fixed: in the iOS app, the player's rotation lock left the clock and status bar
+  drawn over the picture.** The lock turned the player sideways inside a screen iOS
+  still treated as upright, so the clock sat on top of the time readout and the
+  controls were pushed in from the wrong edges. The app now turns the whole screen, as
+  VLC does: the status bar goes away and the controls sit where they do when you turn
+  the phone yourself.
+- **New: the lock works with iOS's own rotation lock on.** Before, the phone's rotation
+  lock forced the video upright. Now the player's lock button turns it to landscape
+  anyway, and turning the button off hands it back.
+- **Changed: the lock holds one landscape side.** It no longer flips over when the
+  phone tips the other way, which is what you want lying down. Lock it while already
+  sideways and it keeps that side. Lock it while upright and it keeps the first side you
+  turn the phone to. To switch sides, unlock, turn the phone, and lock again. With iOS's
+  rotation lock on the phone can't tell which way it is turned, so it stays on the side
+  iOS picks.
+- Needs the 20.3.0 app. An older app, and a phone browser, keep the old sideways
+  picture. The server needs no restart.
+- Checked: the app builds, and the page's choice between the app's lock, an older app
+  and a browser against fakes of each. **Not checked on a phone.**
+
 ## [20.2.2] — 2026-10-02
 ### The app asked for the PIN again the morning after
 
