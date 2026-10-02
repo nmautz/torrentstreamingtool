@@ -1599,6 +1599,13 @@ exactly the swallowed-seek case `_lpVerifySeek` exists for. The two recovery pro
 hand-back rather than racing it on independent timers; pointed at a torn-down or
 mid-seek element, the frame-counting probe would misfire.
 
+If native advanced to another episode during the hold, there is nothing to seek: the
+element still holds the episode the hold started on. The hand-back then loads the
+episode native is on (`_lpLoadIndex(position)`, logged as `handback-reload`). It knows
+from `resume().filePath` differing from `lp.filePath` (the page was frozen for the
+advance) **or** from `lp._nativeAdvancedTo` (the page saw the advance and already
+moved `lp.filePath`: every cast, AirPlay and wired-display hold).
+
 **Progress while locked.** The webview's JS timers are frozen, so `_lpClockTick`'s
 15 s save never fires. The plugin POSTs `/api/library/{id}/progress` itself every
 15 s (and on pause/stop/end), reusing the same near-zero `position < 5` guard. Without

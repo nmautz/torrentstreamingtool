@@ -3033,6 +3033,15 @@ reached through Tailscale is on no network the TV can see. So AirPlay always goe
 - **While native plays, an arm's position is stale.** The page arms from its parked
   element. `arm()` keeps `armed.position` unless the arm switches files; otherwise a
   hand-back resumes at the handoff time.
+- **While native holds the picture, the page's ELEMENT is on the episode the hold
+  started on.** A native advance moves `lp.filePath` (the `nativeAdvanced` listener) but
+  nothing loads the new episode into the parked `<video>`. `_npHandBack` compared
+  `resume().filePath` with `lp.filePath`, found them equal, and seeked: the OLD episode
+  at the NEW episode's position (20.6.3; client log: `seek from:1123 to:405
+  buffered:1120-1355` right after `back-to-phone`). `lp._nativeAdvancedTo` is the "element
+  is behind" flag: set by the listener, cleared by `_lpLoadIndex`, and the hand-back
+  reloads when it is set (`handback-reload` row). Never decide what the element holds
+  from `lp.filePath`.
 - **FINISHED is polled, not pushed once.** Status is read at 1 Hz, so an IDLE/FINISHED
   arrives repeatedly. `castReady` is the latch, and without it one episode end would
   advance several times.

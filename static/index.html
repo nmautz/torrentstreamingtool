@@ -21618,9 +21618,21 @@ async function _npHandBack() {
 
   // Native auto-advanced into the next episode while we were away — resync the
   // playlist cursor and load that file instead of the one we left on.
-  if (r.filePath && lp.filePath && r.filePath !== lp.filePath) {
-    const i = (lp.playlist || []).indexOf(r.filePath);
-    if (i >= 0) { lp.pi = i; await _lpLoadIndex(r.position || 0); return; }
+  //
+  // Comparing against lp.filePath is not enough: when the page was awake for
+  // the advance (a cast, AirPlay or wired-display hold), the nativeAdvanced
+  // listener already moved lp.filePath, so the two agree while the ELEMENT
+  // still holds the episode the hold started on. Seeking it put the old
+  // episode on screen at the new one's position. _nativeAdvancedTo says the
+  // element is behind; _lpLoadIndex clears it.
+  const want = r.filePath || lp.filePath;
+  if (want && lp.filePath && (want !== lp.filePath || lp._nativeAdvancedTo)) {
+    const i = (lp.playlist || []).indexOf(want);
+    if (i >= 0) {
+      _npLog("handback-reload", { file: want, at: r.position || 0,
+                                  elementBehind: !!lp._nativeAdvancedTo }, "play");
+      lp.pi = i; await _lpLoadIndex(r.position || 0); return;
+    }
   }
   if (r.ended) { _lpAdvanceOrEnd(); return; }
 
@@ -27147,6 +27159,7 @@ async function _lpLoadIndex(seekTo) {
   const filePath = lp.playlist[lp.pi];
   if (!filePath) { lpStop(); return; }
   lp.filePath = filePath;
+  lp._nativeAdvancedTo = null;   // the element is about to hold this file (see _npHandBack)
   // Merged-series: re-point the active item to the file we're about to load, so
   // prep / stream-ondemand / progress / saved-tracks all target its owning item
   // as playback crosses episode-torrent boundaries. No-op for single-item plays.
@@ -30526,6 +30539,7 @@ async function lpStop() {
   _lpHidePreparing();
   _lpDevHudStop();
   lp.itemId = null; lp.filePath = null; lp.playlist = []; lp.playlistItems = []; lp.pi = 0;
+  lp._nativeAdvancedTo = null;
   _npSyncAwake();   // nothing is playing here any more — let the phone sleep
   // Drop the pushed-play attribution — the next play started ON this browser
   // belongs to whoever is signed in here.
@@ -32495,6 +32509,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.6.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.6.3</div>
 </body>
 </html>

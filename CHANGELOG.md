@@ -1,5 +1,20 @@
 # Changelog
 
+## [20.6.3] — 2026-10-02
+### Back to phone lands on the right episode after the TV moved on
+
+- **Fixed: coming back to the phone from Chromecast, AirPlay or the glasses showed the
+  wrong episode if the TV had advanced to the next one.** The phone's own player still
+  held the episode you started casting, and coming back only moved it to the new
+  episode's time: the previous episode, at the new one's position. Stopping and starting
+  fixed it because that loads the episode properly. Coming back now loads the episode
+  the TV was on, at the TV's position.
+- Found in the phone's log: after an advance on the Dining Room TV, Back to phone at
+  6:45 of episode 41 moved a player that was still holding episode 40 (buffered
+  18:40 to 22:35) to 6:45.
+- **Not checked**: on a phone or a TV. The fix is in the page the box serves, so it
+  needs no new app build, only the box updated.
+
 ## [20.6.2] — 2026-10-02
 ### Holding the remote's progress bar no longer selects text
 
