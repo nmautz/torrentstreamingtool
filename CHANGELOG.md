@@ -1,5 +1,20 @@
 # Changelog
 
+## [20.5.0] — 2026-10-02
+### Siri can answer about a title that has finished, not only one still downloading
+
+- **Changed: "What's downloading in StreamLink?" now returns a full report.** After what
+  is downloading, it lists the six most recently finished titles and whether each is
+  prepped for streaming (and how long is left if it is being prepped). The first trial
+  showed that Siri runs this one action for every question and answers in its own words,
+  so "Is SpongeBob prepped in StreamLink?" could only ever get "nothing is downloading".
+- **Fixed: the first question after the server restarts could time out.** Checking prep
+  state on a cold drive took 7 seconds, longer than Siri waits. The check is now given
+  2.5 seconds; past that the answer leaves prep out.
+- Server only. The 20.4.0 app is the one to use; no new app build.
+- Checked: the wording (49 unit cases) and the endpoint against a made-up library.
+  **Not checked** at the time of writing: on the box, or through Siri.
+
 ## [20.4.0] — 2026-10-02
 ### Ask Siri whether something has finished downloading (first trial)
 
@@ -14,10 +29,15 @@
 - The phone has to be able to reach the server when you ask (at home, or over Tailscale).
   Content-locked titles are never mentioned, since Siri answers without a PIN.
 - Needs the 20.4.0 app **and** the 20.4.0 server.
-- Checked: the title matching and the wording (45 unit cases), the two server endpoints
-  against a made-up library, and that the built app registers both actions and their
-  seven phrases. **Not checked**: anything on a phone. Siri has not been asked a single
-  question yet, and the endpoints have not run on the box.
+- Checked on an iPhone 16 (iOS 27) against the box: asked from the home screen with
+  "StreamLink" in the sentence, Siri runs the app's "what's downloading" action and
+  answers from it (the phone's log and the box both show the call). The same action works
+  from the Shortcuts app. Also the title matching and the wording (45 unit cases).
+- **Found not to work**: without "StreamLink" in the sentence Siri does not use the app.
+  With the app on screen Siri reads the screen instead of asking the app, and misread it
+  (it reported a watch-progress figure as a download). The per-title action has never
+  been chosen by Siri: asked about SpongeBob by name, it ran the general action instead.
+  **Not checked**: an answer while something is actually downloading or prepping.
 
 ## [20.3.0] — 2026-10-02
 ### The player's rotation lock really rotates the app

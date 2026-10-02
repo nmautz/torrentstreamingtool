@@ -164,13 +164,38 @@ def describe(f: dict) -> str:
     return out + _prep_tail(f)
 
 
-def overview(rows: list[dict]) -> str:
-    """Everything still downloading, in one breath. `rows` are `describe` facts."""
+def prep_clause(f: dict) -> str:
+    """Prep state as a short clause for a list; "" when there is nothing to say."""
+    files = int(f.get("files") or 0)
+    if not f.get("prep") or files <= 0:
+        return ""
+    ready = int(f.get("prep_ready") or 0)
+    busy = int(f.get("prep_busy") or 0)
+    eta = f.get("prep_eta_secs")
+    if ready >= files:
+        return "prepped and ready to stream"
+    left = (", about %s to go" % span(eta)) if (busy and eta is not None) else ""
+    if files == 1:
+        return ("being prepped now%s" % left) if busy else "not prepped yet"
+    return "%d of %d episodes prepped%s" % (ready, files, left)
+
+
+# How many titles one answer names per list. Siri reads the whole thing.
+OVERVIEW_LIVE_MAX = 4
+OVERVIEW_DONE_MAX = 6
+
+
+def overview(rows: list[dict], done: "list[dict] | None" = None) -> str:
+    """The whole report in one breath: what is downloading (`rows`), then what
+    most recently finished (`done`) and whether each is prepped.
+
+    iOS 27's Siri runs this as a tool and answers in its own words, whatever
+    title it was asked about (it has never chosen the per-title intent), so this
+    has to carry every title it might be asked about. `rows` and `done` are
+    `describe` facts; a row of `done` whose downloads all failed says so."""
     live = [r for r in rows if int(r.get("downloading") or 0)]
-    if not live:
-        return "Nothing is downloading right now."
     parts = []
-    for r in live[:4]:
+    for r in live[:OVERVIEW_LIVE_MAX]:
         pct = _pct(r)
         if r.get("finding_peers"):
             parts.append("%s, still finding peers" % r.get("name"))
@@ -183,6 +208,23 @@ def overview(rows: list[dict]) -> str:
     more = len(live) - len(parts)
     if more:
         parts.append("and %d more" % more)
-    if len(live) == 1:
-        return "One thing is downloading: %s." % parts[0]
-    return "%d things are downloading: %s." % (len(live), "; ".join(parts))
+    if not live:
+        out = "Nothing is downloading right now."
+    elif len(live) == 1:
+        out = "One thing is downloading: %s." % parts[0]
+    else:
+        out = "%d things are downloading: %s." % (len(live), "; ".join(parts))
+
+    fin = []
+    for r in (done or [])[:OVERVIEW_DONE_MAX]:
+        if int(r.get("downloading") or 0):
+            continue
+        errors, items = int(r.get("errors") or 0), int(r.get("items") or 0)
+        if errors and errors >= items:
+            fin.append("%s failed to download" % r.get("name"))
+            continue
+        clause = prep_clause(r)
+        fin.append("%s, %s" % (r.get("name"), clause) if clause else "%s" % r.get("name"))
+    if fin:
+        out += " Most recently finished downloading: %s." % "; ".join(fin)
+    return out

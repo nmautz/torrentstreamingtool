@@ -144,6 +144,30 @@ eq("unmeasured in overview",
    vs.overview([dict(BASE, downloading=1, total_bytes=0)]),
    "One thing is downloading: Star Wars (1977).")
 
+# ── the full report: Siri answers about ANY title out of this one sentence ────
+DONE = [dict(BASE, name="SpongeBob SquarePants", files=200, prep_ready=200),
+        dict(BASE, name="Andor", files=12, prep_ready=5, prep_busy=1, prep_eta_secs=3600),
+        dict(BASE, name="Alien (1979)"),
+        dict(BASE, name="Heat (1995)", prep_busy=1),
+        dict(BASE, name="Dune (2021)", errors=1),
+        dict(BASE, name="Plain", prep=False)]
+eq("finished titles carry their prep state",
+   vs.overview([], DONE),
+   "Nothing is downloading right now. Most recently finished downloading: "
+   "SpongeBob SquarePants, prepped and ready to stream; "
+   "Andor, 5 of 12 episodes prepped, about 1 hour to go; "
+   "Alien (1979), not prepped yet; Heat (1995), being prepped now; "
+   "Dune (2021) failed to download; Plain.")
+eq("downloading first, then finished",
+   vs.overview([dict(BASE, downloading=1, done_bytes=1, total_bytes=2, eta_secs=120)], DONE[:1]),
+   "One thing is downloading: Star Wars (1977) at 50%, about 2 minutes left. "
+   "Most recently finished downloading: SpongeBob SquarePants, prepped and ready to stream.")
+eq("a title still downloading is never listed as finished",
+   vs.overview([], [dict(BASE, downloading=1, total_bytes=10)]),
+   "Nothing is downloading right now.")
+ok("finished list is capped",
+   vs.overview([], [dict(BASE, name="N%d" % i) for i in range(20)]).count(";") == vs.OVERVIEW_DONE_MAX - 1)
+
 if _FAIL:
     print("FAILED %d (passed %d)" % (len(_FAIL), _PASS))
     for f in _FAIL:

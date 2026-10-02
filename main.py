@@ -26011,6 +26011,9 @@ async def get_discovery() -> JSONResponse:
 # change with a host update. No profile and no PIN reach an intent, so content-
 # locked items are left out entirely: they are neither listed nor described.
 
+VOICE_PREP_PEEK_S = 2.5
+
+
 def _voice_groups(lib: dict) -> list[dict]:
     """The library as the titles a person would say: one row per show or film,
     in the order the tiles group (`_series_key`). Downloading titles first, then
@@ -26068,7 +26071,15 @@ async def _voice_facts(g: dict) -> dict:
                 out.append({"status": "missing"})
         return out
 
-    summary = _prep_summary(await asyncio.to_thread(_peek))
+    # Siri waits a few seconds, and the first stat of a cold drive can take longer
+    # than that (7 s right after a reboot). Better to say nothing about prep than
+    # to have Siri report that the app did not answer.
+    try:
+        states = await asyncio.wait_for(asyncio.to_thread(_peek), VOICE_PREP_PEEK_S)
+    except asyncio.TimeoutError:
+        facts["prep"] = False
+        return facts
+    summary = _prep_summary(states)
     facts.update(files=summary["total"] - summary["missing"], prep_ready=summary["ready"],
                  prep_busy=summary["processing"], prep_eta_secs=summary["eta_secs"])
     return facts
@@ -26093,8 +26104,14 @@ async def voice_status(key: str = "", q: str = "") -> JSONResponse:
     if not key and not q.strip():
         live = [g for g in rows if any(it.get("status") in ("downloading", "pending")
                                        for it in g["items"])]
-        facts = [await _voice_facts(g) for g in live]
-        return JSONResponse({"found": True, "speech": voicestatus.overview(facts), "titles": facts})
+        # The newest finished titles ride along: Siri runs THIS for any question
+        # ("is SpongeBob prepped?") and answers out of what it returns. `rows` is
+        # already newest-first below the downloading ones.
+        done = [g for g in rows if g not in live][:voicestatus.OVERVIEW_DONE_MAX]
+        facts = await asyncio.gather(*(_voice_facts(g) for g in live + done))
+        live_f, done_f = list(facts[:len(live)]), list(facts[len(live):])
+        return JSONResponse({"found": True, "speech": voicestatus.overview(live_f, done_f),
+                             "titles": live_f, "finished": done_f})
     g = next((x for x in rows if x["key"] == key), None) if key else None
     if g is None and q.strip():
         hits = voicestatus.rank(q, [x["name"] for x in rows])

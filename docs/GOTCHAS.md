@@ -6769,7 +6769,20 @@ compiled into `Metadata.appintents` by `xcodebuild`, and each must contain the a
 A title is only recognised inside a phrase if Siri was told the titles
 (`updateAppShortcutParameters`, called when the host changes).
 
-**Not known yet** (this is what the 20.4.0 spike is for): whether iOS 27's Siri routes a
-question here without the app's name, since the app fits none of Apple's App Schema
-domains. The `siri-match` / `siri-resolve` / `siri-status` rows in the client log show
-what Siri actually handed over.
+**What iOS 27's Siri actually does with these** (iPhone 16, 2026-10-02):
+
+- **It uses an intent as a tool and writes its own answer.** Asked "Is SpongeBob done
+  downloading in StreamLink?", it ran `DownloadsOverviewIntent`, then said in its own
+  words that StreamLink had no download going (and mentioned a torrent it found in
+  Files). The sentence we return is source material, not what is spoken. So an intent's
+  return value has to carry everything Siri might be asked about.
+- **It never picked the per-title intent.** `LibraryTitleQuery` was not called once
+  (no `siri-match` / `siri-resolve` rows), even with the title and the app name in the
+  sentence. Do not build on Siri resolving a library title into a parameter until that is
+  seen to happen.
+- **No app name, no app.** "Is SpongeBob done downloading?" did not reach StreamLink.
+- **With the app on screen, Siri reads the screen instead**, and gets it wrong: it
+  reported a watch-progress percentage as a download. Test from the home screen.
+- A person who has run one of these from the Shortcuts app will think Siri is "still
+  using my shortcut" after deleting it. It is the app's own App Shortcut, which is the
+  intended path and cannot be deleted.
