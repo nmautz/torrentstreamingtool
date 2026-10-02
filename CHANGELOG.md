@@ -20,8 +20,12 @@
   iOS picks.
 - Needs the 20.3.0 app. An older app, and a phone browser, keep the old sideways
   picture. The server needs no restart.
-- Checked: the app builds, and the page's choice between the app's lock, an older app
-  and a browser against fakes of each. **Not checked on a phone.**
+- Checked on an iPhone 16 (iOS 27): locking while upright turns the screen with no
+  status bar, the first sideways turn is kept and the opposite one refused, unlocking
+  returns to upright, and it turns to landscape with iOS's rotation lock on. Also the
+  page's choice between the app's lock, an older app and a browser, against fakes of
+  each. **Not checked**: an older app or Safari on a real phone, and the lock being
+  released when the page reloads.
 
 ## [20.2.2] — 2026-10-02
 ### The app asked for the PIN again the morning after
