@@ -3325,6 +3325,34 @@ player UI works with no host. The pieces:
   catch-based fallback would never fire); resume and audio/subtitle picks are
   restored from `getProgress` (which returns the saved track fields). The M3
   sync machinery pushes it all to the host on the next online session.
+- **App server discovery** (19.14.0; `ServerDiscovery.swift` + `ios-app/www/index.html`).
+  The Connect screen lists servers; the address box remains underneath and is all a plain
+  browser gets. `ServerDiscovery.scan` runs three things at once and reports each server
+  as a `found` event the moment it answers:
+  1. **Bonjour** `_streamlink._tcp` (TXT carries `ip`/`port`). A Bonjour answer skips the
+     probe queue.
+  2. **Wi-Fi sweep**: `GET /api/discovery` on every address of each `en*` interface's
+     subnet (clamped to the phone's own /24 on a wider network), 96 at a time, 2 s each.
+  3. **VPN sweep**: the kernel routing table (`sysctl NET_RT_DUMP`, parsed by offset since
+     iOS ships no `<net/route.h>`) gives the subnets routed through `utun*`; each of /22 or
+     narrower is swept the same way. This is what finds a box behind a Tailscale subnet
+     router. Labelled `Tailscale` when the tunnel's own address is in `100.64/10`.
+
+  `known` URLs (every address of every remembered server) are probed first with a longer
+  timeout. A host from before 19.14.0 has no `/api/discovery`; a 404 there falls back to
+  `/api/version`, so it is listed, with no id.
+  The shell keeps `streamlink_servers` (`[{id, name, url, urls, seen}]`, capacitor origin):
+  `urls` is every address a server reported in `addrs` or was reached at. One box that
+  answers at several addresses is ONE tile; the address offered is the saved one if it
+  answered, else a LAN address, else `100.x` (the LAN address is the same origin at home
+  and away, so the dashboard keeps its login).
+  **Launch:** `checkHost` (native `probe`) replaces the fetch probe and also returns the
+  server's identity, which is how an install that only ever had an address typed in learns
+  its server's id. If the saved address is dead and the id is known, `findMovedServer`
+  scans with `wantId` (returns the instant that id answers, 5 s cap) and follows the box to
+  its new address. No id, no scan. No network interface, the scan returns at once.
+  Diagnostics: a `netmap` row per launch (interfaces, routes read, nets that would be
+  swept) and a `discover` row per scan, both `cat: "app"`.
 - **Shell routing** (`ios-app/www/index.html`): probe fails → `goOffline()`
   prefers the snapshot (`goToCachedPlayer`) and falls back to
   **`downloads.html`** — which is now a **feature-frozen fallback** (first-ever

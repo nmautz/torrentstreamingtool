@@ -1015,6 +1015,22 @@ def start_mdns(lan_ip: str, http_port: int, https_port: int = 0):
         zc.register_service(http_info)
         ok(f"mDNS: http://remote.local registered")
 
+        # What the iOS app's server list browses for. Its own try: a box that
+        # can't register this must still answer to remote.local.
+        try:
+            import discovery
+            zc.register_service(ServiceInfo(
+                discovery.SERVICE_TYPE,
+                discovery.mdns_instance(),
+                addresses=addr,
+                port=http_port,
+                properties=discovery.mdns_txt(HERE, lan_ip, http_port),
+                server="remote.local.",
+            ), allow_name_change=True)
+            ok("mDNS: visible to the StreamLink app on this network")
+        except Exception as exc:
+            warn(f"mDNS app discovery not registered: {exc}")
+
         if https_port:
             https_info = ServiceInfo(
                 "_https._tcp.local.",

@@ -2,9 +2,19 @@
 <!--
   StreamLink iOS — first-run / connect shell  (M2 · 6.0.0-preview.2.x.x)
 
-  Captures the host server address
-  and navigates the WKWebView to that host, where the existing dashboard
-  (static/index.html) loads exactly as it does in a desktop browser.
+  Finds the host server and navigates the WKWebView to it, where the existing
+  dashboard (static/index.html) loads exactly as it does in a desktop browser.
+
+  19.14.0: the address is PICKED, not typed. The native ServerDiscovery plugin
+  lists every StreamLink server the phone can reach (Bonjour on Wi-Fi, a sweep
+  of the Wi-Fi subnet, a sweep of whatever subnets a VPN such as Tailscale
+  routes) and this page shows them as tiles. Typing an address still works and
+  is the only path in a plain browser, where the plugin does not exist.
+
+  Each server the app has used is remembered with its id and EVERY address it
+  reported (`streamlink_servers`). That is what lets a later scan find the same
+  box over Tailscale, and what lets launch follow a box whose address changed
+  instead of dropping to the offline player.
 
   M2 offline routing: on launch with a saved host we PROBE its reachability
   (hostReachable) before navigating. Reachable ⇒ go to the dashboard as before.
@@ -74,6 +84,27 @@
     }
     .err.show { display:block; }
 
+    /* server list */
+    #found { display:none; }
+    #found.show { display:block; }
+    .lhead { display:flex; align-items:center; justify-content:space-between; margin:18px 0 8px; }
+    .lhead label { margin:0; }
+    .scanning { display:none; width:8px; height:8px; background:var(--accent); animation:pulse 1s ease-in-out infinite; }
+    .scanning.show { display:block; }
+    button.srv {
+      display:block; text-align:left; background:var(--panel); border:1px solid var(--line);
+      margin:0 0 8px; padding:14px; text-transform:none; letter-spacing:0;
+    }
+    button.srv:active { background:#1c1c21; border-color:var(--accent); }
+    .srv .n { font-size:17px; font-weight:800; color:var(--fg); word-break:break-word; }
+    .srv .a { font-size:12px; font-weight:500; color:var(--muted); margin-top:5px; word-break:break-all; }
+    .srv .tag {
+      display:inline-block; font-size:10px; font-weight:800; letter-spacing:.1em; text-transform:uppercase;
+      color:var(--accent); border:1px solid var(--accent); padding:2px 6px; margin-left:8px; vertical-align:2px;
+    }
+    .lstatus { font-size:12px; color:var(--muted); line-height:1.45; min-height:17px; }
+    button.small { padding:11px; font-size:12px; margin-top:10px; }
+
     .spacer { flex:1 1 auto; }
     .foot { color:var(--muted); font-size:11px; letter-spacing:.06em; text-align:center; margin-top:24px; }
 
@@ -107,11 +138,19 @@
   <div id="form" style="display:flex; flex-direction:column; flex:1 1 auto;">
     <div class="brand">StreamLink</div>
     <h1>Connect</h1>
-    <p class="sub">Enter the address of your StreamLink host. You can find it in
+    <p class="sub" id="sub">Enter the address of your StreamLink host. You can find it in
       the dashboard&rsquo;s footer or your <code>run.py</code> output
       (e.g. <code>http://192.168.1.20</code>).</p>
 
-    <label for="server">Server address</label>
+    <!-- Servers the phone can see. Shown only inside the app (ServerDiscovery). -->
+    <div id="found">
+      <div class="lhead"><label>Servers found</label><div class="scanning" id="scanDot"></div></div>
+      <div id="servers"></div>
+      <div class="lstatus" id="scanStatus"></div>
+      <button class="ghost small" id="rescan">Scan again</button>
+    </div>
+
+    <label for="server" id="serverLabel">Server address</label>
     <input id="server" type="url" inputmode="url" autocapitalize="off"
            autocorrect="off" spellcheck="false"
            placeholder="http://192.168.1.20" />
@@ -124,7 +163,7 @@
 
     <div class="spacer"></div>
     <div class="foot">
-      StreamLink iOS &middot; v8.0.0
+      StreamLink iOS<span id="appVer"></span>
       <!-- Localhost HLS self-test link hidden. localtest.html is kept in the
            bundle; re-add this link if the Gate 1b self-test is needed again:
       <br/><a href="localtest.html" style="color:#8a8a92">Localhost HLS self-test (Gate 1b)</a>
@@ -135,6 +174,11 @@
   <script>
     "use strict";
     const KEY_URL   = "streamlink_server_url";
+    // Every server this app has used: [{id, name, url, urls: [...], seen}].
+    // `url` is the address last connected through; `urls` is every address the
+    // server has reported or been reached at. `id` is "" for a host older than
+    // 19.14.0, which can be listed but not recognised at a new address.
+    const KEY_SERVERS = "streamlink_servers";
 
     const $ = (id) => document.getElementById(id);
     const formEl = $("form"), connEl = $("connecting");
@@ -177,6 +221,194 @@
       formEl.style.display = "flex";
       // Pre-fill with whatever was last saved so a re-connect is one tap.
       $("server").value = localStorage.getItem(KEY_URL) || "";
+      startDiscovery();
+    }
+
+    // ── Remembered servers ──
+    function loadServers() {
+      try {
+        const v = JSON.parse(localStorage.getItem(KEY_SERVERS) || "[]");
+        return Array.isArray(v) ? v.filter((r) => r && Array.isArray(r.urls)) : [];
+      } catch (_) { return []; }
+    }
+
+    // Every address a probe result says the server answers at. `addrs` are bare
+    // IPs; they take the scheme and port of the URL that actually answered.
+    function serverUrls(s) {
+      const out = [s.url];
+      try {
+        const u = new URL(s.url);
+        for (const a of (s.addrs || [])) {
+          if (!/^\d+\.\d+\.\d+\.\d+$/.test(a)) continue;
+          const alt = u.protocol + "//" + a + (u.port ? ":" + u.port : "");
+          if (!out.includes(alt)) out.push(alt);
+        }
+      } catch (_) {}
+      return out;
+    }
+
+    // Record a server the app saw answer. `usedUrl` marks the address connected
+    // through. Matched by id; a server with no id is matched by address.
+    function remember(s, usedUrl) {
+      if (!s || !s.url) return;
+      const list = loadServers();
+      const urls = serverUrls(s);
+      let rec = s.id ? list.find((r) => r.id === s.id) : null;
+      if (!rec) rec = list.find((r) => !r.id && r.urls.some((u) => urls.includes(u)));
+      if (!rec) {
+        // An address-only row for this box, from before it had an id.
+        const i = list.findIndex((r) => !r.id && r.urls.includes(usedUrl || s.url));
+        if (i >= 0) list.splice(i, 1);
+        rec = { id: s.id || "", name: "", url: "", urls: [] };
+        list.push(rec);
+      }
+      if (s.id) rec.id = s.id;
+      if (s.name) rec.name = s.name;
+      for (const u of urls) if (!rec.urls.includes(u)) rec.urls.push(u);
+      if (usedUrl) { rec.url = usedUrl; if (!rec.urls.includes(usedUrl)) rec.urls.push(usedUrl); }
+      rec.seen = Date.now();
+      try { localStorage.setItem(KEY_SERVERS, JSON.stringify(list.slice(-12))); } catch (_) {}
+    }
+
+    function recordFor(url) {
+      return loadServers().find((r) => r.url === url || r.urls.includes(url)) || null;
+    }
+
+    function knownUrls() {
+      const out = [];
+      const saved = localStorage.getItem(KEY_URL);
+      if (saved) out.push(saved);
+      for (const r of loadServers()) for (const u of r.urls) if (!out.includes(u)) out.push(u);
+      return out;
+    }
+
+    // ── Server list ──
+    // One box usually answers at several addresses at once (its LAN address
+    // through a Tailscale subnet route AND its own 100.x address). It is one
+    // tile. The address offered is the one already in use if that still answers
+    // (same origin, so the dashboard keeps its login), else a LAN address ahead
+    // of a 100.x one, because the LAN address is the same at home and away.
+    const discovered = new Map();   // url → server
+    let scanRun = 0, autoScans = 0, rescanTimer = null, foundHooked = false;
+
+    function isTailnetHost(url) {
+      const m = /^https?:\/\/100\.(\d+)\./.exec(url);
+      return !!m && +m[1] >= 64 && +m[1] <= 127;
+    }
+    function urlRank(s, saved) {
+      if (s.url === saved) return 0;
+      if (s.via === "wifi") return 1;
+      return isTailnetHost(s.url) ? 3 : 2;
+    }
+    function groupServers() {
+      const saved = localStorage.getItem(KEY_URL) || "";
+      const groups = new Map();
+      for (const s of discovered.values()) {
+        const key = s.id || s.url;
+        const cur = groups.get(key);
+        if (!cur || urlRank(s, saved) < urlRank(cur, saved)) groups.set(key, s);
+      }
+      const savedId = (recordFor(saved) || {}).id || "";
+      const isLast = (s) => s.url === saved || (!!s.id && s.id === savedId);
+      return [...groups.values()]
+        .map((s) => ({ s, last: !!saved && isLast(s) }))
+        .sort((a, b) => (b.last - a.last) || (a.s.name || a.s.url).localeCompare(b.s.name || b.s.url));
+    }
+    const VIA = { wifi: "Wi-Fi", tailscale: "Tailscale", vpn: "VPN" };
+
+    function renderServers() {
+      const box = $("servers");
+      box.textContent = "";
+      for (const { s, last } of groupServers()) {
+        const b = document.createElement("button");
+        b.className = "srv";
+        const n = document.createElement("div");
+        n.className = "n";
+        n.textContent = s.name || "StreamLink";
+        if (last) {
+          const t = document.createElement("span");
+          t.className = "tag"; t.textContent = "Last used";
+          n.appendChild(t);
+        }
+        const a = document.createElement("div");
+        a.className = "a";
+        a.textContent = [s.url.replace(/^http:\/\//, ""), VIA[s.via] || "", s.version ? "v" + s.version : ""]
+          .filter(Boolean).join("  ·  ");
+        b.appendChild(n); b.appendChild(a);
+        b.addEventListener("click", () => pickServer(s));
+        box.appendChild(b);
+      }
+    }
+
+    function pickServer(s) {
+      const sd = plugin("ServerDiscovery");
+      if (sd) { try { sd.stop(); } catch (_) {} }
+      scanRun++;
+      if (rescanTimer) { clearTimeout(rescanTimer); rescanTimer = null; }
+      // Fold in the other addresses this same box answered at, so they are
+      // remembered too.
+      for (const o of discovered.values()) if (s.id && o.id === s.id) remember(o);
+      remember(s, s.url);
+      localStorage.setItem(KEY_URL, s.url);
+      goToHost(s.url);
+    }
+
+    function describeNets(nets) {
+      const kinds = [];
+      for (const n of (nets || [])) {
+        const k = VIA[n.kind];
+        if (k && !kinds.includes(k)) kinds.push(k);
+      }
+      return kinds.length ? kinds.join(" and ") : "this network";
+    }
+
+    async function runScan() {
+      const sd = plugin("ServerDiscovery");
+      if (!sd) return;
+      const run = ++scanRun;
+      if (rescanTimer) { clearTimeout(rescanTimer); rescanTimer = null; }
+      $("scanDot").classList.add("show");
+      $("rescan").style.display = "none";
+      if (!discovered.size) $("scanStatus").textContent = "Looking for servers…";
+      let res = null;
+      try { res = await sd.scan({ known: knownUrls(), sweep: true }); } catch (_) {}
+      if (run !== scanRun) return;
+      $("scanDot").classList.remove("show");
+      $("rescan").style.display = "";
+      for (const s of ((res && res.servers) || [])) discovered.set(s.url, s);
+      renderServers();
+      if (discovered.size) { $("scanStatus").textContent = ""; return; }
+      if (res && res.online === false) {
+        $("scanStatus").textContent = "This phone is not on a network.";
+        return;
+      }
+      $("scanStatus").textContent = "No servers found on " + describeNets(res && res.nets) +
+        ". Check that StreamLink is running and that this phone is on the same Wi-Fi, or connected to the same Tailscale network. If iOS asked to find devices on your local network, allow it.";
+      // The first scan usually runs UNDER the Local Network permission prompt
+      // and finds nothing because of it. Nothing tells the page when the
+      // prompt is answered, so look again a couple of times before giving up.
+      if (++autoScans < 3) rescanTimer = setTimeout(runScan, 3000);
+    }
+
+    function startDiscovery() {
+      const sd = plugin("ServerDiscovery");
+      if (!sd) return;       // plain browser: the address box is all there is
+      $("found").classList.add("show");
+      $("sub").textContent = "Pick your StreamLink server. It needs to be on the same Wi-Fi as this phone, or on the same Tailscale network.";
+      $("serverLabel").textContent = "Or enter the address";
+      if (!foundHooked) {
+        foundHooked = true;
+        try {
+          sd.addListener("found", (s) => {
+            if (!s || !s.url || formEl.style.display === "none") return;
+            discovered.set(s.url, s);
+            $("scanStatus").textContent = "";
+            renderServers();
+          });
+        } catch (_) {}
+      }
+      autoScans = 0;
+      runScan();
     }
 
     function goToHost(url) {
@@ -229,20 +461,69 @@
       });
     }
 
+    // The same question asked natively, which can also read the answer: WHICH
+    // server is there. That is how an install that only ever had an address
+    // typed into it learns its server's id, with no extra step for the user.
+    // Falls back to the fetch probe in a plain browser.
+    function checkHost(url) {
+      const sd = plugin("ServerDiscovery");
+      if (!sd) return hostReachable(url).then((ok) => ({ reachable: ok }));
+      return new Promise((resolve) => {
+        let done = false;
+        const finish = (v) => { if (!done) { done = true; resolve(v); } };
+        setTimeout(() => finish({ reachable: false }), 4000);
+        sd.probe({ url, timeout: 2.2 })
+          .then((r) => finish({ reachable: !!(r && r.reachable), server: r && r.server }))
+          .catch(() => hostReachable(url).then((ok) => finish({ reachable: ok })));
+      });
+    }
+
+    // The saved address did not answer. If the app knows which server that was,
+    // look for the same one somewhere else: a new DHCP lease at home, or its
+    // Tailscale address when away. Resolves the server row, or null.
+    async function findMovedServer(url) {
+      const sd = plugin("ServerDiscovery");
+      const rec = recordFor(url);
+      if (!sd || !rec || !rec.id) return null;
+      try {
+        const res = await sd.scan({ known: knownUrls(), sweep: true, wantId: rec.id, deadline: 5 });
+        const hits = ((res && res.servers) || []).filter((s) => s.id === rec.id);
+        hits.sort((a, b) => urlRank(a, url) - urlRank(b, url));
+        return hits[0] || null;
+      } catch (_) { return null; }
+    }
+
     async function connectInterstitial(url) {
       formEl.style.display = "none";
       $("connectTarget").textContent = url;
       $("connectStatus").textContent = "Checking connection…";
       connEl.classList.add("show");
+      const view = ++scanRun;
       // Probe before navigating — an offline launch routes to Downloads. The
       // "View offline downloads" button is tappable the whole time.
-      const ok = await hostReachable(url);
-      if (ok) { goToHost(url); return; }
+      const r = await checkHost(url);
+      if (view !== scanRun) return;          // "Change server" was tapped meanwhile
+      if (r.reachable) {
+        if (r.server) remember(r.server, url);
+        goToHost(url);
+        return;
+      }
+      $("connectStatus").textContent = "Can’t reach server — looking for it…";
+      const moved = await findMovedServer(url);
+      if (view !== scanRun) return;
+      if (moved) {
+        remember(moved, moved.url);
+        localStorage.setItem(KEY_URL, moved.url);
+        $("connectTarget").textContent = moved.url;
+        $("connectStatus").textContent = "Found it at a new address.";
+        goToHost(moved.url);
+        return;
+      }
       $("connectStatus").textContent = "Can’t reach server — opening offline player…";
-      setTimeout(() => { goOffline(url); }, 800);
+      redirectTimer = setTimeout(() => { goOffline(url); }, 800);
     }
 
-    $("changeBtn").addEventListener("click", showForm);
+    $("changeBtn").addEventListener("click", () => { scanRun++; showForm(); });
     $("downloadsBtn").addEventListener("click", () => goOffline());
     $("downloadsBtn2").addEventListener("click", () => goOffline());
 
@@ -250,13 +531,24 @@
       const url = normalizeUrl($("server").value);
       if (!url) { showError("That doesn't look like a valid address. Example: http://192.168.1.20"); return; }
       localStorage.setItem(KEY_URL, url);
+      scanRun++;
       goToHost(url);
+    });
+    $("rescan").addEventListener("click", () => {
+      discovered.clear(); renderServers();     // a manual rescan drops servers that have gone
+      autoScans = 0; runScan();
     });
 
     $("server").addEventListener("keydown", (e) => { if (e.key === "Enter") $("connect").click(); });
 
     // ── Entry point ──
     (function init() {
+      try {
+        const shell = plugin("AppShell");
+        if (shell) shell.info().then((i) => {
+          if (i && i.version) $("appVer").textContent = " · v" + i.version;
+        }).catch(() => {});
+      } catch (_) {}
       const forceSetup = /[?&#]setup=1\b/.test(window.location.href);
       const saved = localStorage.getItem(KEY_URL);
       if (saved && !forceSetup) connectInterstitial(saved);

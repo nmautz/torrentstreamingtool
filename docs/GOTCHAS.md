@@ -2853,6 +2853,53 @@ Two more, on the JS side:
   the common case (playing a *downloaded* episode online, which always routes through
   a proxied session). Same trap as the auto-manage prefs.
 
+### The app cannot list a tailnet; it can only read its routes
+
+Server discovery (19.14.0) wants "every StreamLink box this phone can reach". Three facts
+shape what it can do, and none is obvious:
+
+- **Bonjour stops at the tailnet.** mDNS is link-local multicast; Tailscale carries none of
+  it. Registering the service on the Tailscale interface would do nothing.
+- **An app cannot ask Tailscale for its machines.** The peer list lives in another app's
+  sandbox. What an app *can* read is the kernel routing table. A **subnet router** appears
+  there as a plain route (`192.168.0/24` via `utunN`), which is 254 addresses to probe.
+  Every other tailnet machine hides inside one `100.64/10` route, four million wide.
+  Verified on an iPhone 16 / iOS 27 on 2026-10-01: the sandbox allows
+  `sysctl(NET_RT_DUMP)` (26 routes), and the Tailscale subnet route is in it.
+- **So a box's own `100.x` address can only be learned, never found.** The host reports it
+  in `/api/discovery` `addrs`; the app stores it whenever it sees the box by any other
+  means and probes it on later scans. A box that has *only* a `100.x` address and has never
+  been seen still has to be typed once.
+
+Things that will bite a change here:
+
+- **`net/route.h` does not exist in the iOS SDK.** `NetMap.parseRoutes` reads `rt_msghdr`
+  by offset (92-byte header). A netmask sockaddr is **truncated**: `sa_len` covers only its
+  non-zero bytes and its family byte is garbage. Read it as a `sockaddr_in` and a /24 comes
+  out as nonsense. The parser builds on macOS unchanged (the plugin class is behind
+  `#if canImport(Capacitor)`), so test it there before touching a phone.
+- **An empty route table means "unknown", not "no VPN".** When a tunnel is up and no
+  sweepable route was read, the scan falls back to the /24 around each remembered server.
+- **`ipsec0 192.0.0.x` is the carrier, not a VPN.** It is the IPv4-over-IPv6 shim on
+  cellular and is excluded from the tunnel list by address.
+- **Port 80 answering proves nothing.** Every router does. A candidate is a server only if
+  `/api/discovery` says `app: "streamlink"` (or, pre-19.14.0, `/api/version` returns a lone
+  version). The probe follows redirects and records the origin that finally answered,
+  because `network_adapter_redirect` bounces a non-preferred adapter's IP to the preferred one.
+- **The first scan runs under the Local Network prompt and finds nothing.** Nothing tells
+  the page when the prompt is answered, so an empty scan repeats twice, 3 s apart. A denied
+  permission looks identical to an empty network; the `discover` row's `err` is the only
+  place it shows. Traffic through the tunnel is not subject to that permission, which is
+  why the Tailscale sweep can succeed while Bonjour and the Wi-Fi sweep find nothing.
+- **A new address is a new origin.** Following a box from `192.168.0.106` to `100.x` gives
+  the dashboard an empty `localStorage`, so it asks for the profile again. That is why the
+  tile and the follow both prefer the saved address, then a LAN address, and take `100.x`
+  last.
+- **The sweep is ~96 sockets at once.** iOS's soft limit is 256 file descriptors per
+  process and downloads may be running. Don't raise `maxActive` to make it faster.
+- **`NSBonjourServices` must list `_streamlink._tcp`**, or the browser finds nothing and
+  reports no error (same trap as `_googlecast._tcp` below).
+
 ### AirPlay receivers fetch the URL themselves — loopback and Tailscale URLs are dead to them
 
 AirPlay video is not mirroring. The receiver is handed the player item's URL and

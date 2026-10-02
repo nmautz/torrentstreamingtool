@@ -104,6 +104,30 @@ Uses `zeroconf`. `start_mdns(lan_ip, http_port, https_port)` registers `_http._t
 
 **Both `run.py` and the installed service call `start_mdns_resilient()`, not `start_mdns()` directly.** It spawns a daemon thread that polls `get_local_ip()` until a LAN IP appears, registers, then re-registers if the IP later changes (DHCP lease / network switch). It polls every 5 s until registered, then every 30 s to watch for changes. This exists because the service starts at boot **before Wi-Fi is up** — a one-shot registration would see no IP and silently skip, so `remote.local` would never resolve until a manual relaunch even though the dashboard is reachable by IP. See [GOTCHAS.md](GOTCHAS.md#remotelocal-doesnt-resolve-after-a-reboot). Returns a handle with `.close()`, called on Ctrl+C / service shutdown.
 
+## Discovery: how the app finds this host (19.14.0)
+
+The iOS app lists the servers it can reach; nobody types an address. The host's half is
+[`discovery.py`](../discovery.py) (leaf module, tests in `tests/test_discovery.py`):
+
+| Piece | Where | What |
+|---|---|---|
+| Bonjour service `_streamlink._tcp` | `start_mdns()` in `run.py` | Registered next to `remote.local`, on the same resilient keepalive, so it follows a DHCP change. Instance name is the hostname; `allow_name_change=True` so two boxes on one LAN both register. TXT: `id`, `name`, `ip`, `port`. The address is in the TXT so the phone needs no second resolve. Registered in its own `try`: failing here must not cost `remote.local`. |
+| `GET /api/discovery` | `main.py` | `{app: "streamlink", id, name, version, addrs}`. Unauthenticated, like `/api/version`. `app` is how a probe tells this host from a router's page on port 80. `addrs` is the preferred LAN IP followed by any Tailscale address. |
+| `.server_id` | repo root, gitignored | A random 16-hex id written on first use. The app uses it to recognise the same box on a new address. If the file can't be written the id is `""`, and the app then lists the box but never follows it. Deleting the file makes the box a stranger to every phone once. |
+
+**Tailscale is found by subnet, not by adapter name.** `netadapters` drops VPN adapters by
+name on purpose (they must never become the advertised LAN IP). `discovery.tailscale_ips()`
+takes any IPv4 in `100.64.0.0/10`, which is the same on Windows (`Tailscale`), Linux
+(`tailscale0`) and macOS (`utunN`). Mullvad's `10.x` address is not in that range.
+
+**Platform notes.** Windows: the existing "StreamLink mDNS" firewall rule (UDP 5353) covers
+the new service; nothing else to open. If the rule is missing (not elevated), Bonjour is
+dropped and the app falls back to sweeping the subnet. Linux/macOS: no difference.
+
+The phone's half (three overlapping mechanisms, and what each one cannot see) is in
+[STREAMING.md § App server discovery](STREAMING.md) and
+[GOTCHAS.md](GOTCHAS.md#the-app-cannot-list-a-tailnet-it-can-only-read-its-routes).
+
 ## Windows Firewall ([run.py:629](../run.py#L629))
 
 Adds inbound rules for the HTTP port, HTTPS port (if certs), and UDP 5353 (mDNS). Idempotent — checks `netsh advfirewall firewall show rule name=…` before adding. Requires Administrator; warns if not elevated.

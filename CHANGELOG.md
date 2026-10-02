@@ -1,5 +1,28 @@
 # Changelog
 
+## [19.14.0] — 2026-10-01
+### The app finds your server; you no longer type its address
+
+- **New: the Connect screen lists the servers it can see.** Tap yours. It looks on the
+  Wi-Fi the phone is on, and through Tailscale when that is switched on. The address box is
+  still there underneath for a server the list misses.
+- The first time, iOS asks for permission to find devices on your local network. Allow it,
+  or only servers reached through Tailscale will show.
+- **Away from home:** a server shows up over Tailscale if it advertises its home network
+  there (a subnet router), or if the app has connected to it before. A server that has only
+  a Tailscale `100.x` address and has never been seen on Wi-Fi has to be typed in once.
+  Tailscale gives an app no way to list the machines on it.
+- **New: the app follows a server whose address changed.** If the saved address stops
+  answering, the app looks for the same server elsewhere for up to five seconds before
+  opening the offline player. At a new address the dashboard asks for your profile again.
+  This needs a host on 19.14.0; an older host is listed but can't be followed.
+- A host on 19.14.0 announces itself on the network (Bonjour) and answers
+  `GET /api/discovery`. Older hosts are still found, by checking each address on the network.
+- Checked on an iPhone 16 against a 19.13.0 host over Tailscale: the server was listed
+  within a few seconds. Not yet checked: a 19.14.0 host on the same Wi-Fi as the phone
+  (the Bonjour path, tested Mac to Mac only), and following a server to a new address
+  (tested with a simulated app only).
+
 ## [19.13.1] — 2026-10-01
 ### Skipping back on the phone no longer leaves the picture stopping and starting
 

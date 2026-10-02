@@ -132,6 +132,8 @@ JS-written rows carry `src: "js"`.
 |---|---|
 | `launch` | app start — carries the build; use these to split a long log into sessions |
 | `crash` | **the previous run died and said so.** `kind` is `exception` (with `name`/`reason`) or `signal` (with `sig`); `last` is the final event `DiagLog.write` was handed, `stack` the first 24 frames, `was` whether the app was foreground or background, `since` when that was last true. Written at the NEXT launch, immediately above its `launch` row |
+| `netmap` | once per launch (19.14.0): the phone's interfaces, how many routes the kernel handed over, and the networks server discovery would sweep. `routes: 0` means iOS refused the routing-table read, which is different from a VPN that is off (no `utun` with an address in `ifaces`) |
+| `discover` | one server scan: `found`, `probed`, `bonjour` (answers), `err` (a Bonjour browser error; a denied Local Network permission shows up here), `nets`, `ms`, `want` (true = the launch-time search for a moved server) |
 | `prev-launch-dirty` | the previous run never reached `applicationWillTerminate` and left **no** signal record: a watchdog kill, a memory kill, or the user swiping the app away. `was: "fg"` is a defect; `was: "bg"` is usually iOS reclaiming a backgrounded app and is expected |
 | `snap` | a diagnostics trail row (every field the Monitor diagnostics panel shows) |
 | `startNative` | handoff began — `reason` (`early`/`background`/`manual`), `shouldPlay`, `extWindow`. Written as soon as the player exists and its surface is attached, so it means "we got this far", not "it all worked" |

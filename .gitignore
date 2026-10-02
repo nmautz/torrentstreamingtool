@@ -35,6 +35,9 @@ Downloads/
 # Cached Anime-Lists season-mapping table (see animemap.py); refetched weekly
 .anime_map/
 
+# This install's identity for app discovery (discovery.py); unique per machine
+.server_id
+
 # User library database (profiles + watch history)
 library.json
 library_backups/

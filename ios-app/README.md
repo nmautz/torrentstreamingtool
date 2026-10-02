@@ -18,7 +18,8 @@ build and run it.
 ```
 ios-app/
   www/                      Bundled web shell (the ONLY bundled web asset):
-    index.html              First-run "Connect" screen; probes host reachability →
+    index.html              First-run "Connect" screen: lists the servers the phone
+                            can reach (ServerDiscovery), probes the saved one →
                             navigates to the host, or to downloads.html when offline
     downloads.html          Offline library: lists downloaded bundles + plays them
                             via LocalMediaServer (works with no network)
@@ -77,10 +78,16 @@ not live — re-run `npx cap copy ios` and rebuild.)
 
 ## First run
 
-1. The **Connect** screen asks for your host address (e.g.
-   `http://192.168.1.20`). There is no password: anything that can reach the
-   host can use it.
-2. Tap **Connect** — the app loads your dashboard.
+1. The **Connect** screen lists the StreamLink servers it can see: on the same
+   Wi-Fi, or through a VPN such as Tailscale. iOS asks once for permission to
+   find devices on the local network; allow it.
+2. Tap your server — the app loads your dashboard. There is no password:
+   anything that can reach the host can use it.
+
+If the server isn't listed, type its address (e.g. `http://192.168.1.20`) in
+the box underneath and tap **Connect**. A server that has only a Tailscale
+`100.x` address and has never been seen on Wi-Fi must be typed once; after
+that it is remembered.
 
 **Self-signed host cert:** the host serves HTTPS with a self-signed cert
 (`cert.pem`). iOS won't trust it until you install the host's CA. On the device,

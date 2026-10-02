@@ -25915,6 +25915,27 @@ async def get_ui_version() -> JSONResponse:
     )
 
 
+@app.get("/api/discovery")
+async def get_discovery() -> JSONResponse:
+    """Who this server is and where it answers (19.14.0). Unauthenticated and
+    secret-free, like /api/version: it is what the app's server list probes for,
+    on every address of a subnet, to tell a StreamLink box from a router's login
+    page. `addrs` includes the Tailscale address so the app can learn it while
+    it is on the LAN. See discovery.py and docs/RUNTIME.md § Discovery."""
+    import discovery
+    import netadapters
+
+    def _build() -> dict:
+        try:
+            lan_ip = netadapters.resolve_preferred(state.preferred_adapter)[0]
+        except Exception:
+            lan_ip = ""
+        return discovery.payload(Path(__file__).resolve().parent, UI_VERSION, lan_ip)
+
+    body = await asyncio.to_thread(_build)
+    return JSONResponse(body, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+
 # ── Latest iOS app (19.6.0) ─────────────────────────────────────────────────
 # The newest version installable from the SideStore source (ios-app/publish-ipa.sh
 # writes it). The page compares it with the version of the app it is running
