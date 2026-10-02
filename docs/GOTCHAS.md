@@ -6517,6 +6517,18 @@ that was exactly what a `main` server's phone was offered.
   (`promote.py` refuses that). The check lives in the app because the old server's
   page can't make it. A typed address skips it on the first connect (no probe has
   read a version yet) and gets it on the next launch.
+- **A channel's source never offers an app newer than the channel's server, and
+  promotion enforces it in both directions** (`appchannel.app_move`): a source
+  that is behind `gain`s the app, and one that is ahead is `cut` back
+  (`publish-ipa.sh --promote --ceiling`). The second case is what promoting an
+  OLDER build needs, and `apps.json` was in it from the start, because before
+  channels it was fed every alpha build. Cutting does not reach phones that
+  already installed the newer app.
+- **The newest build is rarely the candidate.** `promote.py candidates --box`
+  scores every build since the channel's. A build's code keeps running inside
+  the builds after it, so its exposure is the hours of everything at or above it
+  (`appchannel.exposure`), not only its own. What that number hides is the later
+  fixes it lacks, which are listed beside it.
 - **Choosing the build is a judgment, and the tools only gather.** `promote.py
   candidates` (changelog: what changed, what was never checked, what was fixed
   LATER) and `promote.py logs --box …` (the box's own logs per version). The

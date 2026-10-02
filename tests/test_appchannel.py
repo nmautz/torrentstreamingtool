@@ -79,13 +79,17 @@ eq("an unparseable ceiling is no ceiling", ac.pick(vs, "dev")["version"], "20.0.
 eq("unparseable entries are skipped", ac.pick(V("1.0", "19.4.1"))["version"], "19.4.1")
 eq("nothing published", ac.pick([]), None)
 
-# ── promotable ───────────────────────────────────────────────────────────────
-alpha = V("20.1.0", "20.0.1", "19.14.0")
-eq("promoting 20.0.3 moves app 20.0.1", ac.promotable(alpha, "20.0.3", V("19.4.1"))["version"], "20.0.1")
-eq("promoting to an empty channel", ac.promotable(alpha, "20.1.0")["version"], "20.1.0")
-eq("already there", ac.promotable(alpha, "20.0.3", V("20.0.1")), None)
-eq("the channel is never moved backwards", ac.promotable(alpha, "19.14.0", V("20.0.1")), None)
-eq("no app old enough", ac.promotable(alpha, "19.0.0"), None)
+# ── app_move ─────────────────────────────────────────────────────────────────
+rel = V("20.1.0", "20.0.1", "19.14.0", "19.9.2")
+mv = lambda target, have=(): (lambda a, e: (a, e and e["version"]))(*ac.app_move(rel, target, have))
+eq("promoting 20.0.3 gains app 20.0.1", mv("20.0.3", V("19.4.1")), ("gain", "20.0.1"))
+eq("an empty channel gains it", mv("20.1.0"), ("gain", "20.1.0"))
+eq("already there", mv("20.0.3", V("20.0.1", "19.14.0")), ("keep", "20.0.1"))
+eq("a source ahead of the server is cut back", mv("19.13.1", V("20.0.1", "19.14.0", "19.9.2")), ("cut", "19.9.2"))
+eq("cut back to an app it does not hold yet", mv("19.14.0", V("20.0.1")), ("cut", "19.14.0"))
+eq("cut to nothing when no app is old enough", mv("19.0.0", V("20.0.1")), ("cut", None))
+eq("no app old enough, nothing offered", mv("19.0.0"), ("none", None))
+eq("an older app in the source is not a reason to cut", mv("20.0.3", V("19.9.2")), ("gain", "20.0.1"))
 
 # ── unverified_claims ────────────────────────────────────────────────────────
 LOG = """# Changelog
@@ -188,6 +192,10 @@ eq("only what the older build did not also do is new",
 eq("the oldest build in the logs owns everything it logged", len(ac.new_signatures(h, "20.0.0")), 1)
 eq("a version that never ran", ac.new_signatures(h, "20.1.0"), [])
 eq("no log", ac.log_health([]), [])
+eq("exposure: as itself, and as itself or newer", ac.exposure(h, "20.0.0"), (2 * 3600, 7 * 3600))
+eq("the newest build has only its own time", ac.exposure(h, "20.0.1"), (5 * 3600, 5 * 3600))
+eq("a build that was never the backend still ran inside later ones", ac.exposure(h, "20.0.0"[:-1] + "1")[1], 5 * 3600)
+eq("a build newer than anything in the logs", ac.exposure(h, "21.0.0"), (0, 0))
 eq("a file name with spaces is not part of the signature",
    ac._signature("streamlink", "[analyzer] [no_skip_points] Hacks.2021.S01E02.1080p.x265-RARBG.mp4: Fingerprinting done"),
    ac._signature("streamlink", "[analyzer] [no_skip_points] Widows Bay S01E09 We Hope.mkv: Fingerprinting done"))

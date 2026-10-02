@@ -32,6 +32,9 @@
 #   ./publish-ipa.sh --dry-run        # build and print the source file, publish nothing
 #   ./publish-ipa.sh --promote --channel main --version 20.0.1
 #                                     # add an already-released version to a channel
+#   ./publish-ipa.sh --promote --channel main --version 19.9.2 --ceiling 19.13.1
+#                                     # ...and drop every app newer than the server
+#                                     # version the channel is being moved to
 #
 # Env: SIDESTORE_REPO=owner/name to publish somewhere else.
 # Requires: everything build-ipa.sh needs, plus gh (logged in) and python3.
@@ -52,6 +55,7 @@ PROMOTE=0
 NOTES=""
 CHANNEL=""
 VERSION=""
+CEILING=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-build) DO_BUILD=0 ;;
@@ -60,7 +64,8 @@ while [[ $# -gt 0 ]]; do
     --notes)      NOTES="${2:?--notes needs text}"; shift ;;
     --channel)    CHANNEL="${2:?--channel needs main, beta or alpha}"; shift ;;
     --version)    VERSION="${2:?--version needs x.y.z}"; shift ;;
-    -h|--help)    sed -n '2,37p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    --ceiling)    CEILING="${2:?--ceiling needs x.y.z}"; shift ;;
+    -h|--help)    sed -n '2,40p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -85,6 +90,10 @@ SOURCE_FILE="$(cd "$ROOT" && python3 -c 'import sys, appchannel; print(appchanne
 
 if [[ -n "$VERSION" && "$PROMOTE" -eq 0 ]]; then
   echo "ERROR: --version only goes with --promote. A build's version is the badge." >&2
+  exit 2
+fi
+if [[ -n "$CEILING" && ( "$PROMOTE" -eq 0 || ! "$CEILING" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ) ]]; then
+  echo "ERROR: --ceiling takes x.y.z and only goes with --promote." >&2
   exit 2
 fi
 if [[ -z "$VERSION" ]]; then
@@ -157,10 +166,11 @@ URL="https://github.com/$REPO/releases/download/$TAG/$ASSET"
 # are replaced only when this version becomes the channel's newest: the
 # declaration has to describe the app the source is offering.
 build_source() {  # $1 = the channel's existing source file (may be missing), $2 = output
-  python3 - "$TEMPLATE" "$1" "$2" "$REPO" "$BUNDLE_ID" "$VERSION" "$IPA_BUILD" "$DATE" "$NOTES" "$URL" "$SIZE" "$MIN_OS" "$WORK/info.json" "$WORK/ent.json" "$CHANNEL" <<'PY'
+  python3 - "$TEMPLATE" "$1" "$2" "$REPO" "$BUNDLE_ID" "$VERSION" "$IPA_BUILD" "$DATE" "$NOTES" "$URL" "$SIZE" "$MIN_OS" "$WORK/info.json" "$WORK/ent.json" "$CHANNEL" "$CEILING" <<'PY'
 import json, os, sys
-(tpl, old, out, repo, bid, ver, build, date, notes, url, size, min_os, info, ent, channel) = sys.argv[1:]
-key = lambda v: tuple(int(n) if n.isdigit() else 0 for n in str(v.get("version", "")).split("."))
+(tpl, old, out, repo, bid, ver, build, date, notes, url, size, min_os, info, ent, channel, ceiling) = sys.argv[1:]
+num = lambda s: tuple(int(n) if n.isdigit() else 0 for n in str(s).split("."))
+key = lambda v: num(v.get("version", ""))
 src = json.loads(open(tpl).read().replace("{repo}", repo))
 # Each channel is its own source to SideStore, so someone who adds two of them
 # sees two, clearly named, instead of one silently replacing the other.
@@ -175,6 +185,10 @@ if os.path.exists(old):
         if a.get("bundleIdentifier") == bid:
             prior = [v for v in a.get("versions", []) if v.get("version") != ver]
             perms = a.get("appPermissions")
+# A channel's source never offers an app newer than the channel's server. When
+# an older build is promoted, whatever the source held above it goes.
+if ceiling:
+    prior = [v for v in prior if key(v) <= num(ceiling)]
 info = json.load(open(info))
 entry = {
     "version": ver, "buildVersion": build, "date": date,
@@ -208,18 +222,20 @@ fi
 
 # Only after the upload landed does the source point at it.
 gh repo clone "$REPO" "$WORK/repo" -- --quiet
-if [[ "$PROMOTE" -eq 1 ]] && python3 - "$WORK/repo/$SOURCE_FILE" "$BUNDLE_ID" "$VERSION" <<'PY'
+if [[ "$PROMOTE" -eq 1 ]] && python3 - "$WORK/repo/$SOURCE_FILE" "$BUNDLE_ID" "$VERSION" "$CEILING" <<'PY'
 import json, os, sys
-path, bid, ver = sys.argv[1:]
+path, bid, ver, ceiling = sys.argv[1:]
+num = lambda s: tuple(int(n) if n.isdigit() else 0 for n in str(s).split("."))
 have = []
 if os.path.exists(path):
     for a in json.load(open(path)).get("apps", []):
         if a.get("bundleIdentifier") == bid:
             have = [v.get("version") for v in a.get("versions", [])]
-sys.exit(0 if ver in have else 1)
+above = [v for v in have if ceiling and num(v) > num(ceiling)]
+sys.exit(0 if ver in have and not above else 1)
 PY
 then
-  echo "==> $VERSION is already on the $CHANNEL channel. Nothing to do."
+  echo "==> $VERSION is already on the $CHANNEL channel${CEILING:+ and nothing there is newer than $CEILING}. Nothing to do."
   exit 0
 fi
 build_source "$WORK/repo/$SOURCE_FILE" "$WORK/repo/$SOURCE_FILE"

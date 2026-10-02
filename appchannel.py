@@ -16,7 +16,8 @@ the public SideStore repo, and this module is the arithmetic both ends share:
   * which app version a server may recommend (`pick`): the newest one in its
     channel's source that is not newer than the server itself;
   * what `promote.py` needs to move a build to a steadier channel
-    (`promotable`, `unverified_claims`).
+    (`app_move`, `unverified_claims`), and to choose one (`changelog_entries`,
+    `log_health`, `exposure`, `new_signatures`).
 
 Leaf module: stdlib only, no `main` import. Tests in `tests/test_appchannel.py`.
 See docs/GOTCHAS.md § Release channels.
@@ -104,19 +105,35 @@ def pick(versions: Iterable[dict], ceiling: str = "") -> Optional[dict]:
     return best
 
 
-def promotable(alpha_versions: Iterable[dict], target: str,
-               have: Iterable[dict] = ()) -> Optional[dict]:
-    """The app entry a channel should gain when the server version `target` is
-    promoted to it: the newest app not newer than `target`. None when there is
-    none, or when the channel already offers that one or a newer one (an app
-    is never moved backwards; SideStore would not install it anyway)."""
-    e = pick(alpha_versions, target)
-    if e is None:
-        return None
+def app_move(released: Iterable[dict], target: str,
+             have: Iterable[dict] = ()) -> tuple[str, Optional[dict]]:
+    """What a channel's source needs when the server version `target` is
+    promoted to it. `released` is every app ever published; `have` is what the
+    channel's source offers now. Returns `(action, entry)`:
+
+      * `("gain", e)`  the source should start offering `e`, the newest app not
+        newer than `target`;
+      * `("cut", e)`   the source offers an app NEWER than `target` and has to
+        be cut back so `e` is its newest (`e` is None when no app is old
+        enough: the source is emptied). This is what promoting an older build
+        does to a source that was fed newer ones, and the reason it exists:
+        before 20.1.0 one source got every alpha build;
+      * `("keep", e)`  it already offers exactly `e`;
+      * `("none", None)` no app is old enough and the source offers none.
+
+    The rule under all four: after a promotion a channel's source never offers
+    an app newer than the channel's server."""
+    released, have = list(released), list(have)
+    want = pick(released, target)
     cur = pick(have)
-    if cur is not None and parse_version(cur.get("version")) >= parse_version(e.get("version")):
-        return None
-    return e
+    top = parse_version(target)
+    if cur is not None and top is not None and parse_version(cur.get("version")) > top:
+        return ("cut", want)
+    if want is None:
+        return ("none", None)
+    if cur is not None and parse_version(cur.get("version")) >= parse_version(want.get("version")):
+        return ("keep", want)
+    return ("gain", want)
 
 
 # What the changelog says when something shipped without being checked. These
@@ -301,3 +318,23 @@ def new_signatures(health: list[dict], version: str) -> list[tuple[str, int]]:
         elif rv is not None and v is not None and rv < v:
             older.update(r["signatures"])
     return sorted(((s, n) for s, n in mine.items() if s not in older), key=lambda x: -x[1])
+
+
+def exposure(health: list[dict], version: str) -> tuple[int, int]:
+    """`(seconds as this build, seconds as this build or any newer one)`.
+
+    The second number is the one that matters for an OLDER candidate. Its code
+    kept running inside every build that came after it, so the hours those
+    later builds ran are hours its code ran too. What they do not show is the
+    later fixes it lacks: read those separately."""
+    v = parse_version(version)
+    own = total = 0
+    for r in health:
+        rv = parse_version(r["version"])
+        if rv is None or v is None:
+            continue
+        if rv == v:
+            own += r["seconds"]
+        if rv >= v:
+            total += r["seconds"]
+    return own, total

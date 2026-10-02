@@ -1,5 +1,19 @@
 # Changelog
 
+## [20.2.1] — 2026-10-01
+### An older build can be the release candidate
+
+- **Fixed: the release-candidate procedure only really weighed the newest build.** It
+  now goes through every build since `main`. `promote.py candidates --box` shows, for
+  each one, how long it ran on the server and how long its code ran counting the builds
+  after it.
+- **Fixed: promoting an older build left `main`'s app source offering a newer app.**
+  A promotion now cuts the source back so it never offers an app newer than the server
+  it is for (`publish-ipa.sh --promote --ceiling`). Phones that already installed the
+  newer app keep it.
+- No change to the server or the app. Run as dry runs against the real source and the
+  real server's logs. Nothing has been promoted yet.
+
 ## [20.2.0] — 2026-10-01
 ### Choosing which build goes to main
 

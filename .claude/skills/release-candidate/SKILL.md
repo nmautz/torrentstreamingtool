@@ -16,12 +16,19 @@ still unknown, and a yes/no. Do the reading yourself. Do not hand them raw outpu
 
 ```bash
 python3 promote.py              # what main / beta / alpha are on, server and app
-python3 promote.py candidates   # every build since main, newest first
+STREAMLINK_ADMIN_PASSWORD='…' python3 promote.py candidates --box https://<box>
 ```
 
-For each build, `candidates` prints what it changed, what the changelog admits
-was **not checked**, which app it would pair with, and **what was fixed after
-it**. That last list is what you would be shipping without by stopping there.
+**Every build between `main` and the tip is a candidate, not only the tip.** The
+tip is usually the least proven build there is. `candidates` lists them all,
+newest first, and for each prints what it changed, what the changelog admits
+was **not checked**, which app it would pair with, how long it ran on the box,
+and **what was fixed after it**. That last list is what you would be shipping
+without by stopping there.
+
+Also read what `main` has NOW. Every "Fixed" in the range is a bug `main` users
+have today. Waiting is not free when `main` is carrying known defects, and an
+older build that fixes them can be the right answer while the tip is not ready.
 
 ## 2. What the box says
 
@@ -56,15 +63,24 @@ Know the limits and say them:
 
 ## 3. Choose
 
-A candidate is a build where all of these hold. Prefer the newest that qualifies;
-do not propose the tip just because it is the tip.
+Go down the list build by build and say, for each plausible stopping point, why
+it qualifies or what rules it out. Natural stopping points are the last build
+before each x-bump and the end of each run of z-bumps. Do not stop at "the tip
+is not ready": the question is which build IS, and the answer is often several
+versions back.
+
+A candidate is a build where all of these hold. Prefer the newest that qualifies.
 
 - **Nothing fixed after it matters.** Read each later fix. If it corrects
   something this build introduced, or something a `main` user would hit, the
   candidate is the later build. A fix to a feature the candidate does not have
   does not count against it.
 - **It has run.** Ideally a few days on the box with real use and no new error
-  class. If nothing has, say so plainly: "nothing has soaked" is a valid finding.
+  class. `candidates --box` gives two numbers: hours as the backend, and hours
+  counting every build after it. For an older build the second is the honest
+  one: its code kept running inside its successors. A build that was "never the
+  backend at a start" was deployed static-only, so its hours hide under the
+  banner before it. If nothing has run long, say so plainly.
 - **Its x/y features are finished.** The end of a run of z-bumps is usually a
   better stopping point than the feature release that started it.
 - **The app it pairs with exists and was used.** `candidates` names it. A build
@@ -73,8 +89,13 @@ do not propose the tip just because it is the tip.
   changed in the range, somebody has to have run an install or an update through
   it. A `main` user gets there by the auto-updater, on Windows.
 
+- **Its app source can be made to match.** `promote.py` cuts a channel's source
+  back when it offers an app newer than the build ("CUT BACK" in the plan). Say
+  so in the report: phones that already took the newer app keep it.
+
 It is fine to return no candidate, or two (a cautious older one and a newer one
-that needs one thing checked). Say which you would pick.
+that needs one thing checked). Say which you would pick, and what `main` users
+keep suffering if the answer is to wait.
 
 ## 4. Ask the owner what the logs cannot say
 

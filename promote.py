@@ -34,6 +34,8 @@ something was not checked: read them before writing that sentence.
     python3 promote.py                       where each channel stands
     python3 promote.py candidates            every build since main: what it changed, what was
                                              fixed AFTER it, what nobody checked, which app it gets
+    python3 promote.py candidates --box https://192.168.0.106
+                                             the same, with how long each build ran on the box
     python3 promote.py logs FILE...          what the box's server logs say about each version
     python3 promote.py logs --box https://192.168.0.106
                                              the same, fetched from the box (admin password in
@@ -180,7 +182,7 @@ def status() -> None:
     print("\nLast marks: " + (", ".join(marks[:6]) if marks else "none yet"))
 
 
-def candidates(channel: str) -> None:
+def candidates(channel: str, box: str = "", limit: int = 80) -> None:
     """Every build between a channel and alpha's tip, newest first, with what
     the changelog can say about each. The lines under a build are what you
     would be SHIPPING WITHOUT by stopping there: fixes that landed later."""
@@ -196,8 +198,11 @@ def candidates(channel: str) -> None:
     for v, text in appchannel.unverified_claims(log, cur_ver, tip):
         claims.setdefault(v, []).append(text)
     today = git("log", "-1", "--format=%cs", "origin/" + SOURCE)
-    print("%s is on %s. %s is on %s (%s). %d builds between them, newest first.\n"
+    health = appchannel.log_health(_keep_order(fetch_box_logs(box, limit))) if box else []
+    ran = {r["version"]: r for r in health}
+    print("%s is on %s. %s is on %s (%s). %d builds between them, newest first."
           % (channel, cur_ver, SOURCE, tip, today, len(entries)))
+    print("Every one of them is a possible candidate, not only the newest.\n")
     later_fixes: list[tuple[str, str]] = []
     for e in entries:
         app = appchannel.pick(apps, e["version"])
@@ -205,6 +210,17 @@ def candidates(channel: str) -> None:
         print("%-8s %s  %s-bump  app %s  [%s]" % (e["version"], e["date"], e["kind"],
                                                  app["version"] if app else "none", counts or "no tagged bullets"))
         print("         %s" % e["title"][:100])
+        if box:
+            own, total = appchannel.exposure(health, e["version"])
+            r = ran.get(e["version"])
+            if r:
+                new = appchannel.new_signatures(health, e["version"])
+                print("         on the box: %.1f h as the backend over %d start(s), %d traceback(s), %d new error "
+                      "signature(s); %.1f h counting the builds after it"
+                      % (own / 3600.0, r["runs"], r["tracebacks"], len(new), total / 3600.0))
+            else:
+                print("         on the box: never the backend at a start (a static-only deploy, or skipped); "
+                      "its code ran %.1f h inside later builds" % (total / 3600.0))
         for c in claims.get(e["version"], []):
             print(textwrap.fill(c, 100, initial_indent="         NOT CHECKED: ", subsequent_indent="           "))
         if later_fixes:
@@ -358,19 +374,30 @@ def plan(channel: str, version: str) -> dict:
     if channel == "beta" and not is_ancestor("origin/main", rev):
         raise Refused("main is not behind this build; beta cannot go behind main.")
 
-    # The app each moved channel gains: the newest one not newer than the build.
-    alpha_apps = released_apps()
+    # What each moved channel's app source needs so that it never offers an
+    # app newer than this build (appchannel.app_move).
+    released = released_apps()
     apps = {}
     for ch in moves:
-        e = appchannel.promotable(alpha_apps, version, fetch_source(ch))
-        if e:
+        have = fetch_source(ch)
+        action, e = appchannel.app_move(released, version, have)
+        cur = appchannel.pick(have)
+        if action == "gain":
             apps[ch] = e["version"]
-    newest = appchannel.pick(alpha_apps, version)
-    if newest is None:
-        print("  app     none published at or below %s; the channel's app stays as it is" % version)
-    else:
-        for ch in moves:
-            print("  app     %s: %s" % (ch, ("gains " + apps[ch]) if ch in apps else "already has %s or newer" % newest["version"]))
+            print("  app     %s: gains %s" % (ch, e["version"]))
+        elif action == "cut":
+            if e is None:
+                raise Refused("the %s source offers app %s, newer than %s, and no app is old enough "
+                              "to replace it." % (ch, cur["version"], version))
+            apps[ch] = e["version"]
+            print("  app     %s: CUT BACK from %s to %s (its source is ahead of this build)"
+                  % (ch, cur["version"], e["version"]))
+        elif action == "keep":
+            print("  app     %s: already offers %s" % (ch, e["version"]))
+        else:
+            print("  app     %s: none published at or below %s" % (ch, version))
+    newest = appchannel.pick(released, version)
+    if newest is not None:
         m = _MIN_SERVER_RE.search(show(rev, "ios-app/www/index.html"))
         if m and appchannel.parse_version(m.group(1)) > appchannel.parse_version(version):
             raise Refused("the app at this commit needs a server on %s or newer, and this is %s."
@@ -397,7 +424,7 @@ def carry_out(p: dict, verified: str, do_app: bool) -> None:
              "Checked: " + verified, "",
              "Promoted from %s. Channels moved: %s." % (p["from"], ", ".join(p["moves"]))]
     if p["apps"]:
-        lines.append("App: " + ", ".join("%s gains %s" % kv for kv in p["apps"].items()) + ".")
+        lines.append("App: " + ", ".join("%s offers %s" % kv for kv in p["apps"].items()) + ".")
     if p["claims"]:
         lines += ["", "The changelog says these were not checked when they shipped:"]
         lines += ["- %s: %s" % c for c in p["claims"]]
@@ -409,7 +436,8 @@ def carry_out(p: dict, verified: str, do_app: bool) -> None:
         git("push", "--quiet", "origin", "%s:refs/heads/%s" % (p["rev"], ch))
     git("fetch", "--quiet", "origin", *appchannel.CHANNELS)
     for ch, app_ver in p["apps"].items():
-        cmd = [str(HERE / "ios-app" / "publish-ipa.sh"), "--promote", "--channel", ch, "--version", app_ver]
+        cmd = [str(HERE / "ios-app" / "publish-ipa.sh"), "--promote", "--channel", ch,
+               "--version", app_ver, "--ceiling", p["version"]]
         if not do_app:
             print("==> App not moved (--no-app). On the Mac, run:\n    " + " ".join(cmd))
             continue
@@ -426,7 +454,7 @@ def main() -> int:
     ap.add_argument("channel", nargs="?",
                     choices=[c for c in appchannel.CHANNELS if c != SOURCE] + ["candidates", "logs"])
     ap.add_argument("paths", nargs="*", help="for `logs`: server log files pulled off the box")
-    ap.add_argument("--box", default="", help="for `logs`: fetch them from this box, e.g. https://192.168.0.106")
+    ap.add_argument("--box", default="", help="for `logs` and `candidates`: read this box's logs, e.g. https://192.168.0.106")
     ap.add_argument("--runs", type=int, default=80, help="for `logs --box`: how many archived runs to read")
     ap.add_argument("--all", action="store_true", help="for `logs`: print every version in the logs")
     ap.add_argument("--to", default="main", choices=[c for c in appchannel.CHANNELS if c != SOURCE],
@@ -441,7 +469,7 @@ def main() -> int:
             status()
             return 0
         if a.channel == "candidates":
-            candidates(a.to)
+            candidates(a.to, a.box, a.runs)
             return 0
         if a.channel == "logs":
             if not a.paths and not a.box:
