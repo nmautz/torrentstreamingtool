@@ -66,12 +66,31 @@ enum VoiceClient {
         return await send(request)
     }
 
+    /// One retry on a transport error, and only on one. Seen on the first real
+    /// voice download: the app is suspended while Siri waits for "yes", the
+    /// kept-alive connection the lookup used dies meanwhile, and the POST that
+    /// follows fails at once without reaching the host (no row in its request
+    /// log). URLSession retries a GET over a fresh connection by itself but
+    /// never a POST. Retrying is safe: the host joins a search already running
+    /// and refuses a second copy of a torrent it has.
     private static func send(_ req: URLRequest) async -> Data? {
         var request = req
         if let d = AppGroupConfig.deviceId, !d.isEmpty { request.setValue(d, forHTTPHeaderField: "X-Device-Id") }
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
-              (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
-        return data
+        for attempt in 0..<2 {
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+                if code == 200 { return data }
+                DiagLog.shared.write("siri-http", ["path": request.url?.path ?? "", "status": code], cat: "app")
+                return nil
+            } catch {
+                let e = error as NSError
+                DiagLog.shared.write("siri-http", ["path": request.url?.path ?? "", "err": e.code,
+                                                   "domain": e.domain, "attempt": attempt], cat: "app")
+                if e.code == NSURLErrorTimedOut { return nil }
+            }
+        }
+        return nil
     }
 
     /// Step 1 of a download: which film the spoken words mean. Starts nothing.
@@ -162,11 +181,15 @@ struct DownloadsOverviewIntent: AppIntent {
 /// screen, so the confirmation is the only check that the right film starts.
 @available(iOS 17.0, *)
 struct DownloadFilmIntent: AppIntent {
-    static var title: LocalizedStringResource = "Download a Film"
+    // Siri's first reading of "download Star Wars in StreamLink" was "find that
+    // film INSIDE the app": it looked, found nothing, and showed its own film
+    // card without ever running this. So the description says outright that
+    // this is for a film the app does NOT have yet.
+    static var title: LocalizedStringResource = "Request a New Film"
     static var description = IntentDescription(
-        "Finds a film by name and starts downloading it to the StreamLink library, after confirming which film was meant. Use when asked to download, get, grab or add a film or movie in StreamLink.",
+        "Requests a film that is NOT yet in StreamLink: the StreamLink server searches for it and downloads it into the library. The film does not need to exist in the app already, so do not look for it in the app first. Use whenever the user asks StreamLink to download, get, grab, add, request or fetch a film or movie, for example: download the original Star Wars in StreamLink.",
         categoryName: "Library",
-        searchKeywords: ["download", "get", "grab", "add", "film", "movie"])
+        searchKeywords: ["download", "get", "grab", "add", "request", "fetch", "film", "movie", "new"])
     static var openAppWhenRun = false
 
     @Parameter(title: "Film",
@@ -230,10 +253,13 @@ struct StreamLinkShortcuts: AppShortcutsProvider {
             phrases: [
                 "Download a film in \(.applicationName)",
                 "Download a movie in \(.applicationName)",
-                "Get a film in \(.applicationName)",
-                "Download something in \(.applicationName)",
+                "Request a film in \(.applicationName)",
+                "Request a movie in \(.applicationName)",
+                "Add a film to \(.applicationName)",
+                "Add a movie to \(.applicationName)",
+                "Ask \(.applicationName) to get a film",
             ],
-            shortTitle: "Download a Film",
+            shortTitle: "Request a New Film",
             systemImageName: "square.and.arrow.down")
     }
 }

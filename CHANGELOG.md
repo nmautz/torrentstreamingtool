@@ -1,5 +1,28 @@
 # Changelog
 
+## [20.6.1] — 2026-10-02
+### The voice download reaches the server, and Siri is told what it is for
+
+- **Fixed: after you said yes, Siri answered "I can't reach your StreamLink server".** The
+  phone had gone to sleep on the connection while Siri waited for your answer, and the
+  request to start the download failed without ever leaving the phone. It now tries once
+  more on a fresh connection.
+- **Fixed: "I'm trying 6 copies" when two were running.** The server knew how many copies
+  it had offered, not how many it would run. It now just says the film is downloading.
+  (This half is on the server and takes effect at its next restart.)
+- **Changed: the action is called "Request a New Film"** and is described to Siri as
+  being for a film the app does not have yet. Asked to "download the original Star Wars
+  in StreamLink", Siri looked for the film inside the app, found nothing and showed its
+  own film card. New phrases: "Request a film in StreamLink", "Add a film to StreamLink".
+- Checked on an iPhone 16 (iOS 27) against the box: "Request a New Film" asked which
+  film, took "Star Wars the original one", asked "Download Star Wars (1977)?", and on a
+  yes the box started a real download of Star Wars (1977) in 1.6 seconds, which
+  "What's downloading" then reported. **Did not work**: every one-sentence request tried
+  ("Download the original Star Wars in StreamLink", "Ask StreamLink to download…");
+  Siri never ran the action for those. **Not checked**: the retry itself (the failure
+  has not recurred since), the one-sentence form on the re-described build, and a
+  request that finds no copy.
+
 ## [20.6.0] — 2026-10-02
 ### Download a film by asking Siri
 
@@ -15,9 +38,9 @@
   Siri says it is still looking, and "What's downloading in StreamLink?" tells you how it
   ended.
 - Needs the 20.6.0 app and the 20.6.0 server, and "StreamLink" in the sentence.
-- Checked: which film is meant and which copy is picked (47 unit cases), the spoken lines
-  (56 cases), and the two server calls with the indexers and the download itself faked.
-  **Not checked** at the time of writing: on the box, through Siri, or a real download.
+- Checked: which film is meant and which copy is picked (47 unit cases), the spoken lines,
+  and on the box that eleven spoken requests name the right film or refuse correctly.
+  On a phone it took the 20.6.1 app (see above).
 
 ## [20.5.1] — 2026-10-02
 ### Siri now answers about a title by name

@@ -26311,7 +26311,7 @@ async def voice_download(request: Request, req: VoiceDownloadReq) -> JSONRespons
     except asyncio.TimeoutError:
         pass
     if job["state"] == "started":
-        speech = voicestatus.started_line(name, job.get("racing", 0))
+        speech = voicestatus.started_line(name)
     elif job["state"] == "failed":
         speech = voicestatus.refusal(job.get("reason") or "", name)
     else:

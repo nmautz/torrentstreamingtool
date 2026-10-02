@@ -261,9 +261,10 @@ def refusal(reason: str, name: str) -> str:
     return _WHY.get(reason, "I couldn't start downloading %s.") % name
 
 
-def started_line(name: str, racing: int = 0) -> str:
-    if racing > 1:
-        return "Okay, %s is downloading. I'm trying %d copies and keeping the best." % (name, racing)
+def started_line(name: str) -> str:
+    # Nothing about racing: at this moment the server knows how many copies were
+    # OFFERED to the race, not how many it will run. The first real download
+    # said "trying 6 copies" while two ran.
     return "Okay, %s is downloading." % name
 
 

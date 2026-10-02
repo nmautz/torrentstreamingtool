@@ -6822,3 +6822,18 @@ A phrase cannot carry a `String` parameter, so the old Siri asks "Which title?" 
 - **`_VOICE_JOBS` is in memory.** A search still running when the box restarts is
   forgotten, and it is the only record of a request that is not yet a library item.
 - Films only. A series name is refused in words rather than guessed into a pack.
+- **A POST after the confirmation can die on the phone.** The app is suspended while Siri
+  waits for "yes"; the kept-alive connection `/find` used goes stale, and URLSession does
+  not retry a POST. The first real voice download failed this way with no row in the
+  box's request log. `VoiceClient.send` retries once on a transport error (never on a
+  timeout or an HTTP status); the host makes that safe by joining a running search and
+  de-duplicating by hash. `siri-http` rows in the client log record each failure.
+- **Siri will not run it from one sentence (as of 20.6.1).** "Download the original Star
+  Wars in StreamLink" is read as "find that film inside the app": Siri answers "I couldn't
+  find it in the StreamLink app" or "I can't search for or download movies directly
+  within the StreamLink app" and shows its own film card. What works is the App Shortcut
+  phrase ("Request a film in StreamLink") followed by the title when asked. Whether the
+  20.6.1 description ("a film that is NOT yet in StreamLink") changes this is untested.
+- **Say only what the server knows.** `library_download` returns how many race candidates
+  were OFFERED (up to 6); the race engine then runs `download_race.size`. The first
+  spoken confirmation said "trying 6 copies" while two ran.
