@@ -6076,6 +6076,19 @@ Tailwind is vendored at `/vendor/tailwind.js`, and without it `h-12`, `flex-1` a
 text sizes silently vanish, which is its own plausible-looking wrong answer. Measured
 after the change: portrait 4 rows of 169px, landscape 4 rows of 59px, `scrollHeight ==
 innerHeight` in both, and the restore branch verified idempotent.
+
+### A hold gesture on iOS is a long press on text (20.6.2)
+
+The remote's seek bar unlocks with a 0.5 s hold. On iOS that hold, over the badge's
+"HOLD TO UNLOCK" label, is a text-selection long press: the label highlights and the Copy
+callout appears. `preventDefault()` on `pointerdown` and `touch-action: none` do **not**
+stop it; only `user-select: none` (+ `-webkit-user-select`, `-webkit-touch-callout: none`)
+on the element and its children does. The TV remote never showed it because
+`#fullscreenControls, #fullscreenControls *` has carried that rule all along; `#lpRemote`
+was built later "in the same idiom" and copied the tiles but not the rule. Any container
+that hosts a hold gesture needs it. Found by diffing the two remotes' styles, not
+reproduced on a phone.
+
 ## The page is a remote, so it must not look like a player (18.12.0)
 
 `_npHolding` has always meant "the native player IS the presentation", and every

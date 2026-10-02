@@ -1,5 +1,15 @@
 # Changelog
 
+## [20.6.2] — 2026-10-02
+### Holding the remote's progress bar no longer selects text
+
+- **Fixed: holding to unlock the progress bar on the Chromecast / AirPlay / glasses
+  remote selected text.** To iOS the half-second hold was a long press on the "HOLD TO
+  UNLOCK" label, so it highlighted it and offered Copy. The remote panel and its seek
+  bar are now unselectable, as the TV remote's fullscreen controls always were.
+- **Not checked**: on a phone. The cause was found by comparing the two remotes'
+  styles, not by reproducing it.
+
 ## [20.6.1] — 2026-10-02
 ### The voice download reaches the server, and Siri is told what it is for
 

@@ -1727,6 +1727,12 @@ are mirrored onto `#lpSeekBar`. Outside remote mode the bar carries `.unlocked`
 permanently, so the on-phone player still seeks with a tap. This applies to glasses,
 AirPlay and Chromecast alike.
 
+`#lpRemote` and `#lpSeekBar` (with everything inside them) are `user-select: none` with
+`-webkit-touch-callout: none` (20.6.2). The unlock hold is a long press, and on iOS a long
+press on selectable text starts a selection whatever `pointerdown` does with
+`preventDefault`. `#fullscreenControls` has carried the same rule from the start; any new
+hold gesture needs it on its own container.
+
 What the remote can drive is what `NativePlayback` exposes: `lpTogglePlay` →
 `np.setPaused`, `_lpCommitSeek` → `np.seekTo`, plus the existing episode-advance path.
 **There is deliberately no volume row on the glasses:** the phone's hardware volume

@@ -994,6 +994,16 @@
        as an empty overlay, just louder. The phone's hardware volume buttons
        already drive the glasses. */
     #lpRemote { display: none; }
+    /* Nothing on a remote is text to select. Without this the 0.5 s hold that
+       unlocks the seek bar is, to iOS, a long press on text: it selects the
+       badge's label (or the title above it) and raises the Copy callout.
+       preventDefault on pointerdown does not stop that. Same rule as
+       #fullscreenControls, which is why the TV remote never did it. */
+    #lpRemote, #lpRemote *, #lpSeekBar, #lpSeekBar * {
+      user-select: none; -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent;
+    }
     #localPlayer.lp-remote #lpRemote {
       position: absolute;
       /* Butts against the header's h-12 bar — 48px INCLUDING its border,
@@ -32485,6 +32495,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.6.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.6.2</div>
 </body>
 </html>
