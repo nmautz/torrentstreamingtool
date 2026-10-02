@@ -1,5 +1,17 @@
 # Changelog
 
+## [20.0.3] — 2026-10-01
+### A download's percentage in the app counts the download, not the server's preparation
+
+- **Fixed: a download that had only just started read "50%".** The first half of the
+  bar was reserved for the server preparing the episode, even when it was already
+  prepared. Each row now shows its own stage: how far the server is while it prepares,
+  then how much of the file is on the phone.
+- Also checked on the iPhone with the 20.0.1 app: Pause (it stays paused after the app
+  is reopened), Next, and the storage bar with the phone's real free space. Still not
+  checked on a phone: Retry on a failed download, offline mode with the new app, and a
+  second server.
+
 ## [20.0.2] — 2026-10-01
 ### Fixes from the first run of the 20.0 app on a phone
 

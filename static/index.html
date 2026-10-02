@@ -23368,8 +23368,15 @@ function _dlQueueHtml({ view, here, live, sname }) {
     nPaused ? `<button onclick="_dlResumeAll()" class="${_dlBtn("ghost")}">Resume all</button>` : "",
   ].join("") : "";
   const body = rows.map((r, i) => {
-    const pct = Math.round((r.frac || 0) * 100);
     const st = r.st || {};
+    // `frac` runs 0-50 % while the server prepares the episode and 50-100 %
+    // while it transfers (it drives the small spinner on the episode page).
+    // A row here names its phase, so its number is that phase's own: an
+    // episode the server already had would otherwise start its download at
+    // "50%" with nothing on the phone.
+    const f = r.frac || 0;
+    const pct = Math.round(Math.max(0, Math.min(1,
+      (r.kind === "prepping" || (r.kind === "waiting" && f < 0.5)) ? f * 2 : f <= 0.5 ? 0 : (f - 0.5) * 2)) * 100);
     let why, tone = "text-gray-500", bar = "bg-indigo-500", quiet = false;
     // In a list that is mostly one show, "Show · S01E…" cut off by the buttons
     // says nothing. Lead with the episode; the show is the second line.
@@ -23387,7 +23394,7 @@ function _dlQueueHtml({ view, here, live, sname }) {
       // A download picked up again knows its total at once but hears its byte
       // count only with the first progress event; until then the fraction (the
       // transfer is its upper half) says how much is already on the phone.
-      const got = st.bytesDone != null ? st.bytesDone : Math.max(0, (r.frac - 0.5) * 2) * (st.bytesTotal || 0);
+      const got = st.bytesDone != null ? st.bytesDone : (pct / 100) * (st.bytesTotal || 0);
       // Handed to the phone's downloader but not reached yet: it is queued,
       // whatever the bookkeeping calls it. "0.0 B of 108 MB · 0%" forty times
       // over reads as forty stuck downloads.
@@ -32397,6 +32404,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.0.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.0.3</div>
 </body>
 </html>
