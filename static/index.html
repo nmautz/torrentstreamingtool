@@ -5396,8 +5396,11 @@ const ALERT_STYLES = {
   info:"border-l-4 border-blue-600 bg-blue-950/70 text-blue-300",
   success:"border-l-4 border-green-600 bg-green-950/70 text-green-300",
 };
+// "ok" is what the app's own code has always passed for good news. It was
+// never a key here, so every "Saved to this phone" was painted as an error.
+ALERT_STYLES.ok = ALERT_STYLES.success;
 // Toast card tone per alert type (the .notice-* classes on #noticeStack).
-const NOTICE_TONES = { error:"red", warn:"yellow", info:"blue", success:"green" };
+const NOTICE_TONES = { error:"red", warn:"yellow", info:"blue", success:"green", ok:"green" };
 let alertTimer;
 function showAlert(msg,type="error") {
   // In-tab alert (search tab)
@@ -23367,7 +23370,12 @@ function _dlQueueHtml({ view, here, live, sname }) {
   const body = rows.map((r, i) => {
     const pct = Math.round((r.frac || 0) * 100);
     const st = r.st || {};
-    let why, tone = "text-gray-500", bar = "bg-indigo-500";
+    let why, tone = "text-gray-500", bar = "bg-indigo-500", quiet = false;
+    // In a list that is mostly one show, "Show · S01E…" cut off by the buttons
+    // says nothing. Lead with the episode; the show is the second line.
+    const lab = r.label;
+    const title = (lab.code || lab.name) ? [lab.code, lab.name].filter(Boolean).join(" · ") : lab.line1;
+    const under = (lab.code || lab.name) ? String(lab.line1 || "").replace(/\s*·\s*[^·]*$/, "") : (lab.line2 || "");
     if (r.kind === "failed") { why = "Failed: " + (r.error || "the server refused it"); tone = "text-red-400"; bar = "bg-red-700"; }
     else if (r.kind === "paused") { why = "Paused by you"; bar = "bg-gray-600"; }
     else if (r.kind === "away") { why = `Waiting for ${sname}`; bar = "bg-gray-600"; }
@@ -23380,7 +23388,11 @@ function _dlQueueHtml({ view, here, live, sname }) {
       // count only with the first progress event; until then the fraction (the
       // transfer is its upper half) says how much is already on the phone.
       const got = st.bytesDone != null ? st.bytesDone : Math.max(0, (r.frac - 0.5) * 2) * (st.bytesTotal || 0);
-      why = st.bytesTotal ? `${fmtSize(got)} of ${fmtSize(st.bytesTotal)}` : "Downloading";
+      // Handed to the phone's downloader but not reached yet: it is queued,
+      // whatever the bookkeeping calls it. "0.0 B of 108 MB · 0%" forty times
+      // over reads as forty stuck downloads.
+      if (!got && i > 0) { why = st.bytesTotal ? `Queued · ${fmtSize(st.bytesTotal)}` : "Queued"; quiet = true; }
+      else why = st.bytesTotal ? `${fmtSize(got)} of ${fmtSize(st.bytesTotal)}` : "Downloading";
     }
     const k = _dlJ(r.key);
     const btns = [];
@@ -23398,9 +23410,9 @@ function _dlQueueHtml({ view, here, live, sname }) {
     return `<div class="${_DL_TILE} p-3 mb-2">
       <div class="flex items-start gap-2">
         <div class="min-w-0 flex-1">
-          <div class="text-sm font-bold truncate">${escHtml(r.label.line1)}</div>
-          ${r.label.line2 ? `<div class="text-xs text-gray-400 truncate">${escHtml(r.label.line2)}</div>` : ""}
-          <div class="text-[11px] mt-1 ${tone} leading-snug">${escHtml(why)}${(r.kind === "downloading" || r.kind === "prepping") && !r.gated ? ` · ${pct}%` : ""}</div>
+          <div class="text-sm font-bold line-clamp-2 leading-snug">${escHtml(title)}</div>
+          ${under ? `<div class="text-xs text-gray-400 truncate">${escHtml(under)}</div>` : ""}
+          <div class="text-[11px] mt-1 ${tone} leading-snug">${escHtml(why)}${(r.kind === "downloading" || r.kind === "prepping") && !r.gated && !quiet ? ` · ${pct}%` : ""}</div>
         </div>
         <div class="flex gap-1 flex-shrink-0">${btns.join("")}</div>
       </div>
@@ -32385,6 +32397,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.0.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.0.2</div>
 </body>
 </html>

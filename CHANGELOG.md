@@ -1,5 +1,21 @@
 # Changelog
 
+## [20.0.2] — 2026-10-01
+### Fixes from the first run of the 20.0 app on a phone
+
+- **Fixed: "Saved to this phone" and other good-news messages in the app were shown in
+  red**, like errors. They are green. This was wrong before 20.0 as well.
+- **Fixed: the download list cut off the episode.** With a season queued, every row read
+  "SpongeBob SquarePa…". Rows now lead with the episode ("S01E02 · Tea at the Treedome")
+  and put the show underneath.
+- **Fixed: downloads waiting their turn read "0.0 B of 108 MB · 0%"**, which looked
+  stuck. They say "Queued".
+- Checked on an iPhone 16 with the 20.0.1 app: first connect, sign-in, the account being
+  pinned, a relaunch opening straight in with no PIN prompt, a 40-episode season queued
+  with each download tagged with its server and account, and the Pause and Next buttons
+  appearing. Not yet checked on the phone: tapping Pause / Next / Retry, the storage
+  bar, offline mode with the new app, and a second server.
+
 ## [20.0.1] — 2026-10-01
 ### A download that was picked up again showed "0 B" beside its percentage
 
