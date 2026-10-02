@@ -690,7 +690,17 @@ Don't re-add the `controls` attribute. Pieces:
   shows once per new version, and again every 3 days until it's installed
   (`sl_app_update_seen`), never while something is playing. The reference is the
   published SideStore version, not the dashboard badge, because the badge also moves for
-  host-only changes.
+  host-only changes. Since 20.1.0 that version comes from the source of the **server's
+  release channel** and is never newer than the server, and `_appUpdExplain` names the
+  source to add when the channel is not `main` (a phone on another channel's source is
+  never offered the version, and nothing on the phone says why).
+- **Out-of-date server notice** (iOS app only, 20.1.0): the opposite case, and it lives
+  in the shell (`ios-app/www/index.html`), not here, because an old server serves an old
+  dashboard. `openHost` checks the version the probe or scan reported against
+  `MIN_SERVER`; below it `showOldServer` replaces the connecting screen with the notice
+  and a **Connect anyway** button, remembered per `(address, server version, MIN_SERVER)`
+  in `streamlink_old_server_ok`. List rows get a "Needs a server update" line. No
+  version reported means no verdict. See [GOTCHAS.md § Release channels](GOTCHAS.md).
 - **Mute** (`lpToggleMute`) and **fullscreen** (`lpToggleFullscreen`) buttons.
   Fullscreen requests OS fullscreen on **the whole `#localPlayer` container**,
   never the bare `<video>` — so the header, transport, and track selectors stay

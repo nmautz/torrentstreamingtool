@@ -6447,8 +6447,10 @@ tuple is even queued.
 ## SideStore source: a version can be published once (19.4.0)
 
 `ios-app/publish-ipa.sh` publishes the unsigned `.ipa` as a GitHub Release on the
-public `nmautz/streamlink-ios` repo and prepends it to that repo's `apps.json`,
-the source SideStore/AltStore users add. Three things bite:
+public `nmautz/streamlink-ios` repo and adds it to the source file of the release
+channel it was built on (`apps.json` for main, `apps-beta.json`, `apps-alpha.json`;
+see § Release channels below), the source SideStore/AltStore users add. Three
+things bite:
 
 - **SideStore offers an update only when the version changes.** The app is
   stamped with the dashboard badge, and the script refuses a tag that already
@@ -6468,6 +6470,55 @@ the source SideStore/AltStore users add. Three things bite:
 
 A dev build from Xcode says 1.0, so on the developer's own phone SideStore
 will keep offering the published version as an update.
+
+## Release channels: the app follows the server (20.1.0)
+
+The server ships the dashboard, so **an old app on a new server** is the direction
+everything is built for: the page looks each plugin up best-effort and greys out
+what the shell can't do. **A new app on an old server** has no such cover. Nothing
+negotiates versions, and an old dashboard cannot know about a shell written after
+it. Until 20.1.0 there was one SideStore source and it got every alpha build, so
+that was exactly what a `main` server's phone was offered.
+
+- **One source per branch.** `appchannel.py` is the single place that maps a
+  branch to its file; `publish-ipa.sh`, `promote.py` and `main.py` all ask it.
+  A build is published to the channel of the branch it was built on, and
+  `publish-ipa.sh` refuses to guess on a feature branch (`--channel`).
+- **A channel may borrow a steadier channel's app, never a fresher one**
+  (`fallback_chain`). `alpha` with no file reads `beta`'s, then `main`'s. `main`
+  reads only its own.
+- **`/api/app/latest` is capped at the server's own version** (`appchannel.pick`).
+  A box that has not updated yet would otherwise send people to the app for the
+  version it is about to become. The badge moves for host-only changes, so the
+  cap is "not newer than", not "equal to": a 20.0.3 server names app 20.0.1.
+- **Promotion is the only way onto `beta` and `main`, and it is one command**
+  (`promote.py`). The tag `release/<channel>/<version>` is the mark that a build
+  is safe; its message is what was checked, plus every line of the changelog in
+  that range that admits something was not (`appchannel.unverified_claims`, which
+  matches this changelog's own phrases: "not yet checked", "not yet confirmed",
+  "unit tests only"…). Don't push to `main` by hand: the branch, the tag and the
+  app source then disagree, which is the state this exists to prevent.
+- **Order matters: branch first, app second.** For the minutes between, boxes can
+  be ahead of phones (fine) and never the reverse. It is still not atomic the
+  other way round: SideStore offers the app at once, a box updates on its own
+  schedule. The Connect-screen notice is the net under that.
+- **Tests run at the commit, in a throwaway worktree.** A passing working tree
+  proves nothing about the commit being promoted.
+- **`appPermissions` describes the NEWEST version in a channel's file.** Promoting
+  an older app into a channel must not overwrite it with the older app's
+  permissions. `build_source` only replaces it when the entry it adds sorts first.
+- **Each channel is its own source to SideStore** (`com.streamlink.source`,
+  `.beta`, `.alpha`). A phone should have exactly one. Two sources offering the
+  same bundle id on one phone is untested.
+- **`MIN_SERVER` (in `ios-app/www/index.html`) is a floor for known breaks, not a
+  compatibility promise.** It is 19.8.0 because older hosts still have pairing and
+  one with `REQUIRE_DEVICE_AUTH` on refuses the app. Raise it in the same patch
+  that breaks an older server, and never above the version being shipped
+  (`promote.py` refuses that). The check lives in the app because the old server's
+  page can't make it. A typed address skips it on the first connect (no probe has
+  read a version yet) and gets it on the next launch.
+- **What channels do not fix:** a box switched from `alpha` back to `main` keeps
+  its newer app (SideStore does not downgrade). That is the case the notice is for.
 
 ## Library refreshes rebuild the grid — keep painted posters (19.4.2)
 

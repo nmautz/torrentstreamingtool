@@ -51,17 +51,32 @@ navigation, so the host page can call the native plugins.
 
 ## Install from SideStore (no build)
 
-In SideStore (or AltStore) go to **Sources → +** and add
-`https://raw.githubusercontent.com/nmautz/streamlink-ios/main/apps.json`,
-then install **StreamLink** from that source. New versions show up as updates.
+In SideStore (or AltStore) go to **Sources → +** and add the source for the
+branch your server follows, then install **StreamLink** from it. New versions
+show up as updates.
+
+| Server branch | Source |
+|---|---|
+| `main` | `https://raw.githubusercontent.com/nmautz/streamlink-ios/main/apps.json` |
+| `beta` | `https://raw.githubusercontent.com/nmautz/streamlink-ios/main/apps-beta.json` |
+| `alpha` | `https://raw.githubusercontent.com/nmautz/streamlink-ios/main/apps-alpha.json` |
+
+Add one, not several. The point is that the app is never newer than the server.
 
 **Publishing a version** (on the Mac, `gh` logged in): bump the badge in
 `static/index.html`, then run `./publish-ipa.sh`. It runs the full
 `build-ipa.sh`, uploads `StreamLink.ipa` as release `v<version>` on
-`nmautz/streamlink-ios`, and prepends the version to that repo's `apps.json`.
-`--dry-run` builds and prints the entry without publishing. `--notes "…"` replaces
+`nmautz/streamlink-ios`, and adds the version to the source file of the branch
+you are on (`--channel` names it on a feature branch).
+`--dry-run` builds and prints the source without publishing. `--notes "…"` replaces
 the default notes, which are the version's CHANGELOG heading. The app's metadata
 (name, description, icon, tint) lives in `sidestore/source.json`.
+
+**Moving a version to `beta` or `main`** is `python3 promote.py <channel>` at the
+repo root, which moves the server branch and the app together and records what
+was checked. `./publish-ipa.sh --promote --channel main --version x.y.z` is the
+app half on its own: it adds the already-released `.ipa` to that channel's
+source without rebuilding. See docs/GOTCHAS.md § Release channels.
 
 ## Build & run on a device
 

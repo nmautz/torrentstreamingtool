@@ -234,6 +234,8 @@ The StreamLink app streams your library, keeps playing with the phone locked, se
    ```
 3. Install **StreamLink** from that source. New versions show up as updates in SideStore.
 
+That source matches a host on the `main` branch, which is what `setup.py` gives you. If you have switched the host to `beta` or `alpha` (Admin → Updates), add that channel's source instead, so the app is never newer than the host: replace `apps.json` in the address with `apps-beta.json` or `apps-alpha.json`. If the app says a server is out of date, update the host from Admin → Updates.
+
 Open the app and tap your server in the list. The app finds it on its own when the phone is on the same Wi-Fi as the host; iOS asks once for permission to find devices on your local network, so allow it. If the server isn't listed, type the host's address (e.g. `192.168.1.20`) in the box underneath. It connects over plain HTTP on your home network, so no certificate setup is needed.
 
 There is no login in the app: anything that can reach the host can use it, the same as the browser dashboard. Keep the host off the open internet. To use it away from home, reach it over a VPN such as Tailscale: with Tailscale on, the app lists a host that advertises its home subnet, and any host it has already connected to at home.

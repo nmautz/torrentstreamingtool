@@ -23734,15 +23734,18 @@ async function _appVersionInit() {
 async function _appCheckUpdate() {
   if (!isApp || _appOffline) return;
   _appUpdCheckedAt = Date.now();
-  let latest = null;
+  let latest = null, src = null;
   try {
     const r = await fetch("/api/app/latest", { cache: "no-store" });
-    if (r.ok) latest = (await r.json()).version;
+    if (r.ok) { src = await r.json(); latest = src.version; }
   } catch (_) {}
   if (!/^\d+\.\d+\.\d+$/.test(latest || "")) return;
   const inst = await _appInstalledVersion();
   if (!inst) return;
-  _appUpd = _verCmp(inst.v, latest) < 0 ? { have: inst.exact ? inst.v : "", latest } : null;
+  // The server answers for ITS release channel (20.1.0) and never with an app
+  // newer than itself, so the update it names is one this server is ready for.
+  _appUpd = _verCmp(inst.v, latest) < 0
+    ? { have: inst.exact ? inst.v : "", latest, channel: src.source || "", sourceUrl: src.source_url || "" } : null;
   _npLog("app-update-check", { have: inst.v, exact: inst.exact, latest, behind: !!_appUpd }, "app");
   _appUpdPaint();
   if (!_appUpd || lp.itemId) return;
@@ -23762,7 +23765,12 @@ function _appUpdPaint() {
 function _appUpdExplain() {
   if (!_appUpd) return;
   const have = _appUpd.have ? `You have ${_appUpd.have}. ` : "";
-  showAlert(`${have}To update: open SideStore, find StreamLink and tap Update to ${_appUpd.latest}.`, "info");
+  // A phone whose SideStore source is for another channel is never offered
+  // this version, and nothing on the phone says why. Name the source.
+  const where = (_appUpd.channel && _appUpd.channel !== "main" && _appUpd.sourceUrl)
+    ? ` If SideStore does not offer it, this server is on the ${_appUpd.channel} channel: add its source under Sources, ${_appUpd.sourceUrl}`
+    : "";
+  showAlert(`${have}To update: open SideStore, find StreamLink and tap Update to ${_appUpd.latest}.${where}`, "info");
 }
 
 function _appInitUpdateCheck() {
@@ -32404,6 +32412,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.0.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.1.0</div>
 </body>
 </html>

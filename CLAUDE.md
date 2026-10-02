@@ -63,6 +63,7 @@ Each entry is a short hook so future Claude instances can jump straight to the r
 | `eplabel.py` (top-level) | **What a file is CALLED.** One label for every surface: `line1` "Breaking Bad · S01E03", `line2` the episode's name, `short` the one-line form. The file name is the label only when neither number nor name is known. TMDb show/episode names first, a name parsed from the file second; specials, `OVA`/`OAD` buckets, two-episode files, anime absolute numbers, spin-off sections and films each have a rule. Leaf module (stdlib + `episodes`, no `main` import), tests in `tests/test_eplabel.py`. Wired in `main.py` (`_file_label` / `_LABEL_MEMO`, `label` on `/files` + `/series`, `label` in bundle meta, `library_current_label` / `tv_local_label` in the state, `/api/admin/file-labels`) and mirrored in `static/index.html` (`fileLabel`, `_composeLabel`, `labelNowPlaying`, `labelInShow`). **Never render `f.name` to a person** — see [docs/GOTCHAS.md](docs/GOTCHAS.md) § A file's name is not what it is called. |
 | `epgroups.py` (top-level) | **TMDb episode groups** (story arcs, DVD order, production order). Two jobs: the episode page's **View** picker (`summarize`/`normalize` — a group is a VIEW, every entry a real TMDb `(season, episode)`, files never renumbered), and **attribution pass 4** (`season_homes`/`place_files`) — specials the whole-season groups agree belong INSIDE a season get `home: {season, after}`, and a file stuck at `(season, 0)` (AoT's `Season 4 - Finale 1`) is placed onto its special (S00E36). Offline over the TMDb disk cache; `episodes.sort_key` honours `home`. Leaf module (stdlib + `episodes`), tests in `tests/test_epgroups.py` over real TMDb data. Wired in `main.py` (`_ep_groups_fetch`, `_ep_group_homes`, `_reattribute_item_files`, `_settle_attribution`, `/api/tmdb/tv/{id}/episode-groups`, `/api/tmdb/episode-group/{id}`, `/api/profiles/{id}/episode-view`). See [docs/LIBRARY_DATA.md § Season/episode attribution](docs/LIBRARY_DATA.md) and [docs/GOTCHAS.md](docs/GOTCHAS.md). |
 | `discovery.py` (top-level) | **Being found by the iOS app** (19.14.0): the app lists servers, nobody types an address. This is the host's half: a stable id (`.server_id`), a name (hostname), and every address the box answers at, with **Tailscale picked out by subnet** (`100.64/10`), not by adapter name. Leaf module (stdlib + optional psutil, no `main` import), tests in `tests/test_discovery.py`. Wired in `main.py` (`GET /api/discovery`) and `run.py` (`start_mdns`, the `_streamlink._tcp` Bonjour service). The phone's half is `ios-app/ios/App/App/ServerDiscovery.swift` (Bonjour + Wi-Fi sweep + a sweep of the subnets a VPN routes, read from the kernel routing table) and the Connect screen in `ios-app/www/index.html`. See [docs/RUNTIME.md § Discovery](docs/RUNTIME.md), [docs/STREAMING.md](docs/STREAMING.md) and [docs/GOTCHAS.md](docs/GOTCHAS.md) § The app cannot list a tailnet. |
+| `appchannel.py` / `promote.py` (top-level) | **Release channels** (20.1.0): the iOS app follows the server's branch, so a phone is never offered an app newer than its server. `appchannel.py` maps a branch to its SideStore source file (`apps.json` / `apps-beta.json` / `apps-alpha.json`), picks the newest app not newer than the server (`pick`), and finds what the changelog admits was never checked (`unverified_claims`). Leaf module (stdlib only, no `main` import), tests in `tests/test_appchannel.py`. `promote.py` is the one way a build reaches `beta` or `main`: tests at the commit, the `release/<channel>/<version>` tag that records what was checked, the branch, then the app. Wired in `main.py` (`_app_channel`, `_app_latest_fetch`, `/api/app/latest`), `ios-app/publish-ipa.sh` (`--channel`, `--promote`) and the Connect screen's `MIN_SERVER` notice in `ios-app/www/index.html`. See [docs/GOTCHAS.md § Release channels](docs/GOTCHAS.md). |
 | `tmdbcache.py` (top-level) | On-disk cache of TMDb API responses (`.tmdb_cache/`) under `_tmdb_get`: per-kind TTLs (`ttl_for`), stale fallback when TMDb is unreachable, API key never stored. Leaf module (stdlib only, no `main` import) with tests in `tests/test_tmdbcache.py`. See [docs/LIBRARY_DATA.md § TMDb response cache](docs/LIBRARY_DATA.md). |
 | `bookmarks.py` (top-level) | **Explore bookmarks** (per-profile watch-later). Release status from TMDb (`movie_status`: digital-release countdown for a film in theaters; `tv_status`: premiere / next season) and the NEW-flag transition (`advance`: only an *awaited* release raises it; `None` evidence changes nothing). Leaf module (stdlib only, no `main` import) with tests in `tests/test_bookmarks.py`. Wired in `main.py` (`_bookmark_status`, `_refresh_bookmarks`, `bookmark_release_loop`, `/api/profiles/{id}/bookmarks*`, SSE `bookmarks_update`) and `static/index.html` (`loadBookmarks`, `toggleBookmark`, `_bmBadge`, `exOpenBookmarks`, `#ssBookmarkBtn`). See [docs/LIBRARY_DATA.md § Bookmarks](docs/LIBRARY_DATA.md). |
 | `subpack.py` (top-level) | Timed subtitle **image packs** — styled ASS and bitmap PGS/VOBSUB pre-rendered to transparent PNGs + a timing manifest, so clients that can't run libass (native iOS `AVPlayer`) or can't decode image subs at all can still show them. Leaf module (stdlib + `mediabin`, no `main` import). Purely additive to a bundle — no re-prep, no cache-version bump. Wired in `main.py` (`/api/library/offline-cache/<key>/subpack/*`). See [docs/STREAMING.md § 2c](docs/STREAMING.md). |
@@ -112,12 +113,17 @@ make test                 # pure unit tests for the leaf modules (no deps, no ve
                           #   python tests/test_diagnostics.py
                           #   python tests/test_analyzer_fp.py
                           #   python tests/test_discovery.py
+                          #   python tests/test_appchannel.py
                           # tests/search_eval/ is the LIVE search-accuracy kit
                           # (69 hand-labelled shows) - run verify.py against a
                           # box before trusting a change to episode matching.
                           # tests/race_harness.py is the LIVE integration driver
                           # for download racing - needs a running StreamLink +
                           # qBittorrent and its own magnets file. See its docstring.
+
+python3 promote.py        # where main / beta / alpha stand (server + app)
+python3 promote.py main   # the plan for marking alpha's newest build safe for main
+                          # (prints checks, changes nothing; --verified "..." --go acts)
 
 python3 run.py --install  # register as a system service (delegates to daemon.py)
 python3 run.py --status   # service status
@@ -178,9 +184,23 @@ closing `Version:` line doesn't show whether a change compiled in. Confirm an ap
 change landed by its behaviour on-device instead.
 
 **Publishing to SideStore:** `ios-app/publish-ipa.sh` builds, uploads a GitHub Release
-to the public `nmautz/streamlink-ios` repo, and updates its `apps.json` (the source
-users add). A version can be published once, so bump the badge first. See
-docs/GOTCHAS.md § SideStore source.
+to the public `nmautz/streamlink-ios` repo, and adds it to the source file of the
+**channel of the branch it was built on** (`apps-alpha.json` from `alpha`). A version
+can be built once, so bump the badge first. See docs/GOTCHAS.md § SideStore source.
+
+## Release channels — work lands on `alpha`; `main` only by promotion
+
+`main` is what other people run. Never push to `main` or `beta` directly, and never
+publish an app build straight to their sources. A build gets there with
+`python3 promote.py <channel>`, which checks it, tags it `release/<channel>/<version>`
+with what was verified, moves the branch, and moves the matching app, in that order.
+Run it without `--go` first and read the "NOT checked" list it prints: `--verified`
+has to say what was actually checked on a box and on a phone, in the user's words or
+from evidence in this session, not a guess. Pushing a branch and publishing an app
+source are outward-facing: confirm with the user before `--go`.
+
+If a change makes the app stop working with older servers, raise `MIN_SERVER` in
+`ios-app/www/index.html` in the same patch. See docs/GOTCHAS.md § Release channels.
 
 ## Style conventions
 

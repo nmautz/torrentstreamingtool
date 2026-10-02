@@ -1,5 +1,42 @@
 # Changelog
 
+## [20.1.0] — 2026-10-01
+### The app follows your server's release channel
+
+- **New: one app source per release channel.** A server follows `main`, `beta` or
+  `alpha`, and the app now has a SideStore source for each. Until now there was one
+  source and it got every build, so a server on `main` was offered an app built for
+  `alpha`: an app newer than the server it talks to.
+  - `main`: `https://raw.githubusercontent.com/nmautz/streamlink-ios/main/apps.json`
+    (the address already in use)
+  - `beta`: `…/apps-beta.json`
+  - `alpha`: `…/apps-alpha.json`
+- **If your server is on `alpha` or `beta`, add that channel's source in SideStore**
+  (Sources, then +). App updates built from now on are published there, and the old
+  source will stop offering them.
+- **Changed: "Update app" only names an app your server is ready for.** The server
+  looks in its own channel's source and never suggests an app newer than itself. When
+  the update is on a channel other than `main`, the notice gives the source to add.
+- **New: the app says when a server is too old for it.** Before opening a server older
+  than 19.8.0, the Connect screen says so and what to do. "Connect anyway" still opens
+  it, and is remembered for that server until its version changes. Servers in the list
+  that are too old are marked "Needs a server update".
+- **New for whoever maintains the branches: `python3 promote.py`.** It marks a build as
+  safe for `beta` or `main` and moves it there: it runs the unit tests at that exact
+  commit, lists everything the changelog says was not checked, records what you did
+  check in a `release/<channel>/<version>` tag, moves the branch, and adds the matching
+  app to that channel's source. With no arguments it shows where each channel stands.
+- Needs the app updated to 20.1.0 for the old-server notice. The rest is on the server.
+- Checked on an iPhone 16 with the 20.1.0 app, against a stand-in server answering as
+  19.4.1: it was found on Wi-Fi and marked "Needs a server update" while the real
+  20.0.3 server was not, tapping it showed the notice without opening the server,
+  "Connect anyway" opened it, and the next launch went straight in. The real server
+  opened with no notice.
+- Also checked: the server's lookup against the real source, as an `alpha` server and
+  as older ones, and `publish-ipa.sh --promote` and `promote.py` as dry runs against
+  the real source. Not yet checked: the "Update app" wording inside the app, and a
+  real promotion to `beta` or `main` (nothing has been promoted yet).
+
 ## [20.0.3] — 2026-10-01
 ### A download's percentage in the app counts the download, not the server's preparation
 

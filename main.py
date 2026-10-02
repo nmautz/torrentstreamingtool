@@ -54,6 +54,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 import analyzer
 import animemap
+import appchannel
 import bookmarks
 import bundlecheck
 import clientlog
@@ -9476,6 +9477,7 @@ async def _run_apply(branch: str, reboot: bool = True, allow_any: bool = False) 
         await _set_updater_phase("applying", f"Applying {branch} branch…", busy=True)
         prev_commit = await updater.current_commit()
         apply_res = await updater.apply_update(branch, allow_any=allow_any)
+        _app_latest["checked"] = 0.0   # the checkout moved: the app channel may have too
         if not apply_res.get("ok"):
             err = apply_res.get("error") or "git update failed"
             await _set_updater_phase("error", f"git apply: {err}", busy=False)
@@ -25976,11 +25978,32 @@ async def get_discovery() -> JSONResponse:
 # inside and shows a quiet "update in SideStore" strip when the app is behind.
 # The source, not UI_VERSION: the badge moves for host-only changes too, and a
 # warning for an update nobody can install is exactly the annoying kind.
-_APP_SOURCE_URL = "https://raw.githubusercontent.com/nmautz/streamlink-ios/main/apps.json"
+#
+# 20.1.0: the source is the one for the CHANNEL this box follows (appchannel.py),
+# and the answer is never newer than this server. Without both, a box on `main`
+# told people to install an app built from `alpha`, and a box that had not
+# updated yet told them to install the app for the version it was about to
+# become. An app newer than its server is the direction nothing tests.
 _APP_LATEST_TTL = 6 * 3600          # a publish shows up within six hours
 _APP_LATEST_RETRY = 15 * 60         # after a failed fetch, try again sooner
-_app_latest: dict = {"version": None, "date": None, "checked": 0.0, "ok": False}
+_app_latest: dict = {"version": None, "date": None, "channel": "", "source": "",
+                     "checked": 0.0, "ok": False}
 _app_latest_lock = asyncio.Lock()
+
+
+async def _app_channel() -> str:
+    """The release channel this box follows: the branch checked out, else the
+    one the auto-updater is set to, else main."""
+    branch = configured = ""
+    try:
+        branch = await updater.current_branch()
+    except Exception:
+        pass
+    try:
+        configured = _autoupdate_cfg(await get_library())["branch"]
+    except Exception:
+        pass
+    return appchannel.channel_for(branch, configured)
 
 
 async def _app_latest_fetch() -> dict:
@@ -25993,17 +26016,23 @@ async def _app_latest_fetch() -> dict:
             return _app_latest
         _app_latest["checked"] = time.time()
         try:
+            channel = await _app_channel()
+            versions, used = [], ""
             async with _http_client(timeout=httpx.Timeout(10.0, connect=5.0),
                                     follow_redirects=True) as c:
-                r = await c.get(_APP_SOURCE_URL)
-                r.raise_for_status()
-                src = r.json()
-            app_entry = next((a for a in src.get("apps", [])
-                              if a.get("bundleIdentifier") == "com.streamlink.client"), None)
-            versions = (app_entry or {}).get("versions") or []
-            if versions:
-                _app_latest["version"] = versions[0].get("version")
-                _app_latest["date"] = versions[0].get("date")
+                # A channel with no source of its own borrows a steadier one's.
+                for ch, url in appchannel.source_urls(channel):
+                    r = await c.get(url)
+                    if r.status_code == 404:
+                        continue
+                    r.raise_for_status()
+                    versions, used = appchannel.versions_of(r.json()), ch
+                    break
+            best = appchannel.pick(versions, UI_VERSION)
+            _app_latest["version"] = best.get("version") if best else None
+            _app_latest["date"] = best.get("date") if best else None
+            _app_latest["channel"] = channel
+            _app_latest["source"] = used
             _app_latest["ok"] = True
         except Exception as e:
             # Offline host, GitHub down: keep the last good answer (or none). A
@@ -26016,7 +26045,11 @@ async def _app_latest_fetch() -> dict:
 @app.get("/api/app/latest")
 async def get_app_latest() -> JSONResponse:
     d = await _app_latest_fetch()
-    return JSONResponse({"version": d["version"], "date": d["date"]})
+    # `source` is the channel whose file answered (a channel with none of its
+    # own borrows a steadier one's); `source_url` is what to add in SideStore.
+    return JSONResponse({"version": d["version"], "date": d["date"],
+                         "channel": d["channel"], "source": d["source"],
+                         "source_url": appchannel.source_url(d["source"]) if d["source"] else ""})
 
 
 # Files an iOS "player snapshot" must carry — the dashboard page plus every asset
@@ -30264,6 +30297,7 @@ async def admin_switch_branch(request: Request, body: UpdaterConfigReq) -> JSONR
     async with _updater_lock:
         await _set_updater_phase("applying", f"Switching to {body.branch}…", busy=True)
         res = await updater.switch_branch(body.branch, allow_any=allow_any)
+        _app_latest["checked"] = 0.0   # the checkout moved: the app channel may have too
         if not res.get("ok"):
             await _set_updater_phase("error", res.get("error", "switch failed"), busy=False)
             raise HTTPException(500, res.get("error", "switch failed"))
@@ -30313,6 +30347,7 @@ async def admin_switch_commit(request: Request, body: UpdaterCommitReq) -> JSONR
         await _set_updater_phase("applying",
                                 f"Pinning to commit {commit[:12]}…", busy=True)
         res = await updater.switch_commit(commit, allow_any=allow_any)
+        _app_latest["checked"] = 0.0   # the checkout moved: the app channel may have too
         if not res.get("ok"):
             await _set_updater_phase("error", res.get("error", "switch failed"),
                                     busy=False)

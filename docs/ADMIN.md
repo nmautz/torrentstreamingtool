@@ -565,6 +565,8 @@ The unified subtitle policy. Controls: **Default Subtitle Language** (the *one* 
 
 ### 8. Updates
 
+**The branch is also the release channel for the iOS app (20.1.0).** `main`, `beta` and `alpha` each have their own SideStore source, and `/api/app/latest` reads the one for the branch this box is on, so a phone is never pointed at an app newer than its server. Builds reach `beta` and `main` only through `promote.py`. See [GOTCHAS.md § Release channels](GOTCHAS.md).
+
 Auto-updater for the dashboard itself + post-update env-key fill-in. The
 underlying git/setup plumbing lives in [updater.py](../updater.py); the loop
 + endpoints are in [main.py](../main.py).
