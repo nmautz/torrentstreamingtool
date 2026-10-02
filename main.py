@@ -75,6 +75,7 @@ import subsearch
 import subsync
 import tmdbcache
 import updater
+import voicestatus
 import vpncheck
 import watchrule
 import watchpurge
@@ -12166,6 +12167,9 @@ async def _race_orphan_sweep() -> None:
 
 
 _monitor_err_at = 0.0
+# item_id -> the last `library_progress` payload sent for it. Only read for an
+# item whose status is still "downloading", so a stale entry is never consulted.
+_DL_PROGRESS_LAST: dict[str, dict] = {}
 
 
 async def library_download_monitor() -> None:
@@ -12486,7 +12490,7 @@ async def library_download_monitor() -> None:
                             continue
                         # Empty outcome ⇒ undecidable this tick (VPN down,
                         # indexers unreachable). Fall through and keep reporting.
-                    await broadcast("library_progress", {
+                    _progress = {
                         "item_id": item["id"],
                         # Rides on library_progress rather than a new event
                         # because the client already caches this payload per
@@ -12512,7 +12516,12 @@ async def library_download_monitor() -> None:
                         "stalled": (not waiting_idle and not _racing_now
                                     and stallrule.is_visible(_mark)),
                         "stalled_secs": int(float(_mark.get("idle") or 0.0)),
-                    })
+                    }
+                    # Kept so a plain GET can answer "how far along is it" - the
+                    # live numbers otherwise exist only on the event stream. See
+                    # /api/voice/status.
+                    _DL_PROGRESS_LAST[item["id"]] = _progress
+                    await broadcast("library_progress", _progress)
                     changed = True  # file list updated
                     # Check if a specific queued file finished (even while torrent is still going)
                     if (state.play_when_ready_item_id == item["id"]
@@ -25994,6 +26003,109 @@ async def get_discovery() -> JSONResponse:
 
     body = await asyncio.to_thread(_build)
     return JSONResponse(body, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+
+# ── Spoken status, for Siri (20.4.0) ────────────────────────────────────────
+# The app's Siri intents (ios-app/ios/App/App/SiriIntents.swift) ask these two
+# and read `speech` out. Matching and wording live in voicestatus.py, so both
+# change with a host update. No profile and no PIN reach an intent, so content-
+# locked items are left out entirely: they are neither listed nor described.
+
+def _voice_groups(lib: dict) -> list[dict]:
+    """The library as the titles a person would say: one row per show or film,
+    in the order the tiles group (`_series_key`). Downloading titles first, then
+    newest - the order a tie in `voicestatus.rank` falls back to."""
+    groups: dict[str, dict] = {}
+    for it in lib["items"]:
+        if it.get("admin_only"):
+            continue
+        key = _series_key(it)
+        g = groups.get(key)
+        if g is None:
+            g = groups[key] = {"key": key, "name": _item_display_names(it)[0], "items": []}
+        g["items"].append(it)
+    rows = list(groups.values())
+    rows.sort(key=lambda g: max((it.get("added_at") or "") for it in g["items"]), reverse=True)
+    rows.sort(key=lambda g: not any(it.get("status") in ("downloading", "pending")
+                                    for it in g["items"]))
+    return rows
+
+
+async def _voice_facts(g: dict) -> dict:
+    """Download + prep facts for one title, in the shape `voicestatus.describe` reads."""
+    items = g["items"]
+    live = [it for it in items if it.get("status") in ("downloading", "pending")]
+    failed = [it for it in items if it.get("status") == "error"]
+    seen = [_DL_PROGRESS_LAST.get(it["id"]) or {} for it in live]
+    etas = [p.get("eta_secs", -1) for p in seen]
+    facts = {
+        "name": g["name"], "items": len(items), "downloading": len(live),
+        "done_bytes": sum(int(p.get("downloaded_bytes") or 0) for p in seen),
+        "total_bytes": sum(int(p.get("total_bytes") or 0) for p in seen),
+        # The title is done when its SLOWEST download is; one unknown makes the
+        # whole estimate unknown.
+        "eta_secs": max(etas) if etas and all(e is not None and e >= 0 for e in etas) else -1,
+        "paused": bool(seen) and all(p.get("paused") for p in seen),
+        "stalled": any(p.get("stalled") for p in seen),
+        "finding_peers": bool(seen) and all(p.get("awaiting_metadata") for p in seen),
+        "errors": len(failed),
+        "error": (failed[0].get("error") or "") if failed else "",
+        "prep": HLS_AVAILABLE, "files": 0, "prep_ready": 0, "prep_busy": 0, "prep_eta_secs": None,
+    }
+    if live or not HLS_AVAILABLE:
+        return facts
+    files = [f for it in items if it.get("status") == "ready" for f in it.get("files", [])]
+
+    def _peek() -> list[dict]:
+        out = []
+        for f in files:
+            if _file_evicted(f):
+                out.append({"status": "cached"})    # the bundle is all that is left
+                continue
+            try:
+                out.append(_peek_prep_state(Path(f.get("path", ""))))
+            except OSError:
+                out.append({"status": "missing"})
+        return out
+
+    summary = _prep_summary(await asyncio.to_thread(_peek))
+    facts.update(files=summary["total"] - summary["missing"], prep_ready=summary["ready"],
+                 prep_busy=summary["processing"], prep_eta_secs=summary["eta_secs"])
+    return facts
+
+
+@app.get("/api/voice/titles")
+async def voice_titles(q: str = "", limit: int = Query(12, ge=1, le=500)) -> JSONResponse:
+    """Library titles for Siri to choose between: `[{key, name}]`. With `q` (what
+    Siri heard) only the names that match, best first; without it, what is
+    downloading and then the newest."""
+    rows = _voice_groups(await get_library())
+    if q.strip():
+        rows = [rows[i] for i, _ in voicestatus.rank(q, [g["name"] for g in rows])]
+    return JSONResponse({"titles": [{"key": g["key"], "name": g["name"]} for g in rows[:limit]]})
+
+
+@app.get("/api/voice/status")
+async def voice_status(key: str = "", q: str = "") -> JSONResponse:
+    """One spoken answer. `key` (from /api/voice/titles) or `q` (a spoken name)
+    asks about one title; neither asks what is downloading at all."""
+    rows = _voice_groups(await get_library())
+    if not key and not q.strip():
+        live = [g for g in rows if any(it.get("status") in ("downloading", "pending")
+                                       for it in g["items"])]
+        facts = [await _voice_facts(g) for g in live]
+        return JSONResponse({"found": True, "speech": voicestatus.overview(facts), "titles": facts})
+    g = next((x for x in rows if x["key"] == key), None) if key else None
+    if g is None and q.strip():
+        hits = voicestatus.rank(q, [x["name"] for x in rows])
+        g = rows[hits[0][0]] if hits else None
+    if g is None:
+        said = q.strip() or "that"
+        return JSONResponse({"found": False,
+                             "speech": "I couldn't find %s in the StreamLink library." % said})
+    facts = await _voice_facts(g)
+    return JSONResponse({"found": True, "key": g["key"], "name": g["name"],
+                         "speech": voicestatus.describe(facts), "facts": facts})
 
 
 # ── Latest iOS app (19.6.0) ─────────────────────────────────────────────────

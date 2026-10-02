@@ -30,10 +30,31 @@ class MainViewController: CAPBridgeViewController {
         injectCapacitorRuntime()
         injectViewportLock()
         watchWebContentProcess()
+        watchHostURL()
         // The glasses' external-display scene. Without this, iOS 27 never hands a
         // scene-based app that scene and both glasses modes are plain mirroring.
         // See ExternalDisplayAccessory in AppDelegate.swift.
         ExternalDisplayAccessory.register(on: self)
+    }
+
+    // The Siri intents (SiriIntents.swift) run with no web view, so they cannot
+    // ask the page which server it is on. Keep the origin of the last HOST the
+    // web view opened where they can read it. The app's own pages
+    // (capacitor://localhost) and the offline player (127.0.0.1) are not hosts.
+    private var hostObservation: NSKeyValueObservation?
+
+    private func watchHostURL() {
+        hostObservation = bridge?.webView?.observe(\.url, options: [.initial, .new]) { wv, _ in
+            guard let u = wv.url, let scheme = u.scheme, scheme == "http" || scheme == "https",
+                  let host = u.host, host != "localhost", host != "127.0.0.1" else { return }
+            let origin = "\(scheme)://\(host)" + (u.port.map { ":\($0)" } ?? "")
+            guard AppGroupConfig.hostUrl != origin else { return }
+            AppGroupConfig.hostUrl = origin
+            // Siri recognises a title inside a spoken phrase only if it was told
+            // the titles; a new host means a different library.
+            if #available(iOS 17.0, *) { StreamLinkShortcuts.updateAppShortcutParameters() }
+        }
+        if #available(iOS 17.0, *) { StreamLinkShortcuts.updateAppShortcutParameters() }
     }
 
     // The player's orientation lock (AppShell.swift). Unlocked, this is

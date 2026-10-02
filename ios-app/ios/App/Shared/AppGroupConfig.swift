@@ -25,11 +25,21 @@ public enum AppGroupConfig {
         static let isYouTube   = "tvremote.isYouTube"
         static let pendingCmd  = "playback.pendingCommand"
         static let strandedBri = "playback.strandedBrightness"
+        static let hostUrl     = "voice.hostUrl"
     }
 
     public static var serverUrl: String? {
         get { defaults?.string(forKey: Key.serverUrl) }
         set { defaults?.set(newValue, forKey: Key.serverUrl) }
+    }
+
+    /// Origin of the host the web view last opened ("http://192.168.0.106").
+    /// Unlike `serverUrl`, which exists only once a TV session has started, this
+    /// is written on every navigation to a host, so the Siri intents have an
+    /// address on a phone that has never used the remote. See SiriIntents.swift.
+    public static var hostUrl: String? {
+        get { defaults?.string(forKey: Key.hostUrl) }
+        set { defaults?.set(newValue, forKey: Key.hostUrl) }
     }
 
     /// The dashboard's device id, sent as `X-Device-Id` so the admin Devices tab

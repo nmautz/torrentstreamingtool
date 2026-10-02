@@ -31,6 +31,7 @@ test:
 	python3 tests/test_analyzer_fp.py
 	python3 tests/test_discovery.py
 	python3 tests/test_appchannel.py
+	python3 tests/test_voicestatus.py
 
 clean:
 	rm -rf .venv __pycache__ .env

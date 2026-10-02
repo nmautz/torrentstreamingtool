@@ -6741,3 +6741,35 @@ it is a reload at the playhead. It's the same lesson as the AirPlay audio pin (1
 anything the receiver chooses, you control by what you hand it, never by a setting on
 the phone. `LocalMediaServer` doesn't implement `maxh`: a downloaded master has one rung.
 If that ever changes, mirror `_cap_variants` there.
+
+## A Siri intent has no web view, and no profile (20.4.0)
+
+`SiriIntents.swift` runs in the app's process, but the system starts that process in the
+background just to call `perform()`: there is no page, so nothing the dashboard keeps in
+`localStorage` (the server registry, the profile, the PIN session) exists. Three things
+follow.
+
+- **The host address is copied out natively.** `MainViewController.watchHostURL` observes
+  the web view's URL and writes the origin of the last *host* it opened to the App Group
+  (`AppGroupConfig.hostUrl`). `capacitor://localhost` and the offline player's
+  `127.0.0.1` are skipped. A fresh install that has never opened a server answers "Open
+  StreamLink and connect to your server first." `tvremote.serverUrl` is not enough on its
+  own: it is only written once a TV session starts.
+- **No profile, so no locked content.** `/api/voice/*` leave `admin_only` items out
+  entirely, neither listed nor described. Do not add a `profile_id` parameter to get them
+  back: a profile id is a claim, not proof (see `_is_elevated`), and Siri answers on a
+  locked phone.
+- **The phone must reach the box when asked.** There is no cached answer. The request
+  times out at 6 s so the app loses that race instead of Siri, which gives `perform()`
+  only a few seconds before saying the app took too long.
+
+The sentence is built on the host (`voicestatus.describe`), so changing what Siri says is
+a host deploy. Changing *which phrases* Siri listens for is an app build: the phrases are
+compiled into `Metadata.appintents` by `xcodebuild`, and each must contain the app's name.
+A title is only recognised inside a phrase if Siri was told the titles
+(`updateAppShortcutParameters`, called when the host changes).
+
+**Not known yet** (this is what the 20.4.0 spike is for): whether iOS 27's Siri routes a
+question here without the app's name, since the app fits none of Apple's App Schema
+domains. The `siri-match` / `siri-resolve` / `siri-status` rows in the client log show
+what Siri actually handed over.

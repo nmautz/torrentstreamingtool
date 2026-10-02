@@ -1,5 +1,24 @@
 # Changelog
 
+## [20.4.0] — 2026-10-02
+### Ask Siri whether something has finished downloading (first trial)
+
+- **New: two questions you can ask Siri about the library.** "Is *Star Wars* done
+  downloading in StreamLink?" answers with how far along it is and how long is left, or,
+  once it has finished, whether it is prepped for streaming and how long that will take.
+  "What's downloading in StreamLink?" lists everything on the move. The same two actions
+  appear in the Shortcuts app.
+- This is a trial to find out how far iOS 27's Siri will go: whether it answers when you
+  don't say "StreamLink", and how well it picks a title out of what you said. Downloading
+  by voice and playback control are not built yet; they wait on what this shows.
+- The phone has to be able to reach the server when you ask (at home, or over Tailscale).
+  Content-locked titles are never mentioned, since Siri answers without a PIN.
+- Needs the 20.4.0 app **and** the 20.4.0 server.
+- Checked: the title matching and the wording (45 unit cases), the two server endpoints
+  against a made-up library, and that the built app registers both actions and their
+  seven phrases. **Not checked**: anything on a phone. Siri has not been asked a single
+  question yet, and the endpoints have not run on the box.
+
 ## [20.3.0] — 2026-10-02
 ### The player's rotation lock really rotates the app
 

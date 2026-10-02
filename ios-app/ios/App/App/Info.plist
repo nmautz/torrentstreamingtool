@@ -12,6 +12,13 @@
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
 	<string>StreamLink</string>
+	<key>INAlternativeAppNames</key>
+	<array>
+		<dict>
+			<key>INAlternativeAppName</key>
+			<string>Stream Link</string>
+		</dict>
+	</array>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
