@@ -1,5 +1,25 @@
 # Changelog
 
+## [20.2.0] — 2026-10-01
+### Choosing which build goes to main
+
+- **New for whoever maintains the branches: `python3 promote.py candidates`.** Every
+  build since `main`, newest first: what it changed, what the changelog says was not
+  checked, which app it pairs with, and what was fixed after it (what you would be
+  shipping without by stopping there).
+- **New: `python3 promote.py logs --box https://<server>`.** Reads the server's own
+  logs, including the archive it keeps of each earlier run, and reports per version how
+  long it ran, how many times it started, and the errors it logged that no older
+  version did. Read-only. The admin password comes from `STREAMLINK_ADMIN_PASSWORD`.
+- **New: a written procedure for picking a release candidate**
+  (`.claude/skills/release-candidate`). Claude gathers the evidence above, asks only
+  about what no log can show, recommends a build or says none is ready, and promotes
+  only after a yes.
+- **Fixed: `promote.py` only looked in the `alpha` source for the app to move.** A build
+  older than the first app published there would have been promoted with no app.
+- No change to the server or the app. Checked against the real server: 81 log files,
+  70 versions. Nothing has been promoted yet.
+
 ## [20.1.0] — 2026-10-01
 ### The app follows your server's release channel
 

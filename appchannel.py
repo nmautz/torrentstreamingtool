@@ -166,3 +166,138 @@ def unverified_claims(changelog: str, after: str, upto: str) -> list[tuple[str, 
         buf += " " + s
     flush()
     return out
+
+
+# ── Evidence for choosing a release candidate ────────────────────────────────
+# `promote.py candidates` and `promote.py logs` print these. They only gather:
+# which build is fit for main is a judgment (see .claude/skills/release-candidate).
+
+_ENTRY_RE = re.compile(r"^## \[(\d+\.\d+\.\d+)\](?:\s*[—-]\s*(\d{4}-\d{2}-\d{2}))?")
+_KIND_RE = re.compile(r"^[-*]\s+\*\*(New|Fixed|Changed|Removed)\b", re.I)
+
+
+def bump_kind(prev: str, cur: str) -> str:
+    """`x`, `y` or `z`: which part of the version moved between two entries."""
+    a, b = parse_version(prev), parse_version(cur)
+    if a is None or b is None:
+        return "?"
+    return "x" if b[0] != a[0] else "y" if b[1] != a[1] else "z"
+
+
+def changelog_entries(changelog: str, after: str, upto: str) -> list[dict]:
+    """One dict per changelog entry newer than `after` and not newer than
+    `upto`, newest first: `{version, date, title, kind, new, fixed, changed,
+    removed, fixes: [first line of each Fixed bullet]}`. `kind` is the bump
+    from the entry below it in the file."""
+    lo, hi = parse_version(after), parse_version(upto)
+    entries: list[dict] = []
+    cur = None
+    for line in (changelog or "").splitlines():
+        m = _ENTRY_RE.match(line)
+        if m:
+            cur = {"version": m.group(1), "date": m.group(2) or "", "title": "", "kind": "?",
+                   "new": 0, "fixed": 0, "changed": 0, "removed": 0, "fixes": []}
+            entries.append(cur)
+            continue
+        if cur is None:
+            continue
+        if line.startswith("### ") and not cur["title"]:
+            cur["title"] = line[4:].strip()
+            continue
+        k = _KIND_RE.match(line.strip())
+        if k:
+            kind = k.group(1).lower()
+            cur[kind] += 1
+            if kind == "fixed":
+                cur["fixes"].append(re.sub(r"\*\*", "", re.sub(r"^[-*]\s+", "", line.strip())))
+    for i, e in enumerate(entries):
+        e["kind"] = bump_kind(entries[i + 1]["version"], e["version"]) if i + 1 < len(entries) else "?"
+    return [e for e in entries
+            if (lo is None or parse_version(e["version"]) > lo)
+            and (hi is None or parse_version(e["version"]) <= hi)]
+
+
+_LOG_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+(DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+\[([^\]]*)\]\s?(.*)$")
+_BANNER_RE = re.compile(r"StreamLink v(\d+\.\d+\.\d+) starting\b.*?branch=(\S+)")
+
+
+def _signature(logger: str, msg: str) -> str:
+    """An error line with the parts that differ between occurrences removed,
+    so the same failure counts once however many files it hit."""
+    msg = re.sub(r"[0-9a-f]{8,}", "#", msg)
+    msg = re.sub(r"(/|[A-Za-z]:\\)\S+", "<path>", msg)
+    # A bare file name (they have spaces, so a path rule cannot catch them):
+    # everything since the last "] " or ": " up to a media extension.
+    msg = re.sub(r"(?:(?<=\] )|(?<=: )|^)(?:(?!\] ).)*?\.(?:mkv|mp4|m4v|avi|mov|ts|srt|ass|vtt|m3u8)\b",
+                 "<file>", msg, flags=re.I)
+    msg = re.sub(r"\d+", "#", msg)
+    return ("[%s] %s" % (logger, msg))[:110]
+
+
+def log_health(lines: Iterable[str]) -> list[dict]:
+    """What a server log says about each version that ran, newest first:
+    `{version, branch, runs, first, last, seconds, errors, tracebacks,
+    signatures: {text: count}}`.
+
+    The log is cut at each `StreamLink vX starting` banner; everything up to
+    the next banner belongs to that run. `seconds` is the time between a run's
+    first and last line, so a box that was switched off is not counted as
+    having run. Lines before the first banner belong to no version and are
+    dropped: an error that cannot be pinned to a build is not evidence about
+    one."""
+    from datetime import datetime
+    out: dict[str, dict] = {}
+    cur = None
+    run_first = run_last = None
+
+    def close():
+        if cur is not None and run_first and run_last:
+            cur["seconds"] += max(0, int((run_last - run_first).total_seconds()))
+
+    for line in lines:
+        if "Traceback (most recent call last)" in line and cur is not None:
+            cur["tracebacks"] += 1
+        m = _LOG_RE.match(line)
+        if not m:
+            continue
+        stamp, level, logger, msg = m.groups()
+        try:
+            t = datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+        b = _BANNER_RE.search(msg)
+        if b:
+            close()
+            cur = out.setdefault(b.group(1), {
+                "version": b.group(1), "branch": b.group(2), "runs": 0, "first": stamp,
+                "last": stamp, "seconds": 0, "errors": 0, "tracebacks": 0, "signatures": {}})
+            cur["runs"] += 1
+            cur["branch"] = b.group(2)
+            run_first = run_last = t
+            cur["last"] = max(cur["last"], stamp)
+            continue
+        if cur is None:
+            continue
+        run_last = t
+        cur["last"] = max(cur["last"], stamp)
+        if level in ("ERROR", "CRITICAL"):
+            cur["errors"] += 1
+            sig = _signature(logger, msg)
+            cur["signatures"][sig] = cur["signatures"].get(sig, 0) + 1
+    close()
+    return sorted(out.values(), key=lambda r: parse_version(r["version"]), reverse=True)
+
+
+def new_signatures(health: list[dict], version: str) -> list[tuple[str, int]]:
+    """Error signatures seen under `version` and under NO older version in the
+    same logs: the ones a build can be blamed for. An error every version has
+    is the box's weather, not this build's doing."""
+    v = parse_version(version)
+    mine, older = {}, set()
+    for r in health:
+        rv = parse_version(r["version"])
+        if rv == v:
+            mine = r["signatures"]
+        elif rv is not None and v is not None and rv < v:
+            older.update(r["signatures"])
+    return sorted(((s, n) for s, n in mine.items() if s not in older), key=lambda x: -x[1])

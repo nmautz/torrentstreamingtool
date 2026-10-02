@@ -6517,6 +6517,18 @@ that was exactly what a `main` server's phone was offered.
   (`promote.py` refuses that). The check lives in the app because the old server's
   page can't make it. A typed address skips it on the first connect (no probe has
   read a version yet) and gets it on the next launch.
+- **Choosing the build is a judgment, and the tools only gather.** `promote.py
+  candidates` (changelog: what changed, what was never checked, what was fixed
+  LATER) and `promote.py logs --box …` (the box's own logs per version). The
+  procedure that uses them is `.claude/skills/release-candidate/SKILL.md`. Three
+  things the log report cannot tell you, each of which has a wrong reading:
+  the version is the **backend's** banner, so a `reboot: false` deploy runs a newer
+  dashboard under the old number; hours running is not hours used; and an `ERROR`
+  line is not always a defect (Smart Skip's "no shared intro" is logged at that
+  level), which is why only signatures **no older version logged** are listed.
+- **The box zips each run's logs at the next start** (`logs_old_*.zip`), so the
+  live `streamlink_app.log` only ever covers the current run. `promote.py logs`
+  reads the archives too; a report built from the live file alone shows one build.
 - **What channels do not fix:** a box switched from `alpha` back to `main` keeps
   its newer app (SideStore does not downgrade). That is the case the notice is for.
 

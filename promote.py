@@ -32,6 +32,12 @@ line of the changelog, between the channel's version and this one, that admits
 something was not checked: read them before writing that sentence.
 
     python3 promote.py                       where each channel stands
+    python3 promote.py candidates            every build since main: what it changed, what was
+                                             fixed AFTER it, what nobody checked, which app it gets
+    python3 promote.py logs FILE...          what the box's server logs say about each version
+    python3 promote.py logs --box https://192.168.0.106
+                                             the same, fetched from the box (admin password in
+                                             the STREAMLINK_ADMIN_PASSWORD environment variable)
     python3 promote.py main                  the plan for alpha's newest build (does nothing)
     python3 promote.py main --version 20.0.3 the plan for a named build
     python3 promote.py main --verified "..." --go     do it
@@ -41,22 +47,31 @@ behind it: beta is never older than main.
 
 The app half needs macOS (`publish-ipa.sh` reads the .ipa with Apple's tools)
 and a logged-in `gh`. Elsewhere pass `--no-app` and run the printed command on
-the Mac. Stdlib only; runs under the system Python (3.9+). The rules it applies
+the Mac.
+
+`candidates` and `logs` gather evidence and decide nothing. Choosing a build is
+the release-candidate procedure in `.claude/skills/release-candidate/SKILL.md`:
+Claude reads this evidence and the box's logs, asks about what no log can show,
+and the owner has the final say. Stdlib only; runs under the system Python (3.9+). The rules it applies
 are in `appchannel.py`. See docs/GOTCHAS.md § Release channels.
 """
 
 from __future__ import annotations
 
 import argparse
+import io
 import json
+import os
 import platform
 import re
+import ssl
 import subprocess
 import sys
 import tempfile
 import textwrap
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Optional
 
@@ -117,6 +132,17 @@ def fetch_source(channel: str) -> list[dict]:
         raise Refused("could not read the %s source: %s" % (channel, e))
 
 
+def released_apps() -> list[dict]:
+    """Every app version any channel's source offers. A build's app was
+    published to the channel it was built on, and channels are files, so the
+    full list of what exists is their union."""
+    seen: dict[str, dict] = {}
+    for ch in appchannel.CHANNELS:
+        for e in fetch_source(ch):
+            seen.setdefault(str(e.get("version")), e)
+    return list(seen.values())
+
+
 def run_tests(rev: str) -> list[str]:
     """Run the unit tests the commit itself lists in its Makefile, in a clean
     worktree of that commit. Returns the names of the files that failed."""
@@ -154,6 +180,153 @@ def status() -> None:
     print("\nLast marks: " + (", ".join(marks[:6]) if marks else "none yet"))
 
 
+def candidates(channel: str) -> None:
+    """Every build between a channel and alpha's tip, newest first, with what
+    the changelog can say about each. The lines under a build are what you
+    would be SHIPPING WITHOUT by stopping there: fixes that landed later."""
+    git("fetch", "--quiet", "--tags", "origin", *appchannel.CHANNELS)
+    cur_ver, tip = badge("origin/" + channel), badge("origin/" + SOURCE)
+    log = show("origin/" + SOURCE, "CHANGELOG.md")
+    entries = appchannel.changelog_entries(log, cur_ver, tip)
+    if not entries:
+        print("%s is on %s, the same as %s. Nothing to promote." % (channel, cur_ver, SOURCE))
+        return
+    apps = released_apps()
+    claims: dict[str, list[str]] = {}
+    for v, text in appchannel.unverified_claims(log, cur_ver, tip):
+        claims.setdefault(v, []).append(text)
+    today = git("log", "-1", "--format=%cs", "origin/" + SOURCE)
+    print("%s is on %s. %s is on %s (%s). %d builds between them, newest first.\n"
+          % (channel, cur_ver, SOURCE, tip, today, len(entries)))
+    later_fixes: list[tuple[str, str]] = []
+    for e in entries:
+        app = appchannel.pick(apps, e["version"])
+        counts = ", ".join("%d %s" % (e[k], k) for k in ("new", "changed", "fixed", "removed") if e[k])
+        print("%-8s %s  %s-bump  app %s  [%s]" % (e["version"], e["date"], e["kind"],
+                                                 app["version"] if app else "none", counts or "no tagged bullets"))
+        print("         %s" % e["title"][:100])
+        for c in claims.get(e["version"], []):
+            print(textwrap.fill(c, 100, initial_indent="         NOT CHECKED: ", subsequent_indent="           "))
+        if later_fixes:
+            print("         fixed after this build (%d):" % len(later_fixes))
+            for v, f in later_fixes[-8:]:
+                print("           %-8s %s" % (v, f[:110]))
+            if len(later_fixes) > 8:
+                print("           ... and %d older ones above" % (len(later_fixes) - 8))
+        else:
+            print("         fixed after this build: nothing yet")
+        print()
+        later_fixes += [(e["version"], f) for f in e["fixes"]]
+
+
+APP_LOG = "streamlink_app.log"        # the one with the version banner
+
+
+def _log_lines(name: str, data: bytes) -> list[str]:
+    """The server log's lines out of a plain log or one of the box's
+    `logs_old_*.zip` archives (it zips the previous run's logs at each start)."""
+    if name.lower().endswith(".zip"):
+        out: list[str] = []
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                for m in z.namelist():
+                    if m.replace("\\", "/").split("/")[-1] == APP_LOG:
+                        out += z.read(m).decode("utf-8", errors="replace").splitlines()
+        except zipfile.BadZipFile:
+            print("  (skipped %s: not a readable zip)" % name, file=sys.stderr)
+        return out
+    return data.decode("utf-8", errors="replace").splitlines()
+
+
+def fetch_box_logs(box: str, limit: int) -> list[str]:
+    """Pull the live server log and the newest `limit` archived runs off a box
+    through its admin API. Read-only. The box's HTTPS certificate is its own
+    self-signed one, so it is not verified: this is for a box on your own
+    network, named by address."""
+    pw = os.environ.get("STREAMLINK_ADMIN_PASSWORD", "")
+    if not pw:
+        raise Refused("set STREAMLINK_ADMIN_PASSWORD to the box's admin password.")
+    ctx = ssl._create_unverified_context()
+    base = box.rstrip("/")
+
+    def call(path: str, body: Optional[dict] = None, token: str = "") -> bytes:
+        req = urllib.request.Request(base + path, data=json.dumps(body).encode() if body is not None else None)
+        if body is not None:
+            req.add_header("Content-Type", "application/json")
+        if token:
+            req.add_header("Authorization", "Bearer " + token)
+        try:
+            with urllib.request.urlopen(req, timeout=60, context=ctx) as r:
+                return r.read()
+        except (urllib.error.URLError, OSError) as e:
+            raise Refused("%s%s: %s" % (base, path, e))
+
+    token = json.loads(call("/api/admin/login", {"password": pw})).get("token", "")
+    if not token:
+        raise Refused("the box did not accept the admin password.")
+    files = json.loads(call("/api/admin/logs", token=token)).get("files", [])
+    wanted = [f["name"] for f in files if f["name"] == APP_LOG]
+    wanted += [f["name"] for f in files if f.get("prior") and f["name"].endswith(".zip")][:limit]
+    lines: list[str] = []
+    for name in wanted:
+        lines += _log_lines(name, call("/api/admin/logs/" + urllib.request.quote(name), token=token))
+    running = json.loads(call("/api/version")).get("version", "?")
+    print("Read %d files from %s (running %s now).\n" % (len(wanted), base, running))
+    return lines
+
+
+def logs(paths: list[str], box: str = "", limit: int = 80, to: str = "main", everything: bool = False) -> None:
+    """Per version: how long it ran on the box, how often it started, and the
+    errors it logged that no older version in the same logs did. Only versions
+    newer than the `to` channel are printed (older ones are still read: they
+    are what "new" is measured against).
+
+    The version is the one in the start-up banner, which is the BACKEND's. A
+    static-only deploy (`reboot: false`) leaves the old banner in place, so a
+    newer dashboard can have been running under an older number."""
+    lines: list[str] = fetch_box_logs(box, limit) if box else []
+    for p in paths:
+        try:
+            lines += _log_lines(p, Path(p).read_bytes())
+        except OSError as e:
+            raise Refused("could not read %s: %s" % (p, e))
+    # Several files (a rotated log and the live one) are one history.
+    health = appchannel.log_health(_keep_order(lines))
+    if not health:
+        raise Refused("no 'StreamLink vX starting' line in those files. Is this the server log?")
+    floor = None if everything else appchannel.parse_version(badge("origin/" + to))
+    shown = [r for r in health if floor is None or appchannel.parse_version(r["version"]) > floor]
+    print("%-9s %-7s %5s %9s %7s %6s  %s" % ("version", "branch", "runs", "ran", "errors", "trace", "first seen → last seen"))
+    for r in shown:
+        print("%-9s %-7s %5d %8.1fh %7d %6d  %s → %s" % (
+            r["version"], r["branch"][:7], r["runs"], r["seconds"] / 3600.0,
+            r["errors"], r["tracebacks"], r["first"], r["last"]))
+    if len(shown) < len(health):
+        print("(%d versions at or below %s's are not shown; --all prints them)" % (len(health) - len(shown), to))
+    print("\nErrors each version logged that no older version in these logs did:")
+    for r in shown:
+        new = appchannel.new_signatures(health, r["version"])
+        if not new:
+            continue
+        print("  %s" % r["version"])
+        for sig, n in new[:12]:
+            print("    %4d×  %s" % (n, sig))
+        if len(new) > 12:
+            print("    ... and %d more" % (len(new) - 12))
+
+
+def _keep_order(lines: list[str]) -> list[str]:
+    """Sorting by timestamp would scatter a traceback (its lines have none)
+    away from the error above it. Give each continuation line the stamp of the
+    line it follows, sort stably, and the blocks stay whole."""
+    keyed, last = [], ""
+    for l in lines:
+        if l[:4].isdigit() and len(l) > 19 and l[4] == "-":
+            last = l[:19]
+        keyed.append((last, l))
+    return [l for _, l in sorted(keyed, key=lambda kl: kl[0])]
+
+
 def plan(channel: str, version: str) -> dict:
     """Everything that would happen, with every check run. Raises Refused."""
     git("fetch", "--quiet", "--tags", "origin", *appchannel.CHANNELS)
@@ -186,7 +359,7 @@ def plan(channel: str, version: str) -> dict:
         raise Refused("main is not behind this build; beta cannot go behind main.")
 
     # The app each moved channel gains: the newest one not newer than the build.
-    alpha_apps = fetch_source(SOURCE) or fetch_source("main")
+    alpha_apps = released_apps()
     apps = {}
     for ch in moves:
         e = appchannel.promotable(alpha_apps, version, fetch_source(ch))
@@ -250,7 +423,14 @@ def carry_out(p: dict, verified: str, do_app: bool) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Mark a build safe for a channel and move it there.",
                                  epilog="With no channel: show where each channel stands.")
-    ap.add_argument("channel", nargs="?", choices=[c for c in appchannel.CHANNELS if c != SOURCE])
+    ap.add_argument("channel", nargs="?",
+                    choices=[c for c in appchannel.CHANNELS if c != SOURCE] + ["candidates", "logs"])
+    ap.add_argument("paths", nargs="*", help="for `logs`: server log files pulled off the box")
+    ap.add_argument("--box", default="", help="for `logs`: fetch them from this box, e.g. https://192.168.0.106")
+    ap.add_argument("--runs", type=int, default=80, help="for `logs --box`: how many archived runs to read")
+    ap.add_argument("--all", action="store_true", help="for `logs`: print every version in the logs")
+    ap.add_argument("--to", default="main", choices=[c for c in appchannel.CHANNELS if c != SOURCE],
+                    help="for `candidates` and `logs`: the channel being promoted to (default main)")
     ap.add_argument("--version", default="", help="the build to promote (default: alpha's newest)")
     ap.add_argument("--verified", default="", help="what was checked; recorded in the tag")
     ap.add_argument("--go", action="store_true", help="act; without it this only prints the plan")
@@ -259,6 +439,14 @@ def main() -> int:
     try:
         if not a.channel:
             status()
+            return 0
+        if a.channel == "candidates":
+            candidates(a.to)
+            return 0
+        if a.channel == "logs":
+            if not a.paths and not a.box:
+                raise Refused("give it server log files (streamlink_app.log, logs_old_*.zip) or --box URL")
+            logs(a.paths, a.box, a.runs, a.to, a.all)
             return 0
         p = plan(a.channel, a.version)
         if not a.go:

@@ -123,6 +123,81 @@ eq("a parenthesised admission", len(ac.unverified_claims(LOG, "19.4.1", "19.13.1
 eq("a clean range", ac.unverified_claims("## [1.0.1]\n- Fixed. Checked on a phone.\n", "1.0.0", "1.0.1"), [])
 eq("no changelog", ac.unverified_claims("", "1.0.0", "2.0.0"), [])
 
+# ── changelog_entries ────────────────────────────────────────────────────────
+LOG2 = """# Changelog
+
+## [20.1.0] — 2026-10-02
+### Channels
+- **New: one source per channel.** Words.
+- **Changed: the notice.** Words.
+
+## [20.0.1] — 2026-10-01
+### A resumed download showed 0 B
+- **Fixed: a resumed download showed "0 B".** It
+  wrapped.
+- **Fixed (not yet confirmed on a phone): another.**
+
+## [20.0.0] — 2026-10-01
+### Tabs
+- **New: tabs.**
+- **Removed: the menu.**
+
+## [19.14.0] — 2026-09-30
+### Discovery
+- **New: discovery.**
+"""
+es = ac.changelog_entries(LOG2, "19.14.0", "20.1.0")
+eq("entries newest first, range respected", [e["version"] for e in es], ["20.1.0", "20.0.1", "20.0.0"])
+eq("date and title", (es[0]["date"], es[0]["title"]), ("2026-10-02", "Channels"))
+eq("bump kinds", [e["kind"] for e in es], ["y", "z", "x"])
+eq("bullets are counted by kind", (es[0]["new"], es[0]["changed"], es[1]["fixed"], es[2]["removed"]), (1, 1, 2, 1))
+eq("a fix is quoted without the markup", es[1]["fixes"][0], 'Fixed: a resumed download showed "0 B". It')
+eq("upto cuts the top", [e["version"] for e in ac.changelog_entries(LOG2, "19.14.0", "20.0.1")], ["20.0.1", "20.0.0"])
+eq("the oldest entry has no bump to measure", ac.changelog_entries(LOG2, "19.0.0", "19.14.0")[0]["kind"], "?")
+eq("bump_kind", (ac.bump_kind("19.14.0", "20.0.0"), ac.bump_kind("20.0.0", "20.1.0"), ac.bump_kind("20.1.0", "20.1.1")), ("x", "y", "z"))
+
+# ── log_health ───────────────────────────────────────────────────────────────
+L = """2026-09-30 07:59:00  ERROR   [streamlink] before any banner: belongs to no build
+2026-09-30 08:00:00  INFO    [streamlink] StreamLink v20.0.0 starting — branch=alpha commit=aaa
+2026-09-30 08:10:00  ERROR   [streamlink.hls] job 9d788318fc7127a8 ABORT: no video stream in /lib/A.mkv
+2026-09-30 09:00:00  ERROR   [streamlink.hls] job 1122334455667788 ABORT: no video stream in /lib/B.mkv
+2026-09-30 10:00:00  INFO    [streamlink] tick
+2026-10-01 08:00:00  INFO    [streamlink] StreamLink v20.0.1 starting — branch=alpha commit=bbb
+2026-10-01 08:30:00  ERROR   [streamlink.hls] job 99aabbccddeeff00 ABORT: no video stream in /lib/C.mkv
+2026-10-01 09:00:00  ERROR   [streamlink] queue row 14 has no stage
+Traceback (most recent call last):
+  File "main.py", line 1, in x
+KeyError: 'stage'
+2026-10-01 12:00:00  WARNING [streamlink] slow
+2026-10-02 08:00:00  INFO    [streamlink] StreamLink v20.0.1 starting — branch=alpha commit=bbb
+2026-10-02 09:00:00  INFO    [streamlink] tick
+""".splitlines()
+h = ac.log_health(L)
+eq("versions newest first", [r["version"] for r in h], ["20.0.1", "20.0.0"])
+eq("runs are counted per version", [r["runs"] for r in h], [2, 1])
+eq("time is summed per run, not across the gap between them", h[0]["seconds"], 4 * 3600 + 3600)
+eq("a run's time ends at its last line", h[1]["seconds"], 2 * 3600)
+eq("errors per version", [r["errors"] for r in h], [2, 2])
+eq("tracebacks per version", [r["tracebacks"] for r in h], [1, 0])
+eq("the same failure on different files is one signature", len(h[1]["signatures"]), 1)
+eq("its count", list(h[1]["signatures"].values()), [2])
+eq("branch", h[0]["branch"], "alpha")
+eq("first and last seen", (h[0]["first"], h[0]["last"]), ("2026-10-01 08:00:00", "2026-10-02 09:00:00"))
+eq("only what the older build did not also do is new",
+   ac.new_signatures(h, "20.0.1"), [("[streamlink] queue row # has no stage", 1)])
+eq("the oldest build in the logs owns everything it logged", len(ac.new_signatures(h, "20.0.0")), 1)
+eq("a version that never ran", ac.new_signatures(h, "20.1.0"), [])
+eq("no log", ac.log_health([]), [])
+eq("a file name with spaces is not part of the signature",
+   ac._signature("streamlink", "[analyzer] [no_skip_points] Hacks.2021.S01E02.1080p.x265-RARBG.mp4: Fingerprinting done"),
+   ac._signature("streamlink", "[analyzer] [no_skip_points] Widows Bay S01E09 We Hope.mkv: Fingerprinting done"))
+eq("nor one with brackets in it",
+   ac._signature("streamlink", "[analyzer] [no_skip_points] Hacks.S01E02.x265-RARBG[eztv.re].mp4: Fingerprinting done"),
+   "[streamlink] [analyzer] [no_skip_points] <file>: Fingerprinting done")
+eq("what remains still says what failed",
+   ac._signature("streamlink", "[analyzer] [no_skip_points] Widows Bay S01E09.mkv: Fingerprinting done"),
+   "[streamlink] [analyzer] [no_skip_points] <file>: Fingerprinting done")
+
 print("appchannel: %d passed, %d failed" % (_PASS, len(_FAIL)))
 for f in _FAIL:
     print("  FAIL " + f)
