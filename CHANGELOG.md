@@ -1,5 +1,26 @@
 # Changelog
 
+## [20.2.2] — 2026-10-02
+### The app asked for the PIN again the morning after
+
+- **Fixed: the iOS app asked for the pinned account's PIN again about 12 hours after
+  updating to 20.x.** The PIN is only remembered when it is typed for the account
+  pinned to the phone. Updating pinned the account that was already signed in, so no
+  PIN was typed and the phone kept the ordinary 12-hour session. The same happened
+  after "Make X this phone's account". The app now asks the server to keep the session
+  it already holds (`POST /api/profiles/{id}/keep-session`), with no PIN prompt.
+- **Changed: the offline page looks for the server as soon as you come back to the
+  app.** iOS runs one VPN at a time, so after SideStore's VPN was on the app opens with
+  Tailscale off and goes offline. Switching Tailscale on and returning now reconnects
+  within a few seconds. Before, it waited up to 15 seconds, and most people restarted
+  the app instead.
+- Server and dashboard only: no new app build. A server older than 20.2.2 behaves as
+  before.
+- Checked: the new route in-process (valid, expired, wrong-profile and missing
+  sessions; kept across a restart; ended by a PIN change), and the app's logic against a
+  fake server. **Not checked on a phone**: that the PIN is not asked for the next
+  morning, and the reconnect on returning to the app.
+
 ## [20.2.1] — 2026-10-01
 ### An older build can be the release candidate
 

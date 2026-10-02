@@ -2898,6 +2898,37 @@ the native downloader and the "paused" download starts. Every `appDownloadBundle
 takes a generation (`_appDlGen`) and checks it after each await; pausing or removing bumps
 it. The same check is what stops a download removed mid-prep from coming back.
 
+### Pinning an account does not make its PIN session a remembered one
+
+**Symptom (20.0.0 to 20.2.1):** the iOS app "remembers the PIN" and asks for it again
+the next morning anyway.
+
+A remembered session (180 days, sliding) is only issued by `verify-pin` with
+`remember: true`, and the app only sends that when a PIN is **typed** for the account
+pinned to the phone. Two paths pin an account nobody types a PIN for:
+
+- the first load of a 20.x app on a phone that was already signed in (`_appAfterProfile`
+  pins whoever is signed in), which is every phone that upgraded;
+- "Make X this phone's account" on the App tab (`_appRepin`).
+
+Both stored the session the page already held, the 12 h kind, as the pinned account's
+proof. Measured on the box's device log: PIN typed at 00:58 on 19.9.2, 20.0.1 first
+opened at 03:08 with no prompt, token dead at 12:58, prompt at 13:39.
+
+**Fix (20.2.2):** `POST /api/profiles/{id}/keep-session` turns a still-valid session
+into a remembered one, and `_appKeepPin` calls it whenever the pinned account's proof is
+not known to be kept (`user.kept` in the registry, which describes one token only).
+
+**Rule:** a token's kind is the server's, not the client's. Giving the cookie a 180-day
+`max-age` (`_appAdoptPinned` does) changes nothing about when the server stops
+honouring it. Anything that stores a token to reuse later has to know which kind it is.
+
+**Unrelated, same morning:** iOS runs **one VPN at a time**. SideStore needs its own
+(StosVPN, `10.7.x` on `utun`), so after a refresh or an app update the phone has
+Tailscale **off**, the `netmap` row shows no `tailscale` net, and the app correctly goes
+offline. That is not a lost server. The offline page now looks again when the app comes
+back to the foreground (see FRONTEND.md § iOS app shell).
+
 ### The app cannot list a tailnet; it can only read its routes
 
 Server discovery (19.14.0) wants "every StreamLink box this phone can reach". Three facts

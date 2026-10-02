@@ -7094,6 +7094,7 @@ async function submitPinPrompt(){
     const body=await r.json();
     const matched=body.profile;
     setProfileToken(body.token, body.expires_in);
+    if(body.remembered) _pinKeptTok = body.token || "";     // see _appKeepPin
     _verifiedProfileId = (matched && matched.id) || null;   // don't re-prompt
     if(!matched||!matched.id){
       errEl.textContent="Login failed. Try again.";
@@ -19974,7 +19975,7 @@ async function saveProgress(itemId, filePath, posSec, durSec, profileId) {
 //
 //   _dev = { v: 1, primary: "<server id>",
 //            servers: { "<id>": { id, name, version, url, urls: [], seen,
-//                                 user: { id, name, color, has_pin, token } } } }
+//                                 user: { id, name, color, has_pin, token, kept } } } }
 //
 // `id` is the host's own (GET /api/discovery, 19.14.0). A host older than that
 // has none, and is keyed "url:<origin>" until it is updated.
@@ -20165,6 +20166,7 @@ function _appPinUser(p) {
     token: (p.has_pin && _verifiedProfileId === p.id) ? (_profileToken || "") : "",
   };
   _devSave();
+  _appKeepPin();
   _appSyncSetProfile();
   _appPaintIdent();
   if (activeTab === "app") _appTabShow();
@@ -20197,10 +20199,46 @@ async function _appAfterProfile() {
     const tok = (profile.has_pin && _verifiedProfileId === profile.id) ? (_profileToken || "") : "";
     const next = { id: u.id, name: profile.name || u.name || "", color: profile.color || u.color || "indigo",
                    has_pin: !!profile.has_pin, token: tok };
+    // `kept` describes one token and does not outlive it.
+    if (tok && u.kept && u.token === tok) next.kept = true;
     if (JSON.stringify(next) !== JSON.stringify(u)) { _dev.servers[_srvId].user = next; _devSave(); }
+    _appKeepPin();
   }
   _appSyncSetProfile();
   _appPaintIdent();
+}
+
+// The pinned account's PIN proof has to be the remembered kind, or the phone
+// asks again once the ordinary 12 h session runs out. It is only issued as one
+// when the PIN is typed for an account that is already pinned (or is the first
+// on this server). An account pinned while ALREADY signed in holds an ordinary
+// session: the 20.0.0 upgrade, which pinned whoever was signed in, and "Make X
+// this phone's account". So ask the server to keep the session this page holds.
+// `kept` on the pinned record marks a token known to be remembered. A host
+// older than 20.2.2 has no such route: nothing changes, and the PIN is asked
+// for once more, which is then remembered.
+let _pinKeptTok = "";         // a token this page knows the server is keeping
+let _pinKeeping = false;
+async function _appKeepPin() {
+  if (!isApp || _appOffline || _appProxied || _pinKeeping) return;
+  const u = _devUser(), tok = _profileToken;
+  if (!u || !tok || u.id !== profile.id || !profile.has_pin || _verifiedProfileId !== u.id) return;
+  if (u.kept && u.token === tok) return;
+  _pinKeeping = true;
+  try {
+    if (_pinKeptTok !== tok) {
+      const r = await _appFetchT(`/api/profiles/${encodeURIComponent(u.id)}/keep-session`, { method: "POST" }, 8000);
+      if (!r.ok) return;
+      _pinKeptTok = tok;
+    }
+    // Still the same account and the same proof as when this started.
+    const now = _devUser();
+    if (!now || now.id !== u.id || _profileToken !== tok) return;
+    setProfileToken(tok, _PIN_REMEMBER_MAXAGE);
+    now.token = tok; now.kept = true;
+    _devSave();
+  } catch (_) {
+  } finally { _pinKeeping = false; }
 }
 
 // ── M3 offline-progress sync (app only) ──────────────────────────────────────
@@ -22840,6 +22878,19 @@ function _appOfflineReconnectInit() {
   _appReconnectInited = true;
   setInterval(() => { if (!lp.itemId) _appOfflineTryReconnect(false); }, 15000);
   window.addEventListener("online", () => { if (!lp.itemId) _appOfflineTryReconnect(false); });
+  // Coming back to the app is the usual moment the server became reachable:
+  // the person left to switch a VPN on (iOS runs one at a time, so SideStore's
+  // leaves Tailscale off) and returned. No "online" event fires for that, and
+  // the 15 s timer was frozen while the app was away. A tunnel takes a moment
+  // to carry traffic after it is switched on, so look again shortly after.
+  let wake = [];
+  document.addEventListener("visibilitychange", () => {
+    wake.forEach(clearTimeout); wake = [];
+    if (document.visibilityState !== "visible") return;
+    for (const ms of [0, 2000, 5000]) {
+      wake.push(setTimeout(() => { if (!lp.itemId) _appOfflineTryReconnect(false); }, ms));
+    }
+  });
 }
 async function _appOfflineTryReconnect(manual) {
   const host = _appOfflineTarget();
@@ -32412,6 +32463,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.2.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.2.2</div>
 </body>
 </html>

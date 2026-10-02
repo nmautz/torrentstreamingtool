@@ -1640,6 +1640,12 @@ def _revoke_profile_sessions(profile_id: str) -> int:
 PROFILE_TOKEN_COOKIE = "streamlink_profile_token"
 
 
+def _profile_token_of(request: Request) -> str:
+    return (request.headers.get("x-profile-token", "").strip()
+            or request.cookies.get(PROFILE_TOKEN_COOKIE, "").strip()
+            or request.query_params.get("profile_token", "").strip())
+
+
 def _profile_session_id(request: Request) -> Optional[str]:
     """The profile id this request has PIN-proved, or None.
 
@@ -1651,9 +1657,7 @@ def _profile_session_id(request: Request) -> Optional[str]:
     without the `Secure` flag is scoped to the host and ignores both scheme and
     port, so one PIN entry now covers http and https alike.
     """
-    tok = (request.headers.get("x-profile-token", "").strip()
-           or request.cookies.get(PROFILE_TOKEN_COOKIE, "").strip()
-           or request.query_params.get("profile_token", "").strip())
+    tok = _profile_token_of(request)
     if not tok:
         return None
     meta = _profile_sessions.get(tok)
@@ -1669,6 +1673,26 @@ def _profile_session_id(request: Request) -> Optional[str]:
         meta["expires"] = now + PROFILE_REMEMBER_TTL
         _save_profile_sessions()
     return meta["profile_id"]
+
+
+def _keep_profile_session(request: Request, profile_id: str) -> bool:
+    """Turn the caller's live session for `profile_id` into a remembered one.
+
+    The iOS app pins an account that is ALREADY signed in: at the 20.0.0 upgrade,
+    and whenever "Make X this phone's account" is used. Nobody is asked for a
+    PIN at that moment, so the session it holds is the 12 h kind and the phone
+    asks again the next morning (20.2.2). Needs a session that is still valid,
+    so it grants nothing the PIN did not already grant - only for longer, which
+    verify-pin's `remember` hands to anyone who knows the PIN anyway."""
+    if _profile_session_id(request) != profile_id:
+        return False
+    meta = _profile_sessions.get(_profile_token_of(request))
+    if not meta:
+        return False
+    meta["remember"] = True
+    meta["expires"] = time.time() + PROFILE_REMEMBER_TTL
+    _save_profile_sessions()
+    return True
 
 # ── Outbound HTTP clients ─────────────────────────────────────────────────────
 # Constructing an `httpx.AsyncClient` builds a fresh SSL context and loads the
@@ -27172,6 +27196,21 @@ async def verify_profile_pin(
     # as HTTPS on the same host, and a Secure cookie would be withheld from the
     # HTTP origin — which is exactly the split this cookie exists to close.
     resp.set_cookie(PROFILE_TOKEN_COOKIE, _tok, max_age=_ttl,
+                    path="/", samesite="lax")
+    return resp
+
+
+@app.post("/api/profiles/{profile_id}/keep-session")
+async def keep_profile_session(profile_id: str, request: Request) -> JSONResponse:
+    """Make the caller's PIN session for this profile a remembered one, without
+    asking for the PIN again. For the iOS app, when it pins an account that is
+    already signed in - see _keep_profile_session. 403 when the caller holds no
+    valid session for this profile: the PIN is then the only way in."""
+    if not _keep_profile_session(request, profile_id):
+        raise HTTPException(403, "No valid PIN session for this profile.")
+    tok = _profile_token_of(request)
+    resp = JSONResponse({"ok": True, "expires_in": PROFILE_REMEMBER_TTL, "remembered": True})
+    resp.set_cookie(PROFILE_TOKEN_COOKIE, tok, max_age=PROFILE_REMEMBER_TTL,
                     path="/", samesite="lax")
     return resp
 

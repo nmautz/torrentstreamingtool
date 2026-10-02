@@ -1013,7 +1013,7 @@ state has no single place it changes). The registry behind it:
 ```
 _dev = { v: 1, primary: "<server id>",
          servers: { "<id>": { id, name, version, url, urls: [], seen,
-                              user: { id, name, color, has_pin, token } } } }
+                              user: { id, name, color, has_pin, token, kept } } } }
 ```
 
 - **`primary`**: the server the app opens at launch. The first one connected to. Changed
@@ -1065,6 +1065,12 @@ does not rebuild posters, reset the Continue Watching scroll or swallow a tap.
   needs that server or no connection. Offline there is no connected server, so looking
   at another one makes it current (`_dlView`): its pinned account becomes `profile` and
   Reconnect tries its address.
+- **Offline, the page looks for the server on its own** (`_appOfflineReconnectInit`):
+  every 15 s, on `online`, and (20.2.2) on coming back to the foreground, at once and
+  again 2 s and 5 s later. Never while something is playing. The foreground one is the
+  path that matters: iOS runs one VPN at a time, so a phone that had SideStore's on
+  opens with Tailscale off, lands offline, and the person leaves to switch it. No
+  `online` event fires for a VPN, and the timer was frozen while the app was away.
 
 **App tab** (`#appTab`, built once by `_appTabBuild`, repainted by `_appTabShow`). This
 phone (server, pinned account, the buttons that change either, other servers the phone
@@ -1088,6 +1094,7 @@ it, and launch goes to the primary's address.
 - Attached as **`X-Profile-Token`** by a single `window.fetch` wrapper installed next to the `profile` declaration, scoped to same-origin `/api/` URLs so it can never leak to a third party. Individual call sites don't (and shouldn't) know about it — don't start adding the header by hand.
 - **Cleared** when a PIN-less profile is selected (`_doSelectProfile`), otherwise the last PIN entered would keep unlocking content for whoever picks a different profile afterwards.
 - **Remembered in the iOS app, for one account** (20.0.0). `submitPinPrompt` sends `remember: true` when the profile is the one pinned to the phone (`_appShouldRememberPin`), and the server answers with a 180-day sliding session instead of the 12 h one. `setProfileToken(tok, maxAge)` takes the cookie's life from `expires_in`. The token is also kept in the app's native registry (`_dev.servers[id].user.token`) so a launch at a new address, where this origin's storage is empty, still opens without asking. See § iOS app shell below.
+- **An account pinned while already signed in holds an ordinary session** (fixed 20.2.2). `remember` is only sent when a PIN is typed. The 20.0.0 upgrade pinned whoever was signed in, and "Make X this phone's account" pins the current account: neither types a PIN, so the pinned token was the 12 h kind and the phone asked again the next morning. `_appKeepPin` (called from `_appAfterProfile` and `_appPinUser`) posts `/api/profiles/{id}/keep-session` once, and marks the pinned record `kept: true` for that token. `kept` describes one token: a different token clears it. A token `verify-pin` reported as `remembered` is marked without a request (`_pinKeptTok`). A host older than 20.2.2 answers 404 and nothing changes.
 - **Revalidated** on every `fetchProfiles()`: the response carries `verified_profile_id`, and a token the server no longer recognises (expired 12 h TTL, deleted profile, wiped session file) is dropped so the next pick re-prompts. Without that, an expired session degrades into "some shows are missing and Delete fails with a 403" and nothing tells the user to re-enter their PIN.
 
 - **Re-prompted on boot** by `_maybePromptForPin()` when the restored profile `has_pin` but the server reports no verified session. The boot path restores a profile from `localStorage` *without* re-verifying, so a login carried across the 11.20.0 upgrade — or one whose 12 h token has expired — is signed in with no PIN proof behind it. Nothing used to ask; the locked shows were just gone. Dismissing the prompt leaves the user logged in, minus that content.
