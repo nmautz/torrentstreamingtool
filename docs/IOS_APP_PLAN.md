@@ -28,6 +28,12 @@
 > is the fallback and ships working either way. See
 > [STREAMING.md § 2b](STREAMING.md) / [GOTCHAS.md](GOTCHAS.md).
 
+> **Bottom tab bar, one server and one account per phone (`20.0.0`).** The ☰ App menu
+> and its three overlays (Downloads, Settings, Change Server) are gone: the app has a
+> bottom tab bar with **Downloads** and **App** tabs beside Search / Explore / Library,
+> and the notes below that mention the menu or an overlay describe what those became.
+> Current reference: [FRONTEND.md § iOS app shell](FRONTEND.md).
+
 > **Settings screen + auto-managed downloads (`8.3.0`).** The ☰ App menu gained a
 > **Settings** overlay (`_appOpenAppSettings()` in `static/index.html` — an overlay
 > ON the live host page, same pattern as Downloads/Change Server, so it never

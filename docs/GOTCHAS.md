@@ -1435,9 +1435,10 @@ Two traps in the fix:
 A proxy must be transparent about credentials: forward what the client sent, remember
 nothing of its own. Its state must never outlive a single request.
 
-**Related, not fixed:** changing a profile's PIN does **not** invalidate that profile's
-existing session tokens (12 h TTL, persisted). Deleting the profile does neutralise them —
-both `_is_elevated` and `_require_delete_auth` require the profile to still exist.
+**Fixed in 20.0.0:** changing or clearing a profile's PIN, or deleting the profile, now
+ends every session token for it (`_revoke_profile_sessions`). It had to: the iOS app can
+ask for a remembered session that lives for months, and a token is proof the *old* PIN
+was known. The device that changed the PIN is asked for the new one at its next load.
 
 ### `os.replace` is not atomic-on-demand on Windows — it needs a retry
 
@@ -2853,6 +2854,50 @@ Two more, on the JS side:
   the common case (playing a *downloaded* episode online, which always routes through
   a proxied session). Same trap as the auto-manage prefs.
 
+### The phone's server and account are kept natively, because the app is three origins (20.0.0)
+
+The connect shell is `capacitor://localhost`, the dashboard is `http://<host>`, and a
+downloaded episode plays from `http://127.0.0.1:<port>`. They share no `localStorage`, and
+the host's own address changes between home Wi-Fi and Tailscale, which is a fourth origin.
+Anything the app must know everywhere goes in `OfflineStore.kvGet/kvSet` (`device.json`,
+which `clear()` never touches). That is where the primary server and each server's pinned
+account live. Keeping them in `localStorage` works on one origin and looks fine until the
+phone goes offline or the server's address changes.
+
+Three rules that follow, each of which was a wrong first version:
+
+- **A profile restore is not a launch.** The page boots on every return from the loopback
+  player, not only when the app opens. Resetting to the pinned account on every boot would
+  throw a shared account out mid-evening. The shell marks a real launch with `?launch=1`
+  and `_appAdoptPinned` strips it, so a reload does not re-adopt.
+- **Don't clear a remembered PIN token because one request failed.** `_appAfterProfile`
+  forgets it only when the page holds no token at all, which is what `fetchProfiles`
+  leaves behind when the server refused it. A token that is merely unverified (the
+  profiles fetch failed) is kept.
+- **A play goes back to the server its download came from.** Sending every pending play
+  to whichever server is connected gets a refusal for another server's items, and they
+  stay pending for ever. `_appPendingFor` filters by the record's `serverId`, then the
+  bundle's tag.
+
+### The Capacitor bridge answers any method name
+
+`_cap.dl.someNewMethod` is never `undefined`: the plugin proxy hands back a function for
+any name, and on a shell too old to have it the call rejects. So "does this shell support
+X" cannot be an existence check. The page calls `BundleDownloader.storage()` once at boot
+(`_appShellProbe`) and sets `_appShell20` if it resolves. The pause/retry buttons and the
+`failed` queue state hang off that flag. Marking a download `failed` on an old shell would
+store nothing, the entry would read as plain "wanted", and the resumer would retry a
+permanent failure on every launch.
+
+### A paused download has to be stopped in the page as well as natively
+
+`BundleDownloader.cancel` stops the transfer. But a download spends its first seconds, or
+hours if the host has to prep the episode, inside `appDownloadBundle` waiting on the host.
+Cancelling natively does nothing to that; when the prep finishes, it hands the files to
+the native downloader and the "paused" download starts. Every `appDownloadBundle` run
+takes a generation (`_appDlGen`) and checks it after each await; pausing or removing bumps
+it. The same check is what stops a download removed mid-prep from coming back.
+
 ### The app cannot list a tailnet; it can only read its routes
 
 Server discovery (19.14.0) wants "every StreamLink box this phone can reach". Three facts
@@ -3799,7 +3844,7 @@ and how `_appRefreshDlBtn` had never animated a merged row at all. Key app downl
 each file's own `item_id` (`_appSaveFiles`), and test "is this file on the open page?"
 with `epFileItem[path] === itemId` when `epSeriesKey` is set. (The browser's host ZIP genuinely can't span items, so there the season button is hidden on a merged page rather than left dead.)
 
-### In-app "tabs" must be overlays on the host page — never full-page navigations — or in-flight downloads die
+### In-app screens must live on the host page — never full-page navigations — or in-flight downloads die
 The dashboard (`static/index.html`, served by the host) is the page that
 *orchestrates* every download: `_appPrepBundle` polls the host's `/offline-job`
 while it builds the HLS bundle, and `_appRunPooled` drives the multi-episode pool,
@@ -3807,10 +3852,11 @@ all in this page's JS, **before** each file is handed to the durable background
 `URLSession`. A full-page navigation away (the old `_appGoDownloads` /
 `_appGoSettings` → `capacitor://localhost/...`) **tears this page down**, killing
 the SSE link AND every in-flight pool lane / prep-poll — so any series episode not
-yet handed to the native downloader is lost. The in-app **Downloads** and **Change
-Server** menu items therefore open **overlays on the live host page**
-(`_appOpenDashboard`, `_appOpenChangeServer`), not navigations. The ONLY legitimate
-disconnect is connecting to a *different* server (inside the Change Server overlay).
+yet handed to the native downloader is lost. The in-app **Downloads** and **App**
+screens are therefore **tabs of the live host page** (`switchTab("downloads")` /
+`switchTab("app")`, 20.0.0; overlays on it before that), not navigations. The ONLY
+legitimate disconnect is connecting to a *different* server (`_appChangeServer` /
+`_dlConnectTo`, both of which confirm first).
 `downloads.html` / `index.html` stay as the **offline** entry points (host
 unreachable) — those are separate local-origin pages by necessity.
 

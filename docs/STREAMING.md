@@ -3199,6 +3199,29 @@ Capacitor native-platform check (`isApp`), so it's inert in a plain browser.
 > `appDownloadAllBundles` warn on tap instead. Removing an *already saved* bundle
 > keeps working regardless (that branch runs before the HLS guard).
 
+**Which server, whose download (20.0.0).** A phone can hold downloads from more than
+one server, and it is one person's. So every bundle is tagged with the server it came
+from (`meta.server_id` / `server_name`, added by `appDownloadBundle`), every durable
+queue entry with the server it is to come from (`serverId`), and offline progress with
+the server it must go back to (`serverId` on the `OfflineStore` record). The Downloads
+tab shows one server at a time; `_appResumeDownloadQueue` drives only the connected
+server's entries; `_appFlushOfflineProgress` sends only the plays that belong to it
+(`_appPendingFor`). Progress is seeded and read for the account **pinned** to the phone
+on that server, not for whoever is signed in. A bundle saved before 20.0.0 has no tag:
+it is placed by the address it was fetched from, and failing that it belongs to the
+phone's primary server. The registry and its rules are in
+[FRONTEND.md § iOS app shell](FRONTEND.md).
+
+**Pause, retry, next (20.0.0).** A queue entry carries `state`: `""` wanted, `paused`,
+`failed` (with `error`). The resumer skips the last two. Pause cancels the native
+transfer (`BundleDownloader.cancel` keeps the files on disk) and bumps the download's
+generation (`_appDlGen`), which is what stops a download still in its host round-trip
+from handing itself over after the user said stop. A permanent failure is kept as a
+`failed` row with its reason and a Retry instead of vanishing. *Next* is
+`BundleDownloader.prioritize({sha})`: the job moves to the front of `jobOrder`, and
+`list()` reports each bundle's `order` so the row visibly moves. All of it needs the
+20.0.0 shell; an older one stores no state, so the page clears a failed intent as before.
+
 **Download.** A per-row **Download** button (`appDownloadBundle` in
 [static/index.html](../static/index.html), app-only via `_appDlBtnHTML`; the movie
 panel's full-width twin is `_appDlWideHTML`, refreshed by the same
@@ -3303,10 +3326,14 @@ player UI works with no host. The pieces:
   "never restarts" is still the rule for every other reason. See
   [GOTCHAS.md](GOTCHAS.md) § a suspended app loses its loopback server.
 - **Offline boot mode** (`?offline=1&host=<url>` → `_appOfflineBoot`,
-  static/index.html): Downloads-only — profile from `OfflineStore.getProfile()`
-  (the loopback origin's localStorage is empty and its port is ephemeral), no
-  SSE/host fetches, the Downloads overlay pinned open as the UI (its Close is
-  hidden; the player floats above it via `html.is-offline` CSS), quality menu
+  static/index.html): no SSE, no host fetches. The server and the account come
+  from the native registry (20.0.0: `host` is looked up there, and the account
+  **pinned** to that server is who offline plays are recorded for; a shell older
+  than that falls back to `OfflineStore.getProfile()`). The loopback origin's
+  localStorage is empty and its port is ephemeral, so nothing can be read from
+  storage. The UI is the **Downloads and App tabs** of the bottom tab bar, with
+  the three server tabs greyed (`html.is-offline` hides the header chrome that
+  needs a server). See [FRONTEND.md § iOS app shell](FRONTEND.md). Quality menu
   device-rung only, Prev/Next expands across the item's *downloaded* episodes
   from the native index, and a Reconnect probe (auto every 15 s while nothing
   plays + a manual button) that `location.replace(host)`s back to the real

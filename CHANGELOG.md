@@ -1,5 +1,47 @@
 # Changelog
 
+## [20.0.0] — 2026-10-01
+### The app has proper tabs, and says which server and whose account it is for
+
+This is for the iPhone app. The dashboard in a browser is unchanged.
+
+- **New: a tab bar along the bottom.** Search, Explore, Library, Downloads and App. It
+  replaces the small "App" button in the corner and the three screens that hung off it.
+  Downloads and App look like the rest of StreamLink now.
+- **New: the app names the server and the account.** The server's name is in the top
+  bar with a dot for the connection. Downloads and App both show the server and the
+  account this phone's downloads and offline history are kept for.
+- **New: one account per phone.** The first account you sign in with becomes the
+  phone's own. The app opens straight into it, and asks for its PIN once and remembers
+  it. Anything watched with no connection is recorded for that account, even if a
+  shared account was the last one signed in. Watching while connected still goes to
+  whoever is signed in. Change the phone's account on the App tab.
+- **New: one server the app opens at launch**, the first one you connect to. Downloads
+  from another server are kept under that server's name and never mixed in. "Make this
+  my server" on the App tab changes it.
+- **New: Continue Watching on the Downloads tab.** The episode you are part-way
+  through, or the next one after the last you finished, for each show saved on the phone.
+  It works with no connection.
+- **New: plays waiting to sync.** After watching offline, the Downloads tab says how
+  many plays have not reached the server yet, and the app tells you when they are sent.
+- **New: a storage bar.** How full the phone is, how much of it is downloads, and how
+  much is episodes you have already finished, with a button to remove those.
+- **New: pause, resume, retry and "next" on each download.** Every row says what it is
+  waiting for: the server, Wi-Fi, a charger, or you. A download that fails stays in the
+  list with the reason, where it used to vanish.
+- **Changed: shows on the Downloads tab are collapsed to one card each.** Tap a show
+  to see its episodes.
+- **Changed: the Connect screen and the offline fallback page match the dashboard**,
+  and the Connect screen marks which server is this phone's and which account it opens as.
+- **Changed: a profile's PIN sessions end when its PIN is changed or removed.** Other
+  devices signed in as that profile are asked for the new PIN.
+- Needs the app updated to 20.0.0 for the remembered PIN to survive a change of address,
+  for pause / retry / next, and for the storage bar. An older app gets the new tabs and
+  the server and account labels as soon as the server is updated.
+- Downloads already on the phone are counted as the first server's.
+- Checked in a desktop browser against a simulated app, on every screen, online and
+  offline, with one server and with two. The app builds. Not yet checked on a phone.
+
 ## [19.14.0] — 2026-10-01
 ### The app finds your server; you no longer type its address
 

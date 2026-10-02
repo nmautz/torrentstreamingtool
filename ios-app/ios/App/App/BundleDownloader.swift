@@ -34,13 +34,22 @@
 //    video rung; written to disk verbatim so the dropped ABR down-rungs (absent
 //    from `files`) are never fetched or referenced.
 //    getLocal({ itemId, filePath }) -> { found, complete, sha?, dir?, bytesDone, bytesTotal, fileCount, meta? }
-//    list()                         -> { items:[{ sha, itemId, filePath, name, complete, bytesTotal, bytesDone, fileCount, meta? }] }
+//    list()                         -> { items:[{ sha, itemId, filePath, name, baseUrl, complete, bytesTotal, bytesDone, fileCount, order, meta? }] }
 //  `meta` (optional) = { series, title, season, episode, episode_name, overview,
 //    tmdb_kind, poster_path, img_base, poster_data_url } — series/episode info +
 //    inlined poster so the offline Downloads picker can group/label with no host.
 //    remove({ sha? , itemId?, filePath? }) -> {}
 //    cancel({ sha })                -> {}
 //    bytesUsed()                    -> { bytes }
+//    storage()                      -> { free, total }   // the phone's volume, in bytes
+//    prioritize({ sha })            -> {}   // this bundle's files are fetched next
+//    enqueue({ itemId, filePath, name?, quality?, profileId?, serverId?, state?, error? }) -> {}
+//      The durable intent. `serverId` = the server it is to come from (a phone can
+//      hold downloads from several; the resumer drives only the connected one's).
+//      `state` = "" | "paused" | "failed" - both are skipped by the resumer until
+//      the user resumes or retries; `error` is the reason shown on a failed row.
+//    dequeue({ itemId, filePath })  -> {}
+//    queueList()                    -> { items:[ <the enqueue fields> + addedAt ] }
 //    openExternal({ url })          -> {}   // open a host URL in Safari (Clip share)
 //
 //  Events: "bundleProgress" { sha, itemId, filePath, bytesDone, bytesTotal, fraction, filesDone, fileCount }
@@ -149,6 +158,8 @@ public class BundleDownloader: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "remove",    returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "cancel",    returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "bytesUsed", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "storage",   returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "prioritize", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "enqueue",   returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "dequeue",   returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "queueList", returnType: CAPPluginReturnPromise),
@@ -243,6 +254,19 @@ public class BundleDownloader: CAPPlugin, CAPBridgedPlugin {
         call.resolve(["bytes": BundleDownloadManager.shared.bytesUsed()])
     }
 
+    /// Free and total space on the phone, for the Downloads storage bar.
+    @objc func storage(_ call: CAPPluginCall) {
+        call.resolve(BundleDownloadManager.shared.storage())
+    }
+
+    /// "Download this one next." Only a bundle already handed to the native
+    /// downloader has a place in the order to move.
+    @objc func prioritize(_ call: CAPPluginCall) {
+        guard let sha = call.getString("sha"), !sha.isEmpty else { call.reject("prioritize() requires sha."); return }
+        BundleDownloadManager.shared.prioritize(sha: sha)
+        call.resolve()
+    }
+
     // Durable download queue (the user's *intent*, persisted before the JS
     // orchestration even fetches the manifest) so a download survives an app kill
     // AND a multi-hour connectivity loss: the dashboard re-drives every queued
@@ -257,7 +281,10 @@ public class BundleDownloader: CAPPlugin, CAPBridgedPlugin {
             itemId: itemId, filePath: filePath,
             name: call.getString("name") ?? filePath,
             quality: call.getString("quality"),
-            profileId: call.getString("profileId"))
+            profileId: call.getString("profileId"),
+            serverId: call.getString("serverId"),
+            state: call.getString("state"),
+            error: call.getString("error"))
         call.resolve()
     }
     @objc func dequeue(_ call: CAPPluginCall) {
@@ -1170,7 +1197,8 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     /// Record the user's intent to download a file. Idempotent — re-enqueuing an
     /// already-queued file just refreshes its fields. The dashboard calls this the
     /// instant the user taps Download, BEFORE any network, so the wish is durable.
-    func enqueue(itemId: String, filePath: String, name: String, quality: String?, profileId: String?) {
+    func enqueue(itemId: String, filePath: String, name: String, quality: String?, profileId: String?,
+                 serverId: String? = nil, state: String? = nil, error: String? = nil) {
         queue.sync {
             _ = root   // ensure the dir + backup-exclusion exist
             var q = readQueue()
@@ -1178,6 +1206,14 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             e["itemId"] = itemId; e["filePath"] = filePath; e["name"] = name
             if let qa = quality { e["quality"] = qa }
             if let p = profileId { e["profileId"] = p }
+            // Never cleared by a later call that omits it: a retry or a pause
+            // re-enqueues with only the fields it is changing.
+            if let sid = serverId, !sid.isEmpty { e["serverId"] = sid }
+            // "" puts the entry back to plain "wanted"; nil leaves it as it is.
+            if let st = state {
+                if st.isEmpty { e["state"] = nil; e["error"] = nil } else { e["state"] = st }
+            }
+            if let er = error, !er.isEmpty { e["error"] = er }
             if e["addedAt"] == nil { e["addedAt"] = ISO8601DateFormatter().string(from: Date()) }
             q[queueKey(itemId, filePath)] = e
             writeQueue(q)
@@ -1406,8 +1442,15 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
                     "itemId": entry["itemId"] as? String ?? "",
                     "filePath": entry["filePath"] as? String ?? "",
                     "name": entry["name"] as? String ?? "",
+                    // Where it came from. A bundle saved before 20.0.0 carries
+                    // no server id in its meta; this is what places it.
+                    "baseUrl": entry["baseUrl"] as? String ?? "",
                     "complete": (entry["complete"] as? Bool) ?? false,
                     "bytesTotal": total, "bytesDone": done, "fileCount": files.count,
+                    // Its place in the transfer order while it is being
+                    // fetched (0 = next), -1 otherwise. The Downloads list
+                    // sorts by it, so "Next" visibly moves the row.
+                    "order": jobOrder.filter { $0 != Self.playerKey }.firstIndex(of: sha) ?? -1,
                 ]
                 if let m = entry["meta"] { row["meta"] = m }
                 return row
@@ -1439,6 +1482,30 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     }
 
     func cancel(sha: String) { queue.sync { cancelLocked(sha: sha) } }
+
+    /// Move a job to the front of the transfer order, behind the player
+    /// snapshot. Files already in flight for other jobs finish; every slot that
+    /// frees after this goes to `sha` first, because `pump` walks `jobOrder`.
+    func prioritize(sha: String) {
+        queue.sync {
+            guard jobs[sha] != nil, sha != Self.playerKey else { return }
+            jobOrder.removeAll { $0 == sha }
+            let at = (jobOrder.first == Self.playerKey) ? 1 : 0
+            jobOrder.insert(sha, at: at)
+            DiagLog.shared.write("dl-prioritize", ["sha": sha, "jobs": jobOrder.count], cat: "offline")
+            pump()
+        }
+    }
+
+    /// The phone's free and total space. "Important usage" is the figure iOS
+    /// itself quotes for something the user asked for: it counts space the
+    /// system would purge to make room.
+    func storage() -> [String: Any] {
+        let keys: Set<URLResourceKey> = [.volumeAvailableCapacityForImportantUsageKey, .volumeTotalCapacityKey]
+        let v = try? root.resourceValues(forKeys: keys)
+        return ["free": v?.volumeAvailableCapacityForImportantUsage ?? Int64(0),
+                "total": Int64(v?.volumeTotalCapacity ?? 0)]
+    }
 
     func bytesUsed() -> Int64 {
         queue.sync {

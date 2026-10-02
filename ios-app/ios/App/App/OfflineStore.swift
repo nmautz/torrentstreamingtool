@@ -38,10 +38,25 @@
 //    markSynced({ applied:[ { itemId, filePath, serverUpdatedAt, profileId? } ] }) -> {}
 //    all()                                                   -> { events:[ <event> ] }
 //    clear()                                                 -> {}
+//    kvGet({ key })                                          -> { value }   // null when unset
+//    kvSet({ key, value })                                   -> {}          // value null = delete
 //
 //  <event> = { profileId, itemId, filePath, positionSec, durationSec, completed,
-//              clientUpdatedAt, baseSyncedAt, playedSec?, subtitleSel?, audioSel?,
-//              localAudioIdx?, localSubtitleIdx? }
+//              clientUpdatedAt, baseSyncedAt, serverId?, playedSec?, subtitleSel?,
+//              audioSel?, localAudioIdx?, localSubtitleIdx? }
+//
+//  serverId (20.0.0): which StreamLink server the file belongs to. A phone can
+//  hold downloads from more than one, and a play made offline must go back to
+//  the server it came from and to no other. saveProgress and seedProgress take
+//  it optionally and never drop one already on the record, so the native writer
+//  (NativePlayback, which does not know it) keeps what the page set. A record
+//  with none is attributed by the page at sync time.
+//
+//  kvGet / kvSet (20.0.0): a small JSON store for what the app must know on
+//  every origin it runs on - the connect shell, the host's dashboard, the
+//  loopback offline player. It holds the phone's servers and the account each
+//  one is pinned to (key "device"); the page owns the shape. Separate file
+//  (device.json), so clear() never touches it.
 //
 //  playedSec (17.5.0): seconds of this file genuinely PLAYED, as opposed to where
 //  the playhead is. An offline session reaches the host as ONE coalesced position,
@@ -69,6 +84,8 @@ public class OfflineStore: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "markSynced",   returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "all",          returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "clear",        returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "kvGet",        returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "kvSet",        returnType: CAPPluginReturnPromise),
     ]
 
     private let store = OfflineProgressStore.shared
@@ -104,7 +121,8 @@ public class OfflineStore: CAPPlugin, CAPBridgedPlugin {
             positionSec: pos, durationSec: dur,
             subtitleSel: sel, audioSel: asel,
             localAudioIdx: call.getInt("localAudioIdx"),
-            localSubtitleIdx: call.getInt("localSubtitleIdx"))
+            localSubtitleIdx: call.getInt("localSubtitleIdx"),
+            serverId: call.getString("serverId"))
         call.resolve()
     }
 
@@ -132,7 +150,8 @@ public class OfflineStore: CAPPlugin, CAPBridgedPlugin {
             playedSec: call.getDouble("playedSec"),
             // M4: a "server wins" conflict resolution must overwrite the device's
             // own unsynced (dirty) record; the normal seed must not.
-            force: call.getBool("force") ?? false)
+            force: call.getBool("force") ?? false,
+            serverId: call.getString("serverId"))
         call.resolve()
     }
 
@@ -153,6 +172,23 @@ public class OfflineStore: CAPPlugin, CAPBridgedPlugin {
 
     @objc func clear(_ call: CAPPluginCall) {
         store.clear()
+        call.resolve()
+    }
+
+    @objc func kvGet(_ call: CAPPluginCall) {
+        guard let key = call.getString("key"), !key.isEmpty else {
+            call.reject("kvGet() requires key."); return
+        }
+        call.resolve(["value": store.kvGet(key) ?? NSNull()])
+    }
+
+    @objc func kvSet(_ call: CAPPluginCall) {
+        guard let key = call.getString("key"), !key.isEmpty else {
+            call.reject("kvSet() requires key."); return
+        }
+        // Whatever JSON the page sent: an object, an array, a string, or null.
+        let raw = call.options["value"]
+        store.kvSet(key, (raw == nil || raw is NSNull) ? nil : raw)
         call.resolve()
     }
 }
@@ -178,6 +214,36 @@ final class OfflineProgressStore {
         return dir
     }
     private var fileURL: URL { root.appendingPathComponent("progress.json") }
+    private var kvURL: URL { root.appendingPathComponent("device.json") }
+
+    // MARK: key/value (the phone's servers and pinned accounts)
+
+    private func readKV() -> [String: Any] {
+        guard let data = try? Data(contentsOf: kvURL),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+        return obj
+    }
+
+    func kvGet(_ key: String) -> Any? {
+        queue.sync { readKV()[key] }
+    }
+
+    func kvSet(_ key: String, _ value: Any?) {
+        queue.sync {
+            var obj = readKV()
+            // A value JSONSerialization cannot write would throw an ObjC
+            // exception, which Swift cannot catch. Refuse it instead.
+            if let v = value {
+                guard JSONSerialization.isValidJSONObject(["v": v]) else { return }
+                obj[key] = v
+            } else {
+                obj[key] = nil
+            }
+            if let data = try? JSONSerialization.data(withJSONObject: obj, options: []) {
+                try? data.write(to: kvURL, options: .atomic)
+            }
+        }
+    }
 
     // On-disk shape: { "profile": {id,name}, "records": { "<key>": <record> } }
     private func read() -> [String: Any] {
@@ -223,7 +289,8 @@ final class OfflineProgressStore {
     func saveProgress(profileId: String?, itemId: String, filePath: String,
                       positionSec: Double, durationSec: Double,
                       subtitleSel: [String: Any]?, audioSel: [String: Any]?,
-                      localAudioIdx: Int?, localSubtitleIdx: Int?) {
+                      localAudioIdx: Int?, localSubtitleIdx: Int?,
+                      serverId: String? = nil) {
         queue.sync {
             var obj = read()
             let pid = (profileId?.isEmpty == false ? profileId! : activeProfileLocked(obj))
@@ -271,6 +338,7 @@ final class OfflineProgressStore {
             // look already-synced, so it was never pushed.
             rec["dirty"] = true
             if rec["baseSyncedAt"] == nil { rec["baseSyncedAt"] = NSNull() }
+            if let sid = serverId, !sid.isEmpty { rec["serverId"] = sid }
             if let s = subtitleSel { rec["subtitleSel"] = s }
             if let a = audioSel { rec["audioSel"] = a }
             if let a = localAudioIdx { rec["localAudioIdx"] = a }
@@ -333,7 +401,7 @@ final class OfflineProgressStore {
     func seedProgress(profileId: String?, itemId: String, filePath: String,
                       positionSec: Double, durationSec: Double, completed: Bool,
                       serverUpdatedAt: String, playedSec: Double? = nil,
-                      force: Bool = false) {
+                      force: Bool = false, serverId: String? = nil) {
         queue.sync {
             var obj = read()
             let pid = (profileId?.isEmpty == false ? profileId! : activeProfileLocked(obj))
@@ -341,11 +409,18 @@ final class OfflineProgressStore {
             let k = key(pid, itemId, filePath)
             // `force` (M4 "server wins") overrides the dirty guard — the user has
             // chosen the server's value, so the unsynced device record is discarded.
-            if !force, let existing = records[k] as? [String: Any], (existing["dirty"] as? Bool) == true {
-                return   // unsynced local progress — don't overwrite; the push handles it
+            let existing = records[k] as? [String: Any]
+            if !force, let e = existing, (e["dirty"] as? Bool) == true {
+                // Unsynced local progress — don't overwrite; the push handles it.
+                // The server it belongs to is still worth learning.
+                if let sid = serverId, !sid.isEmpty, e["serverId"] == nil {
+                    var e2 = e; e2["serverId"] = sid
+                    records[k] = e2; obj["records"] = records; write(obj)
+                }
+                return
             }
             let stamp = serverUpdatedAt.isEmpty ? Self.isoNow() : serverUpdatedAt
-            records[k] = [
+            var seeded: [String: Any] = [
                 "profileId": pid, "itemId": itemId, "filePath": filePath,
                 "positionSec": (positionSec * 10).rounded() / 10,
                 "durationSec": (durationSec * 10).rounded() / 10,
@@ -358,6 +433,11 @@ final class OfflineProgressStore {
                 "baseSyncedAt": stamp,   // server watermark for conflict detection
                 "dirty": false,          // settled — pending() will not re-push it
             ]
+            // A seed replaces the record, so carry the server across: the one
+            // given, else the one the record already had.
+            if let sid = serverId, !sid.isEmpty { seeded["serverId"] = sid }
+            else if let prev = existing?["serverId"] { seeded["serverId"] = prev }
+            records[k] = seeded
             obj["records"] = records
             write(obj)
         }
@@ -456,6 +536,7 @@ final class OfflineProgressStore {
         // Present once this build has written or seeded the record. A record left
         // dirty by an older build syncs without it: the host goes position-only.
         if let p = rec["playedSec"] { e["playedSec"] = p }
+        if let sid = rec["serverId"] { e["serverId"] = sid }
         if let s = rec["subtitleSel"] { e["subtitleSel"] = s }
         if let a = rec["audioSel"] { e["audioSel"] = a }
         if let a = rec["localAudioIdx"] { e["localAudioIdx"] = a }

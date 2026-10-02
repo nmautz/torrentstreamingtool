@@ -1129,23 +1129,62 @@
        without this rule they bleed through over the buttons on mobile. */
     /* Nothing playing on the TV (renderPlayer sets .tv-idle): no player
        footer. <main>'s pb-36 cleared that footer; keep only enough to scroll
-       the last row clear of the app's floating APP button. */
+       the last row clear of the version badge and the home indicator. */
     body.tv-idle footer { display: none !important; }
     body.tv-idle main { padding-bottom: calc(4.5rem + env(safe-area-inset-bottom, 0px)) !important; }
     body:has(#profilePicker:not(.hidden)) footer,
     body:has(#profilePicker:not(.hidden)) #skipOffer,
     body:has(#profilePicker:not(.hidden)) #resumeOffer,
     body:has(#profilePicker:not(.hidden)) #localPlayer { display: none !important; }
-    /* Offline cached-player mode (docs/PLAYER_CACHE_PLAN.md): the Downloads
-       overlay IS the whole UI — its Close would strand the user on the dead
-       online chrome, so it's pinned open and the player floats ABOVE it
-       (playback never closes the overlay in this mode). */
-    html.is-offline #appDashClose { display: none !important; }
-    html.is-offline #localPlayer { z-index: 10001; }
+    /* ── iOS app: bottom tab bar (20.0.0) ─────────────────────────────────────
+       Search / Explore / Library / Downloads / App. In the app it REPLACES the
+       header's tab row, so there is one navigation and it is under the thumb.
+       `html.has-apptabs` is set by _appTabsInit; a plain browser never gets it.
 
-    /* iOS app (M5): hide the always-on App menu during on-device playback so it
-       doesn't float over the player. Tiny (picture-in-picture) mode keeps it. */
-    body:has(#localPlayer.lp-active:not(.lp-tiny)) #appNav { display: none !important; }
+       The bar is an ordinary flex child of <body>, not a fixed layer. That is
+       deliberate: every fixed overlay in the page (episode page, modals, the
+       player, the profile picker) then covers it without a z-index war, and
+       <main> gives up the height by itself. The one fixed thing that must sit
+       ABOVE it is the player footer, which takes its offset from --apptab-h
+       (measured by _appTabsMeasure; the bar's height changes with orientation). */
+    html.has-apptabs #topTabs { display: none !important; }
+    html.has-apptabs #appTabs { display: block; }
+    html.has-apptabs footer { bottom: var(--apptab-h, 0px); padding-bottom: 0 !important; }
+    html.has-apptabs body.tv-idle main { padding-bottom: 1.25rem !important; }
+    html.has-apptabs #localPlayer.lp-tiny { bottom: calc(var(--apptab-h, 0px) + 100px); }
+    html.has-apptabs [data-ui-version] { display: none; }   /* the App tab states it */
+    html.has-apptabs #navProfileName { display: block !important; }
+    #appTabs { display: none; }
+    .apptab {
+      flex: 1 1 0; min-width: 0; height: 52px; position: relative;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+      font-size: 10px; font-weight: 900; letter-spacing: .06em; text-transform: uppercase;
+      color: #6b7280; border-top: 3px solid transparent; margin-top: -2px;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .apptab .ic { width: 20px; height: 20px; }
+    .apptab.on  { color: #fff; border-top-color: #4f46e5; }
+    .apptab.off { color: #374151; }
+    .apptab-badge {
+      position: absolute; top: 5px; left: calc(50% + 7px); min-width: 16px; height: 16px; padding: 0 4px;
+      background: #4f46e5; color: #fff; font-size: 10px; font-weight: 900; line-height: 16px;
+      letter-spacing: 0; text-align: center;
+    }
+    @media (orientation: landscape) and (max-height: 500px) {
+      .apptab { height: 40px; flex-direction: row; gap: 7px; }
+      .apptab .ic { width: 16px; height: 16px; }
+      .apptab-badge { top: 4px; left: auto; right: 8px; }
+    }
+    /* Offline cached-player mode (docs/PLAYER_CACHE_PLAN.md): no server behind
+       the page, so the chrome that talks to one goes. What is left of the
+       header says which server and whose history this is. */
+    html.is-offline #vpnPill, html.is-offline #sseWrap, html.is-offline #dlBadge,
+    html.is-offline #navSettingsBtn, html.is-offline #tvUseComputerBtn,
+    html.is-offline #elsewhereBanner { display: none !important; }
+    html.is-offline #navProfileBtn { pointer-events: none; }
+    /* Downloads: the horizontal Continue Watching strip scrolls on its own. */
+    #dlContinueRow { overflow-x: auto; overscroll-behavior: contain; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+    #dlContinueRow::-webkit-scrollbar { display: none; }
 
     /* ── Icon system — inline SVG sprite sized to the local font.
        See docs/FRONTEND.md § Iconography. ── */
@@ -1209,6 +1248,11 @@
   <symbol id="i-chev-right" viewBox="0 0 24 24"><path d="M15.6 12 8.2 19.4l-1.7-1.7 5.7-5.7-5.7-5.7 1.7-1.7z"/></symbol>
   <symbol id="i-ext" viewBox="0 0 24 24"><path d="M13.5 2.5h8v8h-2.3V6.4l-8.1 8.1-1.6-1.6 8.1-8.1h-4.1zM4 5h6v2.3H6.3v10.4h10.4V13H19v7H4z"/></symbol>
   <symbol id="i-monitor" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M2 3.5h20v13.5H13.2v2.3H17v2.2H7v-2.2h3.8V17H2zm2.2 2.2v9.1h15.6V5.7z"/></symbol>
+  <symbol id="i-compass" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2.2a7.8 7.8 0 1 1 0 15.6 7.8 7.8 0 0 1 0-15.6zm4.6 3.2-6.3 2.9-2.9 6.3 6.3-2.9zM12 10.8a1.2 1.2 0 1 1 0 2.4 1.2 1.2 0 0 1 0-2.4z"/></symbol>
+  <symbol id="i-library" viewBox="0 0 24 24"><path d="M3 4h4v16H3zM9 4h4v16H9zM15.2 5.3l3.9-1 4 15.4-3.9 1z"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M10.5 3h3v8.5h3.6L12 17.4 6.9 11.5h3.6zM4 19h16v2.2H4z"/></symbol>
+  <symbol id="i-server" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M3 4h18v7H3zm2.2 2.2v2.6h13.6V6.2zM3 13h18v7H3zm2.2 2.2v2.6h13.6v-2.6zM6.5 6.7h2v1.6h-2zm0 9h2v1.6h-2z"/></symbol>
+  <symbol id="i-sync" viewBox="0 0 24 24"><path d="M12 4a8 8 0 0 1 7.4 5H22l-3.6 4.2L14.8 9h2.2A5.8 5.8 0 0 0 6.6 9.8L4.5 9A8 8 0 0 1 12 4zM5.6 10.8 9.2 15H7a5.8 5.8 0 0 0 10.4-.8l2.1.8A8 8 0 0 1 4.6 15H2z"/></symbol>
   <symbol id="i-search" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M10.5 2a8.5 8.5 0 1 0 5.05 15.34l4.55 4.55 1.7-1.7-4.55-4.55A8.5 8.5 0 0 0 10.5 2zm0 2.3a6.2 6.2 0 1 1 0 12.4 6.2 6.2 0 0 1 0-12.4z"/></symbol>
   <symbol id="i-trash" viewBox="0 0 24 24"><path d="M9 2h6l1 2h5v2H3V4h5l1-2zM5 8h14l-1.2 14H6.2L5 8zm4 3v8h2v-8H9zm4 0v8h2v-8h-2z"/></symbol>
 </svg>
@@ -2710,6 +2754,8 @@
       <div class="flex items-center gap-1 sm:gap-2 flex-wrap sm:flex-nowrap">
         <!-- Logo — hidden by renderElsewhere() while the "playing elsewhere"
              banner below is standing in this slot. -->
+        <!-- In the iOS app this slot names the SERVER instead (_appPaintIdent):
+             the wordmark says nothing a phone with two servers needs to know. -->
         <div id="navLogo" class="font-black text-base sm:text-lg tracking-wide uppercase whitespace-nowrap flex-shrink-0 h-12 sm:h-14 flex items-center mr-0 sm:mr-1">
           <span class="text-indigo-500">Stream</span><span class="text-white">Link</span>
         </div>
@@ -2726,7 +2772,7 @@
           class="hidden flex-1 my-1.5 bg-indigo-950/70 border border-indigo-900 divide-y divide-indigo-900/60"
           style="min-width:7.5rem"></div>
         <!-- Tabs: order-3 + w-full on mobile (wraps to row 2), order-2 inline on sm+ -->
-        <div class="order-3 sm:order-2 w-full sm:w-auto flex sm:flex-shrink-0 h-11 sm:h-14 border-t border-gray-800 sm:border-t-0 -mx-2 sm:mx-0">
+        <div id="topTabs" class="order-3 sm:order-2 w-full sm:w-auto flex sm:flex-shrink-0 h-11 sm:h-14 border-t border-gray-800 sm:border-t-0 -mx-2 sm:mx-0">
           <button id="tabSearch" onclick="switchTab('search')"
             class="tab-btn tab-inactive flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap">Search</button>
           <!-- #bmTabDot: a bookmarked title came out (see _bmRenderBadges). The
@@ -2761,7 +2807,7 @@
             <span id="sseLabel" class="text-[11px] text-gray-700 hidden sm:block"></span>
           </div>
           <!-- Profile -->
-          <button onclick="showProfilePicker()"
+          <button id="navProfileBtn" onclick="showProfilePicker()"
             class="flex items-center gap-1.5 pl-1 pr-1 sm:pr-2 py-1 hover:bg-gray-800 transition-colors flex-shrink-0 min-h-[36px]">
             <div id="navProfileAvatar"
               class="w-7 h-7 bg-indigo-600 flex items-center justify-center text-xs font-black text-white flex-shrink-0">?</div>
@@ -3055,8 +3101,36 @@
       </div>
     </div>
 
+    <!-- Downloads tab (iOS app only; reached from the bottom tab bar). What is
+         saved on this phone, for ONE server at a time, with the account its
+         offline history belongs to named at the top. Every section is painted
+         by _dlRender; see docs/FRONTEND.md § iOS app shell. -->
+    <div id="downloadsTab" class="hidden">
+      <div id="dlIdent"></div>
+      <div id="dlNotices"></div>
+      <div id="dlContinue"></div>
+      <div id="dlQueue"></div>
+      <div id="dlStorage"></div>
+      <div id="dlShows"></div>
+    </div>
+
+    <!-- App tab (iOS app only): this phone's server + account, then settings.
+         Built once by _appTabBuild. -->
+    <div id="appTab" class="hidden"></div>
+
   </div>
 </main>
+
+<!-- ── iOS app: bottom tab bar (shown only when html.has-apptabs) ──────────── -->
+<nav id="appTabs" class="flex-shrink-0 bg-gray-950 border-t-2 border-gray-800 safe-bottom">
+  <div class="flex max-w-screen-2xl mx-auto">
+    <button class="apptab" data-tab="search" onclick="_appTab('search')"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><span>Search</span></button>
+    <button class="apptab" data-tab="explore" onclick="_appTab('explore')"><svg class="ic" aria-hidden="true"><use href="#i-compass"/></svg><span>Explore</span><span id="bmTabDot2" class="hidden absolute top-2 w-2 h-2 bg-rose-500" style="left:calc(50% + 9px)"></span></button>
+    <button class="apptab" data-tab="library" onclick="_appTab('library')"><svg class="ic" aria-hidden="true"><use href="#i-library"/></svg><span>Library</span></button>
+    <button class="apptab" data-tab="downloads" onclick="_appTab('downloads')"><svg class="ic" aria-hidden="true"><use href="#i-download"/></svg><span>Downloads</span><span id="appTabDlBadge" class="apptab-badge hidden"></span></button>
+    <button class="apptab" data-tab="app" onclick="_appTab('app')"><svg class="ic" aria-hidden="true"><use href="#i-phone"/></svg><span>App</span><span id="appTabUpdDot" class="hidden absolute top-2 w-2 h-2 bg-sky-500" style="left:calc(50% + 9px)"></span></button>
+  </div>
+</nav>
 
 <!-- ── Smart Skip overlay — floats above the player footer/fullscreen ────── -->
 <div id="skipOffer"
@@ -4575,7 +4649,9 @@ try { _profileToken = localStorage.getItem(PROFILE_TOKEN_KEY) || ""; } catch(_){
 // user re-enter the PIN. Deferred until setProfileToken is defined below.
 const _seedTokenCookie = !!_profileToken && !_readTokenCookie();
 if(!_profileToken) _profileToken = _readTokenCookie();
-function setProfileToken(tok){
+// `maxAge` (seconds) is the cookie's life: the server's `expires_in`, which is
+// 12 h for an ordinary session and months for one the app asked it to remember.
+function setProfileToken(tok, maxAge){
   _profileToken = tok || "";
   try {
     if(_profileToken) localStorage.setItem(PROFILE_TOKEN_KEY, _profileToken);
@@ -4583,7 +4659,7 @@ function setProfileToken(tok){
   } catch(_){}
   try {
     document.cookie = _profileToken
-      ? `${PROFILE_TOKEN_KEY}=${encodeURIComponent(_profileToken)};path=/;max-age=43200;samesite=lax`
+      ? `${PROFILE_TOKEN_KEY}=${encodeURIComponent(_profileToken)};path=/;max-age=${Math.max(60, parseInt(maxAge, 10) || 43200)};samesite=lax`
       : `${PROFILE_TOKEN_KEY}=;path=/;max-age=0;samesite=lax`;
   } catch(_){}
 }
@@ -6381,6 +6457,9 @@ function _offerBottom(stack){
     return `calc(env(safe-area-inset-bottom) + ${12 + stack}px)`;
   const ft = document.querySelector("footer");
   const h = ft ? ft.offsetHeight : 0;
+  // In the app the footer sits on top of the bottom tab bar, not on the edge.
+  const tabs = _appTabsHeight();
+  if(tabs) return `${h + tabs + (h > 0 ? 0 : 12) + stack}px`;
   return h > 0 ? `${h + stack}px`
                : `calc(env(safe-area-inset-bottom) + ${12 + stack}px)`;
 }
@@ -6802,11 +6881,22 @@ async function saveSubtitlesPref(){
 
 // ── Tabs ───────────────────────────────────────────────────────────────────
 function switchTab(tab){
+  // Downloads and App exist only in the iOS app (the bottom tab bar). With no
+  // server behind the page they are the only two tabs there are.
+  const appTab = tab==="downloads" || tab==="app";
+  if(appTab && !_appHasTabs()) tab="library";
+  else if(!appTab && _appOffline) return;   // nothing behind those tabs; a TAP on one says so (_appTab)
   activeTab=tab;
   const isS=tab==="search", isL=tab==="library", isE=tab==="explore";
   document.getElementById("searchTab").classList.toggle("hidden",!isS);
   document.getElementById("exploreTab").classList.toggle("hidden",!isE);
   document.getElementById("libraryTab").classList.toggle("hidden",!isL);
+  document.getElementById("downloadsTab").classList.toggle("hidden",tab!=="downloads");
+  document.getElementById("appTab").classList.toggle("hidden",tab!=="app");
+  _appTabsPaint();
+  if(tab==="downloads") _dlShow(); else _dlHide();
+  if(tab==="app") _appTabShow();
+  { const m=document.querySelector("main"); if(m && appTab) m.scrollTop=0; }
   const cls=(on)=>`tab-btn flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap ${on?"tab-active":"tab-inactive"}`;
   document.getElementById("tabSearch").className=cls(isS);
   document.getElementById("tabExplore").className=cls(isE);
@@ -6902,11 +6992,12 @@ function _doSelectProfile(p){
   pbSessions = []; _pbRev = -1; renderElsewhere(); _pbFetchSessions();
   loadBookmarks();   // per profile, like the list above
   if(activeTab==="library") loadLibrary();
-  // M3: tell the native store whose history to record, then flush anything the
-  // offline player accumulated for this profile.
-  _appSyncSetProfile();
+  // The app: the first account signed in on a server becomes this phone's
+  // (_appAfterProfile); then send anything watched with no connection.
+  _appAfterProfile();
   _appFlushOfflineProgress();
   _qaFlush();
+  if(activeTab==="app") _appTabShow();
 }
 
 function applyMaxVolumeToSliders(){
@@ -6974,7 +7065,8 @@ async function submitPinPrompt(){
   try{
     r=await fetch(`/api/profiles/${encodeURIComponent(_pendingPinProfile.id)}/verify-pin`,{
       method:"POST", headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({pin}),
+      // The app asks to be remembered, for the account pinned to the phone only.
+      body:JSON.stringify({pin, remember:_appShouldRememberPin(_pendingPinProfile)}),
     });
   }catch(_){
     // A PIN screen that silently does nothing when the box is unreachable is the
@@ -6998,7 +7090,7 @@ async function submitPinPrompt(){
   if(r.ok){
     const body=await r.json();
     const matched=body.profile;
-    setProfileToken(body.token);
+    setProfileToken(body.token, body.expires_in);
     _verifiedProfileId = (matched && matched.id) || null;   // don't re-prompt
     if(!matched||!matched.id){
       errEl.textContent="Login failed. Try again.";
@@ -15427,6 +15519,7 @@ function _bmSyncToggles(){
 function _bmRenderBadges(){
   const n=_bmList.filter(b=>b.new).length;
   document.getElementById("bmTabDot").classList.toggle("hidden",!n);
+  document.getElementById("bmTabDot2").classList.toggle("hidden",!n);   // the app's bottom bar
   document.getElementById("exBmDot").classList.toggle("hidden",!n);
   const btn=document.getElementById("exBookmarksBtn");
   btn.classList.toggle("hidden",!profile.id); btn.classList.toggle("flex",!!profile.id);
@@ -19809,7 +19902,7 @@ async function saveProgress(itemId, filePath, posSec, durSec, profileId) {
     if (isApp && _cap.os) {
       try {
         await _cap.os.saveProgress({ itemId, filePath,
-          positionSec: posSec, durationSec: durSec, profileId: pid });
+          positionSec: posSec, durationSec: durSec, profileId: pid, serverId: _srvId });
       } catch (_) {}
     }
     return;
@@ -19838,7 +19931,7 @@ async function saveProgress(itemId, filePath, posSec, durSec, profileId) {
     if (isApp && _cap.os) {
       try {
         await _cap.os.saveProgress({ itemId, filePath,
-          positionSec: posSec, durationSec: durSec, profileId: pid });
+          positionSec: posSec, durationSec: durSec, profileId: pid, serverId: _srvId });
         stashed = true;
       } catch (_) {}
     }
@@ -19853,13 +19946,287 @@ async function saveProgress(itemId, filePath, posSec, durSec, profileId) {
   return saved;
 }
 
+// ── iOS app: this phone's servers, and the account pinned to each (20.0.0) ───
+//
+// A phone belongs to somebody. So the app keeps ONE account per server that its
+// downloads and its offline history are for (the "pinned" account), and one
+// server it opens at launch (the "primary"). Both are chosen for you: the first
+// server you connect to and the first account you sign in with. Both can be
+// changed in the App tab.
+//
+// What the pin does and does not cover:
+//   - Offline play is recorded for the pinned account, whoever was signed in
+//     last. That is the whole point: switching to a shared account for an
+//     evening must not send next week's flight to its history.
+//   - Watched badges, Continue Watching, auto-manage and the progress a new
+//     download is seeded with all read the pinned account.
+//   - Streaming while CONNECTED is recorded for the signed-in account, as on
+//     every other device. The pin is about what this phone holds.
+//
+// The registry (`_dev`) lives in the native OfflineStore (kvGet/kvSet), because
+// the app runs on three origins that share no localStorage: the connect shell,
+// the host's dashboard, and the loopback page that plays downloads. A shell
+// older than 20.0.0 has no kvGet; the registry then falls back to this origin's
+// localStorage, which is enough for everything except the offline page.
+//
+//   _dev = { v: 1, primary: "<server id>",
+//            servers: { "<id>": { id, name, version, url, urls: [], seen,
+//                                 user: { id, name, color, has_pin, token } } } }
+//
+// `id` is the host's own (GET /api/discovery, 19.14.0). A host older than that
+// has none, and is keyed "url:<origin>" until it is updated.
+const _DEV_KEY = "device";
+const _DEV_LS_KEY = "sl_device";
+const _PIN_REMEMBER_MAXAGE = 180 * 86400;   // PROFILE_REMEMBER_TTL on the host
+let _dev = { v: 1, primary: "", servers: {} };
+let _devNative = null;        // true once kvGet answered, false once it refused
+let _srvId = "", _srvName = "", _srvVersion = "";
+let _appIdentReady = null;    // settles once _srvId is known (or never will be)
+let _appShell20 = false;      // the shell has the 20.0.0 natives (set by _appShellProbe)
+
+// The origin of the server itself, wherever this page was loaded from.
+function _appHostOrigin() {
+  return _appProxied ? _appProxyHost : (_appOffline ? _appOfflineHost : location.origin);
+}
+
+async function _devLoad() {
+  let v = null;
+  if (isApp && _cap.os) {
+    try { v = (await _cap.os.kvGet({ key: _DEV_KEY })).value; _devNative = true; }
+    catch (_) { _devNative = false; }
+  }
+  if (_devNative !== true) {
+    try { v = JSON.parse(localStorage.getItem(_DEV_LS_KEY) || "null"); } catch (_) {}
+  }
+  if (v && typeof v === "object" && v.servers && typeof v.servers === "object") {
+    _dev = { v: 1, primary: v.primary || "", servers: v.servers };
+  }
+  return _dev;
+}
+function _devSave() {
+  if (_devNative === true) {
+    try { const r = _cap.os.kvSet({ key: _DEV_KEY, value: _dev }); if (r && r.catch) r.catch(() => {}); } catch (_) {}
+    return;
+  }
+  try { localStorage.setItem(_DEV_LS_KEY, JSON.stringify(_dev)); } catch (_) {}
+}
+function _devServerFor(url) {
+  if (!url) return null;
+  for (const id in _dev.servers) {
+    const r = _dev.servers[id];
+    if (r && (r.url === url || (r.urls || []).includes(url))) return r;
+  }
+  return null;
+}
+// A server this phone has downloads from but no record of (the registry was
+// lost, or the shell is too old to keep one) is still named: every download
+// since 20.0.0 carries its server's name.
+const _devSeenNames = new Map();
+function _devServerName(id) {
+  const r = _dev.servers[id];
+  return (r && r.name) || (id === _srvId && _srvName) || _devSeenNames.get(id) || "Another server";
+}
+// The account pinned to a server (default: the connected one), or null.
+function _devUser(id) {
+  const r = _dev.servers[id || _srvId];
+  return (r && r.user && r.user.id) ? r.user : null;
+}
+// Whose offline history this phone keeps on the connected server.
+function _appOfflinePid() { const u = _devUser(); return (u && u.id) || profile.id || ""; }
+
+// Which server a download belongs to. Tagged in its meta since 20.0.0; one
+// saved before that is placed by the address it came from, and failing that it
+// is the phone's own server's.
+function _appBundleServer(it) {
+  // No registry and no server to ask (offline on a shell older than 20.0.0):
+  // there is nothing to tell servers apart by, so everything is "this" one —
+  // which is how that shell has always shown it.
+  if (_appOffline && !_srvId) return "";
+  const sid = it && it.meta && it.meta.server_id;
+  if (sid) return sid;
+  let o = "";
+  try { o = new URL(it.baseUrl).origin; } catch (_) {}
+  const r = o ? _devServerFor(o) : null;
+  return (r && r.id) || _dev.primary || _srvId || "";
+}
+
+// Learn which server this is. Called once at boot, before the profile restore.
+// A server this phone has used before is recognised by its address with no
+// network at all; only a first visit waits for /api/discovery.
+function _appIdentBoot() {
+  if (!_appIdentReady) _appIdentReady = (async () => {
+    if (!(isApp || _appOffline)) return;
+    await _devLoad();
+    const origin = _appHostOrigin();
+    let known = _devServerFor(origin);
+    if (_appOffline && !known && _dev.primary) known = _dev.servers[_dev.primary] || null;
+    if (known) { _srvId = known.id; _srvName = known.name || ""; _srvVersion = known.version || ""; }
+    if (_appOffline) {
+      if (!_srvName) { try { _srvName = new URL(origin).hostname; } catch (_) {} }
+      return;
+    }
+    const fresh = _appIdentRefresh(origin);
+    if (!known) await fresh;
+  })();
+  return _appIdentReady;
+}
+async function _appIdentRefresh(origin) {
+  let d = null;
+  try {
+    const r = await _appFetchT("/api/discovery", { cache: "no-store" }, 5000);
+    if (r.ok) d = await r.json();
+  } catch (_) {}
+  if (!(d && d.app === "streamlink" && d.id)) d = null;
+  const stand = "url:" + origin;
+  const before = _devServerFor(origin);
+  const id = d ? d.id : (before ? before.id : stand);
+  let name = (d && d.name) || (before && before.name) || "";
+  if (!name) { try { name = new URL(origin).hostname; } catch (_) { name = origin; } }
+  const rec = _dev.servers[id] || { id, urls: [] };
+  // The host gained an id (it was updated to 19.14.0+): the record kept under
+  // its address becomes this one, pinned account and all.
+  const old = _dev.servers[stand];
+  if (d && old && old !== rec) {
+    if (!rec.user && old.user) rec.user = old.user;
+    for (const u of (old.urls || [])) if (!(rec.urls || []).includes(u)) rec.urls.push(u);
+    delete _dev.servers[stand];
+    if (_dev.primary === stand) _dev.primary = id;
+  }
+  rec.id = id; rec.name = name; rec.url = origin; rec.seen = Date.now();
+  if (d && d.version) rec.version = d.version;
+  if (!Array.isArray(rec.urls)) rec.urls = [];
+  const add = (u) => { if (u && !rec.urls.includes(u)) rec.urls.push(u); };
+  add(origin);
+  // Its other addresses, with the scheme and port of the one that answered —
+  // what lets a download saved at home be recognised over Tailscale.
+  try {
+    const u = new URL(origin);
+    for (const a of ((d && d.addrs) || [])) {
+      if (/^\d+\.\d+\.\d+\.\d+$/.test(a)) add(u.protocol + "//" + a + (u.port ? ":" + u.port : ""));
+    }
+  } catch (_) {}
+  _dev.servers[id] = rec;
+  if (!_dev.primary) _dev.primary = id;
+  _srvId = id; _srvName = name; _srvVersion = rec.version || "";
+  _devSave();
+  _appPaintIdent();
+}
+
+// Launch: open as the pinned account. The connect shell marks a launch with
+// ?launch=1; a page that merely reloaded, or came back from playing a download,
+// carries no mark and keeps whoever is signed in. Also covers the first visit
+// to a NEW address of a known server, where this origin's storage is empty.
+// Runs before the profile restore; it only writes what that restore reads.
+function _appAdoptPinned() {
+  if (!isApp || _appOffline || _appProxied) return;
+  let launch = false;
+  try {
+    const p = new URLSearchParams(location.search);
+    if (p.get("launch") === "1") {
+      launch = true;
+      p.delete("launch");
+      const q = p.toString();
+      history.replaceState(history.state, "", location.pathname + (q ? "?" + q : "") + location.hash);
+    }
+  } catch (_) {}
+  const u = _devUser();
+  if (!u) return;
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem("streamlink_profile") || "null"); } catch (_) {}
+  const same = !!(saved && saved.id === u.id);
+  if (same) {
+    if (!_profileToken && u.token) setProfileToken(u.token, _PIN_REMEMBER_MAXAGE);
+    return;
+  }
+  if (saved && saved.id && !launch) return;
+  try { localStorage.setItem("streamlink_profile", JSON.stringify({ id: u.id, name: u.name || "" })); } catch (_) {}
+  // Never carry the previous account's PIN proof across.
+  setProfileToken(u.token || "", _PIN_REMEMBER_MAXAGE);
+}
+
+// Should this PIN entry be remembered on the phone? Only for the account the
+// phone is pinned to (or is about to be). A shared account entered for an
+// evening gets the ordinary 12 h session.
+function _appShouldRememberPin(p) {
+  if (!isApp || !p || !p.id) return false;
+  const u = _devUser();
+  return !u || u.id === p.id;
+}
+
+// Pin an account to this phone for the connected server.
+function _appPinUser(p) {
+  const rec = _dev.servers[_srvId];
+  if (!rec || !p || !p.id) return;
+  rec.user = {
+    id: p.id, name: p.name || "", color: p.color || "indigo", has_pin: !!p.has_pin,
+    token: (p.has_pin && _verifiedProfileId === p.id) ? (_profileToken || "") : "",
+  };
+  _devSave();
+  _appSyncSetProfile();
+  _appPaintIdent();
+  if (activeTab === "app") _appTabShow();
+  if (activeTab === "downloads") _dlRender();
+}
+function _appMakePrimary() {
+  if (!_srvId) return;
+  _dev.primary = _srvId;
+  _devSave();
+  showAlert(`${_srvName} is now this phone's server. The app opens it at launch.`, "ok");
+  _appTabShow();
+}
+
+// Called wherever a profile becomes current: the picker, a PIN entry, the
+// boot-time restore. The first account signed in on a server is pinned.
+async function _appAfterProfile() {
+  if (!isApp || _appOffline) return;
+  try { await _appIdentBoot(); } catch (_) {}
+  const u = _devUser();
+  if (!u) {
+    // Not from the loopback page: it is a visitor on the host's behalf, and a
+    // pin made there on an old shell would live in storage nothing else reads.
+    if (_srvId && profile.id && !_appProxied) {
+      _appPinUser(profile);
+      showAlert(`This phone is set up for ${profile.name} on ${_srvName}. Downloads and offline history are kept for this account. You can change it in the App tab.`, "info");
+    }
+  } else if (u.id === profile.id) {
+    // Keep the pinned copy current: a rename, a new colour, a fresh PIN proof —
+    // and a proof the server has stopped honouring is forgotten here too.
+    const tok = (profile.has_pin && _verifiedProfileId === profile.id) ? (_profileToken || "") : "";
+    const next = { id: u.id, name: profile.name || u.name || "", color: profile.color || u.color || "indigo",
+                   has_pin: !!profile.has_pin, token: tok };
+    if (JSON.stringify(next) !== JSON.stringify(u)) { _dev.servers[_srvId].user = next; _devSave(); }
+  }
+  _appSyncSetProfile();
+  _appPaintIdent();
+}
+
 // ── M3 offline-progress sync (app only) ──────────────────────────────────────
-// Push the active profile to the native store so the offline player (downloads.html)
-// records history under the right profile, then drain any pending offline progress
-// to the host. Both no-op in a plain browser / when OfflineStore is unavailable.
+// Tell the native store whose history it is recording — the PINNED account, not
+// whoever is signed in (see the block above) — then drain any pending offline
+// progress to the host. Both no-op in a plain browser / when OfflineStore is
+// unavailable.
 function _appSyncSetProfile() {
-  if (!(isApp && _cap.os) || !profile.id) return;
-  try { _cap.os.setProfile({ profileId: profile.id, profileName: profile.name || "" }); } catch (_) {}
+  if (!(isApp && _cap.os)) return;
+  const u = _devUser();
+  const id = (u && u.id) || profile.id, name = (u && u.name) || profile.name || "";
+  if (!id) return;
+  try { _cap.os.setProfile({ profileId: id, profileName: name }); } catch (_) {}
+}
+
+// Offline plays this phone still owes a server (default: the connected one).
+// A play belongs to the server its download came from: the record says so when
+// this build wrote it, the download's own tag says so otherwise.
+async function _appPendingFor(serverId) {
+  if (!(isApp && _cap.os)) return [];
+  const sid = serverId || _srvId;
+  let all = [], where = new Map();
+  try { all = (await _cap.os.pending()).events || []; } catch (_) { return []; }
+  if (!all.length) return [];
+  try {
+    for (const it of ((await _cap.dl.list()).items || [])) where.set(offKey(it.itemId, it.filePath), _appBundleServer(it));
+  } catch (_) {}
+  return all.filter((e) =>
+    (e.serverId || where.get(offKey(e.itemId, e.filePath)) || _dev.primary || _srvId) === sid);
 }
 
 let _appSyncing = false;
@@ -19867,17 +20234,21 @@ async function _appFlushOfflineProgress() {
   if (_appOffline) return;   // no host behind this origin — sync runs on the next online session
   if (!(isApp && _cap.os) || !profile.id || _appSyncing) return;
   _appSyncing = true;
-  let advancedServer = false;
+  let advancedServer = false, sent = 0;
   // Conflicts gathered across all profile batches, paired with the original
   // pending event so a "keep mine" choice can carry the device's track picks.
   const conflicts = [];
   try {
-    const { events } = await _cap.os.pending();
+    try { await _appIdentBoot(); } catch (_) {}
+    // Only what belongs HERE. A play made from another server's download would
+    // be refused by this one (its item is not in this library) and stay pending
+    // forever, re-sent on every connect.
+    const events = await _appPendingFor(_srvId);
     if (events && events.length) {
       // Group by profile so each batch carries one profile_id (the endpoint's shape).
       const byProfile = new Map();
       for (const e of events) {
-        const pid = e.profileId || profile.id;
+        const pid = e.profileId || _appOfflinePid();
         if (!byProfile.has(pid)) byProfile.set(pid, []);
         byProfile.get(pid).push(e);
       }
@@ -19900,6 +20271,7 @@ async function _appFlushOfflineProgress() {
         const res = await r.json();
         if (res.applied && res.applied.length) {
           advancedServer = true;
+          sent += res.applied.length;
           try { await _cap.os.markSynced({ applied: res.applied.map((a) => ({
             itemId: a.item_id, filePath: a.file_path,
             serverUpdatedAt: a.server_updated_at, profileId: pid,
@@ -19918,28 +20290,34 @@ async function _appFlushOfflineProgress() {
   } finally {
     _appSyncing = false;
   }
+  // The other half of the "waiting to sync" line on the Downloads tab: say that
+  // it went, and where. Silence here reads as "did it work?".
+  if (sent) showAlert(`${sent} offline play${sent === 1 ? "" : "s"} sent to ${_srvName || "the server"}.`, "ok");
   if (conflicts.length) _appShowConflicts(conflicts);
   // After pushing local progress, pull the server's current state as the offline
   // baseline so offline resume reflects watch history from online / other devices.
   await _appSeedFromServer();
   // A flush may have advanced the library on the server — refresh the view.
   if (advancedServer) { try { if (activeTab === "library") await loadLibrary(); } catch (_) {} }
+  if (activeTab === "downloads") _dlRender();
 }
 
 // Server→device: seed OfflineStore with the server's progress for every download
 // so a fully-offline resume starts where online viewing left off. Companion to
 // the flush above; `seedProgress` won't clobber unsynced offline progress.
+// For the PINNED account, and only for this server's downloads.
 async function _appSeedFromServer() {
-  if (!(isApp && _cap.os) || !profile.id) return;
+  const pid = _appOfflinePid();
+  if (!(isApp && _cap.os) || !pid) return;
   try {
     const { items } = await _cap.dl.list();
     const files = (items || [])
-      .filter((it) => it.complete)
+      .filter((it) => it.complete && it.itemId !== _APP_PLAYER_KEY && _appBundleServer(it) === _srvId)
       .map((it) => ({ item_id: it.itemId, file_path: it.filePath }));
     if (!files.length) return;
     const r = await fetch("/api/sync/pull", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profile_id: profile.id, files }),
+      body: JSON.stringify({ profile_id: pid, files }),
     });
     if (!r.ok) return;
     const { progress } = await r.json();
@@ -19951,7 +20329,7 @@ async function _appSeedFromServer() {
           completed: !!p.completed, serverUpdatedAt: p.updated_at || "",
           // Seeds the device's own play count so offline viewing adds to it.
           ...(typeof p.played_sec === "number" ? { playedSec: p.played_sec } : {}),
-          profileId: profile.id,
+          profileId: pid, serverId: _srvId,
         });
       } catch (_) {}
     }
@@ -21491,8 +21869,7 @@ async function _appTryLocalHandoff(itemId, filePath, seekTo, queue) {
     // it there's nothing to load over the loopback, so stream from the host.
     const snap = await _cap.dl.getLocal({ itemId: _APP_PLAYER_KEY, filePath: _APP_PLAYER_KEY });
     if (!(snap && snap.complete && snap.dir)) return false;
-    // Push the active profile natively too (belt & suspenders with the URL param).
-    try { if (_cap.os && profile.id) await _cap.os.setProfile({ profileId: profile.id, profileName: profile.name || "" }); } catch (_) {}
+    _appSyncSetProfile();   // the native store's fallback account: the pinned one
     // Start the LMS in PROXY mode: snapshot + bundles local, everything else
     // forwarded to this host with the device bearer token injected.
     const started = await _cap.lms.start({
@@ -21715,15 +22092,22 @@ function _appIsNetErr(err) {
 
 // Resolve a downloadable bundle manifest, building the host bundle first (and
 // polling the prep job) when it isn't prepped yet.
-async function _appFetchManifest(itemId, filePath, quality) {
+// `live` (optional) answers "is this download still wanted?" — false once it has
+// been paused or removed. The host-prep poll can run for hours; without it a
+// paused download would come back to life when its prep finished.
+async function _appFetchManifest(itemId, filePath, quality, live) {
+  // The progress the manifest carries seeds the phone's offline history, so it
+  // is asked for as the PINNED account (see _appOfflinePid).
+  const who = _appOfflinePid();
   const u = `/api/library/${itemId}/bundle-manifest?file_path=${encodeURIComponent(filePath)}`
-          + (profile.id ? `&profile_id=${encodeURIComponent(profile.id)}` : "")
+          + (who ? `&profile_id=${encodeURIComponent(who)}` : "")
           + (quality ? `&quality=${encodeURIComponent(quality)}` : "");
   let r = await _appFetchT(u, {}, 20000);
   if (r.status === 409) {
     const info = await r.json().catch(() => ({}));
     if (info.ondemand_only) throw new Error("This title is on-demand only — it can’t be downloaded.");
-    await _appPrepBundle(itemId, filePath);
+    await _appPrepBundle(itemId, filePath, live);
+    if (live && !live()) throw _APP_DL_STOPPED;
     r = await _appFetchT(u, {}, 20000);
   }
   if (!r.ok) {
@@ -21734,7 +22118,7 @@ async function _appFetchManifest(itemId, filePath, quality) {
 }
 
 // POST /offline-prepare then poll /offline-job until the host bundle is built.
-async function _appPrepBundle(itemId, filePath) {
+async function _appPrepBundle(itemId, filePath, live) {
   const r = await _appFetchT(`/api/library/${itemId}/offline-prepare`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ file_path: filePath, profile_id: profile.id || "" }),
@@ -21747,6 +22131,7 @@ async function _appPrepBundle(itemId, filePath) {
   const key = offKey(itemId, filePath);
   for (let i = 0; i < 5400; i++) {            // ~3h ceiling at 2s/poll
     await new Promise((res) => setTimeout(res, 2000));
+    if (live && !live()) return;              // paused or removed: stop watching the prep
     let j;
     try {
       const jr = await _appFetchT(`/api/library/offline-job/${prep.job_id}`, {}, 12000);
@@ -21853,12 +22238,48 @@ function _appReleaseBg() { if (isApp && _cap.dl && _cap.dl.releaseBackground) { 
 // on `online`. Cleared only once the bundle is fully on disk (or the user cancels/
 // removes it). Best-effort + method-guarded so an older shell without the queue
 // API still downloads (just without cross-session persistence). No-op in a browser.
+// Since 20.0.0 the entry also says which SERVER it is to come from (the resumer
+// drives only the connected one's) and a `state`: "" wanted, "paused", "failed".
+// A plain persist always sends state "", which is what puts a retried or resumed
+// download back to "wanted".
 function _appQueuePersist(itemId, filePath, name, quality) {
   if (!isApp || !_cap.dl || !_cap.dl.enqueue) return;
   try {
     _cap.dl.enqueue({ itemId, filePath, name: name || "",
       quality: (quality === undefined || quality === null) ? "" : String(quality),
-      profileId: profile.id || "" });
+      profileId: _appOfflinePid(), serverId: _srvId || "", state: "" });
+  } catch (_) {}
+}
+// Mark a queued download paused or failed, keeping everything else about it.
+// Only on a 20.0.0 shell: an older one stores no state, so the entry would read
+// as plain "wanted" and the resumer would retry a failure for ever.
+function _appQueueState(itemId, filePath, name, state, error) {
+  if (!isApp || !_cap.dl || !_cap.dl.enqueue || !_appShell20) return false;
+  try {
+    _cap.dl.enqueue({ itemId, filePath, name: name || "", state: state || "",
+      ...(error ? { error: String(error).slice(0, 300) } : {}) });
+  } catch (_) { return false; }
+  return true;
+}
+// A download's generation. appDownloadBundle takes one when it starts and gives
+// up the moment it is no longer the latest: pausing or removing bumps it. That
+// is what stops a download still waiting on the host (manifest, a prep that can
+// run for hours) from handing itself to the native downloader after the user
+// said stop.
+const _appDlGen = new Map();
+const _APP_DL_STOPPED = { stopped: true };
+function _appDlBump(key) { const g = (_appDlGen.get(key) || 0) + 1; _appDlGen.set(key, g); return g; }
+// Does the shell have the 20.0.0 natives (pause/retry state, prioritize,
+// storage)? Asked once: the bridge answers ANY method name with a promise, and
+// only a call says whether there is something behind it.
+function _appShellProbe() {
+  if (!isApp || !_cap.dl) return;
+  try {
+    _cap.dl.storage().then((r) => {
+      _appShell20 = true;
+      _dlStorageInfo = r; _dlStorageAt = Date.now();
+      if (activeTab === "downloads") _dlRender();
+    }).catch(() => {});
   } catch (_) {}
 }
 function _appQueueClear(itemId, filePath) {
@@ -21879,7 +22300,7 @@ async function appDownloadBundle(itemId, filePath, name, btn, quality) {
   const key = offKey(itemId, filePath);
   const cur = offlineBundles.get(key);
   if (cur && cur.complete) {
-    if (!window.confirm("Remove this offline download from the device?")) return;
+    if (!window.confirm("Remove this download from the phone? It stays on the server.")) return;
     try { await _cap.dl.remove({ itemId, filePath }); } catch (_) {}
     _appQueueClear(itemId, filePath);
     offlineBundles.delete(key);
@@ -21893,11 +22314,18 @@ async function appDownloadBundle(itemId, filePath, name, btn, quality) {
   // no ZIP fallback to put there), so say why rather than doing nothing. Removing
   // an already-saved bundle, handled above, keeps working regardless.
   if (!hlsAvailable) { showAlert("Offline download needs HLS prep on the host.", "warn"); return; }
-  offlineBundles.set(key, { downloading: true, prepping: true, fraction: 0, name });
+  offlineBundles.set(key, { downloading: true, prepping: true, fraction: (cur && cur.fraction) || 0, name,
+                            meta: cur && cur.meta });
   _appRefreshDlBtn(itemId, filePath);
+  _appTabBadgePaint();
+  // This run stops the moment it is not the latest for its file (a pause or a
+  // remove bumps the generation) — see _appDlGen.
+  const gen = _appDlBump(key);
+  const live = () => _appDlGen.get(key) === gen;
   // Record the intent durably up front (before any network) so this download
-  // survives an app kill / long outage; cleared on completion, cancel, or a
-  // permanent failure. Re-persisted once the quality is resolved (below).
+  // survives an app kill / long outage; cleared on completion or cancel, and
+  // marked failed on a permanent failure. Re-persisted once the quality is
+  // resolved (below).
   _appQueuePersist(itemId, filePath, name, quality);
   // The quality is chosen at most once (per-row chooser); reused across retries so
   // a connectivity blip mid-fetch doesn't re-prompt. Bulk callers pass it already.
@@ -21914,9 +22342,11 @@ async function appDownloadBundle(itemId, filePath, name, btn, quality) {
       // Fetch the manifest (builds the host bundle first if needed). The default
       // (no quality) keeps the highest/source rung; if the bundle has multiple
       // rungs and no quality was pre-chosen, ask the user and re-fetch for the pick.
-      let manifest = await _appFetchManifest(itemId, filePath, effQuality);
+      let manifest = await _appFetchManifest(itemId, filePath, effQuality, live);
+      if (!live()) return;
       if (effQuality === undefined && (manifest.videos || []).length > 1) {
         const chosen = await _appChooseQuality(manifest.videos, name);
+        if (!live()) return;
         if (chosen === null) {                  // cancelled — abort this download
           offlineBundles.delete(key);
           _appQueueClear(itemId, filePath);     // drop the durable intent too
@@ -21925,10 +22355,16 @@ async function appDownloadBundle(itemId, filePath, name, btn, quality) {
         }
         effQuality = chosen;
         _appQueuePersist(itemId, filePath, name, chosen);   // persist the chosen rung
-        if (chosen !== "original") manifest = await _appFetchManifest(itemId, filePath, chosen);
+        if (chosen !== "original") manifest = await _appFetchManifest(itemId, filePath, chosen, live);
+        if (!live()) return;
       }
       const origin = window.location.origin;
       const files = (manifest.files || []).map((f) => ({ name: f.name, size: f.size }));
+      // Which server it came from and whose it is, written into the bundle
+      // itself: the Downloads tab shows one server at a time, and an offline
+      // play has to find its way back to the right one.
+      const meta = { ...(manifest.meta || {}), server_id: _srvId || "", server_name: _srvName || "",
+                     profile_id: _appOfflinePid() };
       await _cap.dl.download({
         itemId, filePath, cacheKey: manifest.cache_key, name,
         baseUrl: origin + manifest.bundle_url, files, deviceId: _pbDeviceId(),
@@ -21936,7 +22372,7 @@ async function appDownloadBundle(itemId, filePath, name, btn, quality) {
         // side so we never fetch — nor reference — the dropped ABR rungs.
         masterContent: manifest.master_m3u8 || null,
         // Series/episode metadata + inlined poster for the offline Downloads picker.
-        meta: manifest.meta || null,
+        meta,
       });
       // Seed the offline store with current server progress so offline resume
       // reflects watch history accrued online (M3).
@@ -21950,16 +22386,17 @@ async function appDownloadBundle(itemId, filePath, name, btn, quality) {
             serverUpdatedAt: manifest.progress.updated_at || "",
             ...(typeof manifest.progress.played_sec === "number"
                 ? { playedSec: manifest.progress.played_sec } : {}),
-            profileId: profile.id,
+            profileId: _appOfflinePid(), serverId: _srvId,
           });
         } catch (_) {}
       }
       const e = offlineBundles.get(key) || {};
       e.downloading = true; e.prepping = false; e.waiting = false; e.bytesTotal = manifest.total_bytes;
-      if (manifest.meta) e.meta = manifest.meta;
+      e.meta = meta;
       offlineBundles.set(key, e);
       break;   // handed off to the native downloader — done
     } catch (err) {
+      if (err === _APP_DL_STOPPED || !live()) return;   // paused or removed meanwhile
       if (_appIsNetErr(err)) {
         // Outage during the host round-trip (manifest / prep / handoff). The intent
         // is already persisted in the durable queue, so we never drop the episode:
@@ -21977,18 +22414,25 @@ async function appDownloadBundle(itemId, filePath, name, btn, quality) {
         }
         break;   // leave queued + "waiting"; the resumer owns it now
       }
-      // Permanent failure (bad title, on-demand only, auth) — give up and clear the
-      // durable intent so it isn't retried forever.
-      offlineBundles.delete(key);
-      _appQueueClear(itemId, filePath);
+      // Permanent failure (bad title, on-demand only, auth) — give up. It stays
+      // in the Downloads list as failed, with the reason and a Retry; the
+      // resumer leaves a failed entry alone, so it is not retried for ever. A
+      // shell too old to keep that state has the intent cleared instead.
+      if (_appQueueState(itemId, filePath, name, "failed", err.message || "Download failed.")) {
+        offlineBundles.set(key, { failed: true, error: err.message || "Download failed.", name });
+      } else {
+        offlineBundles.delete(key);
+        _appQueueClear(itemId, filePath);
+      }
       showAlert(err.message || "Download failed.", "error");
       break;
     }
   }
   } finally {
     _appReleaseBg();   // native transfer (if handed off) holds its own assertion now
+    if (live()) _appRefreshDlBtn(itemId, filePath);
+    _appTabBadgePaint();
   }
-  _appRefreshDlBtn(itemId, filePath);
 }
 
 // Library-card "Download all" for a multi-file item, in the app: save every
@@ -22170,6 +22614,7 @@ async function _appInitOfflineBundles() {
       e.bytesTotal = ev.bytesTotal; e.bytesDone = ev.bytesDone;
       offlineBundles.set(key, e);
       _appRefreshDlBtn(ev.itemId, ev.filePath);
+      _appTabBadgePaint();
     });
     _cap.dl.addListener("bundleComplete", (ev) => {
       if (ev.itemId === _APP_PLAYER_KEY) return;
@@ -22177,15 +22622,28 @@ async function _appInitOfflineBundles() {
         { complete: true, sha: ev.sha, dir: ev.dir });
       _appQueueClear(ev.itemId, ev.filePath);   // fully on disk — drop the durable intent
       _appRefreshDlBtn(ev.itemId, ev.filePath);
-      showAlert("Saved offline: " + (ev.filePath.split(/[\\/]/).pop() || ""), "ok");
+      _appTabBadgePaint();
+      _dlStorageAt = 0;
+      if (activeTab === "downloads") _dlRender();
+      showAlert("Saved to this phone: " + fileLabel(ev.filePath, ev.itemId).short, "ok");
     });
     _cap.dl.addListener("bundleError", (ev) => {
       if (ev.itemId === _APP_PLAYER_KEY) return;   // snapshot refresh failure is silent (retried next connect)
       // The native side now retries transient (network) failures indefinitely, so a
-      // bundleError is a PERMANENT failure — give up and clear the durable intent.
-      offlineBundles.delete(offKey(ev.itemId, ev.filePath));
-      _appQueueClear(ev.itemId, ev.filePath);
+      // bundleError is a PERMANENT failure — give up. Kept in the Downloads list
+      // as failed (reason + Retry); on an older shell the intent is cleared.
+      const key = offKey(ev.itemId, ev.filePath);
+      const was = offlineBundles.get(key) || {};
+      if (_appQueueState(ev.itemId, ev.filePath, was.name || "", "failed", ev.message || "Download failed.")) {
+        offlineBundles.set(key, { failed: true, error: ev.message || "Download failed.", name: was.name,
+                                  meta: was.meta, fraction: was.fraction || 0 });
+      } else {
+        offlineBundles.delete(key);
+        _appQueueClear(ev.itemId, ev.filePath);
+      }
       _appRefreshDlBtn(ev.itemId, ev.filePath);
+      _appTabBadgePaint();
+      if (activeTab === "downloads") _dlRender();
       showAlert("Download failed: " + (ev.message || ""), "error");
     });
     // The native gate opened or closed (battery floor, Low Power Mode,
@@ -22196,6 +22654,7 @@ async function _appInitOfflineBundles() {
       const wasGated = !!(_dlPolicy && _dlPolicy.gate && _dlPolicy.gate !== "go");
       if (_dlPolicy) { _dlPolicy.gate = ev.reason; _dlPolicy.gateText = ev.text; }
       _appRenderPolicy();
+      if (activeTab === "downloads") _dlRender();
       if (ev.reason && ev.reason !== "go") showAlert(ev.text || "Downloads paused", "warn");
       else if (wasGated) showAlert("Downloads resumed", "ok");
     });
@@ -22219,6 +22678,23 @@ async function _appInitOfflineBundles() {
         name: it.name, meta: it.meta,
       });
     }
+    // Paused and failed downloads from a previous session: the durable queue
+    // remembers them (20.0.0), so they come back as what they were and not as
+    // "waiting", which the resumer would promptly restart.
+    if (_cap.dl.queueList) {
+      try {
+        for (const e of ((await _cap.dl.queueList()).items || [])) {
+          if (!e || !e.itemId || !e.filePath || (e.state !== "paused" && e.state !== "failed")) continue;
+          const key = offKey(e.itemId, e.filePath);
+          const was = offlineBundles.get(key) || {};
+          if (was.complete) continue;
+          offlineBundles.set(key, { [e.state]: true, error: e.error || "", name: e.name || was.name,
+                                    meta: was.meta, fraction: was.fraction || 0,
+                                    bytesTotal: was.bytesTotal, bytesDone: was.bytesDone });
+        }
+      } catch (_) {}
+    }
+    _appTabBadgePaint();
     if (epItemId) renderEpList();
     // Re-drive any download still wanted from a previous session (queued before an
     // app kill, or stranded "waiting" by a connectivity loss). Runs once on launch;
@@ -22243,10 +22719,18 @@ async function _appResumeDownloadQueue() {
   try {
     let entries = [];
     try { entries = (await _cap.dl.queueList()).items || []; } catch (_) { return; }
+    try { await _appIdentBoot(); } catch (_) {}
     const toStart = [];
     for (const e of entries) {
       if (!e || !e.itemId || !e.filePath) continue;
+      // Not ours to drive: the user stopped it, it failed for good, or it was
+      // queued from a different server (asking THIS one for it would be a 404
+      // that marks it failed). An entry from before 20.0.0 names no server and
+      // belongs to the phone's own.
+      if (e.state === "paused" || e.state === "failed") continue;
+      if (_srvId && (e.serverId || _dev.primary || _srvId) !== _srvId) continue;
       const st = offlineBundles.get(offKey(e.itemId, e.filePath));
+      if (st && (st.paused || st.failed)) continue;
       // Skip anything already done, or already being driven this session (an active
       // transfer, a live pool lane, or a host round-trip in progress).
       if (st && (st.complete || (st.downloading && !st.waiting) || (st.queued && !st.waiting))) continue;
@@ -22294,34 +22778,43 @@ async function _appRefreshPlayerSnapshot() {
 
 // ── Offline cached-player boot (docs/PLAYER_CACHE_PLAN.md) ───────────────────
 // The whole offline init path: called INSTEAD of the normal DOMContentLoaded
-// body when ?offline=1. Boots Downloads-only — profile from the native store,
-// no SSE, no host fetches — then pins the Downloads overlay open as the UI.
+// body when ?offline=1. Boots with no server — no SSE, no host fetches — onto
+// the Downloads tab, which with the App tab is the whole UI in this mode.
 async function _appOfflineBoot() {
   document.documentElement.classList.add("is-offline");
   _lpAttachVideoEvents();
   _applyPhoneLandLayout();
   lockSeekBar();
-  // The loopback origin's localStorage is empty; the active profile was pushed
-  // natively while online (_appSyncSetProfile → OfflineStore.setProfile).
-  if (isApp && _cap.os) {
+  // Which server this would have been, and whose phone this is. The loopback
+  // origin's localStorage is empty, so both come from the native registry: the
+  // account PINNED to that server is who offline plays are recorded for.
+  try { await _appIdentBoot(); } catch (_) {}
+  const pinned = _devUser();
+  if (pinned) {
+    profile = { id: pinned.id, name: pinned.name || "", color: pinned.color || "indigo" };
+    _appSyncSetProfile();
+  } else if (isApp && _cap.os) {
+    // A shell older than 20.0.0 keeps no registry: the last account it was told.
     try {
       const p = await _cap.os.getProfile();
-      if (p && p.profileId) profile = { id: p.profileId, name: p.profileName || "" };
+      if (p && p.profileId) profile = { id: p.profileId, name: p.profileName || "", color: "indigo" };
     } catch (_) {}
   }
   try { renderNavProfile(); } catch (_) {}
+  _appTabsInit();
+  _appShellProbe();
   if (!profile.id) {
-    showAlert("No profile stored on this device yet — watch progress will still be recorded and syncs after you connect once.", "warn");
+    showAlert("This phone has no account set yet. What you watch is still recorded, and is sent once you connect and sign in.", "warn");
   }
   // Hydrate the on-device bundle state (native only; its queue resumer is
-  // offline-gated) and open the overlay that IS the offline UI.
+  // offline-gated), then open the tab that IS the offline UI.
   await _appInitOfflineBundles();
   // The native player's events. Without these the glasses handoff still happens
   // (native decides it) but the page never hears nativeStarted, so it never
   // becomes the remote — the phone shows nothing while the glasses play.
   _npBindEvents();
   _npReconcileOrphan("page-boot");
-  _appOpenDashboard();
+  switchTab("downloads");
   _appInitQuickActions();
   _appVersionInit();
   _appOfflineReconnectInit();
@@ -22333,99 +22826,831 @@ async function _appOfflineBoot() {
 // button probes on demand. On success the page navigates back to the real host.
 let _appOfflineProbing = false;
 let _appReconnectInited = false;
+// Where Reconnect goes: the server being shown. Offline, looking at another
+// server's downloads makes it the current one (_dlView), so this follows.
+function _appOfflineTarget() {
+  const r = _dev.servers[_srvId];
+  return (r && r.url) || _appOfflineHost || "";
+}
 function _appOfflineReconnectInit() {
-  if (!_appOfflineHost || _appReconnectInited) return;
+  if (!_appOfflineTarget() || _appReconnectInited) return;
   _appReconnectInited = true;
   setInterval(() => { if (!lp.itemId) _appOfflineTryReconnect(false); }, 15000);
   window.addEventListener("online", () => { if (!lp.itemId) _appOfflineTryReconnect(false); });
 }
 async function _appOfflineTryReconnect(manual) {
-  if (_appOfflineProbing || !_appOfflineHost) return;
+  const host = _appOfflineTarget();
+  if (_appOfflineProbing || !host) return;
   _appOfflineProbing = true;
   try {
     const ok = await new Promise((resolve) => {
       let done = false;
       const finish = (v) => { if (!done) { done = true; resolve(v); } };
       setTimeout(() => finish(false), 2500);
-      fetch(_appOfflineHost + "/api/version", { mode: "no-cors", cache: "no-store" })
+      fetch(host + "/api/version", { mode: "no-cors", cache: "no-store" })
         .then(() => finish(true)).catch(() => finish(false));
     });
-    if (ok) { window.location.replace(_appOfflineHost); return; }
-    if (manual) showAlert("Server still unreachable.", "warn");
+    // Back online is a launch as far as the account goes: open as the phone's own.
+    if (ok) { window.location.replace(host + (host.indexOf("?") < 0 ? "/?launch=1" : "")); return; }
+    if (manual) showAlert(`${_srvName || "The server"} still can't be reached.`, "warn");
   } finally { _appOfflineProbing = false; }
 }
 
-// ── iOS app: in-app navigation (M5) ──────────────────────────────────────────
-// The dashboard is served by the host, so once we navigate here there's no
-// browser chrome to get back to the app shell. This injects a small always-on
-// menu (app only) so the user can ALWAYS reach Downloads and the Settings /
-// change-server screen, online or off. Local pages live on the
-// capacitor:// origin; full-page navigation crosses back to them.
+// ── iOS app: bottom tab bar + the server's name in the header (20.0.0) ───────
+// The dashboard is served by the host, so once the WebView is here there is no
+// browser chrome and no way back to the app's own screens. Through 19.x those
+// hung off a small floating "App" button; they are now two ordinary tabs,
+// Downloads and App, in a bottom bar that also carries Search / Explore /
+// Library (the header's tab row is hidden in the app — one navigation, not two).
+// Both are tabs ON this live page, never navigations, so the SSE link and any
+// download in flight survive opening them. Only connecting to a different
+// server leaves the page (`_appGoSettings`). Markup: <nav id="appTabs">.
 const _APP_LOCAL_ORIGIN = "capacitor://localhost";
 function _appGoSettings() { window.location.href = _APP_LOCAL_ORIGIN + "/index.html?setup=1"; }
-function _appGoDownloads() { window.location.href = _APP_LOCAL_ORIGIN + "/downloads.html"; }
-
-function _appInitNav() {
-  if (!isApp || document.getElementById("appNav")) return;
-  const wrap = document.createElement("div");
-  wrap.id = "appNav";
-  wrap.style.cssText = "position:fixed;left:8px;bottom:8px;z-index:9998;font-size:11px;"
-    + "font-weight:700;letter-spacing:.05em;text-transform:uppercase;";
-  const menu = document.createElement("div");
-  menu.style.cssText = "display:none;flex-direction:column;margin-bottom:6px;"
-    + "background:#141417;border:1px solid #2a2a30;min-width:150px;";
-  const mk = (label, fn) => {
-    const b = document.createElement("button");
-    b.textContent = label;
-    b.style.cssText = "all:unset;cursor:pointer;color:#f2f2f4;padding:11px 13px;"
-      + "border-bottom:1px solid #2a2a30;text-transform:uppercase;letter-spacing:.05em;font-weight:700;";
-    b.addEventListener("click", () => { menu.style.display = "none"; fn(); });
-    return b;
-  };
-  // Open as overlays ON this live host page — never full-page navigations — so the
-  // SSE link and in-flight download orchestration are not torn down. (Only an
-  // actual switch to a different server, inside the Change Server overlay,
-  // navigates away.) `_appGoDownloads`/`_appGoSettings` remain for the offline pages.
-  menu.appendChild(mk("Downloads", _appOpenDashboard));
-  menu.appendChild(mk("Settings", _appOpenAppSettings));
-  menu.appendChild(mk("Change Server", _appOpenChangeServer));
-  menu.lastChild.style.borderBottom = "0";
-  // Out-of-date app (19.6.0): an entry at the top of the menu and a dot on the
-  // button, both hidden until _appCheckUpdate finds the app behind.
-  const upd = mk("Update app", () => _appUpdExplain());
-  upd.id = "appNavUpd";
-  upd.style.color = "#1BA1E2";
-  upd.style.display = "none";
-  menu.insertBefore(upd, menu.firstChild);
-  const toggle = document.createElement("button");
-  toggle.innerHTML = ic("menu")+" App"
-    + '<span id="appNavDot" style="display:none;width:7px;height:7px;background:#1BA1E2;'
-    + 'margin-left:6px;vertical-align:middle"></span>';
-  toggle.style.cssText = "all:unset;cursor:pointer;color:#cbd5e1;background:#141417cc;"
-    + "border:1px solid #2a2a30;padding:8px 11px;text-transform:uppercase;letter-spacing:.06em;font-weight:800;";
-  toggle.addEventListener("click", () => {
-    menu.style.display = (menu.style.display === "none" ? "flex" : "none");
-  });
-  wrap.appendChild(menu); wrap.appendChild(toggle);
-  document.body.appendChild(wrap);
+function _appGoConnect(url) {
+  window.location.href = _APP_LOCAL_ORIGIN + "/index.html?connect=" + encodeURIComponent(url || "");
 }
 
-// ── iOS app: in-app Dashboard (status / downloads / storage) ─────────────────
-// A full overlay (app only) that lives ON the host page, so the live SSE
-// connection stays up the whole time it's open — unlike downloads.html, which is
-// the offline (local-origin) page with no server link. Shows three things the
-// user asked to see at a glance:
-//   1. Server connection status (live, from the SSE `app._connected` flag).
-//   2. Ongoing offline downloads with live % (from the `offlineBundles` map that
-//      the native BundleDownloader progress events keep current).
-//   3. Local storage used on the device, grouped by series / movie.
-// While open it re-renders on a 1 s tick so the download bars and the connection
-// dot stay live; the tick is torn down on close so it costs nothing when hidden.
-let _appDashTimer = null;
-// Bulk-management state for the Downloaded list: a multi-select mode and the set
-// of selected offKeys. Module-level so it survives the 1 s re-render tick.
+function _appHasTabs() { return document.documentElement.classList.contains("has-apptabs"); }
+function _appTabsHeight() {
+  const n = document.getElementById("appTabs");
+  return (n && _appHasTabs()) ? n.offsetHeight : 0;
+}
+// The player footer is fixed, and sits on top of the bar: it needs the bar's
+// height, which changes with orientation (see the .apptab landscape rule).
+function _appTabsMeasure() {
+  document.documentElement.style.setProperty("--apptab-h", _appTabsHeight() + "px");
+}
+function _appTabsInit() {
+  // Offline mode shows the bar in a plain browser too: that is how the mode is
+  // smoke-tested without a device (see _appOffline).
+  if (!(isApp || _appOffline) || TV_MODE || _appHasTabs()) return;
+  document.documentElement.classList.add("has-apptabs");
+  _appTabsMeasure();
+  window.addEventListener("resize", _appTabsMeasure);
+  window.addEventListener("orientationchange", () => setTimeout(_appTabsMeasure, 250));
+  const logo = document.getElementById("navLogo");
+  if (logo) {
+    logo.classList.remove("flex-shrink-0", "whitespace-nowrap", "sm:text-lg", "text-base");
+    logo.classList.add("min-w-0", "flex-1", "overflow-hidden", "cursor-pointer", "text-sm");
+    logo.addEventListener("click", () => switchTab("app"));
+  }
+  _appTabsPaint();
+  _appPaintIdent();
+  // The connection state has no single place it changes (SSE open, error, a
+  // grace timer, the radio), so the header chip is repainted on a slow tick.
+  // _appPaintIdent only touches the DOM when what it would say has changed.
+  setInterval(_appPaintIdent, 2000);
+}
+function _appTab(tab) {
+  _hap("light");
+  if (_appOffline && tab !== "downloads" && tab !== "app") { _appOfflineNoServer(); return; }
+  switchTab(tab);
+}
+function _appTabsPaint() {
+  document.querySelectorAll("#appTabs .apptab").forEach((b) => {
+    const t = b.getAttribute("data-tab");
+    b.classList.toggle("on", t === activeTab);
+    b.classList.toggle("off", _appOffline && t !== "downloads" && t !== "app");
+  });
+}
+function _appOfflineNoServer() {
+  showAlert(`Not connected to ${_srvName || "the server"}. What is saved on this phone still plays.`, "warn");
+}
+
+// What to call the link to the server right now.
+function _appConnState() {
+  if (_appOffline) return { k: "offline", label: "Not connected", dot: "bg-amber-500", text: "text-amber-500" };
+  if (!navigator.onLine) return { k: "noradio", label: "No connection", dot: "bg-red-600", text: "text-red-500" };
+  if (app._connected === false) return { k: "retry", label: "Reconnecting", dot: "bg-amber-500", text: "text-amber-500" };
+  return { k: "on", label: "Connected", dot: "bg-green-500", text: "text-green-500" };
+}
+let _appIdentSig = "";
+function _appPaintIdent() {
+  if (!_appHasTabs()) return;
+  const st = _appConnState();
+  const name = _srvName || "StreamLink";
+  const sig = st.k + "|" + name;
+  if (sig === _appIdentSig) return;
+  const changed = !!_appIdentSig;
+  _appIdentSig = sig;
+  const logo = document.getElementById("navLogo");
+  if (logo) {
+    logo.innerHTML = `<span class="w-2.5 h-2.5 flex-shrink-0 ${st.dot} mr-2" title="${st.label}"></span>`
+      + `<span class="truncate text-white font-black uppercase tracking-wide">${escHtml(name)}</span>`;
+  }
+  if (changed && activeTab === "downloads") _dlRender();
+  if (changed && activeTab === "app") _appTabShow();
+}
+
+// Downloads in flight, on the Downloads tab's corner.
+function _appTabBadgePaint() {
+  const el = document.getElementById("appTabDlBadge");
+  if (!el) return;
+  let n = 0;
+  for (const st of offlineBundles.values()) {
+    if (st && !st.complete && !st.paused && !st.failed && (st.downloading || st.queued || st.prepping)) n++;
+  }
+  if (_appOffline) n = 0;   // nothing moves with no server; the tab lists what is waiting
+  el.textContent = n > 99 ? "99+" : String(n);
+  el.classList.toggle("hidden", !n);
+}
+
+// ── iOS app: the Downloads tab ───────────────────────────────────────────────
+// What is saved on this phone — for ONE server at a time, with the account its
+// offline history belongs to named above everything else. Top to bottom:
+//   1. Identity: the server (and whether it is reachable), the pinned account.
+//      A phone holding downloads from more than one server gets a switcher.
+//   2. Notices: offline plays not yet sent to the server; why downloading is
+//      paused (the native gate).
+//   3. Continue Watching, from the pinned account's progress on this phone.
+//   4. The queue, every row saying what it is waiting on, with its own controls.
+//   5. Storage: this phone's space, and what finished episodes would give back.
+//   6. The shows, collapsed to one card each.
+// Re-rendered on a 1 s tick while the tab is showing (5 s when nothing is
+// moving). Each section's HTML is only assigned when it differs from what is
+// already there, so a tick that changes one progress bar does not rebuild the
+// posters, reset a horizontal scroll, or eat a tap that lands mid-rebuild.
+let _dlTimer = null, _dlIdleTicks = 0, _dlBusy = false, _dlAgain = false;
+let _dlViewId = "";              // server being shown; "" = the connected one
+let _dlItems = new Map();        // offKey → the native index row (last render)
+let _dlQueue = new Map();        // offKey → the durable queue entry (last render)
+let _dlAnyActive = false;
+let _dlStorageInfo = null, _dlStorageAt = 0;
+const _dlHtml = {};              // section id → last HTML painted
+const _dlOpen = new Set();       // show cards the user expanded
+// Multi-select on the show list. Module-level so it survives the re-render tick.
 let _appDashSelectMode = false;
 const _appDashSel = new Set();
+
+const _DL_LABEL = "text-[11px] font-black uppercase tracking-widest text-gray-500";
+const _DL_TILE = "bg-gray-900 border border-gray-800";
+function _dlBtn(kind, extra) {
+  const tone = {
+    primary: "bg-indigo-600 hover:bg-indigo-500 text-white",
+    ghost:   "bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300",
+    danger:  "bg-red-700 hover:bg-red-600 text-white",
+    quiet:   "border border-gray-800 text-gray-500 hover:text-gray-200",
+  }[kind] || "";
+  return "text-[11px] font-black uppercase tracking-wide px-3 min-h-[36px] inline-flex items-center "
+    + "justify-center gap-1.5 flex-shrink-0 transition-colors whitespace-nowrap " + tone + (extra ? " " + extra : "");
+}
+const _dlJ = (v) => escHtml(JSON.stringify(v));
+function _dlSet(id, html) {
+  if (_dlHtml[id] === html) return;
+  const el = document.getElementById(id);
+  if (!el) return;
+  _dlHtml[id] = html;
+  el.innerHTML = html;
+}
+function _dlKeyParts(key) {
+  const i = String(key).indexOf("|");
+  return i < 0 ? null : { itemId: key.slice(0, i), filePath: key.slice(i + 1) };
+}
+
+function _dlShow() {
+  _dlIdleTicks = 0;
+  _dlRender();
+  if (_dlTimer) clearInterval(_dlTimer);
+  _dlTimer = setInterval(() => {
+    // Nothing moving: look every 5 s, not every second. Each look reads the
+    // whole on-device index over the bridge, posters included.
+    if (!_dlAnyActive && (++_dlIdleTicks % 5)) return;
+    _dlRender();
+  }, 1000);
+}
+function _dlHide() {
+  if (_dlTimer) { clearInterval(_dlTimer); _dlTimer = null; }
+  _appDashSelectMode = false; _appDashSel.clear();
+}
+// The names the rest of the page already calls.
+function _appOpenDashboard() { switchTab("downloads"); }
+function _appRenderDashboard() { return _dlRender(); }
+
+async function _dlRender() {
+  if (activeTab !== "downloads") return;
+  if (_dlBusy) { _dlAgain = true; return; }
+  _dlBusy = true;
+  try { await _dlRenderNow(); } catch (e) { _npLog("dl-render-error", { err: String((e && e.message) || e) }, "app"); }
+  finally {
+    _dlBusy = false;
+    if (_dlAgain) { _dlAgain = false; _dlRender(); }
+  }
+}
+
+async function _dlRenderNow() {
+  const dl = _cap && _cap.dl, os = _cap && _cap.os;
+  let items = [], queue = [], events = [];
+  if (dl) {
+    try { items = (await dl.list()).items || []; } catch (_) {}
+    try { queue = (await dl.queueList()).items || []; } catch (_) {}
+    if (_dlHasPolicy) { try { _dlPolicy = await dl.getPolicy(); } catch (_) {} }
+    if (_appShell20 && Date.now() - _dlStorageAt > 15000) {
+      _dlStorageAt = Date.now();
+      try { _dlStorageInfo = await dl.storage(); } catch (_) {}
+    }
+  }
+  if (os) { try { events = (await os.all()).events || []; } catch (_) {} }
+  if (activeTab !== "downloads") return;
+
+  items = items.filter((it) => it.itemId !== _APP_PLAYER_KEY);   // the player snapshot isn't content
+  _dlItems = new Map(); _dlQueue = new Map();
+  const per = new Map();   // server id → { n, bytes } of what is on the phone
+  for (const it of items) {
+    it._key = offKey(it.itemId, it.filePath);
+    it._sid = _appBundleServer(it);
+    if (it.meta && it.meta.server_name && it._sid) _devSeenNames.set(it._sid, it.meta.server_name);
+    it._bytes = it.complete ? (it.bytesTotal || it.bytesDone || 0) : (it.bytesDone || 0);
+    _dlItems.set(it._key, it);
+    // Offline, a bundle's own meta is the only source of its label (fileLabel).
+    if (it.meta && it.meta.label && it.filePath && !_fileLabels.has(it.filePath)) _fileLabels.set(it.filePath, it.meta.label);
+    const p = per.get(it._sid) || { n: 0, bytes: 0 };
+    if (it.complete) p.n++;
+    p.bytes += it._bytes;
+    per.set(it._sid, p);
+  }
+  for (const e of queue) if (e && e.itemId && e.filePath) _dlQueue.set(offKey(e.itemId, e.filePath), e);
+
+  let view = _dlViewId || _srvId;
+  if (_dlViewId && _dlViewId !== _srvId && !per.has(_dlViewId)) { _dlViewId = ""; view = _srvId; }
+  const here = view === _srvId;            // the connected server's own downloads
+  const live = here && !_appOffline;       // …and it can be talked to
+  const canPlay = here;                    // offline, switching server switches _srvId too (_dlView)
+  const user = _devUser(view) || (here && profile.id ? profile : null);
+  const uid = (user && user.id) || "";
+  const uname = (user && user.name) || "";
+  const sname = _devServerName(view);
+
+  const prog = new Map();     // offKey → this account's progress on the phone
+  let pending = 0;            // offline plays the phone still owes this server
+  for (const e of events) {
+    const k = offKey(e.itemId, e.filePath);
+    const it = _dlItems.get(k);
+    const sid = e.serverId || (it && it._sid) || _dev.primary || _srvId;
+    if (sid === view && e.dirty === true && ((e.positionSec || 0) >= 5 || e.completed)) pending++;
+    if (uid && e.profileId && e.profileId !== uid) continue;
+    prog.set(k, e);
+  }
+  const mine = items.filter((it) => it._sid === view);
+  const done = mine.filter((it) => it.complete);
+
+  // Group the finished ones by show, each show's episodes in watching order.
+  const groups = new Map();
+  for (const it of done) {
+    const meta = it.meta || {};
+    const gkey = (meta.series || meta.title || it.name || it.sha).trim().toLowerCase();
+    const g = groups.get(gkey) || { gkey, title: meta.title || meta.series || it.name || "Download", meta, eps: [], bytes: 0 };
+    g.eps.push(it); g.bytes += it._bytes;
+    groups.set(gkey, g);
+  }
+  const shows = [...groups.values()].sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }));
+  for (const g of shows) {
+    g.eps.sort((a, b) => {
+      const am = a.meta || {}, bm = b.meta || {};
+      const sa = _bundleSeason(am) || 1e6, sb = _bundleSeason(bm) || 1e6;   // specials last
+      return (sa - sb) || (_bundlePos(am) - _bundlePos(bm))
+        || String(am.episode_name || a.name || "").localeCompare(String(bm.episode_name || b.name || ""));
+    });
+    g.series = g.eps.length > 1 || !!((g.meta || {}).season && (g.meta || {}).episode);
+  }
+
+  _dlSet("dlIdent", _dlIdentHtml({ view, here, live, sname, user, per }));
+  _dlSet("dlNotices", _dlNoticesHtml({ here, live, sname, uname, pending }));
+  _dlSet("dlContinue", canPlay ? _dlContinueHtml(shows, prog, uname) : "");
+  _dlSet("dlQueue", _dlQueueHtml({ view, here, live, sname }));
+  _dlSet("dlStorage", _dlStorageHtml({ view, sname, uname, mine, done, per, prog, here }));
+  _dlSet("dlShows", _dlShowsHtml({ shows, prog, sname, canPlay, here, live }));
+  _appTabBadgePaint();
+}
+
+// 1. Identity ---------------------------------------------------------------
+function _dlIdentHtml({ view, here, live, sname, user, per }) {
+  const st = here ? _appConnState()
+    : { k: "other", label: "Not the connected server", dot: "bg-gray-600", text: "text-gray-500" };
+  const rec = _dev.servers[view];
+  let btn = "";
+  if (_appOffline) {
+    btn = `<button onclick="_appOfflineTryReconnect(true)" class="${_dlBtn("ghost")}">Reconnect</button>`;
+  } else if (!here && rec && rec.url) {
+    btn = `<button onclick="_dlConnectTo(${_dlJ(view)})" class="${_dlBtn("ghost")}">Connect</button>`;
+  }
+  const guest = live && user && profile.id && profile.id !== user.id;
+  const av = user
+    ? `<div class="w-10 h-10 ${avatarBg(user.color)} flex items-center justify-center text-base font-black text-white flex-shrink-0">${escHtml((user.name || "?").charAt(0).toUpperCase())}</div>`
+    : `<div class="w-10 h-10 border-2 border-dashed border-gray-700 flex items-center justify-center text-base font-black text-gray-600 flex-shrink-0">?</div>`;
+  const others = [...per.keys()].filter((id) => id !== view);
+  const more = (others.length || !here) ? `
+    <div class="mt-3 pt-3 border-t border-gray-800">
+      <div class="${_DL_LABEL} mb-2">Also on this phone</div>
+      <div class="flex flex-wrap gap-2">
+        ${[...new Set([...(here ? [] : [_srvId]), ...others])].filter(Boolean).map((id) => {
+          const p = per.get(id) || { n: 0, bytes: 0 };
+          return `<button onclick="_dlView(${_dlJ(id)})" class="${_dlBtn("ghost")}">${ic("server")}
+            <span class="truncate max-w-[9rem]">${escHtml(_devServerName(id))}</span>
+            <span class="text-gray-500 font-bold">${p.n} · ${fmtSize(p.bytes)}</span></button>`;
+        }).join("")}
+      </div>
+    </div>` : "";
+  return `
+    <div class="${_DL_TILE} p-3 mb-4">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 bg-gray-800 flex items-center justify-center text-lg text-gray-400 flex-shrink-0">${ic("server")}</div>
+        <div class="min-w-0 flex-1">
+          <div class="${_DL_LABEL}">Server</div>
+          <div class="text-base font-black uppercase tracking-wide truncate leading-tight">${escHtml(sname)}</div>
+          <div class="flex items-center gap-1.5 mt-1">
+            <span class="w-2 h-2 flex-shrink-0 ${st.dot}"></span>
+            <span class="text-[10px] font-black uppercase tracking-wide ${st.text}">${st.label}</span>
+          </div>
+        </div>
+        ${btn}
+      </div>
+      <div class="flex items-center gap-3 mt-3 pt-3 border-t border-gray-800">
+        ${av}
+        <div class="min-w-0 flex-1">
+          <div class="${_DL_LABEL}">Account on this phone</div>
+          <div class="text-base font-black uppercase tracking-wide truncate leading-tight">${escHtml(user ? user.name : "Not set")}</div>
+          <div class="text-[11px] text-gray-500 mt-1 leading-snug">${user
+            ? "Downloads and anything watched with no connection are kept for this account."
+            : "Sign in on this server once and that account becomes this phone's."}</div>
+        </div>
+      </div>
+      ${guest ? `<div class="mt-3 px-3 py-2 bg-amber-950/40 border border-amber-900 text-[11px] text-amber-300 leading-snug">
+        Signed in as <b class="font-black uppercase">${escHtml(profile.name)}</b>. What you watch now goes to that account.
+        This phone's downloads and offline history stay ${escHtml(user.name)}'s.</div>` : ""}
+      ${more}
+    </div>`;
+}
+
+// Look at another server's downloads. With no connection there is no "connected
+// server" to stay on, so the one being looked at becomes the current one: its
+// account is the one offline plays are recorded for, and Reconnect tries it.
+function _dlView(id) {
+  _appDashSelectMode = false; _appDashSel.clear(); _dlOpen.clear();
+  if (_appOffline) {
+    const r = _dev.servers[id];
+    if (!r) return;
+    _srvId = r.id; _srvName = r.name || ""; _srvVersion = r.version || "";
+    const u = _devUser();
+    profile = u ? { id: u.id, name: u.name || "", color: u.color || "indigo" } : { id: "", name: "", color: "indigo" };
+    _dlViewId = "";
+    _appSyncSetProfile();
+    try { renderNavProfile(); } catch (_) {}
+    _appPaintIdent();
+  } else {
+    _dlViewId = (id === _srvId) ? "" : id;
+  }
+  _dlRender();
+}
+function _dlConnectTo(id) {
+  const r = _dev.servers[id];
+  if (!r || !r.url) return;
+  if (!window.confirm(`Leave ${_srvName || "this server"} and connect to ${r.name || "the other server"}? Downloads in progress here stop until you come back.`)) return;
+  _appGoConnect(r.url);
+}
+
+// 2. Notices ----------------------------------------------------------------
+function _dlNoticesHtml({ here, live, sname, uname, pending }) {
+  let out = "";
+  if (!here) {
+    out += `<div class="${_DL_TILE} px-3 py-2.5 mb-4 text-xs text-gray-400 leading-snug">
+      These were saved from <b class="text-gray-200">${escHtml(sname)}</b>. They play when this phone is connected to it,
+      or with no connection at all.</div>`;
+  }
+  if (pending) {
+    out += `<div class="flex items-center gap-3 px-3 py-2.5 mb-4 bg-indigo-950/40 border border-indigo-900">
+      <span class="text-indigo-400 text-base flex-shrink-0">${ic("sync")}</span>
+      <div class="min-w-0 flex-1">
+        <div class="text-xs font-black uppercase tracking-wide text-indigo-200">${pending} play${pending === 1 ? "" : "s"} waiting to sync</div>
+        <div class="text-[11px] text-indigo-300/70 leading-snug">${live
+          ? `Watched with no connection. Not yet in ${escHtml(uname || "your")}${uname ? "'s" : ""} history on ${escHtml(sname)}.`
+          : `Watched with no connection. Sent to ${escHtml(sname)} the next time this phone reaches it.`}</div>
+      </div>
+      ${live ? `<button onclick="_appFlushOfflineProgress()" class="${_dlBtn("primary")}">Send now</button>` : ""}
+    </div>`;
+  }
+  // WHY THE BYTES STOPPED. Only while the native gate is shut: a frozen progress
+  // bar with no explanation reads as a bug.
+  const gate = (_dlHasPolicy && _dlPolicy && _dlPolicy.gate) || "go";
+  if (gate !== "go" && live) {
+    // A resume that happens while the app is backgrounded can only use the slow
+    // out-of-process session — iOS refuses a continued-processing grant to
+    // anything but a foreground app — so say what actually un-pauses it.
+    const hint = gate === "cellular" ? "Join a Wi-Fi network, or allow cellular in the App tab."
+      : gate === "charger"  ? "Plug in, or turn off “Only while charging” in the App tab."
+      : gate === "lowPower" ? "Turn off Low Power Mode in Control Centre, or plug in."
+      : gate === "battery"  ? "Plug in, or lower the pause level in the App tab."
+      : "";
+    out += `<div class="px-3 py-2.5 mb-4 bg-amber-950/40 border border-amber-900">
+      <div class="flex items-center gap-2">
+        <span class="w-2.5 h-2.5 bg-amber-500 flex-shrink-0"></span>
+        <span class="text-xs font-black uppercase tracking-wide text-amber-400">${escHtml(String(_dlPolicy.gateText || "Downloads paused").replace(/\s+-\s+/, ": "))}</span>
+      </div>
+      ${hint ? `<div class="text-[11px] text-amber-300/70 mt-1 leading-snug">${hint}</div>` : ""}
+    </div>`;
+  }
+  return out;
+}
+
+// 3. Continue Watching ------------------------------------------------------
+// One tile per show: the episode this account is part-way through (the one
+// touched most recently), else the first unwatched episode after the last one
+// finished. Only from what is on the phone, so every tile plays with no server.
+function _dlContinueHtml(shows, prog, uname) {
+  const tiles = [];
+  for (const g of shows) {
+    let best = null;
+    for (const ep of g.eps) {
+      const p = prog.get(ep._key);
+      if (!p || p.completed) continue;
+      const pct = (p.positionSec || 0) / ((p.durationSec || 0) || 1);
+      if (pct <= 0.02) continue;
+      const at = String(p.clientUpdatedAt || "");
+      if (!best || at > best.at) best = { ep, at, pct, kind: "Resume", left: Math.max(0, (p.durationSec || 0) - (p.positionSec || 0)) };
+    }
+    if (!best && g.series) {
+      let last = -1;
+      g.eps.forEach((ep, i) => { const p = prog.get(ep._key); if (p && p.completed) last = i; });
+      const nx = last >= 0 ? g.eps[last + 1] : null;
+      if (nx && !((prog.get(nx._key) || {}).completed)) {
+        best = { ep: nx, at: String((prog.get(g.eps[last]._key) || {}).clientUpdatedAt || ""), pct: 0, kind: "Next", left: 0 };
+      }
+    }
+    if (best) tiles.push({ g, ...best });
+  }
+  if (!tiles.length) return "";
+  tiles.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  const html = tiles.slice(0, 12).map(({ g, ep, pct, kind, left }) => {
+    const lab = _bundleLabel(ep.meta || {}, ep.filePath, ep.itemId, ep.name);
+    const sub = [lab.code || "", kind === "Resume" ? `${Math.max(1, Math.round(left / 60))} min left` : ""].filter(Boolean).join(" · ")
+      || lab.name || "";
+    const poster = (g.meta && g.meta.poster_data_url)
+      ? `<img src="${escHtml(g.meta.poster_data_url)}" alt="" class="w-full h-full object-cover">`
+      : `<div class="w-full h-full flex items-center justify-center text-3xl font-black text-gray-600">${escHtml((g.title[0] || "?").toUpperCase())}</div>`;
+    return `<button onclick="_appPlayDownloaded(${_dlJ(ep.itemId)},${_dlJ(ep.filePath)})" class="flex-shrink-0 w-28 text-left">
+      <div class="relative w-28 h-40 bg-gray-800 overflow-hidden border border-gray-800">
+        ${poster}
+        <div class="absolute top-0 left-0 bg-gray-950/85 px-1.5 py-1 text-[9px] font-black uppercase tracking-widest ${kind === "Resume" ? "text-indigo-300" : "text-green-400"}">${kind}</div>
+        ${pct > 0 ? `<div class="absolute inset-x-0 bottom-0 h-1 bg-gray-950/80"><div class="h-full bg-indigo-500" style="width:${Math.round(pct * 100)}%"></div></div>` : ""}
+      </div>
+      <div class="text-[11px] font-black uppercase tracking-wide truncate mt-1.5 text-gray-100">${escHtml(g.title)}</div>
+      <div class="text-[11px] text-gray-500 truncate">${escHtml(sub)}</div>
+    </button>`;
+  }).join("");
+  return `<div class="mb-5">
+    <div class="${_DL_LABEL} mb-2">Continue watching${uname ? ` <span class="text-gray-700">· ${escHtml(uname)}</span>` : ""}</div>
+    <div id="dlContinueRow" class="flex gap-3 pb-1">${html}</div>
+  </div>`;
+}
+
+// 4. The queue ---------------------------------------------------------------
+// One row per download that is wanted and not finished. The durable queue
+// (queue.json) is the list; `offlineBundles` says what this session is doing
+// about each. A row always says what it is waiting on.
+const _DL_KIND_RANK = { downloading: 0, prepping: 1, queued: 2, waiting: 3, away: 4, paused: 5, failed: 6 };
+function _dlQueueRows(view, here, live) {
+  const rows = new Map();
+  for (const [key, e] of _dlQueue) {
+    const it = _dlItems.get(key);
+    if (it && it.complete) continue;
+    const sid = e.serverId || (it ? it._sid : (_dev.primary || _srvId));
+    if (sid !== view) continue;
+    rows.set(key, { key, name: e.name || "", state: e.state || "", error: e.error || "", it });
+  }
+  // What this session started that the queue does not list — a shell too old
+  // to keep one, or the instant before the intent is written.
+  if (here) for (const [key, st] of offlineBundles) {
+    if (!st || st.complete || rows.has(key)) continue;
+    if (!(st.downloading || st.queued || st.prepping || st.paused || st.failed)) continue;
+    rows.set(key, { key, name: st.name || "", state: "", error: "", it: _dlItems.get(key) });
+  }
+  const gateShut = !!(_dlHasPolicy && _dlPolicy && _dlPolicy.gate && _dlPolicy.gate !== "go");
+  const out = [];
+  for (const r of rows.values()) {
+    const st = here ? offlineBundles.get(r.key) : null;
+    const it = r.it;
+    let kind;
+    if (r.state === "failed" || (st && st.failed)) kind = "failed";
+    else if (r.state === "paused" || (st && st.paused)) kind = "paused";
+    else if (!live) kind = "away";
+    else if (!st || st.waiting) kind = "waiting";
+    else if (st.prepping) kind = "prepping";
+    else if (st.queued && !st.downloading) kind = "queued";
+    else kind = "downloading";
+    const frac = st && st.fraction != null ? st.fraction
+      : (it && it.bytesTotal ? 0.5 + 0.5 * ((it.bytesDone || 0) / it.bytesTotal) : 0);
+    const meta = (st && st.meta) || (it && it.meta) || {};
+    const parts = _dlKeyParts(r.key) || {};
+    const label = _bundleLabel(meta, parts.filePath, parts.itemId, (st && st.name) || r.name || (it && it.name));
+    const order = (it && typeof it.order === "number" && it.order >= 0) ? it.order : -1;
+    out.push({ ...r, kind, frac, label, order, st, gated: gateShut && (kind === "downloading" || kind === "queued"),
+               error: (st && st.error) || r.error });
+  }
+  out.sort((a, b) => {
+    if (a.order >= 0 && b.order >= 0) return a.order - b.order;
+    if ((a.order >= 0) !== (b.order >= 0)) return a.order >= 0 ? -1 : 1;
+    return (_DL_KIND_RANK[a.kind] - _DL_KIND_RANK[b.kind]) || a.label.line1.localeCompare(b.label.line1);
+  });
+  return out;
+}
+function _dlQueueHtml({ view, here, live, sname }) {
+  const rows = _dlQueueRows(view, here, live);
+  _dlAnyActive = rows.some((r) => r.kind === "downloading" || r.kind === "prepping" || r.kind === "queued" || r.kind === "waiting");
+  if (!rows.length) return "";
+  const nPaused = rows.filter((r) => r.kind === "paused").length;
+  const nRun = rows.filter((r) => _DL_KIND_RANK[r.kind] <= 3).length;
+  const canCtl = live && _appShell20;
+  const head = canCtl ? [
+    nRun ? `<button onclick="_dlPauseAll()" class="${_dlBtn("quiet")}">Pause all</button>` : "",
+    nPaused ? `<button onclick="_dlResumeAll()" class="${_dlBtn("ghost")}">Resume all</button>` : "",
+  ].join("") : "";
+  const body = rows.map((r, i) => {
+    const pct = Math.round((r.frac || 0) * 100);
+    const st = r.st || {};
+    let why, tone = "text-gray-500", bar = "bg-indigo-500";
+    if (r.kind === "failed") { why = "Failed: " + (r.error || "the server refused it"); tone = "text-red-400"; bar = "bg-red-700"; }
+    else if (r.kind === "paused") { why = "Paused by you"; bar = "bg-gray-600"; }
+    else if (r.kind === "away") { why = `Waiting for ${sname}`; bar = "bg-gray-600"; }
+    else if (r.kind === "waiting") { why = `Waiting for ${sname} to answer`; tone = "text-amber-400"; bar = "bg-amber-600"; }
+    else if (r.gated) { why = String(_dlPolicy.gateText || "Paused").replace(/\s+-\s+/, ": "); tone = "text-amber-400"; bar = "bg-amber-600"; }
+    else if (r.kind === "prepping") why = `${sname} is preparing it`;
+    else if (r.kind === "queued") why = "Queued";
+    else why = st.bytesTotal ? `${fmtSize(st.bytesDone || 0)} of ${fmtSize(st.bytesTotal)}` : "Downloading";
+    const k = _dlJ(r.key);
+    const btns = [];
+    if (canCtl) {
+      if (r.kind === "failed") btns.push(`<button onclick="_dlResume(${k})" class="${_dlBtn("ghost")}">Retry</button>`);
+      else if (r.kind === "paused") btns.push(`<button onclick="_dlResume(${k})" class="${_dlBtn("ghost")}">Resume</button>`);
+      else {
+        // "Next" needs a place in the native order to move, which a download
+        // only has once it has been handed over; and the first row is next.
+        if (r.order > 0 || (r.order === 0 && i > 0)) btns.push(`<button onclick="_dlNext(${k})" class="${_dlBtn("quiet")}" title="Download this one next">Next</button>`);
+        btns.push(`<button onclick="_dlPause(${k})" class="${_dlBtn("quiet")}">Pause</button>`);
+      }
+    }
+    btns.push(`<button onclick="_appCancelDownload(${k})" class="${_dlBtn("quiet", "px-2.5")}" title="Remove this download" aria-label="Remove this download">${ic("x")}</button>`);
+    return `<div class="${_DL_TILE} p-3 mb-2">
+      <div class="flex items-start gap-2">
+        <div class="min-w-0 flex-1">
+          <div class="text-sm font-bold truncate">${escHtml(r.label.line1)}</div>
+          ${r.label.line2 ? `<div class="text-xs text-gray-400 truncate">${escHtml(r.label.line2)}</div>` : ""}
+          <div class="text-[11px] mt-1 ${tone} leading-snug">${escHtml(why)}${(r.kind === "downloading" || r.kind === "prepping") && !r.gated ? ` · ${pct}%` : ""}</div>
+        </div>
+        <div class="flex gap-1 flex-shrink-0">${btns.join("")}</div>
+      </div>
+      <div class="h-1 bg-gray-800 mt-2"><div class="h-full ${bar}" style="width:${pct}%"></div></div>
+    </div>`;
+  }).join("");
+  return `<div class="mb-5">
+    <div class="flex items-center justify-between gap-2 mb-2 min-h-[36px]">
+      <div class="${_DL_LABEL}">Downloading <span class="text-gray-700">· ${rows.length}</span></div>
+      <div class="flex gap-2">${head}</div>
+    </div>
+    ${body}
+  </div>`;
+}
+
+// Stop one download where it is. The files already fetched stay on the phone;
+// Resume picks up from them. Bumping the generation is what stops a download
+// still in its host round-trip (see appDownloadBundle).
+async function _dlPause(key, quiet) {
+  const p = _dlKeyParts(key);
+  if (!p || !isApp || !_cap.dl) return;
+  const st = offlineBundles.get(key) || {};
+  const q = _dlQueue.get(key) || {};
+  _appDlBump(key);
+  offlineBundles.set(key, { paused: true, fraction: st.fraction || 0, name: st.name || q.name || "",
+                            meta: st.meta, bytesTotal: st.bytesTotal, bytesDone: st.bytesDone });
+  _appQueueState(p.itemId, p.filePath, st.name || q.name || "", "paused");
+  const it = _dlItems.get(key);
+  if (it && it.sha) { try { await _cap.dl.cancel({ sha: it.sha }); } catch (_) {} }
+  _appRefreshDlBtn(p.itemId, p.filePath);
+  if (!quiet) _dlRender();
+}
+function _dlResume(key, quiet) {
+  const p = _dlKeyParts(key);
+  if (!p || !isApp) return;
+  const st = offlineBundles.get(key) || {};
+  const q = _dlQueue.get(key) || {};
+  offlineBundles.delete(key);   // or appDownloadBundle reads it as already in flight
+  appDownloadBundle(p.itemId, p.filePath, st.name || q.name || "", null,
+    (q.quality === "" || q.quality == null) ? "original" : q.quality);
+  if (!quiet) _dlRender();
+}
+async function _dlPauseAll() {
+  for (const r of _dlQueueRows(_srvId, true, true)) if (_DL_KIND_RANK[r.kind] <= 3) await _dlPause(r.key, true);
+  _dlRender();
+}
+function _dlResumeAll() {
+  for (const r of _dlQueueRows(_srvId, true, true)) if (r.kind === "paused") _dlResume(r.key, true);
+  _appResumeDownloadQueue();
+  _dlRender();
+}
+async function _dlNext(key) {
+  const it = _dlItems.get(key);
+  if (!it || !it.sha || !isApp) return;
+  try { await _cap.dl.prioritize({ sha: it.sha }); } catch (_) {}
+  _dlRender();
+}
+
+// 5. Storage -----------------------------------------------------------------
+function _dlStorageHtml({ view, sname, uname, mine, done, per, prog, here }) {
+  let mineB = 0, otherB = 0;
+  for (const [id, p] of per) { if (id === view) mineB += p.bytes; else otherB += p.bytes; }
+  if (!mineB && !otherB) return "";
+  // Episodes this account has finished: the space that is free for the asking.
+  let wN = 0, wB = 0;
+  for (const it of done) { const p = prog.get(it._key); if (p && p.completed) { wN++; wB += it._bytes; } }
+  const s = _dlStorageInfo;
+  const total = (s && s.total) || 0, free = (s && s.free) || 0;
+  let bar = "", head = `${fmtSize(mineB + otherB)} used`;
+  const key = (cls, text) => `<span class="inline-flex items-center gap-1.5"><span class="w-2 h-2 ${cls}"></span>${text}</span>`;
+  const legend = [key("bg-indigo-500", `${escHtml(sname)} ${fmtSize(mineB)}`)];
+  if (otherB) legend.push(key("bg-indigo-900", `Other servers ${fmtSize(otherB)}`));
+  if (total > 0) {
+    const rest = Math.max(0, total - free - mineB - otherB);
+    // A sliver that exists gets a width that can be seen.
+    const w = (b) => b > 0 ? Math.max(1.5, (b / total) * 100) : 0;
+    bar = `<div class="flex h-3 bg-gray-800 overflow-hidden">
+      <div class="bg-indigo-500" style="width:${w(mineB)}%"></div>
+      <div class="bg-indigo-900" style="width:${w(otherB)}%"></div>
+      <div class="bg-gray-600" style="width:${w(rest)}%"></div>
+    </div>`;
+    legend.push(key("bg-gray-600", `Everything else ${fmtSize(rest)}`));
+    legend.push(key("bg-gray-800 border border-gray-700", `Free ${fmtSize(free)}`));
+    head = `${fmtSize(free)} free of ${fmtSize(total)}`;
+  }
+  const reclaim = (wN && here) ? `<div class="flex items-center gap-3 mt-3 pt-3 border-t border-gray-800">
+      <div class="min-w-0 flex-1 text-xs text-gray-300 leading-snug"><b class="font-black text-white">${fmtSize(wB)}</b>
+        is ${wN} episode${wN === 1 ? "" : "s"} ${escHtml(uname || "this account")} has finished.</div>
+      <button onclick="_dlRemoveWatched()" class="${_dlBtn("ghost")}">Remove watched</button>
+    </div>` : "";
+  return `<div class="mb-5">
+    <div class="flex items-baseline justify-between gap-2 mb-2">
+      <div class="${_DL_LABEL}">Storage</div>
+      <div class="text-[11px] text-gray-500">${head}</div>
+    </div>
+    <div class="${_DL_TILE} p-3">
+      ${bar}
+      <div class="flex flex-wrap gap-x-4 gap-y-1 ${bar ? "mt-2.5" : ""} text-[11px] text-gray-400">${legend.join("")}</div>
+      ${reclaim}
+    </div>
+  </div>`;
+}
+// Remove every finished episode of the server being shown, for its account.
+async function _dlRemoveWatched() {
+  if (!isApp || !_cap.dl || !_cap.os) return;
+  const uid = (_devUser() || profile || {}).id || "";
+  let events = [];
+  try { events = (await _cap.os.all()).events || []; } catch (_) {}
+  const watched = new Set(events.filter((e) => e.completed && (!uid || !e.profileId || e.profileId === uid))
+    .map((e) => offKey(e.itemId, e.filePath)));
+  const targets = [..._dlItems.values()].filter((it) => it.complete && it._sid === _srvId && watched.has(it._key));
+  if (!targets.length) return;
+  if (!window.confirm(`Remove ${targets.length} finished episode${targets.length > 1 ? "s" : ""} from this phone? They stay on the server.`)) return;
+  for (const it of targets) await _appRemoveOne(it.itemId, it.filePath);
+  _dlStorageAt = 0;
+  _dlRender();
+}
+
+// 6. The shows ---------------------------------------------------------------
+function _dlToggleShow(gkey) {
+  if (_dlOpen.has(gkey)) _dlOpen.delete(gkey); else _dlOpen.add(gkey);
+  _dlRender();
+}
+function _dlShowsHtml({ shows, prog, sname, canPlay, here, live }) {
+  const sel = _appDashSelectMode;
+  // Drop any selected key that's no longer downloaded (removed since last tick).
+  for (const k of [..._appDashSel]) { const it = _dlItems.get(k); if (!it || !it.complete) _appDashSel.delete(k); }
+  const nSel = _appDashSel.size;
+  const total = shows.reduce((n, g) => n + g.bytes, 0);
+  const head = sel
+    ? `<div class="sticky top-0 z-10 bg-gray-950 flex items-center gap-2 py-2 mb-2 border-b border-gray-800">
+        <button onclick="_appDashSelectAll()" class="${_dlBtn("ghost")}">All</button>
+        <button onclick="_appRemoveSelected()" class="${_dlBtn("danger", "flex-1" + (nSel ? "" : " opacity-50"))}">${nSel ? `Remove (${nSel})` : "Remove"}</button>
+        <button onclick="_appDashSetSelect(false)" class="${_dlBtn("quiet")}">Done</button>
+      </div>`
+    : `<div class="flex items-center justify-between gap-2 mb-2 min-h-[36px]">
+        <div class="${_DL_LABEL}">On this phone${total ? ` <span class="text-gray-700">· ${fmtSize(total)}</span>` : ""}</div>
+        ${shows.length ? `<button onclick="_appDashSetSelect(true)" class="${_dlBtn("quiet")}">Select</button>` : ""}
+      </div>`;
+  if (!shows.length) {
+    return head + `<div class="${_DL_TILE} px-4 py-8 text-center">
+      <div class="text-sm font-black uppercase tracking-wide text-gray-400">Nothing saved from ${escHtml(sname)}</div>
+      <div class="text-xs text-gray-600 mt-2 leading-relaxed">${live
+        ? "Open a show in the Library and tap the download arrow on an episode, or Save Season."
+        : "Connect to it, open a show and tap the download arrow on an episode."}</div>
+    </div>`;
+  }
+  const one = shows.length === 1;
+  const cards = shows.map((g) => {
+    const open = sel || one || _dlOpen.has(g.gkey);
+    let nW = 0, nP = 0;
+    for (const ep of g.eps) {
+      const p = prog.get(ep._key);
+      if (p && p.completed) nW++;
+      else if (p && (p.positionSec || 0) / ((p.durationSec || 0) || 1) > 0.02) nP++;
+    }
+    const poster = (g.meta && g.meta.poster_data_url)
+      ? `<img src="${escHtml(g.meta.poster_data_url)}" alt="" class="flex-shrink-0 w-12 h-[72px] object-cover bg-gray-800">`
+      : `<div class="flex-shrink-0 w-12 h-[72px] bg-gray-800 flex items-center justify-center text-lg font-black text-gray-600">${escHtml((g.title[0] || "?").toUpperCase())}</div>`;
+    const gk = _dlJ(g.eps.map((ep) => ep._key));
+    const facts = [
+      g.series ? `${g.eps.length} episode${g.eps.length === 1 ? "" : "s"}` : "",
+      fmtSize(g.bytes),
+    ].filter(Boolean).join(" · ");
+    const seen = [
+      nW ? `<span class="text-green-500">${nW === g.eps.length && !g.series ? "Watched" : nW + " watched"}</span>` : "",
+      nP ? `<span class="text-amber-400">${g.series ? nP + " in progress" : "In progress"}</span>` : "",
+    ].filter(Boolean).join(`<span class="text-gray-700"> · </span>`);
+
+    const epRow = (ep, divided) => {
+      const m = ep.meta || {};
+      const lab = _bundleLabel(m, ep.filePath, ep.itemId, ep.name);
+      // Under a season divider the season is implicit — just the episode number
+      // (the code's own "E01-E02" / "(148)" / "Special 5" kept).
+      const code = lab.code || ((m.season && m.episode) ? `S${pad2(m.season)}E${pad2(m.episode)}` : (m.episode ? `E${pad2(m.episode)}` : ""));
+      const num = code ? (divided ? code.replace(/^S\d+(?=E)/, "") : code) : "";
+      // The show is the card; the row is code + name. The file name only when
+      // neither is known.
+      const nm = lab.name || (code ? "" : lab.line1) || ep.sha;
+      const k = _dlJ(ep._key), id = _dlJ(ep.itemId), fp = _dlJ(ep.filePath);
+      const pr = prog.get(ep._key);
+      const pct = pr ? Math.round(((pr.positionSec || 0) / ((pr.durationSec || 0) || 1)) * 100) : 0;
+      const watched = !!(pr && pr.completed);
+      const inProg = !!pr && !watched && pct > 2;
+      const badge = watched ? `<span class="text-green-500 font-black uppercase tracking-wide">${ic("check")} Watched</span>`
+        : inProg ? `<span class="text-amber-400 font-black">${pct}%</span>` : "";
+      const checked = _appDashSel.has(ep._key);
+      const actions = sel
+        ? `<span class="flex-shrink-0 w-6 h-6 border-2 flex items-center justify-center text-white text-xs
+            ${checked ? "bg-indigo-600 border-indigo-600" : "border-gray-600"}">${checked ? ic("check") : ""}</span>`
+        : `${canPlay ? `<button onclick="_appPlayDownloaded(${id},${fp})" class="${_dlBtn("primary")}">${ic("play")} Play</button>` : ""}
+           <button onclick="_appRemoveDownloaded(${id},${fp})" class="${_dlBtn("quiet", "px-2.5")}" title="Remove from this phone" aria-label="Remove from this phone">${ic("x")}</button>`;
+      return `<div ${sel ? `onclick="_appDashToggleItem(${k})"` : ""} class="flex items-center gap-2 px-3 py-2.5 border-t border-gray-800 ${sel ? "cursor-pointer" : ""}">
+        <div class="min-w-0 flex-1">
+          <div class="text-sm font-semibold truncate">${num ? `<span class="text-indigo-400 font-black text-xs mr-1.5">${escHtml(num)}</span>` : ""}${escHtml(nm)}</div>
+          <div class="text-[11px] text-gray-500 mt-0.5 flex items-center gap-2"><span>${fmtSize(ep._bytes)}</span>${badge}</div>
+          ${(watched || inProg) ? `<div class="h-[3px] bg-gray-800 mt-1.5"><div class="h-full ${watched ? "bg-green-600" : "bg-indigo-500"}" style="width:${watched ? 100 : pct}%"></div></div>` : ""}
+        </div>
+        ${actions}
+      </div>`;
+    };
+
+    let body = "";
+    if (open) {
+      // Seasons ascending, Specials (season 0) last — the same order as the
+      // episode page's tabs. No positive season anywhere ⇒ one flat list.
+      const bySeason = new Map();
+      for (const ep of g.eps) {
+        const s = _bundleSeason(ep.meta || {});
+        if (!bySeason.has(s)) bySeason.set(s, []);
+        bySeason.get(s).push(ep);
+      }
+      const pos = [...bySeason.keys()].filter((s) => s > 0).sort((a, b) => a - b);
+      const order = bySeason.has(0) ? [...pos, 0] : pos;
+      const divided = pos.length > 0 && g.series;
+      body = order.map((s) => {
+        const eps = bySeason.get(s);
+        return (divided ? `<div class="px-3 py-1.5 border-t border-gray-800 bg-gray-950/60 text-[10px] font-black uppercase tracking-widest text-gray-500">
+            ${s === 0 ? "Specials" : "Season " + s} <span class="text-gray-700">· ${eps.length}</span></div>` : "")
+          + eps.map((ep) => epRow(ep, divided)).join("");
+      }).join("");
+      if (!sel && g.eps.length > 1) {
+        body += `<div class="px-3 py-2.5 border-t border-gray-800 flex justify-end">
+          <button onclick="_appRemoveSeries(${gk},${_dlJ(g.title)})" class="${_dlBtn("quiet")}">${ic("trash")} Remove all ${g.eps.length}</button></div>`;
+      }
+    }
+    // A film is one file: its card IS the row, with Play on it. Nothing to open.
+    const film = !g.series && g.eps.length === 1;
+    if (film) body = "";
+    const f0 = g.eps[0];
+    const right = film
+      ? (sel
+        ? `<span class="flex-shrink-0 w-6 h-6 border-2 flex items-center justify-center text-white text-xs
+            ${_appDashSel.has(f0._key) ? "bg-indigo-600 border-indigo-600" : "border-gray-600"}">${_appDashSel.has(f0._key) ? ic("check") : ""}</span>`
+        : `<div class="flex gap-1 flex-shrink-0">${canPlay ? `<button onclick="_appPlayDownloaded(${_dlJ(f0.itemId)},${_dlJ(f0.filePath)})" class="${_dlBtn("primary")}">${ic("play")} Play</button>` : ""}
+            <button onclick="_appRemoveDownloaded(${_dlJ(f0.itemId)},${_dlJ(f0.filePath)})" class="${_dlBtn("quiet", "px-2.5")}" title="Remove from this phone" aria-label="Remove from this phone">${ic("x")}</button></div>`)
+      : sel
+        ? `<button onclick="event.stopPropagation();_appDashToggleSeries(${gk})" class="${_dlBtn("ghost")}">All</button>`
+        : (one ? "" : `<span class="text-gray-500 text-base flex-shrink-0">${ic(open ? "chev-up" : "chev-down")}</span>`);
+    const tap = film ? (sel ? `onclick="_appDashToggleItem(${_dlJ(f0._key)})"` : "")
+      : ((sel || one) ? "" : `onclick="_dlToggleShow(${_dlJ(g.gkey)})"`);
+    return `<div class="${_DL_TILE} mb-3">
+      <div ${tap} class="flex items-center gap-3 p-3 ${tap ? "cursor-pointer" : ""}">
+        ${poster}
+        <div class="min-w-0 flex-1">
+          <div class="text-sm font-black uppercase tracking-wide text-gray-100 leading-snug line-clamp-2">${escHtml(g.title)}</div>
+          <div class="text-xs text-gray-500 mt-1">${facts}</div>
+          ${seen ? `<div class="text-[11px] font-bold mt-0.5">${seen}</div>` : ""}
+        </div>
+        ${right}
+      </div>
+      ${body}
+    </div>`;
+  }).join("");
+  return head + cards;
+}
 
 // ── iOS app: "this app is out of date" (19.6.0) ─────────────────────────────
 // The host asks the SideStore source what the newest installable app is
@@ -22500,14 +23725,13 @@ async function _appCheckUpdate() {
   try { seen = JSON.parse(localStorage.getItem("sl_app_update_seen") || "null"); } catch (_) {}
   if (seen && seen.v === latest && Date.now() - (seen.at || 0) < APP_UPD_NAG_MS) return;
   try { localStorage.setItem("sl_app_update_seen", JSON.stringify({ v: latest, at: Date.now() })); } catch (_) {}
-  showAlert(`App update available (${latest}). Open the App menu for how to install it.`, "info");
+  showAlert(`App update available (${latest}). Open the App tab for how to install it.`, "info");
 }
 
 function _appUpdPaint() {
   const on = !!_appUpd;
-  const dot = document.getElementById("appNavDot"); if (dot) dot.style.display = on ? "inline-block" : "none";
-  const upd = document.getElementById("appNavUpd"); if (upd) upd.style.display = on ? "block" : "none";
-  if (upd && on) upd.textContent = "Update app — " + _appUpd.latest;
+  const dot = document.getElementById("appTabUpdDot"); if (dot) dot.classList.toggle("hidden", !on);
+  if (activeTab === "app") _appTabShow();   // its About row carries the Update button
 }
 
 function _appUpdExplain() {
@@ -22558,7 +23782,6 @@ async function _appRunQuickAction(action) {
   }
   // Both of the others are per profile; the picker is up. Finish after it.
   if (!profile.id) { _qaPending = action; return; }
-  _appCloseDashboard();
   if (action === "search") {
     switchTab("search");
     const i = document.getElementById("searchInput");
@@ -22580,25 +23803,6 @@ async function _appRunQuickAction(action) {
   }
 }
 
-function _appOpenDashboard() {
-  // Offline cached-player mode boots this overlay as the whole UI, including in
-  // the plain-browser smoke test where isApp is false (see _appOfflineBoot).
-  if (!isApp && !_appOffline) return;
-  let ov = document.getElementById("appDash");
-  if (!ov) { ov = _appBuildDashboard(); document.body.appendChild(ov); }
-  ov.style.display = "flex";
-  _appRenderDashboard();
-  if (_appDashTimer) clearInterval(_appDashTimer);
-  _appDashTimer = setInterval(_appRenderDashboard, 1000);
-}
-function _appCloseDashboard() {
-  if (_appOffline) return;   // pinned open — the overlay IS the offline UI
-  const ov = document.getElementById("appDash");
-  if (ov) ov.style.display = "none";
-  if (_appDashTimer) { clearInterval(_appDashTimer); _appDashTimer = null; }
-  _appDashSelectMode = false; _appDashSel.clear();
-}
-
 // --- Download policy: WHEN the phone may download (never how fast) ------------
 //
 // Gates, not a throttle. Measured on device 2026-09-23 over a 17.2 GB run: the
@@ -22618,416 +23822,37 @@ async function _appSetPolicy(patch) {
   if (!_dlHasPolicy) return;
   try { _dlPolicy = await _cap.dl.setPolicy(patch); } catch (_) {}
   _appRenderPolicy();
+  if (activeTab === "downloads") _dlRender();
 }
 
-// Paint both the settings and the "why it stopped" banner from one snapshot.
-// Called from the 1 s dashboard tick, so it re-reads the live conditions
-// (charging / expensive path / Low Power) without its own timer.
+// Paint the download-policy controls (App tab) from one snapshot. The "why it
+// stopped" banner is the Downloads tab's (_dlNoticesHtml), from the same
+// snapshot; both re-read it on their own render.
 function _appRenderPolicy() {
-  const ov = document.getElementById("appDash");
-  if (!ov) return;
-  const wrap = ov.querySelector("#appDashPolicy");
-  const banner = ov.querySelector("#appDashGate");
-  if (!wrap || !banner) return;
-  if (!_dlHasPolicy || !_dlPolicy) { wrap.style.display = "none"; banner.style.display = "none"; return; }
-  wrap.style.display = "block";
+  const root = document.getElementById("appTab");
+  const wrap = root && root.querySelector("#appDashPolicy");
+  if (!wrap) return;
+  if (!_dlHasPolicy || !_dlPolicy) { wrap.classList.add("hidden"); return; }
+  wrap.classList.remove("hidden");
 
+  _appTglPaint(wrap.querySelector("#appDashCell"), !!_dlPolicy.allowCellular);
+  _appTglPaint(wrap.querySelector("#appDashChg"), !!_dlPolicy.chargerOnly);
   // Don't fight the user mid-interaction: only write a control they aren't in.
-  const cell = ov.querySelector("#appDashCell");
-  const chg  = ov.querySelector("#appDashChg");
-  const flr  = ov.querySelector("#appDashFloor");
-  if (document.activeElement !== cell) cell.checked = !!_dlPolicy.allowCellular;
-  if (document.activeElement !== chg)  chg.checked  = !!_dlPolicy.chargerOnly;
+  const flr  = wrap.querySelector("#appDashFloor");
   if (document.activeElement !== flr)  flr.value    = String(_dlPolicy.batteryFloor || 0);
 
   // Price the queue rather than making the user do the arithmetic.
   const perGB = _dlPolicy.percentPerGB || 3;
   const gb = (_dlPolicy.queueRemaining || 0) / 1e9;
-  const cost = ov.querySelector("#appDashCost");
-  cost.textContent = gb > 0.05
-    ? `${gb.toFixed(1)} GB left to download — about ${Math.round(gb * perGB)}% of battery at ~${perGB}% per GB.`
+  wrap.querySelector("#appDashCost").textContent = gb > 0.05
+    ? `${gb.toFixed(1)} GB left to download: about ${Math.round(gb * perGB)}% of battery at ~${perGB}% per GB.`
     : `Downloading costs about ${perGB}% of battery per GB. Speed does not change that, so there is no speed setting.`;
-
-  const gate = _dlPolicy.gate || "go";
-  if (gate === "go") { banner.style.display = "none"; return; }
-  banner.style.display = "block";
-  ov.querySelector("#appDashGateText").textContent = _dlPolicy.gateText || "Downloads paused";
-  // A resume that happens while the app is backgrounded can only use the slow
-  // out-of-process session — iOS refuses a continued-processing grant to
-  // anything but a foreground app — so say what actually un-pauses it.
-  const hint = gate === "cellular" ? "Join a Wi-Fi network, or allow cellular below."
-    : gate === "charger"  ? "Plug in, or turn off \u201cOnly while charging\u201d below."
-    : gate === "lowPower" ? "Turn off Low Power Mode in Control Centre, or plug in."
-    : gate === "battery"  ? "Plug in, or lower the pause threshold below."
-    : "";
-  ov.querySelector("#appDashGateHint").textContent = hint;
 }
 
-function _appBuildDashboard() {
-  const ov = document.createElement("div");
-  ov.id = "appDash";
-  ov.style.cssText = "position:fixed;inset:0;z-index:10000;display:none;flex-direction:column;"
-    + "background:#0b0b0d;color:#f2f2f4;font-family:-apple-system,'Segoe UI',Roboto,sans-serif;"
-    + "padding:max(env(safe-area-inset-top),16px) 16px max(env(safe-area-inset-bottom),16px);overflow-y:auto;";
-  ov.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
-      <div style="font-size:20px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;">Downloads</div>
-      <button id="appDashClose" style="all:unset;cursor:pointer;color:#8a8a92;border:1px solid #2a2a30;
-        padding:8px 14px;font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;">Close</button>
-    </div>
-
-    <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;margin:4px 0 8px;">Server</div>
-    <div style="border:1px solid #2a2a30;background:#141417;padding:13px 14px;margin-bottom:18px;">
-      <div style="display:flex;align-items:center;gap:9px;">
-        <span id="appDashDot" style="width:10px;height:10px;background:#8a8a92;display:inline-block;"></span>
-        <span id="appDashConn" style="font-size:14px;font-weight:700;">Checking…</span>
-        <button id="appDashReconnect" style="all:unset;cursor:pointer;display:none;margin-left:auto;color:#3a7afe;
-          border:1px solid #2a4a7e;padding:6px 12px;font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;">Reconnect</button>
-      </div>
-      <div id="appDashHost" style="font-size:12px;color:#8a8a92;margin-top:7px;word-break:break-all;"></div>
-    </div>
-
-    <!-- WHY THE BYTES STOPPED. Only shown while the native gate is shut; a
-         frozen progress bar with no explanation reads as a bug, and the one
-         place the user can actually act on it is right below. -->
-    <div id="appDashGate" style="display:none;border:1px solid #6b4a12;background:#241b08;
-      padding:12px 14px;margin-bottom:18px;">
-      <div style="display:flex;align-items:center;gap:9px;">
-        <span style="width:10px;height:10px;background:#e0a23d;display:inline-block;flex:0 0 auto;"></span>
-        <span id="appDashGateText" style="font-size:13px;font-weight:700;color:#e0a23d;"></span>
-      </div>
-      <div id="appDashGateHint" style="font-size:11px;color:#a08a5d;margin-top:6px;"></div>
-    </div>
-
-    <div style="display:flex;align-items:center;justify-content:space-between;margin:4px 0 8px;">
-      <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;">Ongoing downloads</div>
-      <button id="appDashResume" style="all:unset;cursor:pointer;display:none;color:#3a7afe;border:1px solid #2a4a7e;
-        padding:5px 11px;font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;">Resume all</button>
-    </div>
-    <div id="appDashDownloads" style="margin-bottom:18px;"></div>
-
-    <!-- POWER & DATA. Gates, never a speed limit: the battery cost is ~3%/GB and
-         flat across every rate measured, because the energy goes per byte (radio
-         time, tunnel decryption, flash writes) and not per second. Slowing a
-         download holds the radio up twice as long for the same bytes, so a
-         "battery saver" speed would cost MORE. See docs/GOTCHAS.md. -->
-    <div id="appDashPolicy" style="display:none;">
-      <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;margin:4px 0 8px;">Power &amp; data</div>
-      <div style="border:1px solid #2a2a30;background:#141417;padding:4px 14px 12px;margin-bottom:18px;">
-        <label style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 0;border-bottom:1px solid #26262c;cursor:pointer;">
-          <span>
-            <span style="font-size:13px;font-weight:700;display:block;">Download over cellular</span>
-            <span style="font-size:11px;color:#8a8a92;">Includes personal hotspots. A full library is many gigabytes.</span>
-          </span>
-          <input type="checkbox" id="appDashCell" style="flex:0 0 auto;width:20px;height:20px;accent-color:#3a7afe;">
-        </label>
-        <label style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 0;border-bottom:1px solid #26262c;cursor:pointer;">
-          <span>
-            <span style="font-size:13px;font-weight:700;display:block;">Only while charging</span>
-            <span style="font-size:11px;color:#8a8a92;">Resumes when you plug in and next open the app.</span>
-          </span>
-          <input type="checkbox" id="appDashChg" style="flex:0 0 auto;width:20px;height:20px;accent-color:#3a7afe;">
-        </label>
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 0;">
-          <span>
-            <span style="font-size:13px;font-weight:700;display:block;">Pause below</span>
-            <span style="font-size:11px;color:#8a8a92;">Battery level at which downloads stop, unless charging.</span>
-          </span>
-          <select id="appDashFloor" style="all:unset;cursor:pointer;flex:0 0 auto;color:#f2f2f4;background:#0b0b0d;
-            border:1px solid #2a2a30;padding:6px 9px;font-size:12px;font-weight:700;">
-            <option value="0">Off</option>
-            <option value="10">10%</option>
-            <option value="20">20%</option>
-            <option value="30">30%</option>
-            <option value="50">50%</option>
-          </select>
-        </div>
-        <div id="appDashCost" style="font-size:11px;color:#8a8a92;border-top:1px solid #26262c;padding-top:10px;"></div>
-      </div>
-    </div>
-
-    <div style="display:flex;align-items:center;justify-content:space-between;margin:4px 0 8px;gap:10px;">
-      <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;">Downloaded on this device</div>
-      <div style="display:flex;align-items:center;gap:10px;flex:0 0 auto;">
-        <div id="appDashTotal" style="font-size:12px;color:#8a8a92;"></div>
-        <button id="appDashSelect" style="all:unset;cursor:pointer;color:#cbd5e1;border:1px solid #2a2a30;
-          padding:5px 11px;font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;">Select</button>
-      </div>
-    </div>
-    <div id="appDashStorage" style="margin-bottom:8px;"></div>
-    <div id="appDashBar" style="display:none;position:sticky;bottom:0;gap:9px;padding:11px 0;
-      background:linear-gradient(transparent,#0b0b0d 22%);align-items:center;">
-      <button id="appDashSelAll" style="all:unset;cursor:pointer;color:#cbd5e1;border:1px solid #2a2a30;
-        padding:9px 13px;font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;">All</button>
-      <button id="appDashRemoveSel" style="all:unset;cursor:pointer;color:#fff;background:#c0392b;
-        padding:9px 15px;font-size:12px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;flex:1 1 auto;text-align:center;">Remove</button>
-      <button id="appDashSelCancel" style="all:unset;cursor:pointer;color:#8a8a92;border:1px solid #2a2a30;
-        padding:9px 13px;font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;">Done</button>
-    </div>
-  `;
-  ov.querySelector("#appDashClose").addEventListener("click", _appCloseDashboard);
-  ov.querySelector("#appDashReconnect").addEventListener("click", () => _appOfflineTryReconnect(true));
-  ov.querySelector("#appDashResume").addEventListener("click", () => _appResumeDownloadQueue());
-  ov.querySelector("#appDashSelect").addEventListener("click", () => _appDashSetSelect(true));
-  ov.querySelector("#appDashSelCancel").addEventListener("click", () => _appDashSetSelect(false));
-  ov.querySelector("#appDashSelAll").addEventListener("click", _appDashSelectAll);
-  ov.querySelector("#appDashRemoveSel").addEventListener("click", _appRemoveSelected);
-  ov.querySelector("#appDashCell").addEventListener("change", (e) =>
-    _appSetPolicy({ allowCellular: e.target.checked }));
-  ov.querySelector("#appDashChg").addEventListener("change", (e) =>
-    _appSetPolicy({ chargerOnly: e.target.checked }));
-  ov.querySelector("#appDashFloor").addEventListener("change", (e) =>
-    _appSetPolicy({ batteryFloor: parseInt(e.target.value, 10) || 0 }));
-  return ov;
-}
-
-// Render the live state into the dashboard overlay. Cheap enough to call every
-// second: one native list() read + DOM rebuild of two small lists.
-async function _appRenderDashboard() {
-  const ov = document.getElementById("appDash");
-  if (!ov || ov.style.display === "none") return;
-
-  // 1. Connection status — driven by the SSE link the host page keeps open.
-  //    Offline cached-player mode has no SSE at all: pin the state and surface
-  //    the Reconnect probe instead.
-  const dot  = ov.querySelector("#appDashDot");
-  const conn = ov.querySelector("#appDashConn");
-  ov.querySelector("#appDashReconnect").style.display = _appOffline ? "inline-block" : "none";
-  if (_appOffline) {
-    dot.style.background = "#e0a23d";
-    conn.textContent = "Offline — downloads only";
-    conn.style.color = "#e0a23d";
-    ov.querySelector("#appDashHost").textContent = _appOfflineHost || "";
-  } else {
-    const online = navigator.onLine && app._connected !== false;
-    dot.style.background = online ? "#3ec46d" : "#e0533d";
-    conn.textContent = online ? "Connected — live" : (navigator.onLine ? "Reconnecting…" : "Offline");
-    conn.style.color = online ? "#3ec46d" : "#e0a23d";
-    ov.querySelector("#appDashHost").textContent = (localStorage.getItem("streamlink_server_url") || window.location.origin);
-  }
-
-  // Policy + live power/network conditions, re-read each tick so the banner
-  // follows a cable going in without its own notification plumbing.
-  if (_dlHasPolicy) {
-    try { _dlPolicy = await _cap.dl.getPolicy(); } catch (_) {}
-    _appRenderPolicy();
-  }
-
-  // Pull the authoritative on-device index for names, sizes and completion.
-  let items = [];
-  try { items = (await _cap.dl.list()).items || []; } catch (_) {}
-  const byKey = new Map();
-  for (const it of items) {
-    byKey.set(offKey(it.itemId, it.filePath), it);
-    // Offline, a bundle's own meta is the only source of its label (fileLabel).
-    if (it.meta && it.meta.label && it.filePath && !_fileLabels.has(it.filePath)) _fileLabels.set(it.filePath, it.meta.label);
-  }
-
-  // 2. Ongoing downloads — anything in the offline map that isn't finished. The
-  //    map carries the live fraction (host prep 0–50 %, transfer 50–100 %).
-  const dlWrap = ov.querySelector("#appDashDownloads");
-  const active = [];
-  let nWaiting = 0;
-  for (const [key, st] of offlineBundles) {
-    if (!st || st.complete) continue;
-    if (!(st.downloading || st.queued || st.prepping)) continue;
-    if (st.waiting) nWaiting++;
-    const it = byKey.get(key);
-    const meta = st.meta || (it && it.meta) || {};
-    const fp = (it && it.filePath) || key.split("|").slice(1).join("|");
-    const label = _bundleLabel(meta, fp, (it && it.itemId) || key.split("|")[0], st.name || (it && it.name));
-    active.push({ key, label, st, itemId: (it && it.itemId), filePath: (it && it.filePath) });
-  }
-  // "Resume all" only when something is actually stalled waiting on the network.
-  ov.querySelector("#appDashResume").style.display = nWaiting ? "inline-block" : "none";
-  if (!active.length) {
-    dlWrap.innerHTML = `<div style="color:#8a8a92;font-size:13px;border:1px solid #2a2a30;background:#141417;padding:13px 14px;">No downloads in progress.</div>`;
-  } else {
-    dlWrap.innerHTML = active.map(({ key, label, st }) => {
-      const pct = Math.round((st.fraction || 0) * 100);
-      const sub = st.waiting ? "Waiting for connection…"
-        : (st.queued && !st.downloading) ? "Queued"
-        : st.prepping ? "Preparing on host…"
-        : (st.bytesTotal ? `${fmtSize(st.bytesDone || 0)} / ${fmtSize(st.bytesTotal)}` : "Downloading…");
-      const _k = escHtml(JSON.stringify(key));
-      return `<div style="border:1px solid #2a2a30;background:#141417;padding:11px 13px;margin-bottom:8px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:13px;font-weight:700;">
-          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto;min-width:0;">${escHtml(label.line1)}</span>
-          <span style="color:#3a7afe;flex:0 0 auto;">${pct}%</span>
-          <button onclick="_appCancelDownload(${_k})" title="Stop this download" style="all:unset;cursor:pointer;flex:0 0 auto;
-            color:#8a8a92;border:1px solid #2a2a30;padding:3px 9px;font-size:12px;font-weight:700;"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
-        </div>
-        ${label.line2 ? `<div style="font-size:12px;color:#c8c8d0;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(label.line2)}</div>` : ""}
-        <div style="font-size:11px;color:#8a8a92;margin-top:3px;">${escHtml(sub)}</div>
-        <div style="height:3px;background:#26262c;margin-top:7px;"><i style="display:block;height:100%;background:#3a7afe;width:${pct}%;"></i></div>
-      </div>`;
-    }).join("");
-  }
-
-  // 3. Downloaded bundles, grouped by series / movie (completed only) — a
-  //    stripped-down mirror of the web episode picker: titles A→Z, episodes
-  //    divided by season (ascending, Specials last) in episode order, with the
-  //    web picker's Watched / % badges. Each episode playable (LocalMediaServer,
-  //    via the normal dashboard player) and removable.
-  const groups = new Map();   // gkey → { title, meta, eps:[item], bytes }
-  let total = 0;
-  for (const it of items) {
-    if (it.itemId === _APP_PLAYER_KEY) continue;   // the player snapshot isn't content
-    if (!it.complete) continue;
-    const bytes = it.bytesTotal || it.bytesDone || 0;
-    total += bytes;
-    const meta = it.meta || {};
-    const gkey = (meta.series || meta.title || it.name || it.sha).trim().toLowerCase();
-    // Grouped by the library's series (a stable key); headed by TMDb's name for it.
-    const g = groups.get(gkey) || { title: meta.title || meta.series || it.name || "Download", meta, eps: [], bytes: 0 };
-    g.eps.push(it); g.bytes += bytes;
-    groups.set(gkey, g);
-  }
-  ov.querySelector("#appDashTotal").textContent = total ? fmtSize(total) + " used" : "";
-  const stWrap = ov.querySelector("#appDashStorage");
-  const rows = [...groups.values()].sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }));
-
-  // Watch progress for the badges — the native OfflineStore is authoritative
-  // offline and server-seeded on every reconnect, so one source serves both.
-  const progByKey = new Map();
-  if (rows.length && isApp && _cap.os) {
-    try {
-      const pid = (profile && profile.id) || "";
-      const { events } = await _cap.os.all();
-      for (const e of (events || [])) {
-        if (pid && e.profileId && e.profileId !== pid) continue;
-        progByKey.set(offKey(e.itemId, e.filePath), e);
-      }
-    } catch (_) {}
-  }
-
-  // Wire up the bulk-management chrome: the Select toggle only matters when there's
-  // something downloaded; the action bar + selection count reflect the live set.
-  const sel = _appDashSelectMode;
-  const selBtn = ov.querySelector("#appDashSelect");
-  const bar = ov.querySelector("#appDashBar");
-  selBtn.style.display = rows.length ? "inline-block" : "none";
-  selBtn.textContent = sel ? "Cancel" : "Select";
-  bar.style.display = sel ? "flex" : "none";
-  // Drop any selected key that's no longer downloaded (removed since last tick).
-  for (const k of [..._appDashSel]) if (!byKey.get(k) || !byKey.get(k).complete) _appDashSel.delete(k);
-  const nSel = _appDashSel.size;
-  const removeBtn = ov.querySelector("#appDashRemoveSel");
-  removeBtn.textContent = nSel ? `Remove (${nSel})` : "Remove";
-  removeBtn.style.opacity = nSel ? "1" : ".5";
-
-  if (!rows.length) {
-    stWrap.innerHTML = `<div style="color:#8a8a92;font-size:13px;border:1px solid #2a2a30;background:#141417;padding:13px 14px;">Nothing downloaded yet.</div>`;
-  } else {
-    const pad2 = (n) => String(n).padStart(2, "0");
-    stWrap.innerHTML = rows.map((g) => {
-      // Bucket the episodes by season, ordered like the web picker's season
-      // tabs: positive seasons ascending, season-0 files trailing as "Specials".
-      // No positive season anywhere (movies, unparsed names) ⇒ one flat list.
-      const bySeason = new Map();
-      for (const ep of g.eps) {
-        const s = _bundleSeason(ep.meta || {});
-        if (!bySeason.has(s)) bySeason.set(s, []);
-        bySeason.get(s).push(ep);
-      }
-      const posSeasons = [...bySeason.keys()].filter((s) => s > 0).sort((a, b) => a - b);
-      const seasonOrder = bySeason.has(0) ? [...posSeasons, 0] : posSeasons;
-      const divided = posSeasons.length > 0;
-      const poster = (g.meta && g.meta.poster_data_url)
-        ? `<img src="${escHtml(g.meta.poster_data_url)}" style="flex:0 0 auto;width:46px;height:69px;object-fit:cover;background:#202028;">`
-        : `<div style="flex:0 0 auto;width:46px;height:69px;background:#202028;display:flex;align-items:center;justify-content:center;color:#8a8a92;font-size:18px;font-weight:800;">${escHtml((g.title[0] || "?").toUpperCase())}</div>`;
-      const isSeries = g.eps.length > 1 || (g.meta && g.meta.season && g.meta.episode);
-      const _gk = escHtml(JSON.stringify(g.eps.map((ep) => offKey(ep.itemId, ep.filePath))));
-      const epRow = (ep) => {
-        const m = ep.meta || {};
-        const lab = _bundleLabel(m, ep.filePath, ep.itemId, ep.name);
-        // Under a season divider the season is implicit — just the episode number
-        // (the code's own "E01-E02" / "(148)" / "Special 5" kept).
-        const code = lab.code || ((m.season && m.episode) ? `S${pad2(m.season)}E${pad2(m.episode)}` : (m.episode ? `E${pad2(m.episode)}` : ""));
-        const num = code ? (divided ? code.replace(/^S\d+(?=E)/, "") : code) + " " : "";
-        // The show is the group header; the row is code + name. The file name
-        // only when neither is known.
-        const nm = lab.name || (code ? "" : lab.line1) || ep.sha;
-        const _id = escHtml(JSON.stringify(ep.itemId)), _p = escHtml(JSON.stringify(ep.filePath));
-        const key = offKey(ep.itemId, ep.filePath);
-        const _k = escHtml(JSON.stringify(key));
-        // Watched / in-progress badges — same thresholds as the web picker (>2 %).
-        const pr = progByKey.get(key);
-        const pct = pr ? Math.round(((pr.positionSec || 0) / ((pr.durationSec || 0) || 1)) * 100) : 0;
-        const watched = !!(pr && pr.completed);
-        const inProg = !!pr && !watched && pct > 2;
-        const badge = watched
-          ? `<span style="color:#22c55e;font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;flex:0 0 auto;"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg> Watched</span>`
-          : inProg ? `<span style="color:#eab308;font-size:10px;font-weight:800;flex:0 0 auto;">${pct}%</span>` : "";
-        const bar = (watched || inProg)
-          ? `<div style="height:3px;background:#26262c;margin-top:6px;"><i style="display:block;height:100%;background:#22c55e;width:${watched ? 100 : pct}%;"></i></div>`
-          : "";
-        // In select mode the whole row toggles a checkbox; otherwise it's Play + a remove button.
-        const checked = _appDashSel.has(key);
-        const box = `<span style="flex:0 0 auto;width:20px;height:20px;border:2px solid ${checked ? "#3a7afe" : "#4a4a52"};
-          background:${checked ? "#3a7afe" : "transparent"};display:flex;align-items:center;justify-content:center;
-          color:#fff;font-size:13px;font-weight:800;">${checked ? ic("check") : ""}</span>`;
-        const actions = sel
-          ? box
-          : `<button onclick="_appPlayDownloaded(${_id},${_p})" style="all:unset;cursor:pointer;background:#3a7afe;color:#fff;
-              padding:8px 13px;font-size:12px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;">Play</button>
-             <button onclick="_appRemoveDownloaded(${_id},${_p})" style="all:unset;cursor:pointer;color:#8a8a92;border:1px solid #2a2a30;
-              padding:8px 11px;font-size:12px;font-weight:700;"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>`;
-        const rowClick = sel ? ` onclick="_appDashToggleItem(${_k})"` : "";
-        return `<div${rowClick} style="display:flex;align-items:center;gap:9px;padding:9px 11px;border-top:1px solid #2a2a30;${sel ? "cursor:pointer;" : ""}">
-          <div style="flex:1 1 auto;min-width:0;">
-            <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-              ${num ? `<span style="color:#3a7afe;font-family:ui-monospace,Menlo,monospace;font-size:11px;font-weight:700;">${escHtml(num)}</span>` : ""}${escHtml(nm)}</div>
-            <div style="font-size:11px;color:#8a8a92;margin-top:2px;display:flex;align-items:center;gap:8px;">
-              <span>${fmtSize(ep.bytesTotal || ep.bytesDone || 0)}</span>${badge}</div>
-            ${bar}
-          </div>
-          ${actions}
-        </div>`;
-      };
-      const sections = seasonOrder.map((s) => {
-        const eps = bySeason.get(s).sort((a, b) => {
-          const am = a.meta || {}, bm = b.meta || {};
-          return (_bundlePos(am) - _bundlePos(bm))
-            || String(am.episode_name || a.name || "").localeCompare(String(bm.episode_name || b.name || ""));
-        });
-        const divider = divided
-          ? `<div style="padding:7px 11px 6px;border-top:1px solid #2a2a30;background:#101014;font-size:10px;font-weight:800;
-              letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;">${s === 0 ? "Specials" : "Season " + s} <span style="color:#4a4a52;">· ${eps.length}</span></div>`
-          : "";
-        return divider + eps.map(epRow).join("");
-      }).join("");
-      // Per-series header gets a "Remove all" shortcut (normal mode) and a
-      // "Select all in series" toggle (select mode) — quick bulk without ticking
-      // each episode.
-      const headBtn = sel
-        ? `<button onclick="_appDashToggleSeries(${_gk})" style="all:unset;cursor:pointer;flex:0 0 auto;color:#3a7afe;
-            border:1px solid #2a4a7e;padding:6px 11px;font-size:11px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;">All</button>`
-        : `<button onclick="_appRemoveSeries(${_gk},${escHtml(JSON.stringify(g.title))})" title="Remove every episode of this title"
-            style="all:unset;cursor:pointer;flex:0 0 auto;color:#8a8a92;border:1px solid #2a2a30;padding:6px 11px;font-size:11px;font-weight:700;">Remove all</button>`;
-      const subtitle = isSeries
-        ? `${seasonOrder.length > 1 ? `${seasonOrder.length} seasons · ` : ""}${g.eps.length} episode${g.eps.length === 1 ? "" : "s"} · ${fmtSize(g.bytes)}`
-        : fmtSize(g.bytes);
-      return `<div style="border:1px solid #2a2a30;background:#141417;margin-bottom:12px;">
-        <div style="display:flex;gap:11px;padding:11px;align-items:flex-start;">
-          ${poster}
-          <div style="flex:1 1 auto;min-width:0;">
-            <div style="font-size:15px;font-weight:800;line-height:1.2;">${escHtml(g.title)}</div>
-            <div style="font-size:12px;color:#8a8a92;margin-top:3px;">${subtitle}</div>
-          </div>
-          ${headBtn}
-        </div>
-        ${sections}
-      </div>`;
-    }).join("");
-  }
-}
-
-// Play a downloaded bundle from the Downloads overlay: hand off to the normal
+// Play a downloaded bundle from the Downloads tab: hand off to the normal
 // dashboard player (which detects the on-device bundle and serves it from the
-// native LocalMediaServer), then close the overlay so the player is visible.
+// native LocalMediaServer). The player opens over the tab.
 async function _appPlayDownloaded(itemId, filePath) {
-  _appCloseDashboard();   // offline mode: a no-op — the player floats above the pinned overlay
   // Online: resume from the host, like every other Play. This used to read
   // nothing online, so a download played from this menu always started at 0 —
   // and the proxied handoff carried that 0 straight into native (18.21.5).
@@ -23054,26 +23879,29 @@ async function _appPlayDownloaded(itemId, filePath) {
   try { await lpPlay(itemId, [filePath], seekTo); } catch (_) {}
 }
 
-// Remove a downloaded bundle from the Downloads overlay and re-render in place.
+// Remove a downloaded bundle from the Downloads tab and re-render in place.
 async function _appRemoveDownloaded(itemId, filePath) {
   if (!isApp || !_cap.dl) return;
-  if (!window.confirm("Remove this offline download from the device?")) return;
+  if (!window.confirm("Remove this download from the phone? It stays on the server.")) return;
   await _appRemoveOne(itemId, filePath);
+  _dlStorageAt = 0;
   _appRenderDashboard();
 }
 
-// ── iOS app: Downloads overlay — bulk actions ────────────────────────────────
+// ── iOS app: Downloads tab — bulk actions ────────────────────────────────
 // Remove a single download from BOTH the native store and the durable queue (so a
 // removed item isn't resurrected by the resumer) and update the in-memory map +
 // per-row button. Shared by the per-row remove button and every bulk path below.
 async function _appRemoveOne(itemId, filePath) {
   if (!isApp || !_cap.dl) return;
+  const key = offKey(itemId, filePath);
+  _appDlBump(key);   // a download of it still in its host round-trip stops here
   try { await _cap.dl.remove({ itemId, filePath }); } catch (_) {}
   _appQueueClear(itemId, filePath);
-  const key = offKey(itemId, filePath);
   offlineBundles.delete(key);
   _appDashSel.delete(key);
   _appRefreshDlBtn(itemId, filePath);
+  _appTabBadgePaint();
 }
 
 // Enter / leave multi-select mode (clears the selection on the way out).
@@ -23094,11 +23922,10 @@ function _appDashToggleSeries(keys) {
   for (const k of keys) { if (all) _appDashSel.delete(k); else _appDashSel.add(k); }
   _appRenderDashboard();
 }
-// Select every downloaded episode on the device.
+// Select every downloaded episode of the server being shown.
 async function _appDashSelectAll() {
-  let items = [];
-  try { items = (await _cap.dl.list()).items || []; } catch (_) {}
-  const done = items.filter((it) => it.complete);
+  const view = _dlViewId || _srvId;
+  const done = [..._dlItems.values()].filter((it) => it.complete && it._sid === view);
   const all = done.length && done.every((it) => _appDashSel.has(offKey(it.itemId, it.filePath)));
   _appDashSel.clear();
   if (!all) for (const it of done) _appDashSel.add(offKey(it.itemId, it.filePath));
@@ -23111,7 +23938,7 @@ async function _appDashSelectAll() {
 async function _appRemoveSelected() {
   if (!isApp || !_cap.dl || !_appDashSel.size) return;
   const n = _appDashSel.size;
-  if (!window.confirm(`Remove ${n} download${n > 1 ? "s" : ""} from this device?`)) return;
+  if (!window.confirm(`Remove ${n} download${n > 1 ? "s" : ""} from this phone? They stay on the server.`)) return;
   let items = [];
   try { items = (await _cap.dl.list()).items || []; } catch (_) {}
   const targets = items.filter((it) => _appDashSel.has(offKey(it.itemId, it.filePath)));
@@ -23124,7 +23951,7 @@ async function _appRemoveSelected() {
 // Remove every episode of one series at once (the per-series "Remove all" button).
 async function _appRemoveSeries(keys, title) {
   if (!isApp || !_cap.dl || !keys || !keys.length) return;
-  if (!window.confirm(`Remove all ${keys.length} download${keys.length > 1 ? "s" : ""} of “${title}”?`)) return;
+  if (!window.confirm(`Remove all ${keys.length} download${keys.length > 1 ? "s" : ""} of “${title}” from this phone? They stay on the server.`)) return;
   let items = [];
   try { items = (await _cap.dl.list()).items || []; } catch (_) {}
   const want = new Set(keys);
@@ -23155,50 +23982,6 @@ async function _appCancelDownload(key) {
   if (itemId) await _appRemoveOne(itemId, filePath);
   else { offlineBundles.delete(key); }
   _appRenderDashboard();
-}
-
-// ── iOS app: Change Server overlay ───────────────────────────────────────────
-// An overlay ON the live host page (app only) so opening it NEVER disconnects —
-// unlike the old menu item that navigated straight to the shell setup page and
-// killed the SSE link + in-flight downloads. Only "Connect to a different
-// server" actually navigates (the legitimate disconnect the user asked for) — and
-// it hands off to the shell setup page, which owns the connect + persist flow
-// (the shell origin owns the saved-server localStorage). Device pairing, and the
-// Re-pair card that lived here, were removed in 19.8.0.
-function _appOpenChangeServer() {
-  if (!isApp) return;
-  let ov = document.getElementById("appSrv");
-  if (ov) { ov.remove(); }
-  ov = document.createElement("div");
-  ov.id = "appSrv";
-  ov.style.cssText = "position:fixed;inset:0;z-index:10001;display:flex;flex-direction:column;"
-    + "background:#0b0b0d;color:#f2f2f4;font-family:-apple-system,'Segoe UI',Roboto,sans-serif;"
-    + "padding:max(env(safe-area-inset-top),16px) 18px max(env(safe-area-inset-bottom),16px);overflow-y:auto;";
-  const host = localStorage.getItem("streamlink_server_url") || window.location.origin;
-  ov.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
-      <div style="font-size:20px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;">Server</div>
-      <button id="appSrvClose" style="all:unset;cursor:pointer;color:#8a8a92;border:1px solid #2a2a30;
-        padding:8px 14px;font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;">Cancel</button>
-    </div>
-    <div style="border:1px solid #2a2a30;background:#141417;padding:13px 14px;margin-bottom:18px;">
-      <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;">Connected to</div>
-      <div style="font-size:14px;margin-top:5px;word-break:break-all;">${escHtml(host)}</div>
-    </div>
-
-    <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;margin:2px 0 8px;">Different server</div>
-    <button id="appSrvChange" style="all:unset;cursor:pointer;display:block;text-align:center;width:100%;
-      background:transparent;color:#e0a23d;border:1px solid #2a2a30;padding:14px;font-size:14px;font-weight:800;
-      letter-spacing:.06em;text-transform:uppercase;">Connect to a different server</button>
-    <div style="font-size:12px;color:#8a8a92;margin-top:8px;line-height:1.45;">Switching servers disconnects this session and stops any in-progress downloads from the current host.</div>
-  `;
-  document.body.appendChild(ov);
-  const close = () => ov.remove();
-  ov.querySelector("#appSrvClose").addEventListener("click", close);
-  ov.querySelector("#appSrvChange").addEventListener("click", () => {
-    if (!window.confirm("Disconnect from this server and choose a different one?")) return;
-    _appGoSettings();   // hand off to the shell setup page (the only real disconnect)
-  });
 }
 
 // ── iOS app: Settings overlay + auto-managed downloads ───────────────────────
@@ -23297,171 +24080,145 @@ function _appAutoScoped(idOrKey, prefs, fallbackSeries) {
   return p.mode === "none_except" ? p.shows.has(key) : !p.shows.has(key);
 }
 
-function _appOpenAppSettings() {
-  if (!isApp) return;
-  let ov = document.getElementById("appSet");
-  if (ov) ov.remove();
-  ov = document.createElement("div");
-  ov.id = "appSet";
-  ov.style.cssText = "position:fixed;inset:0;z-index:10001;display:flex;flex-direction:column;"
-    + "background:#0b0b0d;color:#f2f2f4;font-family:-apple-system,'Segoe UI',Roboto,sans-serif;"
-    + "padding:max(env(safe-area-inset-top),16px) 18px max(env(safe-area-inset-bottom),16px);overflow-y:auto;";
+// ── iOS app: the App tab ─────────────────────────────────────────────────────
+// This phone's server and account at the top, then the settings that used to
+// live in two separate overlays (Settings, Change Server) and the Downloads
+// screen (Power & data). Built once into #appTab; `_appTabShow` repaints the
+// parts that change. With no server behind the page (offline) only the parts
+// that work without one are shown: this origin's localStorage is a loopback's,
+// so the playback and auto-manage switches there would not be the real ones.
+const _APP_SET_ROW = "flex items-center justify-between gap-3 py-3 border-t border-gray-800 first:border-t-0";
+function _appSetRow(title, sub, control, tip) {
+  return `<div class="${_APP_SET_ROW}">
+    <div class="min-w-0 flex-1">
+      <div class="text-sm font-bold">${title}${tip ? helpTip(tip) : ""}</div>
+      ${sub ? `<div class="text-[11px] text-gray-500 mt-0.5 leading-snug">${sub}</div>` : ""}
+    </div>
+    ${control}
+  </div>`;
+}
+const _APP_TGL = "min-w-[56px] min-h-[36px] px-3 text-[11px] font-black uppercase tracking-wide border flex-shrink-0 transition-colors";
+function _appTglPaint(el, on, label) {
+  if (!el) return;
+  el.textContent = label || (on ? "On" : "Off");
+  el.className = _APP_TGL + " " + (on ? "bg-indigo-600 border-indigo-600 text-white" : "bg-transparent border-gray-700 text-gray-500");
+}
+const _APP_SELECT = "w-full bg-gray-950 border border-gray-700 text-gray-100 text-sm px-3 py-2.5 rounded-none outline-none appearance-none";
+
+function _appTabBuild() {
+  const root = document.getElementById("appTab");
+  if (!root || root.dataset.built) return root;
+  root.dataset.built = "1";
   const p = _appAutoPrefs();
-  const selStyle = "width:100%;background:#0b0b0d;border:1px solid #2a2a30;color:#f2f2f4;"
-    + "font-size:16px;padding:12px;border-radius:0;outline:none;-webkit-appearance:none;appearance:none;";
   const aheadOpts = [1,2,3,4,5,6,8,10].map((n) =>
     `<option value="${n}" ${n === p.ahead ? "selected" : ""}>${n} episode${n > 1 ? "s" : ""}</option>`).join("");
   const qOpts = [["original","Original quality"],["1080","1080p"],["720","720p"],["480","480p"]].map(([v,l]) =>
     `<option value="${v}" ${v === p.q ? "selected" : ""}>${l}</option>`).join("");
   const scopeOpts = [["all_except","All shows except…"],["none_except","Only these shows…"]].map(([v,l]) =>
     `<option value="${v}" ${v === p.mode ? "selected" : ""}>${l}</option>`).join("");
-  ov.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
-      <div style="font-size:20px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;">Settings</div>
-      <button id="appSetClose" style="all:unset;cursor:pointer;color:#8a8a92;border:1px solid #2a2a30;
-        padding:8px 14px;font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;">Close</button>
+  const tgl = (id) => `<button id="${id}" class="${_APP_TGL}"></button>`;
+  const online = !_appOffline;
+  root.innerHTML = `
+    <div class="${_DL_LABEL} mb-2">This phone</div>
+    <div id="appIdentBox" class="mb-5"></div>
+
+    <!-- POWER & DATA. Gates, never a speed limit: the battery cost is ~3%/GB and
+         flat across every rate measured, because the energy goes per byte (radio
+         time, tunnel decryption, flash writes) and not per second. Slowing a
+         download holds the radio up twice as long for the same bytes, so a
+         "battery saver" speed would cost MORE. See docs/GOTCHAS.md. -->
+    <div id="appDashPolicy" class="hidden">
+      <div class="${_DL_LABEL} mb-2">When to download</div>
+      <div class="${_DL_TILE} px-3 mb-5">
+        ${_appSetRow("Download over cellular", "Includes personal hotspots. A full library is many gigabytes.",
+          `<button id="appDashCell" class="${_APP_TGL}"></button>`)}
+        ${_appSetRow("Only while charging", "Resumes when you plug in and next open the app.",
+          `<button id="appDashChg" class="${_APP_TGL}"></button>`)}
+        ${_appSetRow("Pause below", "Battery level at which downloads stop, unless charging.",
+          `<select id="appDashFloor" class="flex-shrink-0 bg-gray-950 border border-gray-700 text-gray-100 text-xs font-bold px-2.5 py-2 rounded-none outline-none">
+            <option value="0">Off</option><option value="10">10%</option><option value="20">20%</option>
+            <option value="30">30%</option><option value="50">50%</option></select>`)}
+        <div id="appDashCost" class="text-[11px] text-gray-500 border-t border-gray-800 py-3 leading-snug"></div>
+      </div>
     </div>
 
-    <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;margin:2px 0 8px;">Playback</div>
-    <div style="border:1px solid #2a2a30;background:#141417;padding:13px 14px;margin-bottom:18px;">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
-        <div style="font-size:14px;font-weight:700;">Keep playing when locked</div>
-        <button id="appSetBgTgl" style="all:unset;cursor:pointer;min-width:52px;text-align:center;padding:8px 12px;
-          font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;"></button>
+    ${online ? `
+    <div class="${_DL_LABEL} mb-2">Keep downloads up to date</div>
+    <div class="${_DL_TILE} px-3 mb-5">
+      ${_appSetRow("While watching a series", "Removes episodes you have finished and keeps the next ones downloaded.",
+        tgl("appSetAutoTgl"),
+        "While connected to the server, finished (fully watched) episodes of a series you're watching are removed from this phone, and the next episodes are kept downloaded ahead of where you are. It counts episodes watched in the app and on the TV: whenever this phone reconnects it catches up from the server's watch history. Other shows' downloads are never touched.")}
+      <div id="appSetAutoOpts" class="pb-3">
+        <div class="${_DL_LABEL} mb-1.5">Keep downloaded ahead</div>
+        <select id="appSetAhead" class="${_APP_SELECT}">${aheadOpts}</select>
+        <div class="${_DL_LABEL} mt-3 mb-1.5">Quality</div>
+        <select id="appSetAutoQ" class="${_APP_SELECT}">${qOpts}</select>
+        <div class="text-[11px] text-gray-500 mt-1.5 leading-snug">If an episode doesn't have this quality, the best available is downloaded.</div>
+        <div class="${_DL_LABEL} mt-3 mb-1.5">Apply to</div>
+        <select id="appSetScope" class="${_APP_SELECT}">${scopeOpts}</select>
+        <div id="appSetScopeLabel" class="${_DL_LABEL} mt-3"></div>
+        <div id="appSetShows" class="border border-gray-800 max-h-60 overflow-y-auto mt-1.5"></div>
       </div>
-      <div style="font-size:12px;color:#8a8a92;margin-top:8px;line-height:1.45;">
-        Locking the phone or switching apps hands playback to the system player instead
-        of stopping it — audio keeps going, the lock-screen and Dynamic Island controls
-        stay live, and a connected monitor switches from mirroring to a direct video feed
-        so the picture survives the lock. Styled subtitles fall back to plain text while
-        locked.
-      </div>
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;">
-        <div style="font-size:14px;font-weight:700;">Keep the screen awake while playing</div>
-        <button id="appSetAwakeTgl" style="all:unset;cursor:pointer;min-width:52px;text-align:center;padding:8px 12px;
-          font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;"></button>
-      </div>
-      <div style="font-size:12px;color:#8a8a92;margin-top:8px;line-height:1.45;">
-        Stops the phone auto-locking while it is the screen showing the picture — which
-        also keeps a mirrored monitor alive, since mirroring dies with the phone's screen.
-        It does nothing while the glasses or a monitor are playing directly: that player
-        survives a lock on its own.
-      </div>
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;">
-        <div style="font-size:14px;font-weight:700;">Monitor feed while locked</div>
-        <button id="appSetExtTgl" style="all:unset;cursor:pointer;min-width:74px;text-align:center;padding:8px 12px;
-          font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;"></button>
-      </div>
-      <div style="font-size:12px;color:#8a8a92;margin-top:8px;line-height:1.45;">
-        A mirrored display is tied to the phone's screen, so locking the phone kills it.
-        Taking the display over is what breaks that link.
-        <b style="color:#c9c9cf;">Early</b> claims it the moment an episode starts: the monitor goes
-        <i>black</i> until you lock the phone, and that black screen is the proof it worked.
-        <b style="color:#c9c9cf;">Mirrored</b> leaves mirroring up and lets iOS route the video instead —
-        try it only if your adapter refuses Early.
-      </div>
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;">
-        <div style="font-size:14px;font-weight:700;">Monitor diagnostics</div>
-        <button id="appSetDiagBtn" style="all:unset;cursor:pointer;min-width:74px;text-align:center;padding:8px 12px;
-          font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#f2f2f4;
-          border:1px solid #3a7afe;">Read</button>
-      </div>
-      <div style="font-size:12px;color:#8a8a92;margin-top:8px;line-height:1.45;">
-        Records what the monitor handoff actually did at each step. Plug the monitor in,
-        start an episode, <b style="color:#c9c9cf;">lock the phone for ~20 seconds</b>, unlock, then press
-        Read. The run only counts if the trail contains a <b style="color:#c9c9cf;">locked+3s</b> row.
-        On that row <b style="color:#c9c9cf;">winScene=Y</b> and <b style="color:#c9c9cf;">mir=-</b> means the
-        takeover worked; <b style="color:#c9c9cf;">mir=Y</b> means the monitor was still mirroring the
-        lock screen.
-      </div>
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;">
-        <div style="font-size:14px;font-weight:700;">Send log to server</div>
-        <button id="appSetLogBtn" style="all:unset;cursor:pointer;min-width:74px;text-align:center;padding:8px 12px;
-          font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#f2f2f4;
-          border:1px solid #3a7afe;">Send</button>
-      </div>
-      <div style="font-size:12px;color:#8a8a92;margin-top:8px;line-height:1.45;">
-        The app keeps a diagnostic log on the device that survives restarts and covers
-        <b style="color:#c9c9cf;">on-device playback, downloaded bundles and the external
-        display</b>. Send it whenever something looks wrong. The server <b style="color:#c9c9cf;">keeps
-        every send</b> — it merges each upload into one running transcript per device rather
-        than replacing the last one, so sending often costs nothing and loses nothing. The
-        log is only cleared when someone reading it says so.
-      </div>
-      <pre id="appSetDiagOut" style="display:none;font-size:10px;line-height:1.4;color:#c9c9cf;background:#0d0d10;
-        border:1px solid #2a2a30;padding:10px;margin-top:10px;max-height:260px;overflow:auto;
-        white-space:pre;user-select:text;-webkit-user-select:text;"></pre>
     </div>
 
-    <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;margin:2px 0 8px;">Auto-manage downloads</div>
-    <div style="border:1px solid #2a2a30;background:#141417;padding:13px 14px;">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
-        <div style="font-size:14px;font-weight:700;">While watching a series</div>
-        <button id="appSetAutoTgl" style="all:unset;cursor:pointer;min-width:52px;text-align:center;padding:8px 12px;
-          font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;"></button>
-      </div>
-      <div style="font-size:12px;color:#8a8a92;margin-top:8px;line-height:1.45;">
-        While connected to the server, finished (fully watched) episodes of a series
-        you're watching are removed from this device, and the next episodes are kept
-        downloaded ahead of where you are. Applies to episodes watched in the app AND
-        on the TV — whenever this device reconnects it catches up from the server's
-        watch history. Other shows' downloads are never touched.
-      </div>
-      <div id="appSetAutoOpts" style="margin-top:13px;">
-        <div style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#8a8a92;margin-bottom:6px;">Keep downloaded ahead</div>
-        <select id="appSetAhead" style="${selStyle}">${aheadOpts}</select>
-        <div style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#8a8a92;margin:12px 0 6px;">Auto-download quality</div>
-        <select id="appSetAutoQ" style="${selStyle}">${qOpts}</select>
-        <div style="font-size:12px;color:#8a8a92;margin-top:7px;line-height:1.45;">If an episode doesn't have the chosen quality, the best available is downloaded.</div>
-        <div style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#8a8a92;margin:14px 0 6px;">Apply to</div>
-        <select id="appSetScope" style="${selStyle}">${scopeOpts}</select>
-        <div id="appSetScopeLabel" style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#8a8a92;margin:12px 0 0;"></div>
-        <div id="appSetShows" style="border:1px solid #2a2a30;max-height:240px;overflow-y:auto;margin-top:6px;"></div>
-      </div>
+    <div class="${_DL_LABEL} mb-2">Playback</div>
+    <div class="${_DL_TILE} px-3 mb-5">
+      ${_appSetRow("Keep playing when locked", "Audio carries on, with lock-screen controls.",
+        tgl("appSetBgTgl"),
+        "Locking the phone or switching apps hands playback to the system player instead of stopping it. Audio keeps going, the lock-screen and Dynamic Island controls stay live, and a connected monitor switches from mirroring to a direct video feed so the picture survives the lock. Styled subtitles fall back to plain text while locked.")}
+      ${_appSetRow("Keep the screen awake while playing", "Stops the phone locking itself mid-episode.",
+        tgl("appSetAwakeTgl"),
+        "Stops the phone auto-locking while it is the screen showing the picture, which also keeps a mirrored monitor alive, since mirroring dies with the phone's screen. It does nothing while glasses or a monitor are playing directly: that player survives a lock on its own.")}
+      ${_appSetRow("Monitor feed while locked", "How a connected monitor or glasses keep the picture.",
+        `<button id="appSetExtTgl" class="${_APP_TGL}"></button>`,
+        "A mirrored display is tied to the phone's screen, so locking the phone kills it. Taking the display over is what breaks that link. Early claims it the moment an episode starts: the monitor goes black until you lock the phone, and that black screen is the proof it worked. Mirrored leaves mirroring up and lets iOS route the video instead. Try Mirrored only if your adapter refuses Early.")}
     </div>
+
+    <div class="${_DL_LABEL} mb-2">Troubleshooting</div>
+    <div class="${_DL_TILE} px-3 mb-5">
+      ${_appSetRow("Send log to server", "Send it whenever something looks wrong. Nothing is lost by sending often.",
+        `<button id="appSetLogBtn" class="${_dlBtn("ghost")}">Send</button>`,
+        "The app keeps a diagnostic log on the phone that survives restarts and covers on-device playback, downloads and the external display. The server keeps every send: it merges each upload into one running transcript per device rather than replacing the last one. The log is only cleared when someone reading it says so.")}
+      ${_appSetRow("Monitor diagnostics", "What the monitor handoff did at each step.",
+        `<button id="appSetDiagBtn" class="${_dlBtn("ghost")}">Read</button>`,
+        "Plug the monitor in, start an episode, lock the phone for about 20 seconds, unlock, then press Read. The run only counts if the trail contains a locked+3s row. On that row winScene=Y and mir=- means the takeover worked; mir=Y means the monitor was still mirroring the lock screen.")}
+      <pre id="appSetDiagOut" class="hidden text-[10px] leading-snug text-gray-300 bg-gray-950 border border-gray-800 p-2.5 mb-3 max-h-64 overflow-auto"
+        style="white-space:pre;user-select:text;-webkit-user-select:text;"></pre>
+    </div>` : ""}
+
+    <div class="${_DL_LABEL} mb-2">About</div>
+    <div id="appAboutBox" class="${_DL_TILE} px-3 mb-2"></div>
   `;
-  document.body.appendChild(ov);
+  const $ = (sel) => root.querySelector(sel);
+
+  $("#appDashCell").addEventListener("click", () => _appSetPolicy({ allowCellular: !(_dlPolicy && _dlPolicy.allowCellular) }));
+  $("#appDashChg").addEventListener("click", () => _appSetPolicy({ chargerOnly: !(_dlPolicy && _dlPolicy.chargerOnly) }));
+  $("#appDashFloor").addEventListener("change", (e) => _appSetPolicy({ batteryFloor: parseInt(e.target.value, 10) || 0 }));
+  if (!online) return root;
+
   const paintTgl = () => {
     const on = _appAutoPrefs().on;
-    const t = ov.querySelector("#appSetAutoTgl");
-    t.textContent = on ? "On" : "Off";
-    t.style.background = on ? "#3a7afe" : "transparent";
-    t.style.color = on ? "#fff" : "#8a8a92";
-    t.style.border = on ? "1px solid #3a7afe" : "1px solid #2a2a30";
-    ov.querySelector("#appSetAutoOpts").style.opacity = on ? "1" : ".45";
+    _appTglPaint($("#appSetAutoTgl"), on);
+    $("#appSetAutoOpts").style.display = on ? "" : "none";
   };
-  // Background-playback toggles. Same visual language as the auto-manage switch.
   const paintPlaybackTgls = () => {
-    const p = _appPlaybackPrefs();
-    [["#appSetBgTgl", p.bg], ["#appSetAwakeTgl", p.awake]].forEach(([sel, on]) => {
-      const t = ov.querySelector(sel);
-      if (!t) return;
-      t.textContent = on ? "On" : "Off";
-      t.style.background = on ? "#3a7afe" : "transparent";
-      t.style.color = on ? "#fff" : "#8a8a92";
-      t.style.border = on ? "1px solid #3a7afe" : "1px solid #2a2a30";
-    });
+    const pr = _appPlaybackPrefs();
+    _appTglPaint($("#appSetBgTgl"), pr.bg);
+    _appTglPaint($("#appSetAwakeTgl"), pr.awake);
   };
   // Not a boolean — two named routes to the monitor, same visual language.
   const _EXT_LABEL = { early: "Early", route: "Mirrored" };
   const _EXT_NEXT  = { early: "route", route: "early" };
-  const paintExtTgl = () => {
-    const t = ov.querySelector("#appSetExtTgl");
-    if (!t) return;
-    t.textContent = _EXT_LABEL[_appPlaybackPrefs().ext] || "Early";
-    t.style.background = "transparent";
-    t.style.color = "#f2f2f4";
-    t.style.border = "1px solid #3a7afe";
-  };
+  const paintExtTgl = () => _appTglPaint($("#appSetExtTgl"), true, _EXT_LABEL[_appPlaybackPrefs().ext] || "Early");
   paintPlaybackTgls();
   paintExtTgl();
   // Monitor diagnostics. The readings that decide whether Direct mode ever took
   // the display over can only be taken while the phone is LOCKED, so the native
   // side buffers a trail and this just prints it back. Rendered as fixed-width
   // rows rather than raw JSON so it is legible on a phone and copyable by hand.
-  ov.querySelector("#appSetDiagBtn").onclick = async () => {
-    const out = ov.querySelector("#appSetDiagOut");
-    out.style.display = "block";
+  $("#appSetDiagBtn").onclick = async () => {
+    const out = $("#appSetDiagOut");
+    out.classList.remove("hidden");
     if (!(_cap && _cap.np && _cap.np.extDiag)) {
       out.textContent = "Not available — rebuild the app from Xcode to pick this up.";
       return;
@@ -23642,10 +24399,10 @@ function _appOpenAppSettings() {
       out.textContent = "Failed: " + (e && e.message ? e.message : String(e));
     }
   };
-  ov.querySelector("#appSetLogBtn").onclick = async () => {
-    const b = ov.querySelector("#appSetLogBtn");
-    const out = ov.querySelector("#appSetDiagOut");
-    out.style.display = "block";
+  $("#appSetLogBtn").onclick = async () => {
+    const b = $("#appSetLogBtn");
+    const out = $("#appSetDiagOut");
+    out.classList.remove("hidden");
     if (!(_cap && _cap.np && _cap.np.sendLog)) {
       // "Rebuild" was the wrong first guess and it cost an evening: the binary
       // was already current and self-reporting the right build, but the bridge
@@ -23678,20 +24435,20 @@ function _appOpenAppSettings() {
     }
     b.textContent = "Send"; b.disabled = false;
   };
-  ov.querySelector("#appSetExtTgl").onclick = () => {
+  $("#appSetExtTgl").onclick = () => {
     const next = _EXT_NEXT[_appPlaybackPrefs().ext] || "early";
     try { localStorage.setItem(_APP_EXTMODE_KEY, next); } catch (_) {}
     paintExtTgl();
     _npArm();   // the native side reads this at handoff, so re-push it now
   };
-  ov.querySelector("#appSetBgTgl").onclick = () => {
+  $("#appSetBgTgl").onclick = () => {
     const next = !_appPlaybackPrefs().bg;
     try { localStorage.setItem(_APP_BGPLAY_KEY, next ? "1" : "0"); } catch (_) {}
     paintPlaybackTgls();
     // Take effect immediately for the file already playing.
     if (next) _npArm(); else _npDisarm("bgplay-off");
   };
-  ov.querySelector("#appSetAwakeTgl").onclick = () => {
+  $("#appSetAwakeTgl").onclick = () => {
     const next = !_appPlaybackPrefs().awake;
     try { localStorage.setItem(_APP_AWAKE_KEY, next ? "1" : "0"); } catch (_) {}
     paintPlaybackTgls();
@@ -23699,81 +24456,224 @@ function _appOpenAppSettings() {
   };
   // Heading above the show picker changes meaning with the scope mode: in
   // all_except the picked shows are the exemptions; in none_except they're the
-  // only shows managed. (The picker itself sits inside #appSetAutoOpts, so it's
-  // already dimmed with the rest of the options when the feature is off.)
+  // only shows managed.
   const paintScopeLabel = () => {
-    const el = ov.querySelector("#appSetScopeLabel");
+    const el = $("#appSetScopeLabel");
     if (!el) return;
     el.textContent = _appAutoPrefs().mode === "none_except"
-      ? "Managed shows — only these are auto-managed"
-      : "Excluded shows — these are never auto-managed";
+      ? "Managed shows: only these"
+      : "Excluded shows: never these";
   };
   // (Re)build the tappable series list from the full library. Async because it
   // may lazily fetch /api/library if the cache is cold.
   const renderShows = async () => {
-    const box = ov.querySelector("#appSetShows");
+    const box = $("#appSetShows");
     if (!box) return;
-    box.innerHTML = `<div style="padding:11px 12px;font-size:12px;color:#8a8a92;">Loading shows…</div>`;
+    box.innerHTML = `<div class="px-3 py-2.5 text-xs text-gray-500">Loading shows…</div>`;
     const series = await _appScopeSeries();
-    if (!ov.isConnected) return;   // overlay closed while we waited
     if (!series.length) {
-      box.innerHTML = `<div style="padding:11px 12px;font-size:12px;color:#8a8a92;line-height:1.45;">No shows in your library yet.</div>`;
+      box.innerHTML = `<div class="px-3 py-2.5 text-xs text-gray-500">No shows in your library yet.</div>`;
       return;
     }
     const sel = _appAutoPrefs().shows;
     box.innerHTML = "";
+    const paintChk = (chk, on) => {
+      chk.className = "chk flex-shrink-0 w-6 h-6 border-2 flex items-center justify-center text-white text-xs "
+        + (on ? "bg-indigo-600 border-indigo-600" : "border-gray-600");
+      chk.innerHTML = on ? ic("check") : "";
+    };
     series.forEach((s, i) => {
-      const on = sel.has(s.id);
       const row = document.createElement("div");
-      row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;"
-        + "padding:11px 12px;cursor:pointer;" + (i ? "border-top:1px solid #2a2a30;" : "");
+      row.className = "flex items-center justify-between gap-3 px-3 py-2.5 cursor-pointer" + (i ? " border-t border-gray-800" : "");
       // The sub-line is the point of the row: one show, however many separate
       // downloads it arrived as.
       const sub = s.eps
-        ? `${s.eps} episode${s.eps === 1 ? "" : "s"}` + (s.items > 1 ? ` \u00b7 ${s.items} downloads` : "")
+        ? `${s.eps} episode${s.eps === 1 ? "" : "s"}` + (s.items > 1 ? ` · ${s.items} downloads` : "")
         : "";
       row.innerHTML = `
-        <div style="min-width:0;flex:1 1 auto;">
-          <div style="font-size:14px;font-weight:600;color:#f2f2f4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(s.title)}</div>
-          ${sub ? `<div style="font-size:11px;color:#8a8a92;margin-top:2px;">${escHtml(sub)}</div>` : ""}
+        <div class="min-w-0 flex-1">
+          <div class="text-sm font-semibold truncate">${escHtml(s.title)}</div>
+          ${sub ? `<div class="text-[11px] text-gray-500 mt-0.5">${escHtml(sub)}</div>` : ""}
         </div>
-        <div class="chk" style="flex:0 0 auto;width:20px;height:20px;border:1px solid ${on ? "#3a7afe" : "#2a2a30"};background:${on ? "#3a7afe" : "transparent"};"></div>`;
+        <div class="chk"></div>`;
+      paintChk(row.querySelector(".chk"), sel.has(s.id));
       row.addEventListener("click", () => {
         const cur = _appAutoPrefs().shows;
         if (cur.has(s.id)) cur.delete(s.id); else cur.add(s.id);
         try { localStorage.setItem(_APP_AUTOSHOWS_KEY, JSON.stringify([...cur])); } catch (_) {}
-        const nowOn = cur.has(s.id);
-        const chk = row.querySelector(".chk");
-        chk.style.border = "1px solid " + (nowOn ? "#3a7afe" : "#2a2a30");
-        chk.style.background = nowOn ? "#3a7afe" : "transparent";
+        paintChk(row.querySelector(".chk"), cur.has(s.id));
         _appAutoManage(); _appAutoSweep(500);   // re-apply with the new selection
       });
       box.appendChild(row);
     });
   };
+  root._renderShows = renderShows;
   paintTgl();
   paintScopeLabel();
-  renderShows();
-  ov.querySelector("#appSetClose").addEventListener("click", () => ov.remove());
-  ov.querySelector("#appSetAutoTgl").addEventListener("click", () => {
+  $("#appSetAutoTgl").addEventListener("click", () => {
     const on = !_appAutoPrefs().on;
     try { localStorage.setItem(_APP_AUTOMG_KEY, on ? "1" : "0"); } catch (_) {}
     paintTgl();
-    if (on) { _appAutoManage(); _appAutoSweep(500); }   // apply immediately
+    if (on) { renderShows(); _appAutoManage(); _appAutoSweep(500); }   // apply immediately
   });
-  ov.querySelector("#appSetAhead").addEventListener("change", (e) => {
+  $("#appSetAhead").addEventListener("change", (e) => {
     try { localStorage.setItem(_APP_AHEAD_KEY, e.target.value); } catch (_) {}
     _appAutoManage();
   });
-  ov.querySelector("#appSetAutoQ").addEventListener("change", (e) => {
+  $("#appSetAutoQ").addEventListener("change", (e) => {
     try { localStorage.setItem(_APP_AUTOQ_KEY, e.target.value); } catch (_) {}
   });
-  ov.querySelector("#appSetScope").addEventListener("change", (e) => {
+  $("#appSetScope").addEventListener("change", (e) => {
     const mode = e.target.value === "none_except" ? "none_except" : "all_except";
     try { localStorage.setItem(_APP_AUTOSCOPE_KEY, mode); } catch (_) {}
     paintScopeLabel();
     _appAutoManage(); _appAutoSweep(500);   // scope changed — re-apply
   });
+  return root;
+}
+
+// Paint the parts of the App tab that change: who this phone is, the download
+// policy, the versions. Called on every switch to the tab and whenever the
+// server, the account or the connection changes underneath it.
+async function _appTabShow() {
+  const root = _appTabBuild();
+  if (!root) return;
+  const st = _appConnState();
+  const rec = _dev.servers[_srvId] || null;
+  const u = _devUser();
+  const online = !_appOffline;
+  const isPrimary = !!_srvId && _dev.primary === _srvId;
+  const addr = String((rec && rec.url) || _appHostOrigin() || "").replace(/^http:\/\//, "");
+  const guest = online && u && profile.id && profile.id !== u.id;
+  const av = u
+    ? `<div class="w-10 h-10 ${avatarBg(u.color)} flex items-center justify-center text-base font-black text-white flex-shrink-0">${escHtml((u.name || "?").charAt(0).toUpperCase())}</div>`
+    : `<div class="w-10 h-10 border-2 border-dashed border-gray-700 flex items-center justify-center text-base font-black text-gray-600 flex-shrink-0">?</div>`;
+  // Every other server this phone knows, with what it holds from each.
+  const per = new Map();
+  if (_cap && _cap.dl) {
+    try {
+      for (const it of ((await _cap.dl.list()).items || [])) {
+        if (it.itemId === _APP_PLAYER_KEY || !it.complete) continue;
+        const sid = _appBundleServer(it);
+        const p = per.get(sid) || { n: 0, bytes: 0 };
+        p.n++; p.bytes += it.bytesTotal || it.bytesDone || 0;
+        per.set(sid, p);
+      }
+    } catch (_) {}
+  }
+  const others = Object.values(_dev.servers).filter((r) => r && r.id !== _srvId)
+    .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+  const box = root.querySelector("#appIdentBox");
+  if (box) box.innerHTML = `
+    <div class="${_DL_TILE} p-3">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 bg-gray-800 flex items-center justify-center text-lg text-gray-400 flex-shrink-0">${ic("server")}</div>
+        <div class="min-w-0 flex-1">
+          <div class="${_DL_LABEL}">Server${isPrimary ? ` <span class="text-indigo-400">· opens at launch</span>` : ""}</div>
+          <div class="text-base font-black uppercase tracking-wide truncate leading-tight">${escHtml(_srvName || "Unknown")}</div>
+          <div class="flex items-center gap-1.5 mt-1 min-w-0">
+            <span class="w-2 h-2 flex-shrink-0 ${st.dot}"></span>
+            <span class="text-[10px] font-black uppercase tracking-wide ${st.text} flex-shrink-0">${st.label}</span>
+            <span class="text-[11px] text-gray-600 truncate">${escHtml(addr)}</span>
+          </div>
+        </div>
+      </div>
+      ${(!isPrimary && _srvId && online) ? `<div class="mt-3 flex items-center gap-3">
+        <div class="min-w-0 flex-1 text-[11px] text-gray-500 leading-snug">The app opens
+          <b class="text-gray-300">${escHtml(_devServerName(_dev.primary))}</b> at launch, not this server.</div>
+        <button onclick="_appMakePrimary()" class="${_dlBtn("ghost")}">Make this my server</button></div>` : ""}
+      <div class="flex items-center gap-3 mt-3 pt-3 border-t border-gray-800">
+        ${av}
+        <div class="min-w-0 flex-1">
+          <div class="${_DL_LABEL}">Account on this phone</div>
+          <div class="text-base font-black uppercase tracking-wide truncate leading-tight">${escHtml(u ? u.name : "Not set")}</div>
+          <div class="text-[11px] text-gray-500 mt-1 leading-snug">${u
+            ? `The app opens as this account${u.has_pin ? ", and remembers its PIN" : ""}. Downloads and anything watched with no connection are kept for it.`
+            : "Sign in on this server once and that account becomes this phone's."}</div>
+        </div>
+      </div>
+      ${guest ? `<div class="mt-3 px-3 py-2 bg-amber-950/40 border border-amber-900">
+        <div class="text-[11px] text-amber-300 leading-snug">Signed in right now as <b class="font-black uppercase">${escHtml(profile.name)}</b>.
+          What you watch while connected goes to that account.</div>
+        <div class="flex flex-wrap gap-2 mt-2">
+          <button onclick="_appBackToPinned()" class="${_dlBtn("primary")}">Back to ${escHtml(u.name)}</button>
+          <button onclick="_appRepin()" class="${_dlBtn("ghost")}">Make ${escHtml(profile.name)} this phone's account</button>
+        </div></div>` : ""}
+      ${online ? `<div class="flex flex-wrap gap-2 mt-3 pt-3 border-t border-gray-800">
+        <button onclick="showProfilePicker()" class="${_dlBtn("ghost")}">Switch account</button>
+        <button onclick="_appChangeServer()" class="${_dlBtn("ghost")}">Connect to a different server</button>
+      </div>` : `<div class="flex flex-wrap gap-2 mt-3 pt-3 border-t border-gray-800">
+        <button onclick="_appOfflineTryReconnect(true)" class="${_dlBtn("primary")}">Reconnect</button>
+        <button onclick="_appGoSettings()" class="${_dlBtn("ghost")}">Choose a server</button>
+      </div>`}
+    </div>
+    ${others.length ? `<div class="${_DL_LABEL} mt-4 mb-2">Other servers this phone has used</div>
+      <div class="${_DL_TILE} px-3">${others.map((r) => {
+        const p = per.get(r.id);
+        const ru = (r.user && r.user.name) ? `Account: ${escHtml(r.user.name)}` : "No account set";
+        return `<div class="${_APP_SET_ROW}">
+          <div class="min-w-0 flex-1">
+            ${r.id === _dev.primary ? `<div class="text-[10px] font-black uppercase tracking-widest text-indigo-400">Opens at launch</div>` : ""}
+            <div class="text-sm font-black uppercase tracking-wide truncate">${escHtml(r.name || r.url || "Server")}</div>
+            <div class="text-[11px] text-gray-500 mt-0.5 truncate">${ru}${p ? ` · ${p.n} download${p.n === 1 ? "" : "s"}, ${fmtSize(p.bytes)}` : ""}</div>
+          </div>
+          ${r.url ? `<button onclick="_dlConnectTo(${_dlJ(r.id)})" class="${_dlBtn("ghost")}">Connect</button>` : ""}
+        </div>`;
+      }).join("")}</div>` : ""}`;
+
+  // Download policy (native; an older shell has none and the section stays hidden).
+  if (_dlHasPolicy) { try { _dlPolicy = await _cap.dl.getPolicy(); } catch (_) {} }
+  _appRenderPolicy();
+
+  // Versions. The app's own, and the server it is talking to.
+  const about = root.querySelector("#appAboutBox");
+  if (about) {
+    let inst = null;
+    try { inst = isApp ? await _appInstalledVersion() : null; } catch (_) {}
+    const page = (document.querySelector("[data-ui-version]") || {}).textContent || "";
+    const appV = inst ? (inst.exact ? inst.v : "older than 19.5.0") : "development build";
+    about.innerHTML = `
+      ${_appSetRow("App", isApp ? escHtml(appV) : "Not running inside the app",
+        _appUpd ? `<button onclick="_appUpdExplain()" class="${_dlBtn("primary")}">Update to ${escHtml(_appUpd.latest)}</button>` : "")}
+      ${online
+        ? _appSetRow(escHtml(_srvName || "Server"), `StreamLink ${escHtml(page || _srvVersion || "")}`, "")
+        : _appSetRow("Offline player", `StreamLink ${escHtml(page)}, the copy saved on this phone`, "")}`;
+  }
+  if (online && _appAutoPrefs().on && root._renderShows && !root.dataset.shows) {
+    root.dataset.shows = "1";
+    root._renderShows();
+  }
+}
+
+// Leave this server for another. The only thing in the app that disconnects:
+// it hands off to the shell's Connect screen, which owns finding servers.
+function _appChangeServer() {
+  if (!isApp) return;
+  if (!window.confirm(`Disconnect from ${_srvName || "this server"} and choose a different one? Downloads in progress stop until you come back.`)) return;
+  _appGoSettings();
+}
+// A shared account was signed in for a while; go back to the phone's own.
+async function _appBackToPinned() {
+  const u = _devUser();
+  if (!u) return;
+  let list = allProfiles;
+  try { list = await fetchProfiles(); } catch (_) {}
+  const p = (list || []).find((x) => x.id === u.id);
+  if (!p) { showAlert(`${u.name} is no longer an account on ${_srvName}.`, "error"); return; }
+  // The remembered PIN proof, if the server still honours it.
+  if (p.has_pin && u.token && _verifiedProfileId !== p.id) {
+    setProfileToken(u.token, _PIN_REMEMBER_MAXAGE);
+    try { await fetchProfiles(); } catch (_) {}
+  }
+  if (p.has_pin && _verifiedProfileId !== p.id) { openPinPrompt(p); return; }
+  _doSelectProfile(p);
+}
+function _appRepin() {
+  const u = _devUser();
+  if (!profile.id) return;
+  if (!window.confirm(`Make ${profile.name} this phone's account on ${_srvName}?\n\nFrom now on the app opens as ${profile.name}, and downloads and offline watching are kept for ${profile.name}.${u ? ` What ${u.name} already watched offline is still sent to ${u.name}'s history.` : ""}`)) return;
+  _appPinUser(profile);
+  _appFlushOfflineProgress();
 }
 
 // Full-library SHOW list for the scope picker: one row per show, as
@@ -23882,7 +24782,10 @@ async function _appAutoManageRun(itemId, filePath, pi) {
 async function _appAutoSeriesFiles(seriesKey) {
   let files = null;
   try {
-    const pid = profile.id ? `?profile_id=${encodeURIComponent(profile.id)}` : "";
+    // The PINNED account's progress: the downloads on this phone are that
+    // account's, whoever happens to be signed in (see _appOfflinePid).
+    const who = _appOfflinePid();
+    const pid = who ? `?profile_id=${encodeURIComponent(who)}` : "";
     const r = await fetch(`/api/library/series/${encodeURIComponent(seriesKey)}${pid}`,
                           {});
     if (!r.ok) return null;
@@ -28010,7 +28913,7 @@ function _lpSaveLocalTracks(what) {
         try {
           await _cap.os.saveProgress({
             itemId, filePath, positionSec: pos, durationSec: dur,
-            profileId: _lpProfileId(),
+            profileId: _lpProfileId(), serverId: _srvId,
             localAudioIdx: audioIdx == null ? undefined : audioIdx,
             audioSel: audioSel || undefined,
             // Subtitle fields only for subtitle-triggered saves — an audio
@@ -31353,9 +32256,12 @@ document.addEventListener("DOMContentLoaded",async()=>{
   _renderOnlineBadge();
   _renderSearchModeToggle();  // paint the Smart/Classic search toggle from the saved pref
   _applyPhoneLandLayout();   // position the footer fullscreen btn for the current orientation
-  // iOS app: add the always-on app nav (Downloads / Change server), subscribe to BundleDownloader
-  // events + hydrate the offline-download state. All no-ops in a plain browser.
-  _appInitNav();
+  // iOS app: the bottom tab bar, which server this is and whose phone, then
+  // subscribe to BundleDownloader events + hydrate the offline-download state.
+  // All no-ops in a plain browser.
+  _appTabsInit();
+  _appIdentBoot();
+  _appShellProbe();
   _appInitOfflineBundles();
   // iOS: subscribe to the background player's events (ended / advanced / a
   // display appearing or going away). No-op in a plain browser.
@@ -31436,6 +32342,10 @@ document.addEventListener("DOMContentLoaded",async()=>{
   // _tvApplyStartVolume). No-op everywhere else.
   _tvRefreshStartVolume();
 
+  // The app opens as the account pinned to this phone. Needs to know which
+  // server this is first; for one it has used before that takes no network.
+  if (isApp) { try { await _appIdentBoot(); } catch(_){} _appAdoptPinned(); }
+
   // Restore profile from localStorage
   let saved=localStorage.getItem("streamlink_profile");
   // Self-heal corrupt values (a pre-7.8.1 bug persisted the string "undefined",
@@ -31453,7 +32363,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
       try{
         const profiles=await fetchProfiles();
         const found=profiles.find(x=>x.id===p.id);
-        if(found){ profile=found; applySimpleUi(); renderNavProfile(); applyMaxVolumeToSliders(); loadSearchIndexers(); _appSyncSetProfile(); _appFlushOfflineProgress(); connectSSE(); _appProxiedAutoPlay(); _maybePromptForPin(found); loadBookmarks(); if(activeTab==="library") loadLibrary(); _qaFlush(); return; }
+        if(found){ profile=found; applySimpleUi(); renderNavProfile(); applyMaxVolumeToSliders(); loadSearchIndexers(); _appAfterProfile(); _appFlushOfflineProgress(); connectSSE(); _appProxiedAutoPlay(); _maybePromptForPin(found); loadBookmarks(); if(activeTab==="library") loadLibrary(); _qaFlush(); return; }
         // Saved profile no longer exists on the server (deleted/renamed id).
         if(window.__appShowError) window.__appShowError("Saved profile id "+p.id+" not found among "+profiles.length+" server profiles.");
       } catch(e){
@@ -31469,6 +32379,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">19.14.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.0.0</div>
 </body>
 </html>

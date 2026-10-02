@@ -1571,6 +1571,16 @@ _admin_sessions: dict[str, float] = {}   # token → expiry Unix timestamp
 PROFILE_SESSIONS_FILE = Path(__file__).parent / "profile_sessions.json"
 _profile_sessions: dict[str, dict] = {}
 PROFILE_SESSION_TTL = 12 * 3600          # 12 h — a viewing session, not a login
+# A REMEMBERED session (20.0.0). The iOS app pins one account to the phone and
+# opens straight into it; asking that person for their PIN twice a day on their
+# own phone is the app being forgetful, not careful. verify-pin issues one of
+# these only when asked (`remember`), and the app asks only for the pinned
+# account. It slides: used within its life, it is extended, so a phone in use is
+# never asked again, and one left in a drawer for six months is.
+# What still ends it: changing or clearing the profile's PIN (see
+# _revoke_profile_sessions), deleting the profile, or deleting profile_sessions.json.
+PROFILE_REMEMBER_TTL = 180 * 86400
+PROFILE_REMEMBER_RENEW_AFTER = 7 * 86400   # extend at most weekly: each one is a file write
 
 
 def _load_profile_sessions() -> None:
@@ -1597,16 +1607,33 @@ def _save_profile_sessions() -> None:
         log.warning("Could not persist profile sessions: %s", e)
 
 
-def _new_profile_session(profile_id: str) -> str:
-    """Mint a PIN-verified session token for `profile_id` (and reap expired ones)."""
+def _new_profile_session(profile_id: str, remember: bool = False) -> str:
+    """Mint a PIN-verified session token for `profile_id` (and reap expired ones).
+    `remember` issues the long, sliding kind - see PROFILE_REMEMBER_TTL."""
     now = time.time()
     for t, meta in list(_profile_sessions.items()):
         if meta["expires"] <= now:
             _profile_sessions.pop(t, None)
     token = secrets.token_hex(32)
-    _profile_sessions[token] = {"profile_id": profile_id, "expires": now + PROFILE_SESSION_TTL}
+    meta = {"profile_id": profile_id,
+            "expires": now + (PROFILE_REMEMBER_TTL if remember else PROFILE_SESSION_TTL)}
+    if remember:
+        meta["remember"] = True
+    _profile_sessions[token] = meta
     _save_profile_sessions()
     return token
+
+
+def _revoke_profile_sessions(profile_id: str) -> int:
+    """End every session proved with `profile_id`'s PIN. Called when that PIN is
+    changed or cleared: a token is proof the OLD PIN was known, and since 20.0.0
+    one can live for months."""
+    dead = [t for t, meta in _profile_sessions.items() if meta.get("profile_id") == profile_id]
+    for t in dead:
+        _profile_sessions.pop(t, None)
+    if dead:
+        _save_profile_sessions()
+    return len(dead)
 
 
 PROFILE_TOKEN_COOKIE = "streamlink_profile_token"
@@ -1631,9 +1658,15 @@ def _profile_session_id(request: Request) -> Optional[str]:
     meta = _profile_sessions.get(tok)
     if not meta:
         return None
-    if time.time() > meta["expires"]:
+    now = time.time()
+    if now > meta["expires"]:
         _profile_sessions.pop(tok, None)
         return None
+    # A remembered session slides. Extended at most weekly, so the file is not
+    # rewritten on every request.
+    if meta.get("remember") and meta["expires"] - now < PROFILE_REMEMBER_TTL - PROFILE_REMEMBER_RENEW_AFTER:
+        meta["expires"] = now + PROFILE_REMEMBER_TTL
+        _save_profile_sessions()
     return meta["profile_id"]
 
 # ── Outbound HTTP clients ─────────────────────────────────────────────────────
@@ -15740,6 +15773,7 @@ async def delete_profile(request: Request, profile_id: str) -> JSONResponse:
             dvp = item.get("default_visible_profiles", [])
             if profile_id in dvp:
                 dvp.remove(profile_id)
+    _revoke_profile_sessions(profile_id)
     return JSONResponse({"ok": True})
 
 
@@ -26947,6 +26981,8 @@ async def set_profile_pin(profile_id: str, request: Request, req: ProfilePinReq)
             profile["pin_hash"] = _pin_hash(pin)
         else:
             profile.pop("pin_hash", None)
+    # Every session proved with the old PIN ends here, remembered ones included.
+    _revoke_profile_sessions(profile_id)
     return JSONResponse({"ok": True, "has_pin": bool(pin)})
 
 
@@ -26984,6 +27020,9 @@ async def set_profile_indexers(profile_id: str, request: Request, req: ProfileIn
 
 class PinLoginReq(BaseModel):
     pin: str
+    # The iOS app, for the account pinned to that phone: a long sliding session
+    # instead of the 12 h one. See PROFILE_REMEMBER_TTL.
+    remember: bool = False
 
 # ── PIN attempt throttling ────────────────────────────────────────────────────
 # A 6-digit PIN is a 1,000,000-key space and verify-pin is an unauthenticated
@@ -27078,9 +27117,11 @@ async def verify_profile_pin(
     # Hand back a session token as PROOF the PIN was entered. The client sends it
     # as X-Profile-Token; it is what actually unlocks admin-locked content and the
     # delete endpoints (see _is_elevated / _require_delete_auth).
-    _tok = _new_profile_session(profile["id"])
+    _ttl = PROFILE_REMEMBER_TTL if req.remember else PROFILE_SESSION_TTL
+    _tok = _new_profile_session(profile["id"], remember=req.remember)
     resp = JSONResponse({"token": _tok,
-                         "expires_in": PROFILE_SESSION_TTL,
+                         "expires_in": _ttl,
+                         "remembered": bool(req.remember),
                          "profile": {
         "id": profile["id"],
         "name": profile["name"],
@@ -27097,7 +27138,7 @@ async def verify_profile_pin(
     # Deliberately NOT `secure`: this appliance is served over plain HTTP as well
     # as HTTPS on the same host, and a Secure cookie would be withheld from the
     # HTTP origin — which is exactly the split this cookie exists to close.
-    resp.set_cookie(PROFILE_TOKEN_COOKIE, _tok, max_age=PROFILE_SESSION_TTL,
+    resp.set_cookie(PROFILE_TOKEN_COOKIE, _tok, max_age=_ttl,
                     path="/", samesite="lax")
     return resp
 

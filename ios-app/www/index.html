@@ -24,6 +24,18 @@
   this local page is the offline entry point. A "View downloads (offline)" button
   is always available too.
 
+  20.0.0: the phone has ONE server it opens at launch (the "primary") and one
+  account pinned to each server it uses. Both live in the native OfflineStore
+  (kvGet "device"), written by the dashboard, because this page, the host's
+  dashboard and the loopback offline player share no localStorage. This page
+  only reads it: launch goes to the primary's address (falling back to the last
+  address used, on a phone that has not been set up yet), the list marks which
+  server is the phone's own and whose account it opens as, and every hand-off
+  to a host carries ?launch=1, which is what tells the dashboard to open as the
+  pinned account. `?connect=<url>` (from the dashboard's "Connect" on another
+  server) connects straight to that address without changing the primary.
+  Styled to match the dashboard: same Metro palette, square, uppercase labels.
+
   The Capacitor native bridge (window.Capacitor + native plugins such as
   LocalMediaServer / BundleDownloader) is injected at the WebView level, so it
   remains available on the remote host page after navigation — that is what lets
@@ -38,31 +50,34 @@
   <title>StreamLink</title>
   <style>
     :root {
-      --bg:#0b0b0d; --panel:#141417; --line:#2a2a30; --fg:#f2f2f4;
-      --muted:#8a8a92; --accent:#3a7afe; --accent-press:#2c63d6; --danger:#e0533d;
+      /* The dashboard's palette (Tailwind gray-950/900/800, indigo-600). */
+      --bg:#030712; --panel:#111827; --line:#1f2937; --line2:#374151; --fg:#f3f4f6;
+      --muted:#6b7280; --accent:#4f46e5; --accent-press:#4338ca; --danger:#dc2626; --ok:#22c55e;
     }
     * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
     html,body { margin:0; height:100%; }
     body {
       background:var(--bg); color:var(--fg);
-      font-family:-apple-system,"Segoe UI",Roboto,sans-serif;
+      font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
       display:flex; flex-direction:column; min-height:100%;
       padding:max(env(safe-area-inset-top),24px) 22px
               max(env(safe-area-inset-bottom),24px);
     }
     .brand {
-      font-weight:800; letter-spacing:.14em; text-transform:uppercase;
-      font-size:13px; color:var(--muted); margin-bottom:6px;
+      font-weight:900; letter-spacing:.06em; text-transform:uppercase;
+      font-size:18px; color:var(--fg); margin-bottom:22px;
     }
-    h1 { font-size:30px; font-weight:800; letter-spacing:-.01em; margin:0 0 4px; }
+    .brand b { color:#6366f1; font-weight:900; }
+    .eyebrow { font-size:11px; font-weight:900; letter-spacing:.14em; text-transform:uppercase; color:var(--muted); }
+    h1 { font-size:26px; font-weight:900; letter-spacing:.03em; text-transform:uppercase; margin:0 0 6px; }
     .sub { color:var(--muted); font-size:14px; margin:0 0 28px; line-height:1.45; }
 
     label {
-      display:block; font-size:11px; font-weight:700; letter-spacing:.12em;
+      display:block; font-size:11px; font-weight:900; letter-spacing:.14em;
       text-transform:uppercase; color:var(--muted); margin:18px 0 8px;
     }
     input {
-      width:100%; background:var(--panel); border:1px solid var(--line);
+      width:100%; background:var(--panel); border:1px solid var(--line2);
       color:var(--fg); font-size:17px; padding:15px 14px; border-radius:0;
       outline:none; -webkit-appearance:none;
     }
@@ -71,16 +86,16 @@
 
     button {
       -webkit-appearance:none; border:0; border-radius:0; width:100%;
-      font-size:15px; font-weight:800; letter-spacing:.08em; text-transform:uppercase;
+      font-size:14px; font-weight:900; letter-spacing:.06em; text-transform:uppercase;
       padding:16px; margin-top:26px; cursor:pointer; color:#fff; background:var(--accent);
     }
     button:active { background:var(--accent-press); }
-    button.ghost { background:transparent; color:var(--muted); border:1px solid var(--line); margin-top:12px; }
-    button.ghost:active { background:var(--panel); }
+    button.ghost { background:#1f2937; color:#d1d5db; border:1px solid var(--line2); margin-top:12px; }
+    button.ghost:active { background:#374151; }
 
     .err {
-      display:none; background:rgba(224,83,61,.12); border:1px solid var(--danger);
-      color:#ffb3a5; font-size:13px; padding:12px 14px; margin-top:18px; line-height:1.45;
+      display:none; background:rgba(127,29,29,.35); border:1px solid #7f1d1d;
+      color:#fca5a5; font-size:13px; padding:12px 14px; margin-top:18px; line-height:1.45;
     }
     .err.show { display:block; }
 
@@ -95,12 +110,14 @@
       display:block; text-align:left; background:var(--panel); border:1px solid var(--line);
       margin:0 0 8px; padding:14px; text-transform:none; letter-spacing:0;
     }
-    button.srv:active { background:#1c1c21; border-color:var(--accent); }
-    .srv .n { font-size:17px; font-weight:800; color:var(--fg); word-break:break-word; }
+    button.srv:active { background:#1f2937; border-color:var(--accent); }
+    button.srv.mine { border-left:4px solid var(--accent); }
+    .srv .n { font-size:16px; font-weight:900; letter-spacing:.04em; text-transform:uppercase; color:var(--fg); word-break:break-word; }
     .srv .a { font-size:12px; font-weight:500; color:var(--muted); margin-top:5px; word-break:break-all; }
+    .srv .u { font-size:12px; font-weight:600; color:#9ca3af; margin-top:4px; }
     .srv .tag {
-      display:inline-block; font-size:10px; font-weight:800; letter-spacing:.1em; text-transform:uppercase;
-      color:var(--accent); border:1px solid var(--accent); padding:2px 6px; margin-left:8px; vertical-align:2px;
+      display:block; font-size:10px; font-weight:900; letter-spacing:.14em; text-transform:uppercase;
+      color:#818cf8; margin-bottom:4px;
     }
     .lstatus { font-size:12px; color:var(--muted); line-height:1.45; min-height:17px; }
     button.small { padding:11px; font-size:12px; margin-top:10px; }
@@ -116,8 +133,11 @@
       animation:pulse 1s ease-in-out infinite;
     }
     @keyframes pulse { 0%,100%{opacity:.3} 50%{opacity:1} }
-    .target { font-size:14px; color:var(--fg); word-break:break-all; margin-bottom:4px; }
-    .cstatus { font-size:12px; color:var(--muted); min-height:16px; margin-bottom:8px; }
+    .target { font-size:22px; font-weight:900; letter-spacing:.04em; text-transform:uppercase; color:var(--fg); word-break:break-word; margin:6px 0 4px; }
+    .who { font-size:13px; color:#9ca3af; min-height:17px; }
+    .who b { color:var(--fg); font-weight:900; text-transform:uppercase; letter-spacing:.04em; }
+    .caddr { font-size:12px; color:var(--muted); word-break:break-all; margin-top:6px; }
+    .cstatus { font-size:12px; color:var(--muted); min-height:16px; margin:14px 0 8px; }
   </style>
   <!-- Capacitor web runtime (registerPlugin + Plugins proxy → native bridge).
        Vendored from node_modules/@capacitor/core/dist/capacitor.js. -->
@@ -127,16 +147,18 @@
   <!-- ── Connecting interstitial (shown when a saved server exists) ── -->
   <div id="connecting">
     <div class="dot"></div>
-    <div class="brand">Connecting to</div>
+    <div class="eyebrow">Connecting to</div>
     <div class="target" id="connectTarget"></div>
+    <div class="who" id="connectWho"></div>
+    <div class="caddr" id="connectAddr"></div>
     <div class="cstatus" id="connectStatus"></div>
-    <button id="downloadsBtn2" style="max-width:280px">View offline downloads</button>
-    <button class="ghost" id="changeBtn" style="max-width:280px">Change server</button>
+    <button id="downloadsBtn2" style="max-width:280px">Open downloads</button>
+    <button class="ghost" id="changeBtn" style="max-width:280px">Choose a server</button>
   </div>
 
   <!-- ── First-run / change-server form ── -->
   <div id="form" style="display:flex; flex-direction:column; flex:1 1 auto;">
-    <div class="brand">StreamLink</div>
+    <div class="brand"><b>Stream</b>Link</div>
     <h1>Connect</h1>
     <p class="sub" id="sub">Enter the address of your StreamLink host. You can find it in
       the dashboard&rsquo;s footer or your <code>run.py</code> output
@@ -159,7 +181,7 @@
     <div class="err" id="err"></div>
 
     <button id="connect">Connect</button>
-    <button class="ghost" id="downloadsBtn">View downloads (offline)</button>
+    <button class="ghost" id="downloadsBtn">Open downloads</button>
 
     <div class="spacer"></div>
     <div class="foot">
@@ -183,6 +205,41 @@
     const $ = (id) => document.getElementById(id);
     const formEl = $("form"), connEl = $("connecting");
     let redirectTimer = null;
+
+    // The phone's servers and the account pinned to each, as the dashboard
+    // keeps them (see the header). Read-only here. Empty on a phone that has
+    // not been set up, and on a shell older than 20.0.0.
+    let REG = { primary: "", servers: {} };
+    const downloads = new Map();     // server id → how many downloads the phone holds from it
+    async function loadReg() {
+      const os = plugin("OfflineStore");
+      if (os) {
+        try {
+          const v = (await os.kvGet({ key: "device" })).value;
+          if (v && typeof v === "object" && v.servers && typeof v.servers === "object") {
+            REG = { primary: v.primary || "", servers: v.servers };
+          }
+        } catch (_) {}
+      }
+      const dl = plugin("BundleDownloader");
+      if (dl) {
+        try {
+          for (const it of ((await dl.list()).items || [])) {
+            if (it.itemId === "__player__" || !it.complete) continue;
+            const sid = (it.meta && it.meta.server_id) || REG.primary || "";
+            if (sid) downloads.set(sid, (downloads.get(sid) || 0) + 1);
+          }
+        } catch (_) {}
+      }
+    }
+    function regFor(url) {
+      for (const id in REG.servers) {
+        const r = REG.servers[id];
+        if (r && (r.url === url || (r.urls || []).includes(url))) return r;
+      }
+      return null;
+    }
+    function primaryRec() { return (REG.primary && REG.servers[REG.primary]) || null; }
 
     // Native plugin accessor (Capacitor).
     function plugin(name) {
@@ -226,10 +283,22 @@
 
     // ── Remembered servers ──
     function loadServers() {
+      let list = [];
       try {
         const v = JSON.parse(localStorage.getItem(KEY_SERVERS) || "[]");
-        return Array.isArray(v) ? v.filter((r) => r && Array.isArray(r.urls)) : [];
-      } catch (_) { return []; }
+        list = Array.isArray(v) ? v.filter((r) => r && Array.isArray(r.urls)) : [];
+      } catch (_) {}
+      // What the dashboard learned about each server (every address it reported)
+      // counts too: it is how a server first connected to by a typed address
+      // can still be followed when that address stops answering.
+      for (const id in REG.servers) {
+        const r = REG.servers[id];
+        if (!r || !r.url || id.indexOf("url:") === 0) continue;
+        let rec = list.find((x) => x.id === id);
+        if (!rec) { rec = { id, name: r.name || "", url: r.url, urls: [], seen: r.seen || 0 }; list.push(rec); }
+        for (const u of [r.url].concat(r.urls || [])) if (u && !rec.urls.includes(u)) rec.urls.push(u);
+      }
+      return list;
     }
 
     // Every address a probe result says the server answers at. `addrs` are bare
@@ -310,31 +379,45 @@
       }
       const savedId = (recordFor(saved) || {}).id || "";
       const isLast = (s) => s.url === saved || (!!s.id && s.id === savedId);
+      const isMine = (s) => !!REG.primary && ((!!s.id && s.id === REG.primary) || (regFor(s.url) || {}).id === REG.primary);
       return [...groups.values()]
-        .map((s) => ({ s, last: !!saved && isLast(s) }))
-        .sort((a, b) => (b.last - a.last) || (a.s.name || a.s.url).localeCompare(b.s.name || b.s.url));
+        .map((s) => ({ s, mine: isMine(s), last: !!saved && isLast(s) }))
+        .sort((a, b) => (b.mine - a.mine) || (b.last - a.last) || (a.s.name || a.s.url).localeCompare(b.s.name || b.s.url));
     }
     const VIA = { wifi: "Wi-Fi", tailscale: "Tailscale", vpn: "VPN" };
 
     function renderServers() {
       const box = $("servers");
       box.textContent = "";
-      for (const { s, last } of groupServers()) {
+      for (const { s, mine, last } of groupServers()) {
         const b = document.createElement("button");
-        b.className = "srv";
+        b.className = "srv" + (mine ? " mine" : "");
+        // Which server is this phone's own, and which was merely used last.
+        if (mine || last) {
+          const t = document.createElement("span");
+          t.className = "tag"; t.textContent = mine ? "This phone's server" : "Last used";
+          b.appendChild(t);
+        }
         const n = document.createElement("div");
         n.className = "n";
         n.textContent = s.name || "StreamLink";
-        if (last) {
-          const t = document.createElement("span");
-          t.className = "tag"; t.textContent = "Last used";
-          n.appendChild(t);
+        b.appendChild(n);
+        // Whose account it opens as, and what the phone already holds from it.
+        const rec = (s.id && REG.servers[s.id]) || regFor(s.url);
+        const who = rec && rec.user && rec.user.name;
+        const nDl = rec ? (downloads.get(rec.id) || 0) : 0;
+        if (who || nDl) {
+          const u = document.createElement("div");
+          u.className = "u";
+          u.textContent = [who ? "Opens as " + who : "", nDl ? nDl + " download" + (nDl === 1 ? "" : "s") + " on this phone" : ""]
+            .filter(Boolean).join("  ·  ");
+          b.appendChild(u);
         }
         const a = document.createElement("div");
         a.className = "a";
         a.textContent = [s.url.replace(/^http:\/\//, ""), VIA[s.via] || "", s.version ? "v" + s.version : ""]
           .filter(Boolean).join("  ·  ");
-        b.appendChild(n); b.appendChild(a);
+        b.appendChild(a);
         b.addEventListener("click", () => pickServer(s));
         box.appendChild(b);
       }
@@ -414,7 +497,11 @@
     function goToHost(url) {
       // Replace so the Back gesture doesn't return to this shell mid-session;
       // the host-side glue re-enters setup explicitly via ?setup=1.
-      window.location.replace(url);
+      // ?launch=1 is the mark that this is the app opening the server, as
+      // opposed to the dashboard reloading itself: the dashboard opens as the
+      // account pinned to this phone when it sees it. A host older than 20.0.0
+      // ignores it.
+      window.location.replace(url.replace(/\/+$/, "") + "/?launch=1");
     }
 
     function goToDownloads() { window.location.replace("downloads.html"); }
@@ -442,7 +529,7 @@
 
     // The offline entry point: cached dashboard first, downloads.html fallback.
     async function goOffline(hostUrl) {
-      if (!(await goToCachedPlayer(hostUrl || localStorage.getItem(KEY_URL) || ""))) goToDownloads();
+      if (!(await goToCachedPlayer(hostUrl || (primaryRec() || {}).url || localStorage.getItem(KEY_URL) || ""))) goToDownloads();
     }
 
     // Is the saved host actually reachable? A no-cors probe that ALWAYS resolves
@@ -493,9 +580,23 @@
       } catch (_) { return null; }
     }
 
+    // Name the server and the account it opens as; the address is the small print.
+    function paintTarget(url) {
+      const rec = regFor(url) || recordFor(url);
+      const who = rec && rec.user && rec.user.name;
+      $("connectTarget").textContent = (rec && rec.name) || url.replace(/^https?:\/\//, "");
+      $("connectWho").textContent = "";
+      if (who) {
+        const b = document.createElement("b");
+        b.textContent = who;
+        $("connectWho").append("as ", b);
+      }
+      $("connectAddr").textContent = (rec && rec.name) ? url.replace(/^http:\/\//, "") : "";
+    }
+
     async function connectInterstitial(url) {
       formEl.style.display = "none";
-      $("connectTarget").textContent = url;
+      paintTarget(url);
       $("connectStatus").textContent = "Checking connection…";
       connEl.classList.add("show");
       const view = ++scanRun;
@@ -508,18 +609,18 @@
         goToHost(url);
         return;
       }
-      $("connectStatus").textContent = "Can’t reach server — looking for it…";
+      $("connectStatus").textContent = "Can’t reach it at that address. Looking for it…";
       const moved = await findMovedServer(url);
       if (view !== scanRun) return;
       if (moved) {
         remember(moved, moved.url);
         localStorage.setItem(KEY_URL, moved.url);
-        $("connectTarget").textContent = moved.url;
+        $("connectAddr").textContent = moved.url.replace(/^http:\/\//, "");
         $("connectStatus").textContent = "Found it at a new address.";
         goToHost(moved.url);
         return;
       }
-      $("connectStatus").textContent = "Can’t reach server — opening offline player…";
+      $("connectStatus").textContent = "Can’t reach it. Opening what is saved on this phone…";
       redirectTimer = setTimeout(() => { goOffline(url); }, 800);
     }
 
@@ -542,15 +643,24 @@
     $("server").addEventListener("keydown", (e) => { if (e.key === "Enter") $("connect").click(); });
 
     // ── Entry point ──
-    (function init() {
+    (async function init() {
       try {
         const shell = plugin("AppShell");
         if (shell) shell.info().then((i) => {
           if (i && i.version) $("appVer").textContent = " · v" + i.version;
         }).catch(() => {});
       } catch (_) {}
+      await loadReg();
       const forceSetup = /[?&#]setup=1\b/.test(window.location.href);
-      const saved = localStorage.getItem(KEY_URL);
+      // "Connect" on another server, from the dashboard: go straight there.
+      // The primary is not changed; only the App tab changes that.
+      let direct = "";
+      try { direct = normalizeUrl(new URLSearchParams(window.location.search).get("connect") || "") || ""; } catch (_) {}
+      if (direct) { localStorage.setItem(KEY_URL, direct); connectInterstitial(direct); return; }
+      // Launch opens the phone's own server. Before one is set (a first run, or
+      // a shell that has only ever been given an address) the last address used.
+      const mine = primaryRec();
+      const saved = (mine && mine.url) || localStorage.getItem(KEY_URL);
       if (saved && !forceSetup) connectInterstitial(saved);
       else showForm();
     })();

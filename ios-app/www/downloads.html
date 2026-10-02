@@ -24,19 +24,28 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
   <title>StreamLink — Downloads</title>
   <style>
-    :root { --bg:#0b0b0d; --panel:#141417; --line:#2a2a30; --fg:#f2f2f4; --muted:#8a8a92; --accent:#3a7afe; --ok:#3ec46d; --danger:#e0533d; }
+    /* The dashboard's palette (Tailwind gray-950/900/800, indigo-600), so this
+       fallback reads as the same app as the Downloads tab it stands in for. */
+    :root { --bg:#030712; --panel:#111827; --line:#1f2937; --fg:#f3f4f6; --muted:#6b7280; --accent:#4f46e5; --ok:#22c55e; --danger:#dc2626; }
     * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
     html,body { margin:0; height:100%; }
-    body { background:var(--bg); color:var(--fg); font-family:-apple-system,"Segoe UI",Roboto,sans-serif;
+    body { background:var(--bg); color:var(--fg); font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
            padding:max(env(safe-area-inset-top),18px) 16px max(env(safe-area-inset-bottom),18px); }
     header { display:flex; align-items:baseline; justify-content:space-between; gap:10px; margin-bottom:4px; }
-    h1 { font-size:22px; font-weight:800; letter-spacing:.02em; margin:0; text-transform:uppercase; }
+    h1 { font-size:22px; font-weight:900; letter-spacing:.04em; margin:0; text-transform:uppercase; }
+    /* Whose downloads these are: the server, and the account offline watching is kept for. */
+    .ident { border:1px solid var(--line); background:var(--panel); padding:12px; margin:10px 0 14px; }
+    .ident .k { font-size:10px; font-weight:900; letter-spacing:.14em; text-transform:uppercase; color:var(--muted); }
+    .ident .v { font-size:16px; font-weight:900; letter-spacing:.04em; text-transform:uppercase; margin-top:2px; word-break:break-word; }
+    .ident .row + .row { margin-top:10px; padding-top:10px; border-top:1px solid var(--line); }
+    .ident .st { font-size:10px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; color:#f59e0b; margin-top:3px; }
+    .srvtag { color:#818cf8; font-weight:800; }
     .used { color:var(--muted); font-size:12px; }
     .sub { color:var(--muted); font-size:13px; margin:0 0 16px; }
     .bar { display:flex; gap:10px; margin-bottom:16px; }
-    button { -webkit-appearance:none; border:0; border-radius:0; font-size:13px; font-weight:800;
+    button { -webkit-appearance:none; border:0; border-radius:0; font-size:12px; font-weight:900;
              letter-spacing:.05em; text-transform:uppercase; padding:12px 14px; color:#fff; background:var(--accent); }
-    button.ghost { background:transparent; color:var(--muted); border:1px solid var(--line); }
+    button.ghost { background:#1f2937; color:#d1d5db; border:1px solid #374151; }
     button:active { opacity:.8; }
     ul { list-style:none; margin:0; padding:0; }
     .play { flex:0 0 auto; background:var(--accent); padding:11px 16px; }
@@ -46,10 +55,10 @@
     /* Series / movie cards (metadata-rich offline picker) */
     .card { border:1px solid var(--line); background:var(--panel); margin-bottom:14px; }
     .chead { display:flex; gap:12px; padding:12px; }
-    .poster { flex:0 0 auto; width:60px; height:90px; background:#202028; object-fit:cover; }
+    .poster { flex:0 0 auto; width:60px; height:90px; background:#1f2937; object-fit:cover; }
     .poster.fb { display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:22px; font-weight:800; }
     .chead .info { flex:1 1 auto; min-width:0; }
-    .ctitle { font-size:16px; font-weight:800; line-height:1.2; }
+    .ctitle { font-size:15px; font-weight:900; letter-spacing:.04em; text-transform:uppercase; line-height:1.25; }
     .cmeta { color:var(--muted); font-size:12px; margin-top:3px; }
     .coverview { color:var(--muted); font-size:12px; margin-top:6px; line-height:1.4;
                  display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
@@ -58,9 +67,9 @@
     .ep:last-child { border-bottom:0; }
     .ep .info { flex:1 1 auto; min-width:0; }
     .ep .line { font-size:14px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .ep .num { color:var(--accent); font-family:ui-monospace,Menlo,monospace; font-size:12px; font-weight:700; margin-right:6px; }
+    .ep .num { color:#818cf8; font-size:12px; font-weight:900; margin-right:6px; }
     .ep .size { color:var(--muted); font-size:11px; margin-top:2px; }
-    .prog { height:3px; background:#26262c; margin-top:6px; }
+    .prog { height:3px; background:#1f2937; margin-top:6px; }
     .prog > i { display:block; height:100%; background:var(--accent); }
     .prog.done > i { background:var(--ok); }
     .watched { color:var(--ok); }
@@ -69,9 +78,9 @@
     #playerWrap { position:fixed; inset:0; background:#000; display:none; flex-direction:column; z-index:50; }
     #playerWrap.show { display:flex; }
     #playerWrap video { flex:1 1 auto; width:100%; background:#000; }
-    #playerBar { display:flex; gap:10px; padding:12px max(env(safe-area-inset-left),12px) max(env(safe-area-inset-bottom),12px); background:#0b0b0d; }
+    #playerBar { display:flex; gap:10px; padding:12px max(env(safe-area-inset-left),12px) max(env(safe-area-inset-bottom),12px); background:#030712; }
     #playerBar button { flex:1; }
-    .nowTitle { color:var(--fg); font-size:13px; padding:max(env(safe-area-inset-top),10px) 12px 8px; background:#0b0b0d; word-break:break-all; }
+    .nowTitle { color:var(--fg); font-size:13px; padding:max(env(safe-area-inset-top),10px) 12px 8px; background:#030712; word-break:break-all; }
     pre { color:var(--danger); font-size:12px; white-space:pre-wrap; }
   </style>
   <script src="capacitor.js"></script>
@@ -81,11 +90,15 @@
     <h1>Downloads</h1>
     <span class="used" id="used"></span>
   </header>
-  <p class="sub">Saved on this device — playable with no connection.</p>
+  <div class="ident" id="ident" style="display:none">
+    <div class="row"><div class="k">Server</div><div class="v" id="identSrv"></div><div class="st">Not connected</div></div>
+    <div class="row"><div class="k">Account on this phone</div><div class="v" id="identWho"></div></div>
+  </div>
+  <p class="sub">Saved on this phone. Plays with no connection; what you watch is sent to the server when it is next reached.</p>
 
   <div class="bar">
     <button id="connectBtn">Connect to server</button>
-    <button class="ghost" id="settingsBtn">Settings</button>
+    <button class="ghost" id="settingsBtn">Choose a server</button>
     <button class="ghost" id="refreshBtn">Refresh</button>
   </div>
 
@@ -315,6 +328,28 @@
 
     function offlineStore() { try { return plugin("OfflineStore"); } catch (_) { return null; } }
 
+    // The phone's servers and the account pinned to each (20.0.0; written by the
+    // dashboard into the native store, see www/index.html). A download belongs
+    // to one server, and watching it offline is recorded for that server's
+    // pinned account. Empty on a shell or a phone that predates it: everything
+    // then goes to the last account the app was told, as before.
+    let REG = { primary: "", servers: {} };
+    async function loadReg() {
+      const os = offlineStore();
+      if (!os) return;
+      try {
+        const v = (await os.kvGet({ key: "device" })).value;
+        if (v && typeof v === "object" && v.servers && typeof v.servers === "object") {
+          REG = { primary: v.primary || "", servers: v.servers };
+        }
+      } catch (_) {}
+    }
+    function serverOf(item) { return (item && item.meta && item.meta.server_id) || REG.primary || ""; }
+    function userOf(item) {
+      const r = REG.servers[serverOf(item)];
+      return (r && r.user && r.user.id) ? r.user : null;
+    }
+
     async function saveOfflineProgress() {
       const v = $("v"), item = _nowPlaying, os = offlineStore();
       if (!os || !item || !item.itemId || !item.filePath) return;
@@ -323,8 +358,10 @@
       const pos = v.currentTime || 0, dur = v.duration || 0;
       if (!(dur > 0) || pos < 5) return;   // server ignores near-zero writes
       try {
+        const u = userOf(item), sid = serverOf(item);
         await os.saveProgress({ itemId: item.itemId, filePath: item.filePath,
-                                positionSec: pos, durationSec: dur });
+                                positionSec: pos, durationSec: dur,
+                                ...(u ? { profileId: u.id } : {}), ...(sid ? { serverId: sid } : {}) });
       } catch (_) {}
     }
     function throttledSave() {
@@ -413,7 +450,12 @@
       const m = new Map();
       try {
         const { events } = await os.all();
-        for (const e of (events || [])) m.set(e.itemId + " " + e.filePath, e);
+        // Each server's pinned account only: the badges are that person's.
+        const mine = new Set(Object.values(REG.servers).map((r) => r && r.user && r.user.id).filter(Boolean));
+        for (const e of (events || [])) {
+          if (mine.size && e.profileId && !mine.has(e.profileId)) continue;
+          m.set(e.itemId + " " + e.filePath, e);
+        }
       } catch (_) {}
       return m;
     }
@@ -482,6 +524,16 @@
         try { used = (await dl.bytesUsed()).bytes; } catch (_) {}
       } catch (e) { showErr(e); }
       $("used").textContent = used ? fmtBytes(used) + " used" : "";
+      // Name the phone's server and account. With downloads from more than one
+      // server, each card says which it came from.
+      const sids = new Set(items.map(serverOf).filter(Boolean));
+      const multi = sids.size > 1;
+      const main = REG.servers[REG.primary];
+      if (main) {
+        $("identSrv").textContent = main.name || main.url || "";
+        $("identWho").textContent = (main.user && main.user.name) || "Not set";
+        $("ident").style.display = "block";
+      }
       $("empty").style.display = items.length ? "none" : "block";
 
       const prog = await progressMap();
@@ -514,6 +566,12 @@
         cmeta.textContent = isSeries
           ? `${eps.length} episode${eps.length === 1 ? "" : "s"} · ${fmtBytes(eps.reduce((t, e) => t + (e.bytesTotal || 0), 0))}`
           : fmtBytes(eps[0].bytesTotal || eps[0].bytesDone || 0);
+        if (multi) {
+          const r = REG.servers[serverOf(eps[0])];
+          const tag = document.createElement("span"); tag.className = "srvtag";
+          tag.textContent = " · " + ((r && r.name) || (eps[0].meta || {}).server_name || "Another server");
+          cmeta.appendChild(tag);
+        }
         info.appendChild(cmeta);
         if (meta.overview) { const ov = document.createElement("div"); ov.className = "coverview"; ov.textContent = meta.overview; info.appendChild(ov); }
         head.appendChild(info);
@@ -590,7 +648,7 @@
     const saved = localStorage.getItem(KEY_URL);
     if (saved) $("connectBtn").textContent = "Connect";
 
-    refresh();
+    loadReg().then(refresh, refresh);
   </script>
 </body>
 </html>

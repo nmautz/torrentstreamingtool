@@ -53,6 +53,7 @@ Metro UI throughout — flat tiles, no rounded corners, bold uppercase typograph
 | — | `#noticeStack` — one fixed layer holding `#serverAttentionBanner` + `#globalToast` as opaque `.notice-card`s, pinned under the safe area (never in the flow). See the notice notes below. |
 | 618–671 | Navbar (tabs, VPN pill, SSE dot, profile avatar, settings gear). On mobile portrait the row is `flex-wrap`: row 1 = logo + status/profile/settings, row 2 = the three tabs (each `flex-1`, full-width). `sm:` and up collapses back to a single row. `ml-auto` on the right cluster doubles as the desktop spacer. Tab order swaps via `order-3 sm:order-2` on tabs and `order-2 sm:order-3` on the right cluster. |
 | 677–750 | Search tab + Library tab containers |
+| — | `#downloadsTab` + `#appTab` (inside `<main>`) and `<nav id="appTabs">` (after it): the iOS app's two own tabs and its bottom tab bar. Hidden everywhere else. See § iOS app shell. |
 | 752–793 | Skip / Resume offer floating tiles |
 | 796–939 | Player footer (seek bar, track selectors, controls row) |
 | 942–1159| Fullscreen controls overlay (5-row tile grid + safe-area handling) |
@@ -674,7 +675,7 @@ Don't re-add the `controls` attribute. Pieces:
   Search**, declared in `Info.plist` (`UIApplicationShortcutItems`) and delivered to
   `SceneDelegate`. `AppShell.swift` holds the action across the connect-shell → host
   navigation. `_appInitQuickActions` takes it at boot and on the `quickAction` event,
-  and taking clears it. `_appRunQuickAction` opens the Downloads overlay, focuses
+  and taking clears it. `_appRunQuickAction` opens the Downloads tab, focuses
   Search, or resumes the most recently watched library item that isn't all-watched
   (`resumeLibraryItemWithChooser`). Search and Continue need a profile, so if the
   picker is up they wait in `_qaPending` until `_qaFlush` (picker and boot restore).
@@ -975,6 +976,99 @@ On `DOMContentLoaded`:
 3. Calls `/api/admin/status`; shows admin link if enabled.
 4. Reads `localStorage.streamlink_profile`. If valid profile is restored, connects SSE and goes straight to the dashboard. Otherwise shows the full-screen profile picker first.
 
+## iOS app shell: tab bar, Downloads, App (20.0.0)
+
+Everything here is app-only: `isApp` (Capacitor present) or `_appOffline` (the loopback
+offline page, which also runs in a plain browser for testing). `_appTabsInit` adds
+`html.has-apptabs`; a desktop or mobile browser never gets it and sees none of this.
+
+**The tab bar** (`<nav id="appTabs">`, Search / Explore / Library / Downloads / App)
+replaces the header's tab row in the app. It is an ordinary flex child of `<body>` after
+`<main>`, not a fixed layer, so every fixed overlay (episode page, modals, the player, the
+profile picker) covers it with no z-index work and `<main>` gives up the height on its own.
+The one fixed thing that must sit above it is the player `<footer>`, which takes its
+offset from `--apptab-h` (`_appTabsMeasure`; the bar is shorter in landscape).
+`_offerBottom` adds the same height. `switchTab` handles all five; offline, the three
+server tabs are greyed and a tap says the server isn't connected.
+
+Downloads and App are **tabs on the live page, never navigations**, so the SSE link and
+any download in its host round-trip survive opening them (see GOTCHAS). Only connecting
+to a different server leaves the page (`_appChangeServer` → the shell's Connect screen;
+`_appGoConnect(url)` for a specific one).
+
+**Which server, whose phone.** The header's wordmark slot shows the server's name and a
+square connection dot (`_appPaintIdent`, repainted on a 2 s tick because the connection
+state has no single place it changes). The registry behind it:
+
+```
+_dev = { v: 1, primary: "<server id>",
+         servers: { "<id>": { id, name, version, url, urls: [], seen,
+                              user: { id, name, color, has_pin, token } } } }
+```
+
+- **`primary`**: the server the app opens at launch. The first one connected to. Changed
+  with "Make this my server" on the App tab.
+- **`servers[id].user`**: the account **pinned** to the phone for that server. The first
+  account signed in there (`_appAfterProfile`). Changed with "Make X this phone's account".
+- Stored natively (`OfflineStore.kvGet/kvSet`, key `device`) because the app runs on
+  three origins that share no `localStorage`: the connect shell, the host page, and the
+  loopback page that plays downloads. On a shell older than 20.0.0 it falls back to this
+  origin's `localStorage` (`sl_device`), which covers everything except the offline page.
+- `_srvId` comes from `GET /api/discovery`. A server this phone has used is recognised by
+  its address with no network (`_devServerFor`); only a first visit waits for the fetch
+  (`_appIdentBoot`, awaited before the profile restore). A host older than 19.14.0 has no
+  id and is keyed `url:<origin>` until it is updated, when the record is carried over.
+
+**What the pin covers.** Offline play is recorded for the pinned account whoever was
+signed in last (`_appSyncSetProfile` pushes the pinned id to `OfflineStore.setProfile`;
+`_appOfflineBoot` sets `profile` to it). Watched badges, Continue Watching, the progress
+a download is seeded with, `/api/sync/pull` and auto-manage all read `_appOfflinePid()`.
+Streaming while connected is recorded for the signed-in account, as everywhere else.
+Launch opens as the pinned account: the shell hands off with `?launch=1` and
+`_appAdoptPinned` writes the pinned profile (and its remembered PIN token) into the
+`localStorage` keys the ordinary restore reads. A page that only reloaded, or came back
+from the loopback, carries no mark and keeps whoever is signed in.
+
+**Downloads tab** (`#downloadsTab`, `_dlRender`). One server at a time (`_dlViewId`,
+default the connected one). Top to bottom: identity tile (server + state, pinned account,
+a notice when a different account is signed in, a switcher when the phone holds downloads
+from other servers); notices (offline plays waiting to sync with *Send now*, why the
+native gate is shut); Continue Watching (`_dlContinueHtml`: the episode in progress, else
+the first unwatched after the last finished, one tile per show); the queue; storage; the
+shows, one collapsed card each (`_dlOpen`; a film's card carries Play itself).
+Re-rendered every second while showing, every five when nothing is moving. Each section
+is only assigned when its HTML differs from what is there (`_dlSet`), so a progress tick
+does not rebuild posters, reset the Continue Watching scroll or swallow a tap.
+
+- A download's server is `meta.server_id` (written by `appDownloadBundle`). One saved
+  before 20.0.0 is placed by its `baseUrl` against the registry, else it is the primary's
+  (`_appBundleServer`).
+- **Queue rows** come from the durable queue plus `offlineBundles`. Each has a kind
+  (`downloading`, `prepping`, `queued`, `waiting`, `away`, `paused`, `failed`) and says
+  what it is waiting on. *Pause* cancels the native transfer and keeps the files
+  (`_dlPause`), *Resume*/*Retry* re-run `appDownloadBundle`, *Next* calls
+  `BundleDownloader.prioritize`. These need the 20.0.0 shell (`_appShell20`, learned by
+  calling `storage()` once); on an older one only Remove shows.
+- **Storage** uses `BundleDownloader.storage()` for the phone's free and total space and
+  offers *Remove watched* for episodes the pinned account has finished.
+- Looking at another server's downloads while connected is read-only plus Remove; Play
+  needs that server or no connection. Offline there is no connected server, so looking
+  at another one makes it current (`_dlView`): its pinned account becomes `profile` and
+  Reconnect tries its address.
+
+**App tab** (`#appTab`, built once by `_appTabBuild`, repainted by `_appTabShow`). This
+phone (server, pinned account, the buttons that change either, other servers the phone
+has used), When to download (the native gate policy, moved here from Downloads), Keep
+downloads up to date (auto-manage), Playback, Troubleshooting, About. Long explanations
+are help tips. Offline it shows only what works with no server: this origin's
+`localStorage` is a loopback's, so the playback and auto-manage switches would not be the
+real ones.
+
+**The shell** (`ios-app/www/index.html`, `downloads.html`) uses the dashboard's palette
+by hand (no Tailwind there). The Connect screen reads the registry: it marks the phone's
+own server, says which account each opens as and how many downloads the phone holds from
+it, and launch goes to the primary's address.
+
 ## Profile session token
 
 `POST /api/profiles/{id}/verify-pin` returns a **token** alongside the profile. It is the server's only proof that the PIN was actually entered — a bare `profile_id` proves nothing, since `GET /api/profiles` hands out every UUID unauthenticated. Two things need it: seeing admin-locked ("content lock") items, and the delete endpoints.
@@ -983,6 +1077,7 @@ On `DOMContentLoaded`:
 - **Device identity (19.0.0).** The same wrapper adds `X-Device-Id` (`_pbDeviceId()`) and `X-Device-Name` (URL-encoded `_pbDeviceName()`: `Headers` throws on the "·" in default names) to every same-origin `/api/` call, with or without a profile token. `_devIdSync()` runs at load (and again after the app's loopback hand-off seeds a `did`). It mirrors the id into the `streamlink_device_id` host cookie for requests fetch doesn't make (hls.js, EventSource, `<img>`), and a browser with no id adopts the cookie's before minting one. Feeds the admin Devices tab; see [DIAGNOSTICS.md § Devices](DIAGNOSTICS.md).
 - Attached as **`X-Profile-Token`** by a single `window.fetch` wrapper installed next to the `profile` declaration, scoped to same-origin `/api/` URLs so it can never leak to a third party. Individual call sites don't (and shouldn't) know about it — don't start adding the header by hand.
 - **Cleared** when a PIN-less profile is selected (`_doSelectProfile`), otherwise the last PIN entered would keep unlocking content for whoever picks a different profile afterwards.
+- **Remembered in the iOS app, for one account** (20.0.0). `submitPinPrompt` sends `remember: true` when the profile is the one pinned to the phone (`_appShouldRememberPin`), and the server answers with a 180-day sliding session instead of the 12 h one. `setProfileToken(tok, maxAge)` takes the cookie's life from `expires_in`. The token is also kept in the app's native registry (`_dev.servers[id].user.token`) so a launch at a new address, where this origin's storage is empty, still opens without asking. See § iOS app shell below.
 - **Revalidated** on every `fetchProfiles()`: the response carries `verified_profile_id`, and a token the server no longer recognises (expired 12 h TTL, deleted profile, wiped session file) is dropped so the next pick re-prompts. Without that, an expired session degrades into "some shows are missing and Delete fails with a 403" and nothing tells the user to re-enter their PIN.
 
 - **Re-prompted on boot** by `_maybePromptForPin()` when the restored profile `has_pin` but the server reports no verified session. The boot path restores a profile from `localStorage` *without* re-verifying, so a login carried across the 11.20.0 upgrade — or one whose 12 h token has expired — is signed in with no PIN proof behind it. Nothing used to ask; the locked shows were just gone. Dismissing the prompt leaves the user logged in, minus that content.
