@@ -1082,9 +1082,10 @@ does not rebuild posters, reset the Continue Watching scroll or swallow a tap.
 phone (server, pinned account, the buttons that change either, other servers the phone
 has used), When to download (the native gate policy, moved here from Downloads), Keep
 downloads up to date (auto-manage), Playback, Troubleshooting, About. Long explanations
-are help tips. Offline it shows only what works with no server: this origin's
-`localStorage` is a loopback's, so the playback and auto-manage switches would not be the
-real ones.
+are help tips. Offline it shows only what works with no server. The auto-manage and
+Playback switches write through `_appPrefSet` and are restored from the native store at
+boot by `_appPrefsRestore` (20.6.4): `localStorage` is only their working copy. See
+docs/GOTCHAS.md § A web view's storage is not the app's.
 
 **The shell** (`ios-app/www/index.html`, `downloads.html`) uses the dashboard's palette
 by hand (no Tailwind there). The Connect screen reads the registry: it marks the phone's

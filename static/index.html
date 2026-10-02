@@ -20027,6 +20027,77 @@ function _devSave() {
   }
   try { localStorage.setItem(_DEV_LS_KEY, JSON.stringify(_dev)); } catch (_) {}
 }
+// ── This phone's settings, kept natively (20.6.4) ────────────────────────────
+// The App tab's switches (auto-manage, playback) are read synchronously all over
+// this file, so localStorage stays the working copy. It is not a safe place to
+// KEEP them: a web view's storage belongs to one origin, and it does not survive
+// what the app's own files survive. Seen in the phone's log on 2026-10-02: the
+// app was deactivated in SideStore and brought back, the downloads were all
+// still there, and auto-manage came back off with its defaults. The same thing
+// happens when the server is reached at a different address.
+//
+// So every write also goes to the native store (key "prefs", the file that
+// holds the server registry), and every boot copies the native copy back over
+// localStorage. Native wins: it is written on every change, on every origin.
+// A shell older than 20.0.0 has no kvGet and keeps today's behaviour.
+const _APP_PREFS_KV = "prefs";
+const _appPrefKeys = () => [_APP_AUTOMG_KEY, _APP_AHEAD_KEY, _APP_AUTOQ_KEY, _APP_AUTOSCOPE_KEY,
+                            _APP_AUTOSHOWS_KEY, _APP_BGPLAY_KEY, _APP_AWAKE_KEY, _APP_EXTMODE_KEY];
+let _appPrefsNative = null;            // true once kvGet answered, false once it refused
+const _appPrefsTouched = new Set();    // changed before the restore finished: not to be overwritten
+function _appPrefsPush() {
+  if (!(isApp && _cap.os) || _appPrefsNative !== true) return;
+  const keys = {};
+  for (const k of _appPrefKeys()) {
+    try { const v = localStorage.getItem(k); if (v != null) keys[k] = v; } catch (_) {}
+  }
+  try {
+    const r = _cap.os.kvSet({ key: _APP_PREFS_KV, value: { v: 1, keys } });
+    if (r && r.catch) r.catch(() => {});
+  } catch (_) {}
+}
+// The one way a setting in `_appPrefKeys` is written.
+function _appPrefSet(key, val) {
+  try { localStorage.setItem(key, String(val)); } catch (_) {}
+  if (_appPrefsNative === null) _appPrefsTouched.add(key);
+  _appPrefsPush();
+}
+async function _appPrefsRestore() {
+  if (!(isApp && _cap.os)) return;
+  let v = null;
+  try { v = (await _cap.os.kvGet({ key: _APP_PREFS_KV })).value; }
+  catch (_) { _appPrefsNative = false; return; }
+  _appPrefsNative = true;
+  const kept = (v && typeof v === "object" && v.keys && typeof v.keys === "object") ? v.keys : null;
+  let restored = 0, unsaved = 0;
+  for (const k of _appPrefKeys()) {
+    let cur = null;
+    try { cur = localStorage.getItem(k); } catch (_) {}
+    if (kept && typeof kept[k] === "string" && !_appPrefsTouched.has(k)) {
+      if (cur !== kept[k]) { try { localStorage.setItem(k, kept[k]); restored++; } catch (_) {} }
+    } else if (cur != null) unsaved++;
+  }
+  // What this origin holds and the native copy doesn't: the settings as they
+  // were before 20.6.4, or a change made in the moment before this ran. Only
+  // the host's own origin is trusted for the first; a loopback page's storage
+  // is whatever an earlier session seeded it with.
+  const push = unsaved && (_appPrefsTouched.size || !(_appProxied || _appOffline));
+  _appPrefsTouched.clear();
+  if (push) _appPrefsPush();
+  if (restored || push || !kept)
+    _npLog("prefs-restore", { had: kept ? Object.keys(kept).length : 0, restored, saved: push ? unsaved : 0,
+                              auto: _appAutoPrefs().on ? 1 : 0 }, "app");
+  if (!restored) return;
+  // The page booted on the stale copy: repaint the App tab and run what the
+  // restored settings switch on.
+  const root = document.getElementById("appTab");
+  if (root && root.dataset.built) {
+    delete root.dataset.built; delete root.dataset.shows;
+    try { _appTabShow(); } catch (_) {}
+  }
+  if (!_appOffline) { _appAutoSweep(); _npSyncAwake(); }
+}
+
 function _devServerFor(url) {
   if (!url) return null;
   for (const id in _dev.servers) {
@@ -20782,8 +20853,13 @@ function _appProxiedSeedStorage() {
       const o = JSON.parse(am);
       if (o && typeof o === "object") {
         if (o.on   != null) localStorage.setItem("streamlink_app_automanage", o.on ? "1" : "0");
-        if (o.ahead != null) localStorage.setItem("streamlink_app_automanage_ahead", String(o.ahead));
-        if (o.q    != null) localStorage.setItem("streamlink_app_automanage_autoq", String(o.q));
+        // Until 20.6.4 these two were written under keys nothing reads, so a
+        // proxied session always kept 3 episodes ahead at original quality,
+        // and the scope and the show list were not carried at all.
+        if (o.ahead != null) localStorage.setItem(_APP_AHEAD_KEY, String(o.ahead));
+        if (o.q    != null) localStorage.setItem(_APP_AUTOQ_KEY, String(o.q));
+        if (o.mode != null) localStorage.setItem(_APP_AUTOSCOPE_KEY, String(o.mode));
+        if (Array.isArray(o.shows)) localStorage.setItem(_APP_AUTOSHOWS_KEY, JSON.stringify(o.shows));
         // Background playback / keep-awake — see the producer in _appTryLocalHandoff.
         if (o.bg   != null) localStorage.setItem(_APP_BGPLAY_KEY, o.bg ? "1" : "0");
         if (o.tvm  != null) localStorage.setItem(_APP_AWAKE_KEY, o.tvm ? "1" : "0");
@@ -21947,10 +22023,9 @@ async function _appTryLocalHandoff(itemId, filePath, seekTo, queue) {
     // is empty (see _appProxiedSeedStorage).
     let am = "";
     try {
+      const ap = _appAutoPrefs();
       am = JSON.stringify({
-        on:    localStorage.getItem("streamlink_app_automanage") === "1",
-        ahead: parseInt(localStorage.getItem("streamlink_app_automanage_ahead") || "", 10) || undefined,
-        q:     localStorage.getItem("streamlink_app_automanage_autoq") || undefined,
+        on: ap.on, ahead: ap.ahead, q: ap.q, mode: ap.mode, shows: [...ap.shows],
         // Background-playback prefs must ride along too: playing a DOWNLOADED
         // episode online routes through this proxied session, so without these
         // the loopback origin's empty localStorage would read as "off" and
@@ -22855,6 +22930,7 @@ async function _appOfflineBoot() {
   // origin's localStorage is empty, so both come from the native registry: the
   // account PINNED to that server is who offline plays are recorded for.
   try { await _appIdentBoot(); } catch (_) {}
+  _appPrefsRestore();   // so background playback is the user's setting here too, not the default
   const pinned = _devUser();
   if (pinned) {
     profile = { id: pinned.id, name: pinned.name || "", color: pinned.color || "indigo" };
@@ -24173,7 +24249,7 @@ function _appAutoShowsMigrate(items) {
     const k = (byId.get(x) || {}).series_key;
     if (k && k.indexOf("series:") === 0) out.add(k);
   });
-  try { localStorage.setItem(_APP_AUTOSHOWS_KEY, JSON.stringify([...out])); } catch (_) {}
+  _appPrefSet(_APP_AUTOSHOWS_KEY, JSON.stringify([...out]));
 }
 
 // Is this show in scope for auto-manage under the current mode + selection?
@@ -24546,20 +24622,20 @@ function _appTabBuild() {
   };
   $("#appSetExtTgl").onclick = () => {
     const next = _EXT_NEXT[_appPlaybackPrefs().ext] || "early";
-    try { localStorage.setItem(_APP_EXTMODE_KEY, next); } catch (_) {}
+    _appPrefSet(_APP_EXTMODE_KEY, next);
     paintExtTgl();
     _npArm();   // the native side reads this at handoff, so re-push it now
   };
   $("#appSetBgTgl").onclick = () => {
     const next = !_appPlaybackPrefs().bg;
-    try { localStorage.setItem(_APP_BGPLAY_KEY, next ? "1" : "0"); } catch (_) {}
+    _appPrefSet(_APP_BGPLAY_KEY, next ? "1" : "0");
     paintPlaybackTgls();
     // Take effect immediately for the file already playing.
     if (next) _npArm(); else _npDisarm("bgplay-off");
   };
   $("#appSetAwakeTgl").onclick = () => {
     const next = !_appPlaybackPrefs().awake;
-    try { localStorage.setItem(_APP_AWAKE_KEY, next ? "1" : "0"); } catch (_) {}
+    _appPrefSet(_APP_AWAKE_KEY, next ? "1" : "0");
     paintPlaybackTgls();
     _npSyncAwake();   // takes effect on the episode already playing
   };
@@ -24609,7 +24685,7 @@ function _appTabBuild() {
       row.addEventListener("click", () => {
         const cur = _appAutoPrefs().shows;
         if (cur.has(s.id)) cur.delete(s.id); else cur.add(s.id);
-        try { localStorage.setItem(_APP_AUTOSHOWS_KEY, JSON.stringify([...cur])); } catch (_) {}
+        _appPrefSet(_APP_AUTOSHOWS_KEY, JSON.stringify([...cur]));
         paintChk(row.querySelector(".chk"), cur.has(s.id));
         _appAutoManage(); _appAutoSweep(500);   // re-apply with the new selection
       });
@@ -24621,20 +24697,20 @@ function _appTabBuild() {
   paintScopeLabel();
   $("#appSetAutoTgl").addEventListener("click", () => {
     const on = !_appAutoPrefs().on;
-    try { localStorage.setItem(_APP_AUTOMG_KEY, on ? "1" : "0"); } catch (_) {}
+    _appPrefSet(_APP_AUTOMG_KEY, on ? "1" : "0");
     paintTgl();
     if (on) { renderShows(); _appAutoManage(); _appAutoSweep(500); }   // apply immediately
   });
   $("#appSetAhead").addEventListener("change", (e) => {
-    try { localStorage.setItem(_APP_AHEAD_KEY, e.target.value); } catch (_) {}
+    _appPrefSet(_APP_AHEAD_KEY, e.target.value);
     _appAutoManage();
   });
   $("#appSetAutoQ").addEventListener("change", (e) => {
-    try { localStorage.setItem(_APP_AUTOQ_KEY, e.target.value); } catch (_) {}
+    _appPrefSet(_APP_AUTOQ_KEY, e.target.value);
   });
   $("#appSetScope").addEventListener("change", (e) => {
     const mode = e.target.value === "none_except" ? "none_except" : "all_except";
-    try { localStorage.setItem(_APP_AUTOSCOPE_KEY, mode); } catch (_) {}
+    _appPrefSet(_APP_AUTOSCOPE_KEY, mode);
     paintScopeLabel();
     _appAutoManage(); _appAutoSweep(500);   // scope changed — re-apply
   });
@@ -32378,6 +32454,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
   // manage prefs the host handed off (empty localStorage on this origin) so the
   // normal profile-restore proceeds and auto-manage keeps the user's settings.
   _appProxiedSeedStorage();
+  _appPrefsRestore();   // this phone's settings, from the copy the app keeps (not awaited)
   // Stream-to-device bootstrap: kick off the one-shot SW eviction (drops any
   // legacy cached app shell + frees the registration) and wire the local
   // <video>'s timeupdate/ended/visibilitychange/pagehide handlers.
@@ -32509,6 +32586,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.6.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.6.4</div>
 </body>
 </html>

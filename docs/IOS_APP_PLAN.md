@@ -104,10 +104,14 @@
 > single pure `_appAutoScoped(itemId, prefs)` membership test gates **both** feeders
 > (in-app pass + sweep) — nothing in the delete/keep-ahead logic changes.
 > **Default = unchanged behaviour**: `all_except` + empty set == all shows managed.
-> Prefs persist in host-origin localStorage: `streamlink_app_automanage`,
+> Prefs are read from localStorage: `streamlink_app_automanage`,
 > `streamlink_app_ahead`, `streamlink_app_autoq`, `streamlink_app_autoscope`
 > (`all_except`|`none_except`), `streamlink_app_autoshows` (JSON array of **series
 > keys** since 18.21.0 — item ids before that, migrated in place on first read).
+> Since 20.6.4 localStorage is only the working copy: every write goes through
+> `_appPrefSet`, which also saves to the native store (`kvSet` key `prefs`), and
+> `_appPrefsRestore` copies the native copy back at every boot. One set per phone.
+> See docs/GOTCHAS.md § A web view's storage is not the app's.
 > Online-only (`_appOffline`/`navigator.onLine`/`app._connected` gated) and
 > `isApp`-gated; host-served, no app rebuild.
 >

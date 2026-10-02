@@ -3426,7 +3426,7 @@ hangs). Two paths keep page and media same-origin:
   loopback page `_appProxied` is set but **`_appOffline` stays false**, so it takes the
   **normal online boot** — SSE, library, Play-to-TV, auto-manage, and real `/api` sync
   all run, just served from the loopback. `_appProxiedSeedStorage` seeds the profile,
-  auto-manage prefs, device identity and the **PIN token** (`tok=`, 18.23.2 — without
+  auto-manage prefs (superseded by `_appPrefsRestore` on an app from 20.0.0 on, 20.6.4), device identity and the **PIN token** (`tok=`, 18.23.2 — without
   it a PIN-protected profile boots unverified and is asked for its PIN mid-episode;
   stripped from the URL once seeded) — the loopback origin's localStorage is empty; `_appProxiedAutoPlay`
   starts the handed-off episode after the profile restores; `lpStop` →

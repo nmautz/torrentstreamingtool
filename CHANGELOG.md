@@ -1,5 +1,36 @@
 # Changelog
 
+## [20.6.4] — 2026-10-02
+### The app's settings survive what its downloads survive
+
+- **Fixed: "Keep downloads up to date" came back switched off, with its defaults, after
+  the app was deactivated in SideStore and brought back.** The App tab's settings were
+  kept only in the web view's storage, which belongs to one server address and is not
+  restored with the app's own files. They are now also written to the app's native
+  store (the file that already holds the phone's server and account) on every change,
+  and copied back from it every time the page starts. Covers the on/off switch, episodes
+  ahead, quality, the scope and the show list, and the three Playback switches. The same
+  loss on reaching the server at a different address is fixed by the same change.
+- Found in the phone's log: on 2026-10-02 01:37 UTC the app came back in a new data
+  container with every download still present, and the next sweep kept 4 episodes (the
+  default 3 ahead) where every sweep before it had kept 11; 23 seconds later it was back
+  to 11, set by hand.
+- **Fixed: while playing a downloaded episode, the app kept only 3 episodes ahead at
+  original quality whatever the setting said, and ignored the show list.** The handoff
+  to the on-device player wrote "episodes ahead" and "quality" under names nothing reads
+  and did not carry the scope at all. In the log since 2026-09-29: 59 of 63 in-player passes
+  ran with `ahead: 3`, while 105 of the 106 sweeps beside them kept 11 (10 ahead).
+- The settings are now one set for the phone, not one per server address.
+- The first start after this update saves the settings the phone has now. Settings
+  already lost have to be set once more.
+- Needs an app from 20.0.0 on (the native store). An older app behaves as before.
+- **Not checked**: on a phone. The store logic was run in Node through seven cases
+  (first save, write-through, wiped storage restored, native copy wins, a loopback
+  page's seeded values not saved, a change made before the restore, an old app). That
+  the native file itself survives a SideStore deactivate is inferred from the downloads
+  beside it surviving one, not seen. A `prefs-restore` row in the phone's log says what
+  each start did.
+
 ## [20.6.3] — 2026-10-02
 ### Back to phone lands on the right episode after the TV moved on
 

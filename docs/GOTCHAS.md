@@ -2852,7 +2852,42 @@ Two more, on the JS side:
   through the `am=` param in `_appTryLocalHandoff` **and** read back in
   `_appProxiedSeedStorage` — otherwise background playback reads as "off" in exactly
   the common case (playing a *downloaded* episode online, which always routes through
-  a proxied session). Same trap as the auto-manage prefs.
+  a proxied session). Same trap as the auto-manage prefs. Since 20.6.4 the loopback
+  page also restores all of them from the native store (`_appPrefsRestore`), so `am=`
+  only matters to an app older than 20.0.0.
+
+### A web view's storage is not the app's (20.6.4)
+
+The App tab's settings (auto-manage and the Playback switches) lived only in the host
+origin's `localStorage`. That storage is lost in two ordinary ways while the app's files
+in `Application Support` are not: **deactivating the app in SideStore and bringing it
+back** (the downloads return, the web view's storage does not), and **reaching the
+server at a different address** (a new origin, an empty `localStorage`). Either way
+auto-manage silently came back off. It read as "sometimes it turns itself off".
+
+- **Anything the user sets on the phone goes through `_appPrefSet(key, value)`**, never
+  a bare `localStorage.setItem`. It writes localStorage (the synchronous working copy
+  `_appAutoPrefs` / `_appPlaybackPrefs` read) and the native store (`OfflineStore.kvSet`,
+  key `prefs`, shape `{v: 1, keys: {<localStorage key>: <string>}}`, in `device.json`
+  beside the server registry). A new setting must be added to `_appPrefKeys`.
+- **`_appPrefsRestore` runs at every boot, on all three origins, and native wins.** It is
+  not awaited, so code that reads a setting once at boot can see the stale value; when
+  the restore changes anything it rebuilds the App tab and calls `_appAutoSweep()` and
+  `_npSyncAwake()`. A setting changed before the restore finished is kept
+  (`_appPrefsTouched`).
+- **Only the host's own origin migrates.** What localStorage holds and the native copy
+  lacks is saved from the host origin only; a loopback page's storage is whatever an
+  earlier session seeded it with.
+- **The settings are per phone, not per server.** The show list holds series keys
+  (`series:<name>`), which mean the same show on any server.
+- A `prefs-restore` row in the client log (`had`, `restored`, `saved`, `auto`) says what
+  a boot did. `restored > 0` on the host origin means web storage had been lost.
+- Found the same day: the `am=` handoff wrote `ahead` and `q` under
+  `streamlink_app_automanage_ahead` / `_autoq`, which nothing reads, so every proxied
+  session kept the default 3 ahead. It now writes the real keys and carries `mode` and
+  `shows` too.
+- **Not covered:** the download policy (already native, `getPolicy`/`setPolicy`), and
+  anything else still in `localStorage` (device id and name, search mode, the profile).
 
 ### The phone's server and account are kept natively, because the app is three origins (20.0.0)
 
