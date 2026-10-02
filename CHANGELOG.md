@@ -1,5 +1,16 @@
 # Changelog
 
+## [20.0.1] — 2026-10-01
+### A download that was picked up again showed "0 B" beside its percentage
+
+- **Fixed: in the app's Downloads tab, a download resumed after reopening the app read
+  "0.0 B of 610 MB · 60%"** until its next progress update. It now shows the amount
+  already on the phone.
+- 20.0.0's tab bar, Downloads tab and server and account labels were checked on an
+  iPhone 16 against the live server, with the 19.14.0 app. The parts that need the
+  20.0.0 app (remembered PIN across addresses, pause / retry / next, the storage bar)
+  have not been checked on a phone yet.
+
 ## [20.0.0] — 2026-10-01
 ### The app has proper tabs, and says which server and whose account it is for
 

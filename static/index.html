@@ -23375,7 +23375,13 @@ function _dlQueueHtml({ view, here, live, sname }) {
     else if (r.gated) { why = String(_dlPolicy.gateText || "Paused").replace(/\s+-\s+/, ": "); tone = "text-amber-400"; bar = "bg-amber-600"; }
     else if (r.kind === "prepping") why = `${sname} is preparing it`;
     else if (r.kind === "queued") why = "Queued";
-    else why = st.bytesTotal ? `${fmtSize(st.bytesDone || 0)} of ${fmtSize(st.bytesTotal)}` : "Downloading";
+    else {
+      // A download picked up again knows its total at once but hears its byte
+      // count only with the first progress event; until then the fraction (the
+      // transfer is its upper half) says how much is already on the phone.
+      const got = st.bytesDone != null ? st.bytesDone : Math.max(0, (r.frac - 0.5) * 2) * (st.bytesTotal || 0);
+      why = st.bytesTotal ? `${fmtSize(got)} of ${fmtSize(st.bytesTotal)}` : "Downloading";
+    }
     const k = _dlJ(r.key);
     const btns = [];
     if (canCtl) {
@@ -32379,6 +32385,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.0.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.0.1</div>
 </body>
 </html>
