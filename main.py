@@ -75,6 +75,7 @@ import subsearch
 import subsync
 import tmdbcache
 import updater
+import voicepick
 import voicestatus
 import vpncheck
 import watchrule
@@ -17101,6 +17102,54 @@ async def _tmdb_search_collections(q: str) -> list:
     return out
 
 
+async def _tmdb_search_results(q: str, kind: str = "") -> list[dict]:
+    """TMDb candidates for a free-text query, tv + movie interleaved by TMDb
+    popularity. Each row keeps `popularity`, `votes` and (films) `original_title`; the
+    `/api/tmdb/search` response drops them. Shared with the voice path."""
+    kind = kind if kind in ("tv", "movie") else ""
+    results: list[dict] = []
+
+    if kind in ("", "tv"):
+        tv = await _tmdb_get("/search/tv",
+                             {"query": q, "include_adult": "false"})
+        for r in (tv or {}).get("results", []) or []:
+            results.append({
+                "id":          r.get("id"),
+                "kind":        "tv",
+                "title":       r.get("name") or "",
+                "year":        (r.get("first_air_date") or "")[:4],
+                "votes":       int(r.get("vote_count") or 0),
+                "date":        (r.get("first_air_date") or "")[:10],
+                "overview":    r.get("overview") or "",
+                "poster_path": r.get("poster_path") or "",
+                "rating":      round(float(r.get("vote_average") or 0.0), 1),
+                "popularity":  r.get("popularity") or 0,
+            })
+    if kind in ("", "movie"):
+        mv = await _tmdb_get("/search/movie",
+                             {"query": q, "include_adult": "false"})
+        for r in (mv or {}).get("results", []) or []:
+            results.append({
+                "id":          r.get("id"),
+                "kind":        "movie",
+                "title":       r.get("title") or "",
+                "original_title": r.get("original_title") or "",
+                "year":        (r.get("release_date") or "")[:4],
+                "votes":       int(r.get("vote_count") or 0),
+                "date":        (r.get("release_date") or "")[:10],
+                "overview":    r.get("overview") or "",
+                "poster_path": r.get("poster_path") or "",
+                "rating":      round(float(r.get("vote_average") or 0.0), 1),
+                "popularity":  r.get("popularity") or 0,
+            })
+
+    # Interleave tv + movie by TMDb popularity so the most relevant title leads
+    # regardless of type (each list already comes back popularity-sorted).
+    results = [r for r in results if r.get("id") and r.get("title")]
+    results.sort(key=lambda r: r.get("popularity") or 0, reverse=True)
+    return results
+
+
 @app.get("/api/tmdb/search")
 async def tmdb_search(query: str = "", kind: str = "") -> JSONResponse:
     """TMDb candidate shows/movies for a free-text query — the entry point of the
@@ -17119,46 +17168,11 @@ async def tmdb_search(query: str = "", kind: str = "") -> JSONResponse:
         return JSONResponse({"enabled": True, "img_base": LOCAL_IMG_BASE,
                              "results": [], "collections": []})
 
-    kind = kind if kind in ("tv", "movie") else ""
-    results: list[dict] = []
-
-    if kind in ("", "tv"):
-        tv = await _tmdb_get("/search/tv",
-                             {"query": q, "include_adult": "false"})
-        for r in (tv or {}).get("results", []) or []:
-            results.append({
-                "id":          r.get("id"),
-                "kind":        "tv",
-                "title":       r.get("name") or "",
-                "year":        (r.get("first_air_date") or "")[:4],
-                "date":        (r.get("first_air_date") or "")[:10],
-                "overview":    r.get("overview") or "",
-                "poster_path": r.get("poster_path") or "",
-                "rating":      round(float(r.get("vote_average") or 0.0), 1),
-                "popularity":  r.get("popularity") or 0,
-            })
-    if kind in ("", "movie"):
-        mv = await _tmdb_get("/search/movie",
-                             {"query": q, "include_adult": "false"})
-        for r in (mv or {}).get("results", []) or []:
-            results.append({
-                "id":          r.get("id"),
-                "kind":        "movie",
-                "title":       r.get("title") or "",
-                "year":        (r.get("release_date") or "")[:4],
-                "date":        (r.get("release_date") or "")[:10],
-                "overview":    r.get("overview") or "",
-                "poster_path": r.get("poster_path") or "",
-                "rating":      round(float(r.get("vote_average") or 0.0), 1),
-                "popularity":  r.get("popularity") or 0,
-            })
-
-    # Interleave tv + movie by TMDb popularity so the most relevant title leads
-    # regardless of type (each list already comes back popularity-sorted).
-    results = [r for r in results if r.get("id") and r.get("title")]
-    results.sort(key=lambda r: r.get("popularity") or 0, reverse=True)
+    results = await _tmdb_search_results(q, kind)
     for r in results:
         r.pop("popularity", None)
+        r.pop("original_title", None)
+        r.pop("votes", None)
 
     collections = await _tmdb_search_collections(q) if kind != "tv" else []
 
@@ -26110,8 +26124,10 @@ async def voice_status(key: str = "", q: str = "") -> JSONResponse:
         done = [g for g in rows if g not in live][:voicestatus.OVERVIEW_DONE_MAX]
         facts = await asyncio.gather(*(_voice_facts(g) for g in live + done))
         live_f, done_f = list(facts[:len(live)]), list(facts[len(live):])
-        return JSONResponse({"found": True, "speech": voicestatus.overview(live_f, done_f),
-                             "titles": live_f, "finished": done_f})
+        asked = _voice_jobs_open()
+        return JSONResponse({"found": True,
+                             "speech": voicestatus.overview(live_f, done_f, asked),
+                             "titles": live_f, "finished": done_f, "requests": asked})
     g = next((x for x in rows if x["key"] == key), None) if key else None
     if g is None and q.strip():
         hits = voicestatus.rank(q, [x["name"] for x in rows])
@@ -26123,6 +26139,185 @@ async def voice_status(key: str = "", q: str = "") -> JSONResponse:
     facts = await _voice_facts(g)
     return JSONResponse({"found": True, "key": g["key"], "name": g["name"],
                          "speech": voicestatus.describe(facts), "facts": facts})
+
+
+# ── Downloading by voice (20.6.0) ───────────────────────────────────────────
+# "Download Star Wars, the original one." Two calls, because the person is asked
+# in between: /find names the film it understood, Siri puts that back ("Download
+# Star Wars (1977)?"), and only a yes reaches /download. Films only. Which film
+# and which release are decided in voicepick.py; the release pick is a port of
+# the dashboard's one-press Get (grpGetFilm), and goes through the SAME
+# `library_download` as that button, so the VPN gate, the unreleased gate, the
+# duplicate check and racing all apply unchanged.
+
+VOICE_DOWNLOAD_WAIT_S = 8.0       # how long /download holds the call open
+VOICE_JOB_KEEP_S = 6 * 3600       # how long a request that never started is reported
+# tmdb_id -> {tmdb_id, name, state: searching|started|failed, reason, at, ...}.
+# In memory only: a restart forgets a search that was running, and with it the
+# only thing that was not yet a library item.
+_VOICE_JOBS: dict[int, dict] = {}
+
+
+def _voice_jobs_open() -> list[dict]:
+    """Requests still searching or that never started, for the spoken report."""
+    cutoff = time.time() - VOICE_JOB_KEEP_S
+    for k in [k for k, j in _VOICE_JOBS.items() if j.get("at", 0) < cutoff]:
+        _VOICE_JOBS.pop(k, None)
+    return [{k: v for k, v in j.items() if k != "task"}
+            for j in _VOICE_JOBS.values() if j.get("state") in ("searching", "failed")]
+
+
+def _voice_film_name(title: str, date: str) -> str:
+    year = (date or "")[:4]
+    return f"{title} ({year})" if year else title
+
+
+async def _voice_find(spoken: str) -> dict:
+    """The film a spoken request names: `{found, reason?, name, tmdb_id, sure, date}`."""
+    said = " ".join((spoken or "").split())
+    if not said:
+        return {"found": False, "reason": "unknown", "name": "that"}
+    if not await _tmdb_effective_key():
+        return {"found": False, "reason": "no_tmdb", "name": said}
+    req = voicepick.parse_request(said)
+    attempts = [req]
+    if req["query"].lower() != said.lower():
+        # The hint may have been part of the title ("Blade Runner 2049").
+        attempts.append({"query": said, "year": 0, "want": ""})
+    series = None
+    for r in attempts:
+        cands = await _tmdb_search_results(r["query"], "")
+        film, sure = voicepick.choose_title(r, [c for c in cands if c["kind"] == "movie"])
+        show, show_sure = voicepick.choose_title(r, [c for c in cands if c["kind"] == "tv"])
+        if film and not voicepick.series_meant(film, sure, show, show_sure):
+            return {"found": True, "tmdb_id": int(film["id"]), "sure": sure,
+                    "name": _voice_film_name(film["title"], film.get("date", "")),
+                    "date": film.get("date", "")}
+        if show and show_sure and series is None:
+            series = show
+    if series:
+        return {"found": False, "reason": "series", "name": series["title"]}
+    return {"found": False, "reason": "unknown", "name": req["query"] or said}
+
+
+@app.get("/api/voice/find")
+async def voice_find(q: str = "") -> JSONResponse:
+    """Step 1 of a voice download: which film `q` (the words as spoken) means.
+    `{found, speech}`, and when found `{tmdb_id, name, sure, confirm}` - `confirm`
+    is the question to put back to the person. Starts nothing."""
+    hit = await _voice_find(q)
+    if not hit["found"]:
+        return JSONResponse({"found": False, "reason": hit["reason"],
+                             "speech": voicestatus.refusal(hit["reason"], hit["name"])})
+    reason = ""
+    if hit["date"] and hit["date"] > datetime.now().date().isoformat():
+        reason = "unreleased"
+    else:
+        lib = await get_library()
+        for it in lib["items"]:
+            meta = it.get("metadata") or {}
+            if (not it.get("admin_only") and meta.get("tmdb_kind") == "movie"
+                    and int(meta.get("tmdb_id") or 0) == hit["tmdb_id"]
+                    and it.get("status") != "error"):
+                reason = "have"
+                break
+    if reason:
+        return JSONResponse({"found": False, "reason": reason, "name": hit["name"],
+                             "speech": voicestatus.refusal(reason, hit["name"])})
+    return JSONResponse({"found": True, "tmdb_id": hit["tmdb_id"], "name": hit["name"],
+                         "sure": hit["sure"],
+                         "confirm": voicestatus.confirm_line(hit["name"], hit["sure"]),
+                         "speech": voicestatus.confirm_line(hit["name"], hit["sure"])})
+
+
+class VoiceDownloadReq(BaseModel):
+    tmdb_id: int
+
+
+async def _voice_download_film(request: Request, job: dict, det: dict) -> None:
+    """Search, pick and start one film; the outcome is written onto `job`."""
+    title = (det.get("title") or "").strip()
+    orig = (det.get("original_title") or "").strip()
+    year = int((det.get("release_date") or "0")[:4] or 0) or None
+    try:
+        lib = await get_library()
+
+        async def search(q: str) -> list[dict]:
+            shaped = await _indexer_query(q, lib)
+            return [m for g in _group_search_results(shaped, q, [], year)
+                    for m in (g.get("results") or [])]
+
+        results = await search(title)
+        if orig and orig != title and not any(float(m.get("rel") or 0) >= 1 for m in results):
+            results += await search(orig)
+        cands = voicepick.candidates(results)
+        if not cands:
+            job.update(state="failed", reason="none")
+            return
+        pick = cands[0]
+        rcfg = _download_race_cfg(lib)
+        short = voicepick.shortlist(cands, rcfg["quality_ceiling"]) if rcfg["enabled"] else []
+        runtime = float(det.get("runtime") or 0)
+        body = DownloadReq(
+            magnet=pick["magnet"], title=pick.get("title", ""),
+            tmdb_id=job["tmdb_id"], tmdb_kind="movie",
+            auto_picked=len(short) > 1,
+            candidates=[{"magnet": c["magnet"], "title": c.get("title", ""),
+                         "size": int(c.get("size") or 0), "seeders": int(c.get("seeders") or 0),
+                         "dv_risk": bool(c.get("dv_risk")), "audio": c.get("audio") or ""}
+                        for c in short] if len(short) > 1 else [],
+            runtime_min=runtime, episode_count=1 if runtime else 0)
+        resp = await library_download(request, body)
+        data = json.loads(resp.body)
+        job.update(state="started", item_id=data.get("item_id", ""),
+                   release=pick.get("title", ""),
+                   racing=int((data.get("race") or {}).get("size") or 0))
+        log.info("[voice] %s -> %r (%s seeders)", job["name"], pick.get("title", ""),
+                 pick.get("seeders", 0))
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        reason = ("vpn" if exc.status_code == 403 else
+                  "unreleased" if detail.get("code") == "unreleased" else
+                  "indexers" if exc.status_code == 502 else "error")
+        job.update(state="failed", reason=reason)
+        log.warning("[voice] %s did not start: %s %s", job["name"], exc.status_code, exc.detail)
+    except Exception:
+        job.update(state="failed", reason="error")
+        log.exception("[voice] download of %s failed", job["name"])
+
+
+@app.post("/api/voice/download")
+async def voice_download(request: Request, req: VoiceDownloadReq) -> JSONResponse:
+    """Step 2: start the film /find named. Holds the call open for
+    `VOICE_DOWNLOAD_WAIT_S` so the answer can be the real outcome; past that the
+    search carries on and the spoken report (/api/voice/status) says how it ended.
+    `{ok, state: started|searching|failed, speech, item_id?}`."""
+    det = await _tmdb_get(f"/movie/{int(req.tmdb_id)}")
+    if not det or not det.get("title"):
+        return JSONResponse({"ok": False, "state": "failed",
+                             "speech": voicestatus.refusal("unknown", "that")})
+    name = _voice_film_name(det["title"], det.get("release_date") or "")
+    if not state.vpn_secure:
+        return JSONResponse({"ok": False, "state": "failed",
+                             "speech": voicestatus.refusal("vpn", name)})
+    job = _VOICE_JOBS.get(int(req.tmdb_id))
+    if not job or job.get("state") != "searching":
+        job = _VOICE_JOBS[int(req.tmdb_id)] = {
+            "tmdb_id": int(req.tmdb_id), "name": name, "state": "searching",
+            "reason": "", "at": time.time()}
+        job["task"] = _spawn_bg(_voice_download_film(request, job, det))
+    try:
+        await asyncio.wait_for(asyncio.shield(job["task"]), VOICE_DOWNLOAD_WAIT_S)
+    except asyncio.TimeoutError:
+        pass
+    if job["state"] == "started":
+        speech = voicestatus.started_line(name, job.get("racing", 0))
+    elif job["state"] == "failed":
+        speech = voicestatus.refusal(job.get("reason") or "", name)
+    else:
+        speech = voicestatus.searching_line(name)
+    return JSONResponse({"ok": job["state"] != "failed", "state": job["state"],
+                         "speech": speech, "item_id": job.get("item_id", "")})
 
 
 # ── Latest iOS app (19.6.0) ─────────────────────────────────────────────────

@@ -185,14 +185,16 @@ OVERVIEW_LIVE_MAX = 4
 OVERVIEW_DONE_MAX = 6
 
 
-def overview(rows: list[dict], done: "list[dict] | None" = None) -> str:
+def overview(rows: list[dict], done: "list[dict] | None" = None,
+             requests: "list[dict] | None" = None) -> str:
     """The whole report in one breath: what is downloading (`rows`), then what
     most recently finished (`done`) and whether each is prepped.
 
     iOS 27's Siri runs this as a tool and answers in its own words, whatever
     title it was asked about (it has never chosen the per-title intent), so this
     has to carry every title it might be asked about. `rows` and `done` are
-    `describe` facts; a row of `done` whose downloads all failed says so."""
+    `describe` facts; a row of `done` whose downloads all failed says so.
+    `requests` are voice downloads still searching or that never started."""
     live = [r for r in rows if int(r.get("downloading") or 0)]
     parts = []
     for r in live[:OVERVIEW_LIVE_MAX]:
@@ -227,4 +229,54 @@ def overview(rows: list[dict], done: "list[dict] | None" = None) -> str:
         fin.append("%s, %s" % (r.get("name"), clause) if clause else "%s" % r.get("name"))
     if fin:
         out += " Most recently finished downloading: %s." % "; ".join(fin)
+    for q in requests or []:
+        line = request_line(q)
+        if line:
+            out += " " + line
     return out
+
+
+# ── downloads asked for by voice ─────────────────────────────────────────────
+# One sentence per outcome, keyed by a `reason` the server sets. A reason that
+# is not listed says only that it did not start: never a guess at why.
+
+_WHY = {
+    "none":       "I couldn't find a copy of %s anywhere right now.",
+    "vpn":        "I can't download %s right now: the VPN isn't connected.",
+    "unreleased": "%s isn't out yet.",
+    "indexers":   "I couldn't search for %s: the indexers aren't answering.",
+    "series":     "%s is a series. I can only start films by voice for now.",
+    "unknown":    "I couldn't find a film called %s.",
+    "no_tmdb":    "I can't look up %s: StreamLink has no TMDb key set.",
+    "have":       "%s is already in your library, so I didn't download it again.",
+}
+
+
+def confirm_line(name: str, sure: bool = True) -> str:
+    """What is put back to the person before anything starts."""
+    return ("Download %s?" if sure else "The closest I found is %s. Download it?") % name
+
+
+def refusal(reason: str, name: str) -> str:
+    return _WHY.get(reason, "I couldn't start downloading %s.") % name
+
+
+def started_line(name: str, racing: int = 0) -> str:
+    if racing > 1:
+        return "Okay, %s is downloading. I'm trying %d copies and keeping the best." % (name, racing)
+    return "Okay, %s is downloading." % name
+
+
+def searching_line(name: str) -> str:
+    return "I'm still looking for a copy of %s. Ask me what's downloading in a minute." % name
+
+
+def request_line(q: dict) -> str:
+    """A voice request that has NOT become a library item, for the report.
+    One that started is already listed as downloading."""
+    state, name = q.get("state"), q.get("name") or "that"
+    if state == "searching":
+        return "Still looking for a copy of %s." % name
+    if state == "failed":
+        return refusal(q.get("reason") or "", name)
+    return ""

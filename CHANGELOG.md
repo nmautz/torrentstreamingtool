@@ -1,5 +1,44 @@
 # Changelog
 
+## [20.6.0] — 2026-10-02
+### Download a film by asking Siri
+
+- **New: "Download Star Wars, the original one, in StreamLink."** Siri works out which
+  film you mean, asks you to confirm it ("Download Star Wars (1977)?"), and on a yes the
+  server finds the best copy and starts it, the same copy the Get button would choose.
+  It then tells you it is downloading, or why it could not start.
+- You can say which version: "the original one", "the new one", or a year ("Dune 1984").
+  With none of those you get the best-known film of that name.
+- Films only for now. Ask for a series and Siri says so instead of guessing.
+- It refuses, in words, a film that is already in your library, one that is not out yet,
+  and any download while the VPN is down. If the search takes more than a few seconds
+  Siri says it is still looking, and "What's downloading in StreamLink?" tells you how it
+  ended.
+- Needs the 20.6.0 app and the 20.6.0 server, and "StreamLink" in the sentence.
+- Checked: which film is meant and which copy is picked (47 unit cases), the spoken lines
+  (56 cases), and the two server calls with the indexers and the download itself faked.
+  **Not checked** at the time of writing: on the box, through Siri, or a real download.
+
+## [20.5.1] — 2026-10-02
+### Siri now answers about a title by name
+
+- **Fixed: "Is SpongeBob prepped in StreamLink?" got "I can't search within the
+  StreamLink app".** Siri chooses an action by its name and description, and ours only
+  said "what's downloading". Both actions now describe everything they can answer:
+  downloading, finished, prepped, available, ready.
+- **Fixed: Siri could never ask about one title.** The title was something Siri had to
+  look up through the app, and it never did. It is now the name as you said it
+  ("SpongeBob"), and the server works out which title you meant.
+- New phrases: "What's ready in StreamLink", "What finished downloading in StreamLink",
+  "StreamLink status", "Check a title in StreamLink".
+- App only; needs the 20.5.0 server.
+- Checked on an iPhone 16 (iOS 27) from the home screen: "Is SpongeBob prepped in
+  StreamLink?" reached the app with "SpongeBob" and was answered correctly; "What's
+  ready in StreamLink?" read out the full report. **Did not work**: "Is Hunter x Hunter
+  done downloading in StreamLink?" was asked once and Siri did not use the app at all.
+  **Not checked**: an answer while something is downloading or prepping, and the old
+  (pre-iOS 27) Siri.
+
 ## [20.5.0] — 2026-10-02
 ### Siri can answer about a title that has finished, not only one still downloading
 
@@ -12,8 +51,9 @@
   state on a cold drive took 7 seconds, longer than Siri waits. The check is now given
   2.5 seconds; past that the answer leaves prep out.
 - Server only. The 20.4.0 app is the one to use; no new app build.
-- Checked: the wording (49 unit cases) and the endpoint against a made-up library.
-  **Not checked** at the time of writing: on the box, or through Siri.
+- Checked on the box: the report names the six newest titles with their prep state, in
+  0.2 s once warm and 2.7 s on the first ask after a reboot. Through Siri it took the
+  20.5.1 app to get there (see above).
 
 ## [20.4.0] — 2026-10-02
 ### Ask Siri whether something has finished downloading (first trial)

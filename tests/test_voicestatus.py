@@ -168,6 +168,23 @@ eq("a title still downloading is never listed as finished",
 ok("finished list is capped",
    vs.overview([], [dict(BASE, name="N%d" % i) for i in range(20)]).count(";") == vs.OVERVIEW_DONE_MAX - 1)
 
+# ── downloads asked for by voice ──────────────────────────────────────────────
+eq("confirm", vs.confirm_line("Star Wars (1977)"), "Download Star Wars (1977)?")
+eq("confirm, unsure", vs.confirm_line("Star Wars (1977)", False),
+   "The closest I found is Star Wars (1977). Download it?")
+eq("started", vs.started_line("Dune (1984)"), "Okay, Dune (1984) is downloading.")
+eq("started, racing", vs.started_line("Dune (1984)", 3),
+   "Okay, Dune (1984) is downloading. I'm trying 3 copies and keeping the best.")
+eq("no copy", vs.refusal("none", "Dune (1984)"), "I couldn't find a copy of Dune (1984) anywhere right now.")
+eq("an unlisted reason guesses nothing", vs.refusal("qbit", "Dune (1984)"),
+   "I couldn't start downloading Dune (1984).")
+eq("report carries a search still running and one that failed, not one that started",
+   vs.overview([], [], [{"state": "searching", "name": "Alien (1979)"},
+                        {"state": "failed", "reason": "none", "name": "Heat (1995)"},
+                        {"state": "started", "name": "Dune (1984)"}]),
+   "Nothing is downloading right now. Still looking for a copy of Alien (1979). "
+   "I couldn't find a copy of Heat (1995) anywhere right now.")
+
 if _FAIL:
     print("FAILED %d (passed %d)" % (len(_FAIL), _PASS))
     for f in _FAIL:

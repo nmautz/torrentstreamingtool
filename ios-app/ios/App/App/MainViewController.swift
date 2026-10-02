@@ -48,13 +48,8 @@ class MainViewController: CAPBridgeViewController {
             guard let u = wv.url, let scheme = u.scheme, scheme == "http" || scheme == "https",
                   let host = u.host, host != "localhost", host != "127.0.0.1" else { return }
             let origin = "\(scheme)://\(host)" + (u.port.map { ":\($0)" } ?? "")
-            guard AppGroupConfig.hostUrl != origin else { return }
-            AppGroupConfig.hostUrl = origin
-            // Siri recognises a title inside a spoken phrase only if it was told
-            // the titles; a new host means a different library.
-            if #available(iOS 17.0, *) { StreamLinkShortcuts.updateAppShortcutParameters() }
+            if AppGroupConfig.hostUrl != origin { AppGroupConfig.hostUrl = origin }
         }
-        if #available(iOS 17.0, *) { StreamLinkShortcuts.updateAppShortcutParameters() }
     }
 
     // The player's orientation lock (AppShell.swift). Unlocked, this is

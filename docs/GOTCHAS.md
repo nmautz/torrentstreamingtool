@@ -6766,8 +6766,8 @@ follow.
 The sentence is built on the host (`voicestatus.describe`), so changing what Siri says is
 a host deploy. Changing *which phrases* Siri listens for is an app build: the phrases are
 compiled into `Metadata.appintents` by `xcodebuild`, and each must contain the app's name.
-A title is only recognised inside a phrase if Siri was told the titles
-(`updateAppShortcutParameters`, called when the host changes).
+A phrase cannot carry a `String` parameter, so the old Siri asks "Which title?" after
+"Check a title in StreamLink"; the new one fills it from the sentence.
 
 **What iOS 27's Siri actually does with these** (iPhone 16, 2026-10-02):
 
@@ -6776,13 +6776,49 @@ A title is only recognised inside a phrase if Siri was told the titles
   words that StreamLink had no download going (and mentioned a torrent it found in
   Files). The sentence we return is source material, not what is spoken. So an intent's
   return value has to carry everything Siri might be asked about.
-- **It never picked the per-title intent.** `LibraryTitleQuery` was not called once
-  (no `siri-match` / `siri-resolve` rows), even with the title and the app name in the
-  sentence. Do not build on Siri resolving a library title into a parameter until that is
-  seen to happen.
+- **It routes on the intent's title and description.** While the overview intent was
+  described as "what's downloading", "Is SpongeBob prepped in StreamLink?" got "I can't
+  search within the StreamLink app" and nothing ran. Describing every question the intent
+  can answer (20.5.1) fixed it. A new capability needs its words in the description, and
+  the description is compiled into the app.
+- **It fills a plain `String` parameter from the sentence, and never an `AppEntity`.** As
+  an entity (20.4.0) the title was never resolved: `EntityStringQuery` was not called
+  once, so the per-title intent could not be chosen. As a `String` (20.5.1) Siri passed
+  `"SpongeBob"` and the host matched it (`voicestatus.rank`). Take spoken names as
+  strings and resolve them on the host.
+- **It is not reliable.** Same build, same minute: "Is Hunter x Hunter done downloading
+  in StreamLink?" ran nothing and Siri said it had no information. Asked once; cause
+  unknown.
 - **No app name, no app.** "Is SpongeBob done downloading?" did not reach StreamLink.
 - **With the app on screen, Siri reads the screen instead**, and gets it wrong: it
   reported a watch-progress percentage as a download. Test from the home screen.
 - A person who has run one of these from the Shortcuts app will think Siri is "still
   using my shortcut" after deleting it. It is the app's own App Shortcut, which is the
   intended path and cannot be deleted.
+
+## A voice download has nobody checking the screen (20.6.0)
+
+`DownloadFilmIntent` → `/api/voice/find` → confirmation → `/api/voice/download`.
+
+- **The confirmation is the safety, so never skip it.** `/find` starts nothing. Which film
+  was meant is a guess from a few spoken words; "Download Star Wars (1977)?" is the only
+  check before a multi-gigabyte download of the wrong thing. Do not merge the two calls.
+- **Hints come off the END of the sentence only.** "the original one", "the new one" and
+  a trailing year are stripped; "First Blood", "Old", "1917" and "The Original Kings of
+  Comedy" are titles. When the stripped form finds nothing for that year the words are
+  retried untouched ("Blade Runner 2049").
+- **Fame is TMDb `vote_count`, not `popularity`.** Popularity is this week's traffic. A
+  name match under 5% of the best-known result's votes loses unless it is word for word:
+  "a new hope" means Star Wars (1977), not "A Christmas in New Hope"; "dune the new one"
+  is 2021, not an unknown 2025 "The Dune"; "the office" is the series, not a 1966 film.
+- **The release pick is a second copy of the dashboard's.** `voicepick.candidates` /
+  `shortlist` port `grpGetFilm`, `_pickCmp` and `_ssAutoPickRace` from `static/index.html`,
+  against the warning on `DownloadReq.candidates` that a server-side ranking would
+  disagree with the one on screen. With no page there is no alternative; change one,
+  change both. The page's Auto-pick size/seeder limits and audio preference are page
+  state and do NOT apply to a voice download.
+- **The download itself is `library_download`, called directly.** Do not reimplement the
+  add: the VPN gate, unreleased gate, duplicate-hash check and racing all live there.
+- **`_VOICE_JOBS` is in memory.** A search still running when the box restarts is
+  forgotten, and it is the only record of a request that is not yet a library item.
+- Films only. A series name is refused in words rather than guessed into a pack.

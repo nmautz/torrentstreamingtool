@@ -2,20 +2,24 @@
 //  SiriIntents.swift
 //  StreamLink iOS — asking Siri about the library (20.4.0 spike).
 //
-//  "Is Star Wars done downloading?"  "What's downloading in StreamLink?"
+//  "Is Star Wars done downloading in StreamLink?"  "What's ready in StreamLink?"
+//  "Download Star Wars, the original one, in StreamLink."
 //
 //  Siri reaches an app only through App Intents. These are deliberately thin:
 //  the host decides which title was meant and writes the sentence
-//  (voicestatus.py, GET /api/voice/titles and /api/voice/status), so the wording
+//  (voicestatus.py, voicepick.py, /api/voice/*), so the wording
 //  and the matching change with a host update and never need a new app build.
 //
-//  ── What this spike is for ──────────────────────────────────────────────────
-//  Two things no document settles, so every call is written to the diagnostic
-//  log (`siri-*` rows) to be read back off the phone:
-//    1. Does Siri route a plain question here WITHOUT the app's name, or only
-//       the App Shortcut phrases below, which carry it?
-//    2. What does Siri hand over as the title: the spoken words (`siri-match`),
-//       or an entity it already resolved (`siri-resolve`)?
+//  ── What the first device tests showed (iPhone 16, iOS 27, 2026-10-02) ──────
+//  Siri uses an intent as a TOOL: it picks one by its title and description,
+//  runs it, and answers in its own words out of what came back. So:
+//    * The description is what Siri routes on. "What's downloading" was never
+//      run for "is SpongeBob prepped?"; Siri said it could not search the app.
+//    * The title is a plain String. As an AppEntity (20.4.0) Siri never once
+//      called the entity query, so it could not fill the parameter and the
+//      intent was never chosen. The host matches the spoken name instead.
+//    * The sentence must contain "StreamLink"; without it Siri never comes here.
+//  Every run is written to the diagnostic log (`siri-*` rows).
 //
 //  ── Where the host address comes from ───────────────────────────────────────
 //  An intent runs in the app's process with NO web view: the system starts the
@@ -32,148 +36,204 @@ import AppIntents
 
 @available(iOS 17.0, *)
 enum VoiceClient {
-    struct Title: Decodable { let key: String; let name: String }
-    private struct Titles: Decodable { let titles: [Title] }
     private struct Status: Decodable { let speech: String }
+
+    /// What the host understood a spoken film name to mean (GET /api/voice/find).
+    struct Found: Decodable {
+        let found: Bool
+        let speech: String
+        let tmdb_id: Int?
+        let name: String?
+        let confirm: String?
+    }
 
     static let unreachable = "I can't reach your StreamLink server right now."
     static let unconfigured = "Open StreamLink and connect to your server first."
 
+    private static var base: String? {
+        guard let b = AppGroupConfig.hostUrl ?? AppGroupConfig.serverUrl, !b.isEmpty else { return nil }
+        return b
+    }
+
     private static func get(_ path: String, _ query: [URLQueryItem]) async -> Data? {
-        guard let base = AppGroupConfig.hostUrl ?? AppGroupConfig.serverUrl, !base.isEmpty,
-              var parts = URLComponents(string: base + path) else { return nil }
+        guard let base, var parts = URLComponents(string: base + path) else { return nil }
         parts.queryItems = query.isEmpty ? nil : query
         guard let url = parts.url else { return nil }
         var request = URLRequest(url: url)
         // Siri gives perform() only a few seconds before it says the app is
         // taking too long; an unreachable host must lose that race, not Siri.
         request.timeoutInterval = 6
+        return await send(request)
+    }
+
+    private static func send(_ req: URLRequest) async -> Data? {
+        var request = req
         if let d = AppGroupConfig.deviceId, !d.isEmpty { request.setValue(d, forHTTPHeaderField: "X-Device-Id") }
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         return data
     }
 
-    /// Library titles; `q` is what Siri heard, nil for the suggested list.
-    static func titles(matching q: String?, limit: Int = 12) async -> [Title] {
-        var query = [URLQueryItem(name: "limit", value: String(limit))]
-        if let q, !q.isEmpty { query.append(URLQueryItem(name: "q", value: q)) }
-        guard let data = await get("/api/voice/titles", query),
-              let body = try? JSONDecoder().decode(Titles.self, from: data) else { return [] }
-        return body.titles
+    /// Step 1 of a download: which film the spoken words mean. Starts nothing.
+    static func find(_ spoken: String) async -> Found {
+        guard base != nil else {
+            return Found(found: false, speech: unconfigured, tmdb_id: nil, name: nil, confirm: nil)
+        }
+        guard let data = await get("/api/voice/find", [URLQueryItem(name: "q", value: spoken)]),
+              let body = try? JSONDecoder().decode(Found.self, from: data) else {
+            return Found(found: false, speech: unreachable, tmdb_id: nil, name: nil, confirm: nil)
+        }
+        return body
     }
 
-    /// The sentence to say. `key` nil asks what is downloading at all.
-    static func status(key: String?) async -> String {
+    /// Step 2: start it. The host holds the call for up to 8 s while it searches
+    /// the indexers, so this waits longer than a status question does.
+    static func download(tmdbId: Int) async -> String {
+        guard let base, let url = URL(string: base + "/api/voice/download") else { return unconfigured }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["tmdb_id": tmdbId])
+        request.timeoutInterval = 12
+        guard let data = await send(request),
+              let body = try? JSONDecoder().decode(Status.self, from: data) else { return unreachable }
+        return body.speech
+    }
+
+    /// The sentence to say. `name` is the title as spoken, matched on the host;
+    /// nil asks for the full report.
+    static func status(name: String?) async -> String {
         guard let base = AppGroupConfig.hostUrl ?? AppGroupConfig.serverUrl, !base.isEmpty else {
             return unconfigured
         }
-        let query = key.map { [URLQueryItem(name: "key", value: $0)] } ?? []
+        let query = name.map { [URLQueryItem(name: "q", value: $0)] } ?? []
         guard let data = await get("/api/voice/status", query),
               let body = try? JSONDecoder().decode(Status.self, from: data) else { return unreachable }
         return body.speech
     }
 }
 
-/// A show or film in the library, as a person names it. `id` is the host's
-/// series key, the same grouping a library tile uses.
-@available(iOS 17.0, *)
-struct LibraryTitle: AppEntity {
-    static var typeDisplayRepresentation = TypeDisplayRepresentation(name: "Title")
-    static var defaultQuery = LibraryTitleQuery()
-
-    let id: String
-    let name: String
-
-    var displayRepresentation: DisplayRepresentation { DisplayRepresentation(title: "\(name)") }
-}
-
-@available(iOS 17.0, *)
-struct LibraryTitleQuery: EntityStringQuery {
-    func entities(for identifiers: [String]) async throws -> [LibraryTitle] {
-        let all = await VoiceClient.titles(matching: nil, limit: 500)
-        let byKey = Dictionary(all.map { ($0.key, $0.name) }, uniquingKeysWith: { a, _ in a })
-        DiagLog.shared.write("siri-resolve", ["ids": identifiers, "known": all.count], cat: "app")
-        // A title the host no longer lists (or a host that is unreachable) still
-        // resolves, so perform() runs and the HOST's answer is what gets said.
-        return identifiers.map { LibraryTitle(id: $0, name: byKey[$0] ?? "that title") }
-    }
-
-    func entities(matching string: String) async throws -> [LibraryTitle] {
-        let hits = await VoiceClient.titles(matching: string)
-        DiagLog.shared.write("siri-match", ["heard": string, "hits": hits.map { $0.name }], cat: "app")
-        return hits.map { LibraryTitle(id: $0.key, name: $0.name) }
-    }
-
-    func suggestedEntities() async throws -> [LibraryTitle] {
-        await VoiceClient.titles(matching: nil, limit: 50).map { LibraryTitle(id: $0.key, name: $0.name) }
-    }
-}
-
 @available(iOS 17.0, *)
 struct DownloadStatusIntent: AppIntent {
-    static var title: LocalizedStringResource = "Check Download Status"
+    static var title: LocalizedStringResource = "Check a Title"
     static var description = IntentDescription(
-        "Says whether a film or show in your StreamLink library has finished downloading, how far along it is, and how long until it is prepped for streaming.",
+        "Looks up one film or show in the StreamLink library by name and reports whether it has finished downloading, how far along it is and how long is left, and whether it is prepped, available and ready to stream. Use for any question about a specific title in StreamLink.",
         categoryName: "Library",
-        searchKeywords: ["download", "downloading", "progress", "prepped", "ready", "finished"])
+        searchKeywords: ["download", "downloading", "progress", "prepped", "ready", "finished", "available", "library"])
     static var openAppWhenRun = false
 
-    @Parameter(title: "Title", requestValueDialog: "Which title?")
-    var target: LibraryTitle
+    @Parameter(title: "Title",
+               description: "The name of the film or show, as spoken, for example SpongeBob or Star Wars.",
+               requestValueDialog: "Which title?")
+    var name: String
 
     static var parameterSummary: some ParameterSummary {
-        Summary("Is \(\.$target) done downloading?")
+        Summary("Check \(\.$name) in the library")
     }
 
     func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<String> {
-        let speech = await VoiceClient.status(key: target.id)
-        DiagLog.shared.write("siri-status", ["key": target.id, "name": target.name, "said": speech], cat: "app")
+        let speech = await VoiceClient.status(name: name)
+        DiagLog.shared.write("siri-status", ["heard": name, "said": speech], cat: "app")
         return .result(value: speech, dialog: "\(speech)")
     }
 }
 
 @available(iOS 17.0, *)
 struct DownloadsOverviewIntent: AppIntent {
-    static var title: LocalizedStringResource = "What's Downloading"
+    static var title: LocalizedStringResource = "Library Status"
     static var description = IntentDescription(
-        "Lists what your StreamLink server is downloading right now, with progress and time left.",
+        "Reports the state of the StreamLink library: what is downloading now with progress and time left, which films and shows most recently finished downloading, and whether each is prepped, available and ready to stream. Use for any question about what is downloading, finished, available, prepped or ready in StreamLink.",
         categoryName: "Library",
-        searchKeywords: ["download", "downloading", "progress", "queue"])
+        searchKeywords: ["download", "downloading", "progress", "queue", "prepped", "ready", "finished", "available", "library", "status"])
     static var openAppWhenRun = false
 
     func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<String> {
-        let speech = await VoiceClient.status(key: nil)
+        let speech = await VoiceClient.status(name: nil)
         DiagLog.shared.write("siri-overview", ["said": speech], cat: "app")
         return .result(value: speech, dialog: "\(speech)")
     }
 }
 
+/// "Download Star Wars, the original one in StreamLink." Films only (20.6.0).
+///
+/// Two calls to the host with the person in between: /find says which film it
+/// took the words to mean, `requestConfirmation` puts that back ("Download Star
+/// Wars (1977)?"), and only a yes reaches /download. Nobody is looking at a
+/// screen, so the confirmation is the only check that the right film starts.
+@available(iOS 17.0, *)
+struct DownloadFilmIntent: AppIntent {
+    static var title: LocalizedStringResource = "Download a Film"
+    static var description = IntentDescription(
+        "Finds a film by name and starts downloading it to the StreamLink library, after confirming which film was meant. Use when asked to download, get, grab or add a film or movie in StreamLink.",
+        categoryName: "Library",
+        searchKeywords: ["download", "get", "grab", "add", "film", "movie"])
+    static var openAppWhenRun = false
+
+    @Parameter(title: "Film",
+               description: "The film's name as spoken, including anything said about which version, for example: Star Wars the original one, Dune 1984, or Dune the new one.",
+               requestValueDialog: "Which film?")
+    var name: String
+
+    static var parameterSummary: some ParameterSummary {
+        Summary("Download \(\.$name)")
+    }
+
+    func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<String> {
+        let found = await VoiceClient.find(name)
+        DiagLog.shared.write("siri-find", ["heard": name, "found": found.found,
+                                           "name": found.name ?? "", "said": found.speech], cat: "app")
+        guard found.found, let id = found.tmdb_id else {
+            return .result(value: found.speech, dialog: "\(found.speech)")
+        }
+        let question = found.confirm ?? found.speech
+        // Throws if the person says no, which ends the intent with nothing started.
+        if #available(iOS 18.0, *) {
+            try await requestConfirmation(actionName: .download, dialog: "\(question)")
+        } else {
+            try await requestConfirmation(result: .result(dialog: "\(question)"),
+                                          confirmationActionName: .download)
+        }
+        let speech = await VoiceClient.download(tmdbId: id)
+        DiagLog.shared.write("siri-download", ["tmdb": id, "name": found.name ?? "", "said": speech], cat: "app")
+        return .result(value: speech, dialog: "\(speech)")
+    }
+}
+
 /// The phrases that work on every Siri, old and new. Each must carry the app's
-/// name; a phrase may carry one parameter, and Siri only recognises parameter
-/// values it was told about (`updateAppShortcutParameters`, called from
-/// MainViewController when the host is known).
+/// name. A phrase cannot carry a String parameter, so the per-title one asks
+/// "Which title?" on the old Siri; the new one fills it from the sentence.
 @available(iOS 17.0, *)
 struct StreamLinkShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
-        AppShortcut(
-            intent: DownloadStatusIntent(),
-            phrases: [
-                "Is \(\.$target) done downloading in \(.applicationName)",
-                "Check on \(\.$target) in \(.applicationName)",
-                "How long until \(\.$target) is ready in \(.applicationName)",
-                "\(.applicationName) download status",
-            ],
-            shortTitle: "Download Status",
-            systemImageName: "arrow.down.circle")
         AppShortcut(
             intent: DownloadsOverviewIntent(),
             phrases: [
                 "What's downloading in \(.applicationName)",
                 "What is \(.applicationName) downloading",
-                "\(.applicationName) downloads",
+                "What finished downloading in \(.applicationName)",
+                "What's ready in \(.applicationName)",
+                "\(.applicationName) status",
             ],
-            shortTitle: "What's Downloading",
+            shortTitle: "Library Status",
             systemImageName: "list.bullet")
+        AppShortcut(
+            intent: DownloadStatusIntent(),
+            phrases: [
+                "Check a title in \(.applicationName)",
+                "Is something done downloading in \(.applicationName)",
+                "Is something prepped in \(.applicationName)",
+            ],
+            shortTitle: "Check a Title",
+            systemImageName: "arrow.down.circle")
+        AppShortcut(
+            intent: DownloadFilmIntent(),
+            phrases: [
+                "Download a film in \(.applicationName)",
+                "Download a movie in \(.applicationName)",
+                "Get a film in \(.applicationName)",
+                "Download something in \(.applicationName)",
+            ],
+            shortTitle: "Download a Film",
+            systemImageName: "square.and.arrow.down")
     }
 }

@@ -32,6 +32,7 @@ test:
 	python3 tests/test_discovery.py
 	python3 tests/test_appchannel.py
 	python3 tests/test_voicestatus.py
+	python3 tests/test_voicepick.py
 
 clean:
 	rm -rf .venv __pycache__ .env
