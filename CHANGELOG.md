@@ -1,5 +1,16 @@
 # Changelog
 
+## [20.8.3] — 2026-10-03
+### The last main-thread audio switch at PiP start
+
+- **Verified on device (20.8.2, 2026-10-03 01:31):** no pause at the start (the first
+  audio switch was straight to mixable), PiP opened in 565 ms (was 1.9 s) with no
+  "Media failed to decode", and the return to the app showed no `unasked-pause`.
+- **Fixed: one exclusive audio switch was still made inline while PiP opened.** The page
+  arms as soon as it becomes the remote, and that arm did the same switch itself, taking
+  625 ms of main thread 10 ms before the deferred one. While PiP is opening, an arm now
+  leaves it to the deferred switch.
+
 ## [20.8.2] — 2026-10-03
 ### No blip at the start, or going into and out of PiP
 

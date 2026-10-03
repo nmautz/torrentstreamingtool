@@ -1432,6 +1432,11 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // `mix:false` → 40.184 `unasked-pause`).
         let mix = !exclusive && player == nil && cast == nil
             && (shadowPlayer != nil || sessionMixable || armed.autoPip)
+        // PiP is opening and didStart's off-main switch owns this one (20.8.3).
+        // The page arms the moment it becomes the remote, and that arm used to do
+        // the same exclusive switch inline: 625 ms of main thread, 10 ms ahead of
+        // the deferred one (measured 2026-10-03 01:31:17.350).
+        if !exclusive, pipOn, sessionMixable { return }
         if sessionActivated, mix != sessionMixable { sessionActivated = false }
         guard !sessionActivated else { return }
         let s = AVAudioSession.sharedInstance()

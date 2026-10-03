@@ -2010,7 +2010,9 @@ Two refinements (20.8.2):
   ~100 ms before the shadow made it mixable, which paused the page once at every start
   and every return from PiP.
 - On a **PiP** promotion the exclusive switch is deferred to `didStart` and run off the
-  main thread (`makeSessionExclusiveSoon`). Inline, it cost 0.9 s of main thread inside
+  main thread (`makeSessionExclusiveSoon`). Until it has landed, `activateAudioSession`
+  returns early for any non-exclusive caller while `pipOn` (20.8.3): the page arms the
+  moment it becomes the remote, and that arm otherwise made the same switch inline. Inline, it cost 0.9 s of main thread inside
   the PiP opening animation, and it broke WebKit's still-live element ("Media failed
   to decode"). The lock promotion (no PiP) still switches inline: nothing is on screen,
   and the relief pitcher must be the Now Playing app at once. A promoted shadow also
@@ -2047,6 +2049,9 @@ controller and the view.
 **Cost:** a second stream at ≤540p (none extra for a downloaded episode, which plays
 from the phone's own loopback server) and a second video decode, for as long as an
 episode plays with the switch on.
+
+**20.8.2 verified 2026-10-03 01:31:** mixable from the first arm (no start pause), PiP
+open in 565 ms with no WebKit decode error, and a clean return.
 
 **Verified on device 2026-10-03 (20.8.0):** iOS does float the layer behind the
 webview: `pip-possible on:true`, then `pip-will-start` (app `inact`) on the swipe home,
