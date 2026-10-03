@@ -1,5 +1,25 @@
 # Changelog
 
+## [20.7.0] — 2026-10-02
+### Picture in Picture in the app
+
+- **New: a Picture in Picture button in the player's control row** (app only, next to
+  AirPlay), so an episode keeps playing in a floating window over other apps. Shown when
+  the file can be played natively (the same condition as AirPlay) and the device supports
+  PiP.
+- Built the way AirPlay is: the native player takes over the episode at the current
+  position, and the native player's video is what goes into the window. While the app is
+  open behind it, the phone shows the remote panel ("Playing in Picture in Picture").
+  Progress, Smart Skip, auto-advance and the sleep timer run off the native player as they
+  do on the glasses.
+- Ending it: the window's "back to app" button returns the episode to the phone's player
+  and keeps playing. Its X pauses, and the episode is back on the phone when you return.
+  **To Phone** on the remote also ends it.
+- Not automatic yet: swiping home without pressing the button still uses the existing
+  background handoff (sound only), because the native player only starts at that moment
+  and is not on screen to float.
+- **Not yet tried on a device.**
+
 ## [20.6.4] — 2026-10-02
 ### The app's settings survive what its downloads survive
 

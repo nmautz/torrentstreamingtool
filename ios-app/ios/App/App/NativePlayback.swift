@@ -214,6 +214,7 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "castVolume", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "release",   returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "routeCheck", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "pip",       returnType: CAPPluginReturnPromise),
     ]
 
     private let mgr = NativePlaybackManager.shared
@@ -363,6 +364,10 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
 
     @objc func routeCheck(_ call: CAPPluginCall) {
         mgr.routeCheck { call.resolve($0) }
+    }
+
+    @objc func pip(_ call: CAPPluginCall) {
+        mgr.startPiP { call.resolve($0) }
     }
 }
 
@@ -962,6 +967,14 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private var volView: MPVolumeView?
     private var volObs: NSKeyValueObservation?
     private var volPhoneOriginal: Float = -1
+    /// Picture in Picture (20.7.0). `pipOn` from the tap until PiP ends; the
+    /// view is the PiP source, at the back of the app's window. See startPiP.
+    private(set) var pipOn = false
+    private var pipRestoring = false
+    private var pipView: ExternalPlayerView?
+    private var pipController: AVPictureInPictureController?
+    private var pipPossibleObs: NSKeyValueObservation?
+    private var pipDeadline: DispatchWorkItem?
 
     /// Whether we are currently holding the idle timer open. See setAwake.
     private(set) var awakeOn = false
@@ -1483,7 +1496,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
 
     /// True while the native player is the presentation and the page must not
     /// touch its own element.
-    var isHolding: Bool { isNativeActive && (extWindow != nil || airplayOn || castLive) }
+    var isHolding: Bool { isNativeActive && (extWindow != nil || airplayOn || castLive || pipOn) }
 
     func disarm(reason: String = "unspecified") {
         // ORDER IS LOAD-BEARING: flush, then stop, then wipe.
@@ -2441,7 +2454,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             DiagLog.shared.write("cast-rejoin", ["pos": armed.position], cat: "cast")
             c.rejoin()
         }
-        if extWindow != nil || airplayOn || castLive { return }
+        if extWindow != nil || airplayOn || castLive || pipOn { return }
 
         // If the webview never calls resume() — it reloaded, crashed, or the
         // page was replaced — we'd be left playing invisible audio with no UI.
@@ -2526,6 +2539,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             SilentKeepAlive.shared.stop()
         }
         endAirPlaySession()
+        endPiPSession()
         player?.pause()
         player?.replaceCurrentItem(with: nil)
         player = nil
@@ -3083,6 +3097,133 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         onMain { pv?.removeFromSuperview() }
     }
 
+    // MARK: Picture in Picture (20.7.0)
+
+    // WHY THE NATIVE PLAYER, NOT WEBKIT'S OWN PiP
+    // The web player is hls.js over ManagedMediaSource, and the moment the app
+    // backgrounds the relief pitcher (appDidEnterBackground) would start a
+    // SECOND engine under WebKit's PiP window and take the audio session from
+    // it. So PiP is one more takeover of the kind AirPlay already is: the
+    // native player takes the playback while foreground, the page becomes its
+    // remote, and progress / skip / advance / sleep all run off the native
+    // clock exactly as they do on the glasses. Once PiP is up, backgrounding
+    // finds the native player already running and leaves it alone.
+    //
+    // THE SOURCE LAYER. AVPictureInPictureController needs an AVPlayerLayer in
+    // a window. It sits at the back of the app's window, behind the opaque
+    // webview, so nothing is drawn twice; it is torn down in stopNative.
+    //
+    // ENDING. Three ways, and they differ in what the viewer meant:
+    //   restore (the window's "back to app" button) -> hand back, keep playing;
+    //   close (the window's X)                       -> pause, then hand back;
+    //   the page's To Phone (releaseToPhone)          -> hand back, keep playing.
+    // Native only reports; the page's resume() does the hand-back, as for AirPlay.
+
+    func startPiP(_ done: @escaping ([String: Any]) -> Void) {
+        onMain { [weak self] in
+            guard let self = self else { return }
+            guard AVPictureInPictureController.isPictureInPictureSupported() else {
+                done(["ok": false, "error": "This device can't do Picture in Picture."]); return
+            }
+            guard self.armed.active, self.armed.url != nil else {
+                done(["ok": false, "error": "Nothing is playing that Picture in Picture can take."]); return
+            }
+            if self.pipOn { done(["ok": true]); return }
+            if self.extWindow != nil || self.airplayOn || self.cast != nil {
+                done(["ok": false, "error": "Already playing on another screen."]); return
+            }
+            // A native player that is not holding is mid-hand-back from a
+            // background stint; taking it over here would race that.
+            if self.isNativeActive {
+                done(["ok": false, "error": "The player is busy. Try again in a moment."]); return
+            }
+            self.pipOn = true
+            self.pipRestoring = false
+            DiagLog.shared.write("pip-start", ["at": self.armed.position,
+                                               "paused": self.armed.paused,
+                                               "title": self.armed.title], cat: "ext")
+            self.startNative(reason: "pip")
+            guard let p = self.player, self.attachPiPSurface(p) else {
+                self.endPiP(reason: "no-surface")
+                done(["ok": false, "error": "Picture in Picture couldn't start."]); return
+            }
+            done(["ok": true])
+        }
+    }
+
+    private var appRootView: UIView? {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.session.role == .windowApplication }?
+            .windows.first?.rootViewController?.view
+    }
+
+    /// The PiP source: a backing-layer view (see ExternalPlayerView) behind the
+    /// webview, and the controller over it. PiP can only start once the item is
+    /// ready, which on a host stream can take seconds — so start on the
+    /// `isPictureInPicturePossible` flip, and give up after 15 s.
+    private func attachPiPSurface(_ p: AVPlayer) -> Bool {
+        guard pipView == nil, let root = appRootView else { return false }
+        let v = ExternalPlayerView(frame: root.bounds)
+        v.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        v.isUserInteractionEnabled = false
+        v.backgroundColor = .black
+        v.playerLayer.videoGravity = .resizeAspect
+        v.playerLayer.player = p
+        root.insertSubview(v, at: 0)
+        pipView = v
+        guard let c = AVPictureInPictureController(playerLayer: v.playerLayer) else { return false }
+        c.delegate = self
+        pipController = c
+        pipPossibleObs = c.observe(\.isPictureInPicturePossible, options: [.initial, .new]) { [weak self] c, _ in
+            guard c.isPictureInPicturePossible else { return }
+            self?.onMain {
+                guard let self = self, self.pipOn, self.pipController === c,
+                      !c.isPictureInPictureActive else { return }
+                self.pipPossibleObs?.invalidate(); self.pipPossibleObs = nil
+                c.startPictureInPicture()
+            }
+        }
+        pipDeadline?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self, self.pipOn,
+                  self.pipController?.isPictureInPictureActive != true else { return }
+            self.endPiP(reason: "never-started")
+        }
+        pipDeadline = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: work)
+        return true
+    }
+
+    /// PiP is over but the player is not: tell the page, whose resume()
+    /// flushes, stops native and puts the episode back on the phone.
+    private func endPiP(reason: String) {
+        guard pipOn else { return }
+        pipOn = false
+        pipDeadline?.cancel(); pipDeadline = nil
+        DiagLog.shared.write("pip-end", ["reason": reason, "pos": armed.position,
+                                         "paused": armed.paused], cat: "ext")
+        emit("pipEnded", ["reason": reason, "position": armed.position,
+                          "paused": armed.paused])
+    }
+
+    /// Teardown half, from stopNative.
+    private func endPiPSession() {
+        pipOn = false
+        pipRestoring = false
+        pipDeadline?.cancel(); pipDeadline = nil
+        pipPossibleObs?.invalidate(); pipPossibleObs = nil
+        let c = pipController, v = pipView
+        pipController = nil
+        pipView = nil
+        onMain {
+            c?.delegate = nil
+            if c?.isPictureInPictureActive == true { c?.stopPictureInPicture() }
+            v?.playerLayer.player = nil
+            v?.removeFromSuperview()
+        }
+    }
+
     // MARK: Chromecast (18.27.0 spike)
 
     // A Cast session is a TRANSPORT, the same role the AVPlayer plays: `armed`
@@ -3321,10 +3462,17 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     /// page resumes its own element there.
     func releaseToPhone() -> [String: Any] {
         return onMainSync {
-            guard isNativeActive, castLive || airplayOn else { return ["ok": false] }
+            guard isNativeActive, castLive || airplayOn || pipOn else { return ["ok": false] }
             DiagLog.shared.write("back-to-phone", ["cast": castLive, "airplay": airplayOn,
+                                                   "pip": pipOn,
                                                    "pos": armed.position], cat: "ext")
             castLive = false
+            if pipOn {
+                // Cleared FIRST, so the didStop this provokes is not read as the
+                // viewer closing the window (which would pause).
+                pipOn = false
+                pipController?.stopPictureInPicture()
+            }
             if airplayOn {
                 airplayOn = false
                 airplayWatchdog?.cancel(); airplayWatchdog = nil
@@ -3746,6 +3894,8 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             "holding":  isHolding,
             "airplay":  airplayOn,
             "cast":     castLive,
+            "pip":      pipOn,
+            "pipSupported": AVPictureInPictureController.isPictureInPictureSupported(),
         ]
     }
 
@@ -3779,5 +3929,39 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         guard bgTask != .invalid else { return }
         let id = bgTask; bgTask = .invalid
         DispatchQueue.main.async { UIApplication.shared.endBackgroundTask(id) }
+    }
+}
+
+// MARK: - Picture in Picture delegate
+
+extension NativePlaybackManager: AVPictureInPictureControllerDelegate {
+    func pictureInPictureControllerDidStartPictureInPicture(_ c: AVPictureInPictureController) {
+        pipDeadline?.cancel(); pipDeadline = nil
+        DiagLog.shared.write("pip-active", ["pos": armed.position], cat: "ext")
+    }
+
+    func pictureInPictureController(_ c: AVPictureInPictureController,
+                                    failedToStartPictureInPictureWithError error: Error) {
+        DiagLog.shared.write("pip-failed", ["err": error.localizedDescription], cat: "ext")
+        endPiP(reason: "failed")
+    }
+
+    /// The window's "back to app" button. Only this path calls it, so it is
+    /// what tells a restore from a close in didStop.
+    func pictureInPictureController(_ c: AVPictureInPictureController,
+                                    restoreUserInterfaceForPictureInPictureStopWithCompletionHandler
+                                    completionHandler: @escaping (Bool) -> Void) {
+        pipRestoring = true
+        completionHandler(true)
+    }
+
+    func pictureInPictureControllerDidStopPictureInPicture(_ c: AVPictureInPictureController) {
+        // pipOn is already false when the page asked (releaseToPhone).
+        guard pipOn else { return }
+        let restored = pipRestoring
+        pipRestoring = false
+        // Closing the window is stopping, as it is in every other player.
+        if !restored { setPaused(true, source: "pip-closed") }
+        endPiP(reason: restored ? "restore" : "closed")
     }
 }

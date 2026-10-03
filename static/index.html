@@ -4295,6 +4295,15 @@
               <path stroke-linejoin="round" d="M12 14l5 6H7z"/>
             </svg>
           </button>
+          <!-- Picture in Picture (app only, 20.7.0) — lpPip. The native player takes
+               the playback and floats it over other apps; same shown-when as AirPlay,
+               plus the device must support PiP (_npPipSupported). -->
+          <button id="lpPipBtn" class="lp-ctl-sm hidden" onclick="lpPip()" title="Picture in Picture — keep watching over other apps">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M21 11V5H3v14h7"/>
+              <rect x="13" y="14" width="8" height="6"/>
+            </svg>
+          </button>
           <!-- Chromecast / Google TV (app only, 18.27.0 spike) — lpCast. -->
           <button id="lpCastBtn" class="lp-ctl-sm hidden" onclick="lpCast()" title="Cast to a Chromecast or Google TV">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -21057,7 +21066,7 @@ function _npStartPoll() {
     if (!_npHolding || Date.now() - _npLastProgressAt < 4000) return;
     let st = null;
     try { st = await _cap.np.state(); } catch (_) { return; }
-    if (!st || !st.native) { _npStopPoll(); _npHolding = false; _npAirplay = false; _npCastName = ""; _npSyncRemoteUi(); return; }
+    if (!st || !st.native) { _npStopPoll(); _npHolding = false; _npAirplay = false; _npPip = false; _npCastName = ""; _npSyncRemoteUi(); return; }
     _npApplyNativeTransport(st.position, st.paused, _npNativeDur);
   }, 2000);
 }
@@ -21119,7 +21128,7 @@ function _npSyncRemoteUi() {
   // stopped being a remote; there is no event for it.
   _lpRmLockSync();
   const banner = document.getElementById("lpRemoteBannerTxt");
-  if (banner) banner.textContent = "Playing " + _npWhereLabel().replace(/^On /, "on ");
+  if (banner) banner.textContent = "Playing " + _npWhereLabel().replace(/^(On|In) /, (m) => m.toLowerCase());
   // Casting / AirPlay: TV volume row, and To Phone in place of To TV (header too).
   const onTv = on && _npOnCastOrTv();
   const volRow = document.getElementById("lpRemoteVolRow");
@@ -21160,10 +21169,13 @@ function _npSyncRemoteUi() {
 let _npExternal = false;     // an external display / AirPlay route is present
 let _npAirplay = false;      // the hold is an AirPlay session, not a wired display
 let _npCastName = "";        // non-empty: the hold is a Chromecast session, on this TV
+let _npPip = false;          // the hold is Picture in Picture, on this phone's own screen
+let _npPipSupported = false; // the app build has pip() and the device can do PiP (state())
 
 // True while the hold is a TV the phone streams to (AirPlay / Chromecast), as
 // opposed to a wired display — the case where "back to phone" means something.
-function _npOnCastOrTv() { return !!(_npHolding && (_npCastName || _npAirplay)); }
+// Picture in Picture counts too: "To Phone" there means "back into the app".
+function _npOnCastOrTv() { return !!(_npHolding && (_npCastName || _npAirplay || _npPip)); }
 
 // Stop on the TV, keep watching here. Native lets go (release), then the usual
 // hand-back resumes the page's own element at the native playhead.
@@ -21237,8 +21249,7 @@ function lpRemoteMore() {
   const body = document.getElementById("moreModalBody");
   if (!body) return;
   body.innerHTML = "";
-  const where = _npWhereLabel().replace(/^On /, "");
-  document.getElementById("moreModalSub").textContent = "Playing on " + where;
+  document.getElementById("moreModalSub").textContent = "Playing " + _npWhereLabel().replace(/^(On|In) /, (m) => m.toLowerCase());
   const section = (title, cols = 1) => {
     const h = document.createElement("div");
     h.className = "text-[9px] font-black uppercase tracking-widest text-gray-500 mb-2" + (body.children.length ? " mt-4" : "");
@@ -21346,6 +21357,7 @@ function lpRemoteMore() {
 // Where the picture is while native holds it — the header, the remote banner.
 function _npWhereLabel() {
   if (_npCastName) return "On " + _npCastName;
+  if (_npPip) return "In Picture in Picture";
   return _npAirplay ? "On AirPlay" : "On Glasses";
 }
 
@@ -21361,6 +21373,22 @@ function _npSyncAirplayBtn() {
     const b = document.getElementById(id);
     if (b) b.classList.toggle("hidden", !show);
   }
+  const pip = document.getElementById("lpPipBtn");
+  if (pip) pip.classList.toggle("hidden", !(show && _npPipSupported));
+}
+
+// Picture in Picture (20.7.0). Not WebKit's own PiP: the moment the app
+// backgrounds, the native relief pitcher would start a second engine under it.
+// So it is the AirPlay shape again — native takes the playback, this page is its
+// remote while the app is open — with the native player's layer as the PiP
+// source. See startPiP in NativePlayback.swift.
+async function lpPip() {
+  if (!_npOk() || !_npPipSupported) return;
+  _npArm();                     // native starts from THIS playhead, not the last tick
+  let r = null;
+  try { r = await _cap.np.pip(); } catch (e) { r = { ok: false, error: (e && e.message) || "" }; }
+  _npLog("pip-tap", { ok: !!(r && r.ok), err: (r && r.error) || "", file: lp.filePath }, "ext");
+  if (!r || !r.ok) showAlert((r && r.error) || "Picture in Picture needs an updated app build.", "error");
 }
 
 // Chromecast / Google TV (18.27.0 spike). Same shape as AirPlay: the native side
@@ -21689,7 +21717,7 @@ async function _npHandBack() {
   // rather than at each call site is what makes the display-lost hand-back
   // below safe: while it stayed true, every control kept reading _npNativePos
   // from a player that no longer exists and the element was left parked.
-  _npHolding = false; _npAirplay = false; _npCastName = ""; _npStopPoll(); _npSyncRemoteUi();
+  _npHolding = false; _npAirplay = false; _npPip = false; _npCastName = ""; _npStopPoll(); _npSyncRemoteUi();
   const v = _lpV(); if (!v) return;
 
   // Native auto-advanced into the next episode while we were away — resync the
@@ -21734,14 +21762,23 @@ async function _npHandBack() {
 // Native events: the player finished a file, advanced, or a display appeared.
 function _npBindEvents() {
   if (!isApp || !_cap.np || !_cap.np.addListener) return;
+  // An older build answers state() without the key, which keeps the button hidden.
+  try {
+    _cap.np.state().then((st) => {
+      _npPipSupported = !!(st && st.pipSupported);
+      _npSyncAirplayBtn();
+    }, () => {});
+  } catch (_) {}
   try {
     // Early mode hands off while we are still FOREGROUND, so the web element is
     // still playing when native starts. Stop it, or both engines run at once.
     // Intent stays "playing" — the user did not pause anything, and if this were
     // recorded as a pause the native side would inherit it on the next handoff.
     _cap.np.addListener("nativeStarted", (e) => {
-      if (!e || (e.reason !== "early" && e.reason !== "airplay" && e.reason !== "cast")) return;
+      if (!e || (e.reason !== "early" && e.reason !== "airplay" && e.reason !== "cast"
+                 && e.reason !== "pip")) return;
       _npAirplay = e.reason === "airplay";
+      _npPip = e.reason === "pip";
       _npCastName = e.reason === "cast" ? (e.name || "TV") : "";
       // No player on this page means the arm native just played is not ours —
       // it outlived the page that made it. Becoming a remote for it would draw
@@ -21795,6 +21832,7 @@ function _npBindEvents() {
       const wasHolding = _npHolding;
       _npHolding = false;
       _npAirplay = false;
+      _npPip = false;
       _npCastName = "";
       _npSyncRemoteUi();
       _npStopPoll();
@@ -21851,6 +21889,21 @@ function _npBindEvents() {
       _npLog("airplay-ended", { reason: (e && e.reason) || "", at: (e && e.position) || 0,
                                 holding: _npHolding }, "ext");
       if (_npHolding) _npHandBack().catch(() => {});
+    });
+    // Picture in Picture ended: restored into the app (keeps playing), closed
+    // with its X (native already paused), or never started. resume() puts the
+    // episode back on the phone at the native playhead — but only while VISIBLE:
+    // handing back to a suspended WKWebView stops playback outright, and a PiP
+    // closed over another app is handed back by visibilitychange on the return
+    // (clearing _npPip is what lets that guard through).
+    _cap.np.addListener("pipEnded", (e) => {
+      const reason = (e && e.reason) || "";
+      _npLog("pip-ended", { reason, at: (e && e.position) || 0, holding: _npHolding,
+                            visible: document.visibilityState === "visible" }, "ext");
+      _npPip = false;
+      if (_npHolding && document.visibilityState === "visible") _npHandBack().catch(() => {});
+      if (reason === "failed" || reason === "never-started" || reason === "no-surface")
+        showAlert("Picture in Picture couldn’t start.", "error");
     });
     // The Cast session ended: failed before it went live (the page is still
     // playing — just say so and re-arm with the page's own URLs, which the
@@ -31433,7 +31486,9 @@ function _lpAttachVideoEvents() {
     // repair it — on this return and every one after. `_npExternal` is set from
     // the same displayChanged event, which may land either side of this
     // handler; whichever arrives second does the hand-back.
-    if (_npHolding && _npExternal) return;
+    // Picture in Picture is the same: the window is still floating, and the
+    // page is its remote until pipEnded clears _npPip.
+    if (_npHolding && (_npExternal || _npPip)) return;
     _npHandBack().then(() => {
       setTimeout(_lpRecoverActiveSub, 400);
       setTimeout(_lpRecoverMediaPipeline, 600);
@@ -32586,6 +32641,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.6.4</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.7.0</div>
 </body>
 </html>

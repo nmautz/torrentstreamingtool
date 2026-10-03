@@ -1966,6 +1966,49 @@ episode**, 15 / 30 / 45 min, 1 / 1.5 / 2 hours. A small moon badge with the time
   AVPlayer's own `volume` ramps at 10 Hz. Cast has no local volume, so it just pauses.
 - **Setting it buzzes** (`_hap("selection")`); running out never does.
 
+#### Picture in Picture (20.7.0 — not yet verified on a device)
+
+The **PiP** button (`#lpPipBtn`, app only) sits next to AirPlay. It is shown under the
+same condition (`_npOk()`, not holding) **and** when `state().pipSupported` is true, which
+an older app build does not send, so its button stays hidden. `lpPip()` arms and calls
+`NativePlayback.pip()` → `startPiP`.
+
+**Why not WebKit's own PiP on the `<video>`.** The web player is hls.js over
+ManagedMediaSource, and the moment the app backgrounds, `appDidEnterBackground` would start
+the native relief pitcher. That is a second engine under WebKit's PiP window, and it would
+take the audio session from it. So PiP is one more native takeover, shaped like AirPlay:
+`startNative(reason: "pip")` while foreground, the page pauses its element on
+`nativeStarted` and becomes the remote (`#lpWhere` reads "In Picture in Picture"). Once PiP
+is up, backgrounding finds native already running and leaves it alone.
+
+**The source layer.** `AVPictureInPictureController` needs an `AVPlayerLayer` in a window.
+`attachPiPSurface` puts an `ExternalPlayerView` at the back of the app's window, behind the
+opaque webview, so nothing is drawn twice. PiP starts on the controller's
+`isPictureInPicturePossible` flip, because the item has to be ready and a host stream can
+take seconds. If it has not started within 15 s, it ends with `never-started`.
+
+**Ending** (native reports `pipEnded {reason}`; the page's `_npHandBack()` does the work,
+as for `airplayEnded`):
+
+| How | `reason` | Native | Page |
+|---|---|---|---|
+| the window's "back to app" button | `restore` | keeps playing | hands back, element plays |
+| the window's X | `closed` | `setPaused(true, "pip-closed")` | hands back paused |
+| **To Phone** on the remote | — (`releaseToPhone` clears `pipOn` first) | stops PiP | `lpBackToPhone` hands back |
+| never started / failed | `never-started`, `failed`, `no-surface` | — | hands back, error alert |
+
+The hand-back runs only while the page is **visible**: a PiP closed over another app is
+handed back by the `visibilitychange` return. That guard is
+`_npHolding && (_npExternal || _npPip)`, and `pipEnded` clears `_npPip` so the return gets
+through. While PiP is up, `isHolding` is true, so `resume()` answers `holding` and
+`appDidBecomeActive` arms no hand-back deadline. `stopNative` → `endPiPSession` removes
+the controller and the view.
+
+**Not done: automatic PiP on swipe-home.** That needs a player already presenting
+on screen when the app leaves, and the native player only starts at
+`didEnterBackground`. Swiping home without pressing the button is still the
+sound-only background handoff.
+
 ### 2c. Subtitle image packs (styled ASS + PGS/VOBSUB)
 
 **The problem.** An HLS subtitle rendition may carry WebVTT or IMSC1 and nothing else, so

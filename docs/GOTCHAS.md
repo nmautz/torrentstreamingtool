@@ -3011,6 +3011,24 @@ Things that will bite a change here:
 - **`NSBonjourServices` must list `_streamlink._tcp`**, or the browser finds nothing and
   reports no error (same trap as `_googlecast._tcp` below).
 
+### Picture in Picture is the NATIVE player's, never WebKit's (20.7.0)
+
+It is tempting to call `webkitSetPresentationMode("picture-in-picture")` on the
+`<video>`. Don't. The moment the app backgrounds, `appDidEnterBackground` starts the
+native relief pitcher, a second engine that takes the audio session from WebKit's PiP
+window. PiP is a native takeover like AirPlay (`startPiP`, `nativeStarted
+reason:"pip"`), and the page is its remote. Three things keep it working:
+
+- `isHolding` includes `pipOn`. Without that, coming back to the app with PiP still
+  floating made `resume()` stop the player that was feeding the window.
+- The PiP close button (X) is told apart from "back to app" **only** by
+  `restoreUserInterfaceForPictureInPictureStop` having been called first
+  (`pipRestoring`). `releaseToPhone` clears `pipOn` **before** stopping PiP, so its own
+  `didStop` is not read as a close (which would pause).
+- `pipEnded` hands back only while the page is visible, and clears `_npPip` so the
+  `visibilitychange` return can do it otherwise. Handing back to a suspended WKWebView
+  stops playback.
+
 ### AirPlay receivers fetch the URL themselves — loopback and Tailscale URLs are dead to them
 
 AirPlay video is not mirroring. The receiver is handed the player item's URL and
