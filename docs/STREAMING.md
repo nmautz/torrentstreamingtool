@@ -2002,7 +2002,20 @@ every few seconds, and WebKit paused the page each time (`interruption began` â†
 (and keeps it after the shadow goes, because switching back to exclusive while the page
 plays is itself an interruption). Only `startNative` asks for `exclusive: true`, so a
 promoted shadow becomes the Now Playing app with the lock-screen controls. Each switch
-writes `audio-session {mix}`.
+writes `audio-session {mix, ms}`.
+
+Two refinements (20.8.2):
+- With `autoPip` on, the session is mixable **from the first arm**, not only once the
+  shadow exists. The arm and the post-hand-back arm used to activate it exclusive
+  ~100 ms before the shadow made it mixable, which paused the page once at every start
+  and every return from PiP.
+- On a **PiP** promotion the exclusive switch is deferred to `didStart` and run off the
+  main thread (`makeSessionExclusiveSoon`). Inline, it cost 0.9 s of main thread inside
+  the PiP opening animation, and it broke WebKit's still-live element ("Media failed
+  to decode"). The lock promotion (no PiP) still switches inline: nothing is on screen,
+  and the relief pitcher must be the Now Playing app at once. A promoted shadow also
+  keeps its external-playback flags unless a display is connected, because flipping them
+  on a playing player re-evaluates its video output.
 
 **The swipe home.** iOS calls `willStartPictureInPicture` and `promoteShadow(pip: true)`
 hands the shadow to `startNative(reason: "pip", adopting:)`: same player, same item,

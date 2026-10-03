@@ -3037,7 +3037,10 @@ relief pitcher would take its audio anyway. Hence the **shadow player** (STREAMI
   each other and WebKit pauses the page (20.8.0's "keeps pausing"). The session must be
   `.mixWithOthers` while the shadow exists, and exclusive again only in `startNative`.
   Never switch it back to exclusive while the page plays: that activation is itself an
-  interruption.
+  interruption. That includes the FIRST arm (20.8.2): with `autoPip` on, the arm
+  activates mixable before the shadow exists.
+- The exclusive switch at a PiP promotion waits for `didStart` and runs off main.
+  `setActive` against a live WebKit session took 0.9 s and broke WebKit's element.
 
 ### AirPlay receivers fetch the URL themselves — loopback and Tailscale URLs are dead to them
 

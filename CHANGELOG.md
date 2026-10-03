@@ -1,5 +1,23 @@
 # Changelog
 
+## [20.8.2] — 2026-10-03
+### No blip at the start, or going into and out of PiP
+
+- **Fixed: a one-beat pause when an episode starts on the phone and when it comes back
+  from PiP.** The app still made its audio exclusive for a moment before the silent PiP
+  copy existed (at the first arm, and after the hand-back), and that interrupted the
+  phone's player. In the 2026-10-03 log, `audio-session mix:false` at 01:17:40.013 is
+  followed by `unasked-pause` 170 ms later. With PiP on, the audio is now mixable
+  whenever the phone's player is the one playing.
+- **Fixed: the PiP window blinking as it opened.** The switch to exclusive audio as PiP
+  took over took 0.9 s of the main thread in the middle of the opening animation. Done
+  while the phone's player was still live, it also broke that player ("Media failed to
+  decode", 8 ms later), which the return from PiP then had to recover from. The switch
+  now waits until the window is open and runs off the main thread. The promoted player
+  also no longer has its external-display settings rewritten unless a display is
+  connected.
+- `audio-session` log rows now carry `ms`, so a slow switch shows up.
+
 ## [20.8.1] — 2026-10-03
 ### Playing on the phone no longer keeps pausing
 

@@ -1423,11 +1423,19 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // Only startNative asks for `exclusive`. Anywhere else a mixable session
         // STAYS mixable once the shadow is gone: re-activating it exclusive while
         // the page plays is itself an interruption, and pauses the page once.
+        //
+        // AND MIXABLE FROM THE FIRST ARM when auto-PiP is on (20.8.2). Until the
+        // shadow existed, the arm and the post-hand-back arm activated exclusive
+        // and the shadow made it mixable ~100 ms later — and that exclusive
+        // activation, landing while the page plays, interrupted it: one pause at
+        // every start and every return from PiP (measured 01:17:40.013
+        // `mix:false` → 40.184 `unasked-pause`).
         let mix = !exclusive && player == nil && cast == nil
-            && (shadowPlayer != nil || sessionMixable)
+            && (shadowPlayer != nil || sessionMixable || armed.autoPip)
         if sessionActivated, mix != sessionMixable { sessionActivated = false }
         guard !sessionActivated else { return }
         let s = AVAudioSession.sharedInstance()
+        let t0 = Date()
         do {
             try s.setCategory(.playback, mode: .moviePlayback,
                               options: mix ? [.mixWithOthers] : [])
@@ -1435,12 +1443,49 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             sessionActivated = true
             sessionMixable = mix
             DiagLog.shared.write("audio-session", ["mix": mix, "shadow": shadowPlayer != nil,
-                                                   "native": isNativeActive], cat: "app")
+                                                   "native": isNativeActive,
+                                                   "ms": Int(Date().timeIntervalSince(t0) * 1000)],
+                                 cat: "app")
             audioSessionError = ""
             audioEverActivated = true
         } catch {
             audioSessionError = "\(Self.stateName(UIApplication.shared.applicationState)): \(error.localizedDescription)"
             DiagLog.shared.write("audio-session-failed", ["reason": audioSessionError], cat: "app")
+        }
+    }
+
+    /// The PiP promotion's switch to exclusive, done once the window is OPEN and
+    /// off the main thread (20.8.2). Done inline it took 0.9 s of main thread in
+    /// the middle of the PiP opening animation (the window blinked), and as an
+    /// exclusive activation while WebKit's element was still live it broke that
+    /// element ("Media failed to decode" 8 ms later), which the return from PiP
+    /// then had to recover from. By didStart the app is backgrounded and WebKit
+    /// has paused its element, so there is nothing left to interrupt.
+    private let audioQ = DispatchQueue(label: "streamlink.audiosession", qos: .userInitiated)
+    private func makeSessionExclusiveSoon(_ why: String) {
+        guard sessionMixable || !sessionActivated else { return }
+        audioQ.async { [weak self] in
+            let s = AVAudioSession.sharedInstance()
+            let t0 = Date()
+            var err = ""
+            do {
+                try s.setCategory(.playback, mode: .moviePlayback, options: [])
+                try s.setActive(true)
+            } catch { err = error.localizedDescription }
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if err.isEmpty {
+                    self.sessionActivated = true
+                    self.sessionMixable = false
+                    self.audioEverActivated = true
+                    self.updateNowPlaying()
+                } else {
+                    self.audioSessionError = err
+                }
+                DiagLog.shared.write("audio-session", ["mix": false, "why": why, "ms": ms,
+                                                       "async": true, "err": err], cat: "app")
+            }
         }
     }
 
@@ -1638,8 +1683,9 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // activateAudioSession(). Kept here as a fallback for the paths that reach
         // startNative without an arm (takeover from a remote command).
         // Exclusive: we are THE player now, and a promoted shadow's mixable
-        // session would leave the lock screen to another app.
-        activateAudioSession(exclusive: true)
+        // session would leave the lock screen to another app. Except while PiP
+        // is opening: then it waits for didStart (see makeSessionExclusiveSoon).
+        if !(shadow != nil && pipOn) { activateAudioSession(exclusive: true) }
 
         endedFlag = false
         // THE DECISION IS MADE HERE, NOT IN THE SEEK COMPLETION.
@@ -1661,8 +1707,13 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             it = AVPlayerItem(url: url)
             p = AVPlayer(playerItem: it)
         }
-        p.allowsExternalPlayback = true
-        p.usesExternalPlaybackWhileExternalScreenIsActive = true
+        // A promoted shadow is left as it is unless a display is actually there:
+        // flipping external playback on a PLAYING player makes it re-evaluate
+        // its video output, which is one more way for the PiP window to blink.
+        if shadow == nil || externalScreen != nil {
+            p.allowsExternalPlayback = true
+            p.usesExternalPlaybackWhileExternalScreenIsActive = true
+        }
         p.appliesMediaSelectionCriteriaAutomatically = false
         p.actionAtItemEnd = .pause
         item = it
@@ -4112,6 +4163,7 @@ extension NativePlaybackManager: AVPictureInPictureControllerDelegate {
 
     func pictureInPictureControllerDidStartPictureInPicture(_ c: AVPictureInPictureController) {
         DiagLog.shared.write("pip-active", ["pos": armed.position], cat: "ext")
+        if isNativeActive { makeSessionExclusiveSoon("pip-active") }
     }
 
     /// Already promoted, so the native player is running with its layer in a
@@ -4122,7 +4174,10 @@ extension NativePlaybackManager: AVPictureInPictureControllerDelegate {
         DiagLog.shared.write("pip-failed", ["err": error.localizedDescription], cat: "ext")
         endPiP(reason: "failed")
         endPiPSession()
-        if isNativeActive, !armed.paused { player?.play() }
+        if isNativeActive {
+            activateAudioSession(exclusive: true)   // deferred for the window that never opened
+            if !armed.paused { player?.play() }
+        }
     }
 
     /// The window's "back to app" button. Only this path calls it, so it is
