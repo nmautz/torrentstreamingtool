@@ -2038,7 +2038,11 @@ episode plays with the switch on.
 **Verified on device 2026-10-03 (20.8.0):** iOS does float the layer behind the
 webview: `pip-possible on:true`, then `pip-will-start` (app `inact`) on the swipe home,
 `pip-active`, and `pip-app-returned` → `restore` on the way back. The same run found the
-audio fight above (fixed in 20.8.1, which is not yet verified).
+audio fight above. **20.8.1 verified the same night:** `audio-session mix:true` at the
+shadow's start, not one `interruption` row across play → PiP → restore, and the session
+went exclusive at the promotion (`mix:false` just before `startNative adopted:true`).
+The one `unasked-pause` left is the parked element during the hand-back seek
+(`seeking:1`); it played on, and the seek landed 3 s later.
 
 ### 2c. Subtitle image packs (styled ASS + PGS/VOBSUB)
 
