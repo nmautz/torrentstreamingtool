@@ -781,7 +781,9 @@ runs in `lpUnloadCurrent`/`lpStop`. `_npHandBack()` reclaims the playhead on
 foreground — **the `visibilitychange`→visible branch now chains
 `_lpRecoverActiveSub` / `_lpRecoverMediaPipeline` after it** instead of racing them on
 independent timers, because those probes read the playhead and the frame-counting one
-would misfire against a mid-seek element. `_npSyncAwake()` holds the phone
+would misfire against a mid-seek element. A paused return after 60 s or more away
+rebuilds the MediaSource instead of seeking, and every hand-back logs `handback` and
+`handback-frames` (`_npWatchFrames`); see STREAMING.md § 2b. `_npSyncAwake()` holds the phone
 awake (native `setAwake`) whenever the page itself is playing and no native handoff is
 running — all that remains of TV Mode, which 18.13.2 removed along with its screen
 dimming, its tap-swallowing veil, its double-tap exit and the countdown that engaged

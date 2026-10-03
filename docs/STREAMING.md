@@ -1599,6 +1599,23 @@ exactly the swallowed-seek case `_lpVerifySeek` exists for. The two recovery pro
 hand-back rather than racing it on independent timers; pointed at a torn-down or
 mid-seek element, the frame-counting probe would misfire.
 
+**A paused return after more than a minute away rebuilds instead of seeking (20.8.4).**
+A paused episode leaves nothing playing, so iOS suspends the app. Measured 2026-10-03
+(three paused locks of 3 to 12 minutes): after the return the picture was choppy under
+clean sound, the playhead and both players' segment fetches were at normal pace, seeks
+did not help, and reopening the episode did. So when `resume()` reports `paused`, hls.js
+is the engine and the page was hidden for `NP_REBUILD_AFTER_SEC` (60 s) or more,
+`_npHandBack` calls `hls.recoverMediaError()` (a new MediaSource) and lets the armed
+`loadedmetadata` resume put the playhead back, in place of `_lpCommitSeek`. The time
+away comes from `_npHiddenAt`, stamped by the `visibilitychange` hidden branch and
+passed in by the visible branch only, so the other callers (PiP ended, AirPlay ended,
+Back to phone) never rebuild. A playing return is left alone: native kept the app
+awake, and a rebuild there would be an audible gap. Every hand-back logs `handback
+{at, paused, away, rebuilt}`, and `_npWatchFrames` logs `handback-frames {sec, wall,
+total, dropped, fps, height}` over the first 10 s of play after it. **Not yet verified
+on a device**: the cause is inferred, and `handback-frames` is what will confirm it
+(`fps` near the source's with `rebuilt: true`) or show it wrong.
+
 If native advanced to another episode during the hold, there is nothing to seek: the
 element still holds the episode the hold started on. The hand-back then loads the
 episode native is on (`_lpLoadIndex(position)`, logged as `handback-reload`). It knows

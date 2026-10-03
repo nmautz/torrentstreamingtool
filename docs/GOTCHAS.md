@@ -3145,6 +3145,21 @@ Setting the pending subtitle's `track.mode = "showing"` at `MANIFEST_PARSED` / `
 
 The inverse of the dropped-cues gotcha above: a suspend (screen lock, long background) can kill the media **decoder** while the element still reports `playing` and `currentTime` keeps advancing — so `<track>` cues and the libass overlay keep rendering over a black, silent video. No `error` fires and `readyState` looks healthy, so it can only be detected empirically: `_lpRecoverMediaPipeline` (on `visibilitychange`→visible, after a settle delay) snapshots `getVideoPlaybackQuality().totalVideoFrames` (fallback `webkitDecodedFrameCount`), and if the clock has advanced ~1.5 s later with **zero** new decoded frames, the pipeline is dead — `hls.recoverMediaError()` rebuilds the MediaSource in place (Safari-native falls back to `_lpNetLost()`'s reload-at-position machinery). Guards: skips when paused/ended, when `lp.netDown` (the network-recovery loop owns that case), and when no frame counter exists. Fixed 7.16.4.
 
+### Unlocking a PAUSED episode can leave a choppy picture under clean sound (20.8.4)
+
+A third thing a suspend does to the media pipeline, and the one `_lpRecoverMediaPipeline`
+cannot see: frames still decode, only far fewer of them, so its "zero new frames" test
+passes. It needs a paused episode (nothing playing, so iOS suspends the app) and a few
+minutes. Measured 2026-10-03, three times in one evening. Seeks do not cure it, even
+into freshly fetched segments; a new MediaSource does. `_npHandBack` therefore rebuilds
+(`hls.recoverMediaError()`) on a paused return after `NP_REBUILD_AFTER_SEC`. Do not
+extend that to playing returns without evidence: the rebuild is a 1 to 2 s gap, and
+`handback-frames` rows are there to show whether a playing return ever needs it. The
+cause is inferred from what the request log ruled out (network, the loader, the PiP
+shadow all at normal pace), not observed. It appeared with the 20.8 shadow player in
+the build, and the shadow is not ruled out as a contributor: if `handback-frames` shows
+a low `fps` with `rebuilt: true`, test with Picture in Picture switched off next.
+
 ### Service worker is an eviction stub — keep it that way
 
 `static/sw.js` exists only to unregister itself and `caches.delete` everything it ever cached, so devices with the old "Handoff" SW installed don't stay pinned to a stale app shell. Don't reintroduce caching strategies, navigation fallbacks, or API caches in `sw.js`. Once enough time has passed that no device has the old SW alive, the file and the `evictLegacyServiceWorker` call in `index.html` can be deleted entirely. (The offline cached player does NOT use a service worker — it's a device-side snapshot served by the native loopback server; see below.)

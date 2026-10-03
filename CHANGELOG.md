@@ -1,5 +1,24 @@
 # Changelog
 
+## [20.8.4] — 2026-10-03
+### Choppy picture after unlocking a paused episode
+
+- **Fixed (not yet confirmed on a device): the picture stuttered, with clean sound, after
+  the phone had been locked on a paused episode for a few minutes.** Seen three times in
+  the 2026-10-03 log (South Park S29E02, locked paused for 12 min, 5.5 min and 2 min
+  48 s). Each time the playhead advanced at normal speed, the page and the silent PiP
+  copy fetched segments at their normal pace, and back-seeks did not help. Closing the
+  episode and opening it again did. A paused episode leaves nothing playing, so iOS
+  suspends the app, and the page's video pipeline does not always come back whole. Now,
+  when the app returns to a paused episode after more than a minute away, the page
+  rebuilds its player at the saved position instead of reusing the old one
+  (`handback {rebuilt: true}`). Nothing is playing at that moment, so there is no gap to
+  hear. A return while playing is unchanged.
+- **New log rows.** `handback` (position, paused, seconds away, rebuilt) on every return,
+  and `handback-frames` after the first 10 s of play that follow: frames presented and
+  dropped against the clock. The stutter left no trace in the log before this, so the
+  cause above is inferred from what was ruled out. The next one will be measured.
+
 ## [20.8.3] — 2026-10-03
 ### The last main-thread audio switch at PiP start
 

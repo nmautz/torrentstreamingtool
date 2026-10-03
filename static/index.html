@@ -21044,6 +21044,44 @@ let _npVisiblePaused = false;
 // display — measured as "pressed play, the glasses went paused and the phone
 // resumed from the old position".
 let _npHolding = false;
+// Wall clock of the last `visibilitychange` → hidden. Read (and cleared) by the
+// handler's visible branch, which hands the stint's length to _npHandBack.
+let _npHiddenAt = 0;
+// A PAUSED episode leaves nothing playing, so iOS suspends the app, and after a
+// suspension WebKit's video pipeline can come back decoding a fraction of its
+// frames: a choppy picture under clean sound, which no seek cures and a fresh
+// MediaSource does (2026-10-03, three paused locks of 3-12 min). Past this
+// long away, a paused hand-back rebuilds instead of seeking.
+const NP_REBUILD_AFTER_SEC = 60;
+const NP_FRAME_WATCH_MS = 10000;
+let _npFrameWatchGen = 0;
+
+// What the picture did in the first seconds of play after a hand-back: frames
+// presented and dropped against the clock. Logging only; a pause or a seek
+// inside the window shows as `sec` well short of `wall`.
+function _npWatchFrames(ctx) {
+  const v = _lpV();
+  if (!v || !v.getVideoPlaybackQuality) return;
+  const gen = ++_npFrameWatchGen, file = lp.filePath;
+  const begin = () => {
+    if (gen !== _npFrameWatchGen || lp.filePath !== file) return;
+    let q0; try { q0 = v.getVideoPlaybackQuality(); } catch (_) { return; }
+    const t0 = v.currentTime || 0, w0 = Date.now();
+    setTimeout(() => {
+      if (gen !== _npFrameWatchGen || lp.filePath !== file) return;
+      let q1; try { q1 = v.getVideoPlaybackQuality(); } catch (_) { return; }
+      const sec = (v.currentTime || 0) - t0;
+      const total = q1.totalVideoFrames - q0.totalVideoFrames;
+      _npLog("handback-frames", Object.assign({
+        sec: +sec.toFixed(2), wall: +((Date.now() - w0) / 1000).toFixed(2),
+        total: total, dropped: q1.droppedVideoFrames - q0.droppedVideoFrames,
+        fps: sec > 0.5 ? +(total / sec).toFixed(1) : -1,
+        height: v.videoHeight || 0, paused: v.paused, ready: v.readyState,
+      }, ctx || {}), "play");
+    }, NP_FRAME_WATCH_MS);
+  };
+  if (!v.paused) begin(); else v.addEventListener("playing", begin, { once: true });
+}
 // Mirror of the NATIVE player's transport, polled at 1 Hz while it holds the
 // display. The page's own <video> is parked at a stale position, so every
 // control and readout has to read this instead or the UI describes a player
@@ -21685,7 +21723,7 @@ function _npDisarm(reason) {
 // Foreground hand-back. Adopts the native player's playhead and returns control
 // to the web element, reusing the existing resume/recovery machinery rather than
 // fighting it. Ordering here is load-bearing — see the comments inline.
-async function _npHandBack() {
+async function _npHandBack(awaySec) {
   if (!isApp || !_cap.np || !_npArmed) return;
   let r = null;
   try { r = await _cap.np.resume(); } catch (_) { return; }
@@ -21739,6 +21777,24 @@ async function _npHandBack() {
   lp.resumeSec = t;            // arms the loadedmetadata seek if the element reset
   lp.resumeApplied = false;
   lp.lastSaveAt = Date.now();  // native already wrote progress; don't double-write
+
+  // Paused and long away: a new MediaSource, not a seek (NP_REBUILD_AFTER_SEC).
+  // Nothing is playing, so the rebuild costs the viewer nothing, and the
+  // loadedmetadata resume armed just above puts it back at `t`. Playing returns
+  // are left alone: native kept the app awake, and a rebuild there is a gap.
+  const away = Math.round(awaySec || 0);
+  let rebuilt = false;
+  if (r.paused && lp.hls && away >= NP_REBUILD_AFTER_SEC) {
+    try { lp.hls.recoverMediaError(); rebuilt = true; } catch (_) {}
+  }
+  _npLog("handback", { file: lp.filePath, at: t, paused: !!r.paused, away: away,
+                       rebuilt: rebuilt }, "play");
+  _npWatchFrames({ away: away, rebuilt: rebuilt });
+  if (rebuilt) {
+    _lpResumeIfParked("handback-rebuild", t);
+    try { _lpCtlSync(); _lpCtlShow(); } catch (_) {}
+    return;
+  }
 
   // A multi-minute jump after a background stint is exactly the "swallowed seek"
   // case _lpCommitSeek/_lpVerifySeek exist for. Never write currentTime directly
@@ -31476,8 +31532,11 @@ function _lpAttachVideoEvents() {
       // which is exactly why the native side extrapolates from the last arm.
       _npArm();
       _lpFlushProgress(false);
+      _npHiddenAt = Date.now();
       return;
     }
+    const awaySec = _npHiddenAt ? (Date.now() - _npHiddenAt) / 1000 : 0;
+    _npHiddenAt = 0;
     _lpOdKeepAlive(true);   // heal a reaped OD session the moment we're back
     // The hand-back MUST settle before the two recovery probes run: they each
     // read the playhead, and _lpRecoverMediaPipeline samples decoded frames over
@@ -31498,7 +31557,7 @@ function _lpAttachVideoEvents() {
     // Picture in Picture is the same: the window is still floating, and the
     // page is its remote until pipEnded clears _npPip.
     if (_npHolding && (_npExternal || _npPip)) return;
-    _npHandBack().then(() => {
+    _npHandBack(awaySec).then(() => {
       setTimeout(_lpRecoverActiveSub, 400);
       setTimeout(_lpRecoverMediaPipeline, 600);
     }, () => {
@@ -32650,6 +32709,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.8.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.8.4</div>
 </body>
 </html>
