@@ -1,5 +1,27 @@
 # Changelog
 
+## [20.8.5] — 2026-10-03
+### Chromecast buffering until the app is opened
+
+- **Fixed (built, not yet confirmed on a TV): a cast could stop and buffer until the app
+  was opened.** The TV fetches the stream through the phone, and with the phone locked
+  the only thing keeping the app running is a loop of silence. An audio interruption or
+  a route change stops that loop, and nothing started it again. In the 2026-10-03 log
+  the cast ran locked for 18 minutes, AirPods connected and left a second later
+  (22:53:40), `interruption began reason:4` followed, the last progress post was at
+  22:54:05, and the TV buffered until the app was opened at 22:54:44. The same order
+  (interruption, then `cast-dropped`) is in the log on 2026-09-27 and 2026-10-03 02:47.
+  The silence now restarts itself: at once on a route change, on a disconnected route
+  and when an interruption ends, and every two seconds otherwise for as long as the app
+  is still running. If the phone's audio belongs to another app, it restarts mixed with
+  it instead of taking it back.
+- **Low Power Mode was on, and is not the cause.** The earlier drops happened with it
+  off, and this one follows the route change to the second.
+- **Not fixed: a phone call.** iOS refuses any audio during a call, so a long call with
+  the phone locked can still stall the TV until the call ends or the app is opened.
+- **New log row.** `cast-keepalive-revive` (`why`, `ok`, `err`, `mixed`): one per outage
+  and one per recovery.
+
 ## [20.8.4] — 2026-10-03
 ### Choppy picture after unlocking a paused episode
 

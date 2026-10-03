@@ -3078,6 +3078,18 @@ reached through Tailscale is on no network the TV can see. So AirPlay always goe
   `AirPlayDoor`, so a suspended phone means a stalled TV. Unlike AirPlay, nothing plays
   locally to keep the process up, so `SilentKeepAlive` does. Removing it "because
   nothing is playing" breaks casting with the phone locked.
+- **The silence stops on its own, and has to restart itself (20.8.5).** An
+  `AVAudioEngine` stops on an audio interruption and on a route change. AirPods
+  connecting for a second were enough (`interruption began reason:4`, which has no
+  `ended`): the app was suspended when its last background task ran out and the TV
+  buffered until the app was opened. `SilentKeepAlive` now watches the engine's
+  configuration change, the session's interruptions and a 2 s timer, and logs
+  `cast-keepalive-revive`. The cast's session is exclusive, and an exclusive session
+  cannot take the audio back from another app while backgrounded (`OSStatus
+  560557684`), so the restart falls back to a mixable session (`mixed: true`). A phone
+  call refuses both; that case is open. A `cast-dropped why:silent` right after a
+  `becomeActive` means the phone had been suspended: read upward for what stopped the
+  audio, and do not look at the network first.
 - **No Google Cast SDK, on purpose** (`CastSession.swift`). If you change the protobuf,
   change it in both `encode` and `decode`. There are six fields, and the field numbers
   and wire types are the protocol.

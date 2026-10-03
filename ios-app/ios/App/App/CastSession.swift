@@ -575,9 +575,22 @@ enum CastProto {
 /// AVPlayer's own playback keeps the process up under the `audio` background
 /// mode; a Cast session plays nothing locally, so it plays silence instead.
 /// Mixed with others so it never interrupts the viewer's own audio.
+///
+/// IT HAS TO PUT ITSELF BACK (20.8.5). An AVAudioEngine stops on an audio
+/// interruption and on a route change, and nothing restarts it. Measured
+/// 2026-10-03 22:53: AirPods connected and left a second later, `interruption
+/// began reason:4` (route disconnected, which has no `ended`), and the phone
+/// was suspended as soon as the last background task ran out. The TV buffered
+/// until the app was opened. The same order (interruption, then `cast-dropped`)
+/// is in the log on 2026-09-27 and 2026-10-03 02:47.
 final class SilentKeepAlive {
     static let shared = SilentKeepAlive()
     private var engine: AVAudioEngine?
+    private var node: AVAudioPlayerNode?
+    private var buffer: AVAudioPCMBuffer?
+    private var observers: [NSObjectProtocol] = []
+    private var watch: DispatchSourceTimer?
+    private var down = false
 
     var isRunning: Bool { engine?.isRunning ?? false }
 
@@ -600,13 +613,86 @@ final class SilentKeepAlive {
         node.scheduleBuffer(buf, at: nil, options: .loops)
         node.play()
         engine = e
+        self.node = node
+        buffer = buf
+        down = false
+        watchForStops(e)
         DiagLog.shared.write("cast-keepalive", ["on": true], cat: "cast")
     }
 
     func stop() {
         guard let e = engine else { return }
+        watch?.cancel(); watch = nil
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+        observers.removeAll()
         e.stop()
         engine = nil
+        node = nil
+        buffer = nil
         DiagLog.shared.write("cast-keepalive", ["on": false], cat: "cast")
+    }
+
+    /// Three ways to find out the silence stopped. The two notifications are
+    /// the fast path: once the audio is gone the process may have only seconds.
+    /// The timer catches what neither reports, and retries a restart that was
+    /// refused (a phone call) for as long as the process is still running.
+    private func watchForStops(_ e: AVAudioEngine) {
+        let nc = NotificationCenter.default
+        observers.append(nc.addObserver(forName: .AVAudioEngineConfigurationChange,
+                                        object: e, queue: .main) { [weak self] _ in
+            self?.revive("route")
+        })
+        observers.append(nc.addObserver(forName: AVAudioSession.interruptionNotification,
+                                        object: nil, queue: .main) { [weak self] note in
+            let info = note.userInfo ?? [:]
+            let type = AVAudioSession.InterruptionType(
+                rawValue: (info[AVAudioSessionInterruptionTypeKey] as? UInt) ?? 0)
+            if type == .ended { self?.revive("interruption-ended"); return }
+            // A disconnected route interrupts and never says `ended`. Any other
+            // interrupter is still talking; the timer asks again in two seconds.
+            let reason = (info[AVAudioSessionInterruptionReasonKey] as? UInt) ?? 0
+            if reason == 4 { self?.revive("route-disconnected") }
+        })
+        let t = DispatchSource.makeTimerSource(queue: .main)
+        t.schedule(deadline: .now() + 2, repeating: 2)
+        t.setEventHandler { [weak self] in self?.revive("watchdog") }
+        t.resume()
+        watch = t
+    }
+
+    private func revive(_ why: String) {
+        guard let e = engine, let node = node, let buf = buffer else { return }
+        if e.isRunning, node.isPlaying { return }
+        let s = AVAudioSession.sharedInstance()
+        var err = ""
+        var mixed = false
+        do { try s.setActive(true) } catch {
+            // The cast's session is exclusive (it owns the lock-screen controls),
+            // and from the background an exclusive session may not take the audio
+            // back from another app. A mixable one asks nobody.
+            do {
+                try s.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+                try s.setActive(true)
+                mixed = true
+            } catch { err = "session: \(error.localizedDescription)" }
+        }
+        if err.isEmpty {
+            do {
+                if !e.isRunning { try e.start() }
+                // play() on a node whose engine is not running raises.
+                if e.isRunning {
+                    node.stop()
+                    node.scheduleBuffer(buf, at: nil, options: .loops)
+                    node.play()
+                }
+            } catch { err = "engine: \(error.localizedDescription)" }
+        }
+        let ok = err.isEmpty && e.isRunning
+        // One row per outage and one per recovery, not one per retry.
+        if ok || !down {
+            DiagLog.shared.write("cast-keepalive-revive",
+                                 ["why": why, "ok": ok, "err": err, "mixed": mixed], cat: "cast")
+        }
+        down = !ok
     }
 }
