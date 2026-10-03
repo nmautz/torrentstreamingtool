@@ -3011,23 +3011,27 @@ Things that will bite a change here:
 - **`NSBonjourServices` must list `_streamlink._tcp`**, or the browser finds nothing and
   reports no error (same trap as `_googlecast._tcp` below).
 
-### Picture in Picture is the NATIVE player's, never WebKit's (20.7.0)
+### Picture in Picture needs a native player that is ALREADY playing (20.8.0)
 
-It is tempting to call `webkitSetPresentationMode("picture-in-picture")` on the
-`<video>`. Don't. The moment the app backgrounds, `appDidEnterBackground` starts the
-native relief pitcher, a second engine that takes the audio session from WebKit's PiP
-window. PiP is a native takeover like AirPlay (`startPiP`, `nativeStarted
-reason:"pip"`), and the page is its remote. Three things keep it working:
+iOS floats a video on swipe-home only from an `AVPlayerLayer` that is playing inside the
+app at that moment (`canStartPictureInPictureAutomaticallyFromInline`). Our phone player
+is WebKit's `<video>`, and the native relief pitcher starts at `didEnterBackground`,
+which is too late. WebKit's PiP (`webkitSetPresentationMode`) needs a tap, and the
+relief pitcher would take its audio anyway. Hence the **shadow player** (STREAMING.md §
+2b, Picture in Picture). Traps:
 
-- `isHolding` includes `pipOn`. Without that, coming back to the app with PiP still
-  floating made `resume()` stop the player that was feeding the window.
-- The PiP close button (X) is told apart from "back to app" **only** by
-  `restoreUserInterfaceForPictureInPictureStop` having been called first
-  (`pipRestoring`). `releaseToPhone` clears `pipOn` **before** stopping PiP, so its own
-  `didStop` is not read as a close (which would pause).
-- `pipEnded` hands back only while the page is visible, and clears `_npPip` so the
-  `visibilitychange` return can do it otherwise. Handing back to a suspended WKWebView
-  stops playback.
+- The shadow lives in `shadowPlayer`, never `player`. Putting it in `player` makes
+  `isNativeActive` true, and then the page's ticks are ignored, progress is written by
+  two writers, and the web element is treated as parked.
+- `isHolding` includes `pipOn`, or coming back to the app would make `resume()` stop
+  the player feeding the window.
+- X and restore are told apart **only** by `restoreUserInterfaceForPictureInPictureStop`
+  having run first (`pipRestoring`). `appDidBecomeActive` sets it before stopping PiP
+  itself, because back-in-the-app is a restore.
+- `nativeStarted reason:"pip"` is emitted as the app leaves, so it is usually delivered
+  after the restore already ended it. Check `state().pip` before becoming a remote.
+- Not for on-demand: two readers of a JIT encode request different segments and drag
+  the encoder between positions.
 
 ### AirPlay receivers fetch the URL themselves — loopback and Tailscale URLs are dead to them
 

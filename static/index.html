@@ -4295,15 +4295,6 @@
               <path stroke-linejoin="round" d="M12 14l5 6H7z"/>
             </svg>
           </button>
-          <!-- Picture in Picture (app only, 20.7.0) — lpPip. The native player takes
-               the playback and floats it over other apps; same shown-when as AirPlay,
-               plus the device must support PiP (_npPipSupported). -->
-          <button id="lpPipBtn" class="lp-ctl-sm hidden" onclick="lpPip()" title="Picture in Picture — keep watching over other apps">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M21 11V5H3v14h7"/>
-              <rect x="13" y="14" width="8" height="6"/>
-            </svg>
-          </button>
           <!-- Chromecast / Google TV (app only, 18.27.0 spike) — lpCast. -->
           <button id="lpCastBtn" class="lp-ctl-sm hidden" onclick="lpCast()" title="Cast to a Chromecast or Google TV">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -20051,7 +20042,8 @@ function _devSave() {
 // A shell older than 20.0.0 has no kvGet and keeps today's behaviour.
 const _APP_PREFS_KV = "prefs";
 const _appPrefKeys = () => [_APP_AUTOMG_KEY, _APP_AHEAD_KEY, _APP_AUTOQ_KEY, _APP_AUTOSCOPE_KEY,
-                            _APP_AUTOSHOWS_KEY, _APP_BGPLAY_KEY, _APP_AWAKE_KEY, _APP_EXTMODE_KEY];
+                            _APP_AUTOSHOWS_KEY, _APP_BGPLAY_KEY, _APP_AWAKE_KEY, _APP_EXTMODE_KEY,
+                            _APP_PIP_KEY];
 let _appPrefsNative = null;            // true once kvGet answered, false once it refused
 const _appPrefsTouched = new Set();    // changed before the restore finished: not to be overwritten
 function _appPrefsPush() {
@@ -20873,6 +20865,7 @@ function _appProxiedSeedStorage() {
         if (o.bg   != null) localStorage.setItem(_APP_BGPLAY_KEY, o.bg ? "1" : "0");
         if (o.tvm  != null) localStorage.setItem(_APP_AWAKE_KEY, o.tvm ? "1" : "0");
         if (o.ext  != null) localStorage.setItem(_APP_EXTMODE_KEY, String(o.ext));
+        if (o.pip  != null) localStorage.setItem(_APP_PIP_KEY, o.pip ? "1" : "0");
       }
     }
   } catch (_) {}
@@ -20993,6 +20986,8 @@ async function _tvRemoteSync() {
 // Inert outside the app: every entry point returns early unless `isApp`, the
 // plugin is present, and the user hasn't switched the feature off.
 const _APP_BGPLAY_KEY = "streamlink_app_bgplay";   // "0" = off (default ON)
+// Picture in Picture on leaving the app (20.8.0). "0" = off (default ON).
+const _APP_PIP_KEY = "streamlink_app_pip";
 // Historical name: this was TV Mode's switch, and the stored key and the `tvm`
 // sync field keep that spelling so upgrading doesn't silently reset anyone's
 // choice. What it gates since 18.13.2 is only "keep the screen awake while the
@@ -21016,13 +21011,14 @@ const _APP_AWAKE_KEY = "streamlink_app_tvmode";   // "0" = off (default ON)
 const _APP_EXTMODE_KEY = "streamlink_app_extmode";
 
 function _appPlaybackPrefs() {
-  let bg = true, awake = true, ext = "early";
+  let bg = true, awake = true, ext = "early", pip = true;
   try {
     bg = localStorage.getItem(_APP_BGPLAY_KEY) !== "0";
     awake = localStorage.getItem(_APP_AWAKE_KEY) !== "0";
     ext = (localStorage.getItem(_APP_EXTMODE_KEY) === "route") ? "route" : "early";
+    pip = localStorage.getItem(_APP_PIP_KEY) !== "0";
   } catch (_) {}
-  return { bg, awake, ext };
+  return { bg, awake, ext, pip };
 }
 
 // True when the native background player is usable for the CURRENT file.
@@ -21170,7 +21166,6 @@ let _npExternal = false;     // an external display / AirPlay route is present
 let _npAirplay = false;      // the hold is an AirPlay session, not a wired display
 let _npCastName = "";        // non-empty: the hold is a Chromecast session, on this TV
 let _npPip = false;          // the hold is Picture in Picture, on this phone's own screen
-let _npPipSupported = false; // the app build has pip() and the device can do PiP (state())
 
 // True while the hold is a TV the phone streams to (AirPlay / Chromecast), as
 // opposed to a wired display — the case where "back to phone" means something.
@@ -21373,22 +21368,6 @@ function _npSyncAirplayBtn() {
     const b = document.getElementById(id);
     if (b) b.classList.toggle("hidden", !show);
   }
-  const pip = document.getElementById("lpPipBtn");
-  if (pip) pip.classList.toggle("hidden", !(show && _npPipSupported));
-}
-
-// Picture in Picture (20.7.0). Not WebKit's own PiP: the moment the app
-// backgrounds, the native relief pitcher would start a second engine under it.
-// So it is the AirPlay shape again — native takes the playback, this page is its
-// remote while the app is open — with the native player's layer as the PiP
-// source. See startPiP in NativePlayback.swift.
-async function lpPip() {
-  if (!_npOk() || !_npPipSupported) return;
-  _npArm();                     // native starts from THIS playhead, not the last tick
-  let r = null;
-  try { r = await _cap.np.pip(); } catch (e) { r = { ok: false, error: (e && e.message) || "" }; }
-  _npLog("pip-tap", { ok: !!(r && r.ok), err: (r && r.error) || "", file: lp.filePath }, "ext");
-  if (!r || !r.ok) showAlert((r && r.error) || "Picture in Picture needs an updated app build.", "error");
 }
 
 // Chromecast / Google TV (18.27.0 spike). Same shape as AirPlay: the native side
@@ -21593,6 +21572,10 @@ function _npPayload() {
     sleepEpisode: !!_lpSleep.episode,
     // The remote's quality cap (More sheet): tallest rung allowed, 0 = Auto.
     maxHeight: lp.nativeMaxH || 0,
+    // Picture in Picture on leaving the app: native runs a muted shadow of this
+    // stream so iOS has a playing layer to float. Never for on-demand: a second
+    // reader of a JIT encode would drag the encoder to a second position.
+    autoPip: _appPlaybackPrefs().pip && lp.mode !== "ondemand",
   };
 }
 
@@ -21706,7 +21689,16 @@ async function _npHandBack() {
   if (!isApp || !_cap.np || !_npArmed) return;
   let r = null;
   try { r = await _cap.np.resume(); } catch (_) { return; }
-  if (!r || !r.active) return;
+  if (!r || !r.active) {
+    // Nothing native left to take back, yet the page still thinks it is a
+    // remote: a late start event, or a hold another path already ended. Stop
+    // being one, or the element stays parked under controls that drive nothing.
+    if (r && _npHolding) {
+      _npLog("handback-stale-hold", { file: lp.filePath }, "play");
+      _npHolding = false; _npAirplay = false; _npPip = false; _npCastName = ""; _npStopPoll(); _npSyncRemoteUi();
+    }
+    return;
+  }
   // The native player is driving an external display and did NOT stop. iOS
   // reports the app active while the phone is still locked when a display is
   // attached, so this path runs at a moment the user has not actually come back.
@@ -21762,13 +21754,6 @@ async function _npHandBack() {
 // Native events: the player finished a file, advanced, or a display appeared.
 function _npBindEvents() {
   if (!isApp || !_cap.np || !_cap.np.addListener) return;
-  // An older build answers state() without the key, which keeps the button hidden.
-  try {
-    _cap.np.state().then((st) => {
-      _npPipSupported = !!(st && st.pipSupported);
-      _npSyncAirplayBtn();
-    }, () => {});
-  } catch (_) {}
   try {
     // Early mode hands off while we are still FOREGROUND, so the web element is
     // still playing when native starts. Stop it, or both engines run at once.
@@ -21777,6 +21762,20 @@ function _npBindEvents() {
     _cap.np.addListener("nativeStarted", (e) => {
       if (!e || (e.reason !== "early" && e.reason !== "airplay" && e.reason !== "cast"
                  && e.reason !== "pip")) return;
+      // A "pip" start is announced as the app LEAVES, so it is often delivered
+      // only on the way back — after the restore has already ended it and handed
+      // the episode back. Becoming a remote then would park a playing element
+      // under no player at all; ask native whether it is still floating.
+      if (e.reason === "pip") {
+        _cap.np.state().then((st) => {
+          if (st && st.native && st.pip) _npBecomeRemote(e);
+          else _npLog("pip-start-stale", { at: e.position || 0 }, "ext");
+        }, () => {});
+        return;
+      }
+      _npBecomeRemote(e);
+    });
+    function _npBecomeRemote(e) {
       _npAirplay = e.reason === "airplay";
       _npPip = e.reason === "pip";
       _npCastName = e.reason === "cast" ? (e.name || "TV") : "";
@@ -21797,7 +21796,7 @@ function _npBindEvents() {
       _npNativePaused = false;
       _npNativeDur = lp.duration || 0;
       _npStartPoll();
-    });
+    }
     // The native player's own clock. This is the page's only source of truth for
     // the seek bar and time labels while the element is parked.
     _cap.np.addListener("nativeProgress", (e) => {
@@ -21890,20 +21889,19 @@ function _npBindEvents() {
                                 holding: _npHolding }, "ext");
       if (_npHolding) _npHandBack().catch(() => {});
     });
-    // Picture in Picture ended: restored into the app (keeps playing), closed
-    // with its X (native already paused), or never started. resume() puts the
-    // episode back on the phone at the native playhead — but only while VISIBLE:
-    // handing back to a suspended WKWebView stops playback outright, and a PiP
-    // closed over another app is handed back by visibilitychange on the return
-    // (clearing _npPip is what lets that guard through).
+    // Picture in Picture ended: back in the app or its restore button (keeps
+    // playing), its X (native already paused), or it failed to open. resume()
+    // puts the episode back on the phone at the native playhead — but only while
+    // VISIBLE: handing back to a suspended WKWebView stops playback outright, and
+    // a PiP closed over another app is handed back by visibilitychange on the
+    // return (clearing _npPip is what lets that guard through). Not gated on
+    // _npHolding: the nativeStarted that set it may still be queued behind this.
     _cap.np.addListener("pipEnded", (e) => {
       const reason = (e && e.reason) || "";
       _npLog("pip-ended", { reason, at: (e && e.position) || 0, holding: _npHolding,
                             visible: document.visibilityState === "visible" }, "ext");
       _npPip = false;
-      if (_npHolding && document.visibilityState === "visible") _npHandBack().catch(() => {});
-      if (reason === "failed" || reason === "never-started" || reason === "no-surface")
-        showAlert("Picture in Picture couldn’t start.", "error");
+      if (document.visibilityState === "visible") _npHandBack().catch(() => {});
     });
     // The Cast session ended: failed before it went live (the page is still
     // playing — just say so and re-arm with the page's own URLs, which the
@@ -22086,6 +22084,7 @@ async function _appTryLocalHandoff(itemId, filePath, seekTo, queue) {
         bg:    localStorage.getItem(_APP_BGPLAY_KEY) !== "0",
         tvm:   localStorage.getItem(_APP_AWAKE_KEY) !== "0",
         ext:   _appPlaybackPrefs().ext,
+        pip:   _appPlaybackPrefs().pip,
       });
     } catch (_) {}
     const q = new URLSearchParams({
@@ -24404,6 +24403,9 @@ function _appTabBuild() {
       ${_appSetRow("Keep playing when locked", "Audio carries on, with lock-screen controls.",
         tgl("appSetBgTgl"),
         "Locking the phone or switching apps hands playback to the system player instead of stopping it. Audio keeps going, the lock-screen and Dynamic Island controls stay live, and a connected monitor switches from mirroring to a direct video feed so the picture survives the lock. Styled subtitles fall back to plain text while locked.")}
+      ${_appSetRow("Picture in Picture", "Leaving the app keeps the episode playing in a small window.",
+        tgl("appSetPipTgl"),
+        "Swipe home or switch apps while an episode plays and it carries on in a floating window, the way YouTube does it; come back to the app and it returns to the player. To make that possible the app keeps a silent, small copy of the stream running alongside the player while you watch, which costs some extra data and battery. Turn this off to save both. Not for episodes encoded on the fly. iOS's own Settings → General → Picture in Picture → Start PiP Automatically must also be on.")}
       ${_appSetRow("Keep the screen awake while playing", "Stops the phone locking itself mid-episode.",
         tgl("appSetAwakeTgl"),
         "Stops the phone auto-locking while it is the screen showing the picture, which also keeps a mirrored monitor alive, since mirroring dies with the phone's screen. It does nothing while glasses or a monitor are playing directly: that player survives a lock on its own.")}
@@ -24443,6 +24445,7 @@ function _appTabBuild() {
     const pr = _appPlaybackPrefs();
     _appTglPaint($("#appSetBgTgl"), pr.bg);
     _appTglPaint($("#appSetAwakeTgl"), pr.awake);
+    _appTglPaint($("#appSetPipTgl"), pr.pip);
   };
   // Not a boolean — two named routes to the monitor, same visual language.
   const _EXT_LABEL = { early: "Early", route: "Mirrored" };
@@ -24685,6 +24688,12 @@ function _appTabBuild() {
     paintPlaybackTgls();
     // Take effect immediately for the file already playing.
     if (next) _npArm(); else _npDisarm("bgplay-off");
+  };
+  $("#appSetPipTgl").onclick = () => {
+    const next = !_appPlaybackPrefs().pip;
+    _appPrefSet(_APP_PIP_KEY, next ? "1" : "0");
+    paintPlaybackTgls();
+    _npArm();   // native starts or retires the shadow on the next arm
   };
   $("#appSetAwakeTgl").onclick = () => {
     const next = !_appPlaybackPrefs().awake;
@@ -32641,6 +32650,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.7.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.8.0</div>
 </body>
 </html>

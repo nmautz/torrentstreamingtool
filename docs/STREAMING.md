@@ -1966,48 +1966,69 @@ episode**, 15 / 30 / 45 min, 1 / 1.5 / 2 hours. A small moon badge with the time
   AVPlayer's own `volume` ramps at 10 Hz. Cast has no local volume, so it just pauses.
 - **Setting it buzzes** (`_hap("selection")`); running out never does.
 
-#### Picture in Picture (20.7.0 — not yet verified on a device)
+#### Picture in Picture — automatic, on leaving the app (20.8.0; not yet verified on a device)
 
-The **PiP** button (`#lpPipBtn`, app only) sits next to AirPlay. It is shown under the
-same condition (`_npOk()`, not holding) **and** when `state().pipSupported` is true, which
-an older app build does not send, so its button stays hidden. `lpPip()` arms and calls
-`NativePlayback.pip()` → `startPiP`.
+Swipe home (or switch apps) while an episode plays on the phone and it carries on in a
+floating window. Coming back to the app brings it back into the player. There is no
+button. The 20.7.0 button and `pip()` were removed. Switch: ☰ App → Settings → Playback →
+**Picture in Picture** (`streamlink_app_pip`, default on, in `_appPrefKeys` and the `am=`
+seed). It rides every arm as `autoPip`, which is false for on-demand (`lp.mode ===
+"ondemand"`), because a second reader of a JIT encode would drag the encoder to two
+positions.
 
-**Why not WebKit's own PiP on the `<video>`.** The web player is hls.js over
-ManagedMediaSource, and the moment the app backgrounds, `appDidEnterBackground` would start
-the native relief pitcher. That is a second engine under WebKit's PiP window, and it would
-take the audio session from it. So PiP is one more native takeover, shaped like AirPlay:
-`startNative(reason: "pip")` while foreground, the page pauses its element on
-`nativeStarted` and becomes the remote (`#lpWhere` reads "In Picture in Picture"). Once PiP
-is up, backgrounding finds native already running and leaves it alone.
+**Why a shadow player.** iOS starts PiP by itself only for a native `AVPlayerLayer`
+that is **already playing** when the app leaves
+(`canStartPictureInPictureAutomaticallyFromInline`). The phone's player is WebKit's
+`<video>`, and the native player only starts at `didEnterBackground`, which is too late.
+WebKit's own PiP can't start without a tap, and the relief pitcher would take its audio.
+So while the page plays in the foreground, native runs a **shadow** (`createShadow`):
 
-**The source layer.** `AVPictureInPictureController` needs an `AVPlayerLayer` in a window.
-`attachPiPSurface` puts an `ExternalPlayerView` at the back of the app's window, behind the
-opaque webview, so nothing is drawn twice. PiP starts on the controller's
-`isPictureInPicturePossible` flip, because the item has to be ready and a host stream can
-take seconds. If it has not started within 15 s, it ends with `never-started`.
+- muted, capped at `PIP_SHADOW_MAXH` (540p) through `?maxh=`, with
+  `preferredForwardBufferDuration = 10`, since it only has to keep pace;
+- in its own `shadowPlayer`, **not** `player`, so nothing keyed on `isNativeActive`
+  (progress, Now Playing, the ignored page ticks) sees it;
+- following the page: `syncShadow` runs on every arm and every 1 Hz tick. It re-seeks
+  when it drifts more than 1.5 s (at most every 3 s), pauses when the page pauses, and
+  is rebuilt on a file or URL change;
+- created only while the app is active and the page is **playing**. It is retired by
+  any other takeover (glasses, AirPlay, Cast), a disarm, or the switch going off;
+- its layer sits behind the webview (`attachPiPSurface`), carrying the PiP controller.
 
-**Ending** (native reports `pipEnded {reason}`; the page's `_npHandBack()` does the work,
-as for `airplayEnded`):
+**The swipe home.** iOS calls `willStartPictureInPicture` and `promoteShadow(pip: true)`
+hands the shadow to `startNative(reason: "pip", adopting:)`: same player, same item,
+unmuted, buffer back to automatic, seeking only if it drifted more than 2 s. From here
+on it is an ordinary native takeover, and the page becomes the remote on
+`nativeStarted reason:"pip"`. That event usually lands only on the way back, so the
+page checks `state().pip` before becoming a remote (`pip-start-stale` otherwise).
+
+**No PiP** (a lock, PiP switched off in iOS Settings): `appDidEnterBackground` waits
+0.8 s for `willStart`, then promotes the shadow **without** PiP (`pip-auto-missed`). The
+layer is dropped first, because an attached layer is how AVFoundation pauses video in the
+background. The relief pitcher is then a player that was already playing, which iOS
+continues, where it will not reliably start a new one.
+
+**Ending** (native reports `pipEnded {reason}`; the page's `_npHandBack()` takes it back):
 
 | How | `reason` | Native | Page |
 |---|---|---|---|
-| the window's "back to app" button | `restore` | keeps playing | hands back, element plays |
-| the window's X | `closed` | `setPaused(true, "pip-closed")` | hands back paused |
-| **To Phone** on the remote | — (`releaseToPhone` clears `pipOn` first) | stops PiP | `lpBackToPhone` hands back |
-| never started / failed | `never-started`, `failed`, `no-surface` | — | hands back, error alert |
+| back in the app (`appDidBecomeActive` stops PiP) or the window's restore button | `restore` | keeps playing | hands back, element plays |
+| the window's X | `closed` | `setPaused(true, "pip-closed")` | hands back paused on return |
+| PiP failed to open | `failed` | drops the layer, plays on as the background handoff | hands back on return |
 
-The hand-back runs only while the page is **visible**: a PiP closed over another app is
-handed back by the `visibilitychange` return. That guard is
-`_npHolding && (_npExternal || _npPip)`, and `pipEnded` clears `_npPip` so the return gets
-through. While PiP is up, `isHolding` is true, so `resume()` answers `holding` and
-`appDidBecomeActive` arms no hand-back deadline. `stopNative` → `endPiPSession` removes
-the controller and the view.
+The hand-back runs only while the page is **visible**. The `visibilitychange` guard is
+`_npHolding && (_npExternal || _npPip)`, and `pipEnded` clears `_npPip` so that whichever
+of the two arrives second does it. `_npHandBack` also drops a stale remote state when
+`resume()` finds nothing native left. `stopNative` → `endPiPSession` removes the
+controller and the view.
 
-**Not done: automatic PiP on swipe-home.** That needs a player already presenting
-on screen when the app leaves, and the native player only starts at
-`didEnterBackground`. Swiping home without pressing the button is still the
-sound-only background handoff.
+**Cost:** a second stream at ≤540p (none extra for a downloaded episode, which plays
+from the phone's own loopback server) and a second video decode, for as long as an
+episode plays with the switch on.
+
+**Open:** whether iOS floats a layer that sits behind an opaque webview. The log
+answers it: `pip-possible on:true` then `pip-will-start` means it does;
+`pip-auto-missed` after `possible:true` means iOS declined. If it does not, the next
+thing to try is a small, actually-visible layer.
 
 ### 2c. Subtitle image packs (styled ASS + PGS/VOBSUB)
 

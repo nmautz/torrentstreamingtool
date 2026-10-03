@@ -1,5 +1,27 @@
 # Changelog
 
+## [20.8.0] — 2026-10-02
+### Picture in Picture starts by itself, like YouTube
+
+- **Changed: no more PiP button.** Swipe home or switch apps while an episode plays on
+  the phone and it carries on in a floating window. Come back to the app and it returns
+  to the player, still playing. The window's X pauses it. A paused episode doesn't float,
+  as in other apps.
+- How: iOS only floats a native player that is already playing when the app leaves, and
+  the phone's player is the web view's. So while an episode plays, the app runs a silent,
+  small copy of the same stream (up to 540p, short buffer) in step with the player. iOS
+  floats that copy, and from there it is the same native takeover as 20.7.0.
+- **New setting: ☰ App → Settings → Playback → Picture in Picture** (on by default),
+  because the silent copy costs some data and battery. Episodes encoded on the fly are
+  left out: a second reader would drag the encoder to two positions. iOS's own
+  Settings → General → Picture in Picture → Start PiP Automatically must be on too.
+- Locking the phone (no PiP) now continues with that same copy, so sound on the lock
+  screen comes from a player that was already running rather than a new one started in
+  the background.
+- **Not yet tried on a device.** Watch the phone's log for `pip-will-start` (it worked)
+  or `pip-auto-missed` (iOS didn't float it). `pip-possible` shows whether iOS would
+  have.
+
 ## [20.7.0] — 2026-10-02
 ### Picture in Picture in the app
 

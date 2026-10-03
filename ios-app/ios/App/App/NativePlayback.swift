@@ -181,6 +181,10 @@ struct ArmedPlayback {
     /// AirPlay TV or a Chromecast fetches the master itself and runs its own
     /// ABR; nothing set on this phone's player item would reach it.
     var maxHeight = 0
+    /// Picture in Picture on leaving the app (☰ App → Settings → Playback). The
+    /// page sends false for an on-demand stream: a second reader of a JIT
+    /// encode would pull it to a second position.
+    var autoPip = false
     /// When `position` was sampled. Handoff extrapolates from this.
     var armedAt = Date()
 }
@@ -214,7 +218,6 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "castVolume", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "release",   returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "routeCheck", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "pip",       returnType: CAPPluginReturnPromise),
     ]
 
     private let mgr = NativePlaybackManager.shared
@@ -364,10 +367,6 @@ public class NativePlayback: CAPPlugin, CAPBridgedPlugin {
 
     @objc func routeCheck(_ call: CAPPluginCall) {
         mgr.routeCheck { call.resolve($0) }
-    }
-
-    @objc func pip(_ call: CAPPluginCall) {
-        mgr.startPiP { call.resolve($0) }
     }
 }
 
@@ -967,14 +966,24 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private var volView: MPVolumeView?
     private var volObs: NSKeyValueObservation?
     private var volPhoneOriginal: Float = -1
-    /// Picture in Picture (20.7.0). `pipOn` from the tap until PiP ends; the
-    /// view is the PiP source, at the back of the app's window. See startPiP.
+    /// Picture in Picture. `pipOn` from the moment iOS floats the promoted
+    /// shadow until PiP ends; the view is the PiP source, at the back of the
+    /// app's window. See "Auto Picture in Picture".
     private(set) var pipOn = false
     private var pipRestoring = false
     private var pipView: ExternalPlayerView?
     private var pipController: AVPictureInPictureController?
     private var pipPossibleObs: NSKeyValueObservation?
-    private var pipDeadline: DispatchWorkItem?
+    /// The SHADOW: a muted native player that follows the page's <video> while
+    /// it plays in the foreground, so iOS has a playing layer to float when the
+    /// app leaves. Separate from `player` so nothing that keys on
+    /// `isNativeActive` (progress, Now Playing, the page's ticks) sees it until
+    /// it is promoted. See "Auto Picture in Picture".
+    private var shadowPlayer: AVPlayer?
+    private var shadowStatusObs: NSKeyValueObservation?
+    private var shadowFile = ""
+    private var shadowArmedURL: URL?
+    private var shadowLastSeek = Date.distantPast
 
     /// Whether we are currently holding the idle timer open. See setAwake.
     private(set) var awakeOn = false
@@ -1183,6 +1192,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             a.sleepId = 0; a.sleepAt = 0; a.sleepEpisode = false
         }
         a.maxHeight      = max(0, call.getInt("maxHeight") ?? 0)
+        a.autoPip        = call.getBool("autoPip") ?? false
         if let u = a.url { a.url = cappedURL(u, a.maxHeight) }
         if let u = a.nextUrl { a.nextUrl = cappedURL(u, a.maxHeight) }
         a.armedAt        = Date()
@@ -1391,6 +1401,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         let wantScene = armed.extMode != "route"
         onMain { ExternalDisplayAccessory.setEnabled(wantScene) }
         maybeClaimEarly()
+        syncShadow("arm")
     }
 
     /// Idempotent. Records why it failed rather than swallowing it: a silent
@@ -1437,6 +1448,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         }
         if !isNativeActive {
             PlaybackLiveActivity.shared.update(state: liveActivityState(), force: false)
+            syncShadow("tick")
         }
     }
 
@@ -1512,6 +1524,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // Measured on 2026-09-22 (client_iPhone-app.log): stopNative logged
         // `title:"" pos:0`, and 13 ms later a trailing observer tick reported a
         // real position of 322.26 s against an all-MISSING guard and dropped it.
+        teardownShadow("disarm-\(reason)")
         let hadPlayer = isNativeActive
         if hadPlayer { maybePostProgress(armed.position, force: true) }
         DiagLog.shared.write("disarm", ["reason": reason,
@@ -1558,13 +1571,40 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     @objc private func appDidEnterBackground() {
         DiagLog.shared.noteAppState("bg")
         if isNativeActive { diagSnap("background"); scheduleBackgroundSnaps() }
-        guard armed.active, armed.handoffEnabled, armed.url != nil else { return }
+        guard armed.active, armed.handoffEnabled, armed.url != nil else {
+            teardownShadow("bg-unarmed"); return
+        }
+        // Already native — which includes a shadow that PiP's willStart has just
+        // promoted, the normal case for a swipe home.
         guard !isNativeActive else { return }
+        if shadowPlayer != nil {
+            // PiP may still be on its way: iOS starts it around this moment and
+            // willStart promotes the shadow. If it does not come (a lock, PiP
+            // switched off in iOS Settings), the shadow is still the better
+            // relief pitcher: it is ALREADY PLAYING, and iOS lets a backgrounded
+            // app continue a player where it will not reliably start one.
+            beginBgTask()
+            DiagLog.shared.write("pip-auto-wait", [
+                "possible": pipController?.isPictureInPicturePossible ?? false,
+                "rate": Double(shadowPlayer?.rate ?? 0)], cat: "ext")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                guard let self = self else { return }
+                if self.isNativeActive { self.endBgTask(); return }
+                guard self.shadowPlayer != nil else { self.startNative(reason: "background"); return }
+                DiagLog.shared.write("pip-auto-missed", [
+                    "possible": self.pipController?.isPictureInPicturePossible ?? false], cat: "ext")
+                self.promoteShadow(pip: false, reason: "background")
+            }
+            return
+        }
         startNative(reason: "background")
     }
 
-    func startNative(reason: String) {
+    func startNative(reason: String, adopting shadow: AVPlayer? = nil) {
         guard let url = armed.url, !isNativeActive else { return }
+        // Any other takeover (glasses, AirPlay, a remote command) retires the
+        // shadow; its PiP surface must not float a player nobody drives.
+        if shadow == nil { teardownShadow("native-\(reason)") }
 
         // Hold the process up through asset load + first frame. Once the player
         // is actually playing, the `audio` background mode takes over and this
@@ -1585,8 +1625,17 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // perfectly correct position. Capture intent at the instant of handoff.
         let shouldPlay = !armed.paused
         let startAt = extrapolatedPosition()
-        let it = AVPlayerItem(url: url)
-        let p = AVPlayer(playerItem: it)
+        let it: AVPlayerItem
+        let p: AVPlayer
+        if let sp = shadow, let cur = sp.currentItem {
+            // The shadow, promoted: same player, same item, already playing.
+            p = sp; it = cur
+            p.isMuted = false
+            cur.preferredForwardBufferDuration = 0     // back to automatic
+        } else {
+            it = AVPlayerItem(url: url)
+            p = AVPlayer(playerItem: it)
+        }
         p.allowsExternalPlayback = true
         p.usesExternalPlaybackWhileExternalScreenIsActive = true
         p.appliesMediaSelectionCriteriaAutomatically = false
@@ -1615,14 +1664,28 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // after it is separately visible through the observers it installs.
         DiagLog.shared.write("startNative", ["reason": reason, "at": startAt,
                                              "shouldPlay": shouldPlay,
+                                             "adopted": shadow != nil,
                                              "title": armed.title,
                                              "extWindow": extWindow != nil], cat: "play")
 
-        statusObs = it.observe(\.status, options: [.new]) { [weak self] obs, _ in
-            guard let self = self, obs.status == .readyToPlay else { return }
-            self.adoptDuration(from: obs)
-            self.applyTrackSelection(on: obs)
-            self.seekAndPlay(to: startAt, play: shouldPlay)
+        if shadow != nil, it.status == .readyToPlay {
+            // Ready long ago, so the status KVO below would never fire. Tracks
+            // were applied when the shadow loaded; only a real drift needs a seek.
+            adoptDuration(from: it)
+            if abs(CMTimeGetSeconds(p.currentTime()) - startAt) > 2 {
+                seekAndPlay(to: startAt, play: shouldPlay)
+            } else {
+                if shouldPlay { p.play() } else { p.pause() }
+                updateNowPlaying()
+                endBgTask()
+            }
+        } else {
+            statusObs = it.observe(\.status, options: [.new]) { [weak self] obs, _ in
+                guard let self = self, obs.status == .readyToPlay else { return }
+                self.adoptDuration(from: obs)
+                self.applyTrackSelection(on: obs)
+                self.seekAndPlay(to: startAt, play: shouldPlay)
+            }
         }
         externalObs = p.observe(\.isExternalPlaybackActive, options: [.new]) { [weak self] pl, _ in
             guard let self = self else { return }
@@ -2439,6 +2502,14 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // kill it again — which is the exact failure this mode exists to escape.
         // stopNative() still releases it when playback really ends.
         if !earlyClaim { detachExternalWindow() }
+        // Back in the app while PiP floats: the picture comes back with it, as in
+        // every app. A restore, so playback carries on (didStop → pipEnded).
+        if pipOn, let c = pipController, c.isPictureInPictureActive {
+            DiagLog.shared.write("pip-app-returned", ["pos": armed.position], cat: "ext")
+            pipRestoring = true
+            c.stopPictureInPicture()
+            return
+        }
         guard isNativeActive else { return }
 
         // HOLDING THE DISPLAY MEANS "active" IS NOT A HAND-BACK CUE.
@@ -3097,58 +3168,133 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         onMain { pv?.removeFromSuperview() }
     }
 
-    // MARK: Picture in Picture (20.7.0)
+    // MARK: Auto Picture in Picture (20.8.0)
 
-    // WHY THE NATIVE PLAYER, NOT WEBKIT'S OWN PiP
-    // The web player is hls.js over ManagedMediaSource, and the moment the app
-    // backgrounds the relief pitcher (appDidEnterBackground) would start a
-    // SECOND engine under WebKit's PiP window and take the audio session from
-    // it. So PiP is one more takeover of the kind AirPlay already is: the
-    // native player takes the playback while foreground, the page becomes its
-    // remote, and progress / skip / advance / sleep all run off the native
-    // clock exactly as they do on the glasses. Once PiP is up, backgrounding
-    // finds the native player already running and leaves it alone.
+    // HOW EVERY APP DOES IT, AND WHY WE NEED A SHADOW TO DO IT
+    // iOS floats a video by itself when the app leaves only if a native
+    // AVPlayerLayer is PLAYING inside the app at that moment
+    // (`canStartPictureInPictureAutomaticallyFromInline`). Ours is not: the
+    // phone's player is WebKit's <video>, and the native player only starts at
+    // didEnterBackground, too late for iOS to float anything. WebKit's own PiP
+    // cannot start without a tap, and the relief pitcher would take its audio.
     //
-    // THE SOURCE LAYER. AVPictureInPictureController needs an AVPlayerLayer in
-    // a window. It sits at the back of the app's window, behind the opaque
-    // webview, so nothing is drawn twice; it is torn down in stopNative.
+    // So while the page plays in the foreground, a SHADOW native player follows
+    // it: muted, capped at PIP_SHADOW_MAXH (it only ever shows in a small window)
+    // with a short forward buffer (it only has to keep pace), its layer behind
+    // the webview carrying the PiP controller. iOS starts PiP on the swipe home;
+    // willStart PROMOTES the shadow into `player` (startNative adopting it), so
+    // from then on it is exactly the takeover AirPlay is, with the page as its
+    // remote. Coming back to the app stops PiP as a restore, and the page takes
+    // the episode back at the native playhead.
     //
-    // ENDING. Three ways, and they differ in what the viewer meant:
-    //   restore (the window's "back to app" button) -> hand back, keep playing;
-    //   close (the window's X)                       -> pause, then hand back;
-    //   the page's To Phone (releaseToPhone)          -> hand back, keep playing.
-    // Native only reports; the page's resume() does the hand-back, as for AirPlay.
+    // The page stays the master while it plays: the shadow follows the arms and
+    // the 1 Hz ticks, re-seeking when it drifts, pausing when the page pauses.
+    // It is created only while the app is active and the page is PLAYING (a
+    // paused episode does not float, as in every app), and retired by any other
+    // takeover, a file change, a disarm, or the setting going off.
 
-    func startPiP(_ done: @escaping ([String: Any]) -> Void) {
-        onMain { [weak self] in
-            guard let self = self else { return }
-            guard AVPictureInPictureController.isPictureInPictureSupported() else {
-                done(["ok": false, "error": "This device can't do Picture in Picture."]); return
-            }
-            guard self.armed.active, self.armed.url != nil else {
-                done(["ok": false, "error": "Nothing is playing that Picture in Picture can take."]); return
-            }
-            if self.pipOn { done(["ok": true]); return }
-            if self.extWindow != nil || self.airplayOn || self.cast != nil {
-                done(["ok": false, "error": "Already playing on another screen."]); return
-            }
-            // A native player that is not holding is mid-hand-back from a
-            // background stint; taking it over here would race that.
-            if self.isNativeActive {
-                done(["ok": false, "error": "The player is busy. Try again in a moment."]); return
-            }
-            self.pipOn = true
-            self.pipRestoring = false
-            DiagLog.shared.write("pip-start", ["at": self.armed.position,
-                                               "paused": self.armed.paused,
-                                               "title": self.armed.title], cat: "ext")
-            self.startNative(reason: "pip")
-            guard let p = self.player, self.attachPiPSurface(p) else {
-                self.endPiP(reason: "no-surface")
-                done(["ok": false, "error": "Picture in Picture couldn't start."]); return
-            }
-            done(["ok": true])
+    private let PIP_SHADOW_MAXH = 540
+
+    private func syncShadow(_ why: String) {
+        onMain { [weak self] in self?.syncShadowOnMain(why) }
+    }
+
+    private func syncShadowOnMain(_ why: String) {
+        let eligible = armed.active && armed.autoPip && armed.handoffEnabled
+            && armed.url != nil && !isNativeActive && extWindow == nil
+            && AVPictureInPictureController.isPictureInPictureSupported()
+        guard eligible else { teardownShadow("ineligible-\(why)"); return }
+        if shadowPlayer != nil, shadowFile != armed.filePath || shadowArmedURL != armed.url {
+            teardownShadow("file-changed")
         }
+        guard let sp = shadowPlayer else {
+            guard !armed.paused, UIApplication.shared.applicationState == .active else { return }
+            createShadow()
+            return
+        }
+        guard sp.currentItem?.status == .readyToPlay else { return }
+        if armed.paused {
+            if sp.rate != 0 { sp.pause() }
+            return
+        }
+        // Where the page's element is now (the arm's sample, carried forward).
+        var want = armed.position + Date().timeIntervalSince(armed.armedAt) * max(armed.rate, 0)
+        if armed.duration > 1 { want = min(want, armed.duration - 1) }
+        let now = CMTimeGetSeconds(sp.currentTime())
+        if abs(now - want) > 1.5, Date().timeIntervalSince(shadowLastSeek) > 3 {
+            shadowLastSeek = Date()
+            let tol = CMTime(seconds: 0.25, preferredTimescale: 600)
+            sp.seek(to: CMTime(seconds: max(want, 0), preferredTimescale: 600),
+                    toleranceBefore: tol, toleranceAfter: tol)
+        }
+        let rate = Float(armed.rate > 0 ? armed.rate : 1)
+        if sp.rate != rate { sp.rate = rate }
+    }
+
+    private func createShadow() {
+        guard let base = armed.url else { return }
+        let cap = armed.maxHeight > 0 ? min(armed.maxHeight, PIP_SHADOW_MAXH) : PIP_SHADOW_MAXH
+        let it = AVPlayerItem(url: cappedURL(base, cap))
+        it.preferredForwardBufferDuration = 10
+        let p = AVPlayer(playerItem: it)
+        p.isMuted = true
+        p.allowsExternalPlayback = false
+        p.preventsDisplaySleepDuringVideoPlayback = false
+        p.appliesMediaSelectionCriteriaAutomatically = false
+        p.actionAtItemEnd = .pause
+        shadowPlayer = p
+        shadowFile = armed.filePath
+        shadowArmedURL = armed.url
+        shadowLastSeek = .distantPast
+        shadowStatusObs = it.observe(\.status, options: [.new]) { [weak self] obs, _ in
+            guard obs.status == .readyToPlay || obs.status == .failed else { return }
+            self?.onMain {
+                guard let self = self, self.shadowPlayer === p else { return }
+                if obs.status == .failed {
+                    DiagLog.shared.write("pip-shadow-failed",
+                                         ["err": obs.error?.localizedDescription ?? ""], cat: "ext")
+                    return
+                }
+                // Picked now, while muted, so a promotion has nothing to switch.
+                self.applyTrackSelection(on: obs)
+                self.syncShadowOnMain("ready")
+            }
+        }
+        guard attachPiPSurface(p) else {
+            DiagLog.shared.write("pip-shadow-no-surface", [:], cat: "ext")
+            teardownShadow("no-surface")
+            return
+        }
+        DiagLog.shared.write("pip-shadow-start", ["file": armed.filePath, "maxh": cap,
+                                                  "at": armed.position], cat: "ext")
+    }
+
+    private func teardownShadow(_ why: String) {
+        guard let sp = shadowPlayer else { return }
+        shadowStatusObs?.invalidate(); shadowStatusObs = nil
+        shadowPlayer = nil
+        shadowFile = ""
+        shadowArmedURL = nil
+        sp.pause()
+        sp.replaceCurrentItem(with: nil)
+        endPiPSession()      // the surface and controller were the shadow's
+        DiagLog.shared.write("pip-shadow-stop", ["why": why], cat: "ext")
+    }
+
+    /// The shadow becomes THE native player. With `pip`, its layer is in the PiP
+    /// window; without, it is the relief pitcher, and the layer is dropped first
+    /// because an attached layer is how AVFoundation pauses video on background.
+    private func promoteShadow(pip: Bool, reason: String) {
+        guard let sp = shadowPlayer, !isNativeActive else { return }
+        shadowStatusObs?.invalidate(); shadowStatusObs = nil
+        shadowPlayer = nil
+        shadowFile = ""
+        shadowArmedURL = nil
+        if pip { pipOn = true; pipRestoring = false } else { endPiPSession() }
+        DiagLog.shared.write("pip-shadow-promote", ["pip": pip, "reason": reason,
+                                                    "pos": CMTimeGetSeconds(sp.currentTime()),
+                                                    "armPos": armed.position], cat: "ext")
+        startNative(reason: reason, adopting: sp)
     }
 
     private var appRootView: UIView? {
@@ -3159,39 +3305,32 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     }
 
     /// The PiP source: a backing-layer view (see ExternalPlayerView) behind the
-    /// webview, and the controller over it. PiP can only start once the item is
-    /// ready, which on a host stream can take seconds — so start on the
-    /// `isPictureInPicturePossible` flip, and give up after 15 s.
+    /// webview, and a controller over it that iOS may start by itself.
     private func attachPiPSurface(_ p: AVPlayer) -> Bool {
         guard pipView == nil, let root = appRootView else { return false }
         let v = ExternalPlayerView(frame: root.bounds)
         v.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         v.isUserInteractionEnabled = false
-        v.backgroundColor = .black
+        v.backgroundColor = .clear
         v.playerLayer.videoGravity = .resizeAspect
         v.playerLayer.player = p
         root.insertSubview(v, at: 0)
         pipView = v
-        guard let c = AVPictureInPictureController(playerLayer: v.playerLayer) else { return false }
+        guard let c = AVPictureInPictureController(playerLayer: v.playerLayer) else {
+            v.playerLayer.player = nil
+            v.removeFromSuperview()
+            pipView = nil
+            return false
+        }
         c.delegate = self
+        c.canStartPictureInPictureAutomaticallyFromInline = true
         pipController = c
-        pipPossibleObs = c.observe(\.isPictureInPicturePossible, options: [.initial, .new]) { [weak self] c, _ in
-            guard c.isPictureInPicturePossible else { return }
-            self?.onMain {
-                guard let self = self, self.pipOn, self.pipController === c,
-                      !c.isPictureInPictureActive else { return }
-                self.pipPossibleObs?.invalidate(); self.pipPossibleObs = nil
-                c.startPictureInPicture()
-            }
+        // Diagnostic only: whether iOS would float this layer. A swipe home that
+        // logs `pip-auto-missed` after `possible: true` is iOS declining; after
+        // `possible: false` it never had the chance.
+        pipPossibleObs = c.observe(\.isPictureInPicturePossible, options: [.new]) { c, _ in
+            DiagLog.shared.write("pip-possible", ["on": c.isPictureInPicturePossible], cat: "ext")
         }
-        pipDeadline?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self = self, self.pipOn,
-                  self.pipController?.isPictureInPictureActive != true else { return }
-            self.endPiP(reason: "never-started")
-        }
-        pipDeadline = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: work)
         return true
     }
 
@@ -3200,7 +3339,6 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private func endPiP(reason: String) {
         guard pipOn else { return }
         pipOn = false
-        pipDeadline?.cancel(); pipDeadline = nil
         DiagLog.shared.write("pip-end", ["reason": reason, "pos": armed.position,
                                          "paused": armed.paused], cat: "ext")
         emit("pipEnded", ["reason": reason, "position": armed.position,
@@ -3211,7 +3349,6 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private func endPiPSession() {
         pipOn = false
         pipRestoring = false
-        pipDeadline?.cancel(); pipDeadline = nil
         pipPossibleObs?.invalidate(); pipPossibleObs = nil
         let c = pipController, v = pipView
         pipController = nil
@@ -3244,6 +3381,8 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             guard self.armed.active, let url = self.armed.url else {
                 done(["ok": false, "error": "Nothing is playing that can be cast."]); return
             }
+            // The TV takes the episode; nothing may float on the phone.
+            self.teardownShadow("cast")
             guard !self.isNativeActive else {
                 done(["ok": false, "error": "Already playing on another screen."]); return
             }
@@ -3895,6 +4034,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             "airplay":  airplayOn,
             "cast":     castLive,
             "pip":      pipOn,
+            "pipShadow": shadowPlayer != nil,
             "pipSupported": AVPictureInPictureController.isPictureInPictureSupported(),
         ]
     }
@@ -3935,15 +4075,28 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
 // MARK: - Picture in Picture delegate
 
 extension NativePlaybackManager: AVPictureInPictureControllerDelegate {
+    /// iOS is floating the shadow (the swipe home). Promote it now, while the
+    /// app can still act, so the window is never a muted player nobody drives.
+    func pictureInPictureControllerWillStartPictureInPicture(_ c: AVPictureInPictureController) {
+        DiagLog.shared.write("pip-will-start", [
+            "shadow": shadowPlayer != nil,
+            "app": Self.stateName(UIApplication.shared.applicationState)], cat: "ext")
+        if shadowPlayer != nil { promoteShadow(pip: true, reason: "pip") }
+    }
+
     func pictureInPictureControllerDidStartPictureInPicture(_ c: AVPictureInPictureController) {
-        pipDeadline?.cancel(); pipDeadline = nil
         DiagLog.shared.write("pip-active", ["pos": armed.position], cat: "ext")
     }
 
+    /// Already promoted, so the native player is running with its layer in a
+    /// window that never opened: drop the layer (an attached one pauses video
+    /// in the background) and carry on as the ordinary background handoff.
     func pictureInPictureController(_ c: AVPictureInPictureController,
                                     failedToStartPictureInPictureWithError error: Error) {
         DiagLog.shared.write("pip-failed", ["err": error.localizedDescription], cat: "ext")
         endPiP(reason: "failed")
+        endPiPSession()
+        if isNativeActive, !armed.paused { player?.play() }
     }
 
     /// The window's "back to app" button. Only this path calls it, so it is
