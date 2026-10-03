@@ -1966,7 +1966,7 @@ episode**, 15 / 30 / 45 min, 1 / 1.5 / 2 hours. A small moon badge with the time
   AVPlayer's own `volume` ramps at 10 Hz. Cast has no local volume, so it just pauses.
 - **Setting it buzzes** (`_hap("selection")`); running out never does.
 
-#### Picture in Picture — automatic, on leaving the app (20.8.0; not yet verified on a device)
+#### Picture in Picture — automatic, on leaving the app (20.8.0; PiP verified on a device)
 
 Swipe home (or switch apps) while an episode plays on the phone and it carries on in a
 floating window. Coming back to the app brings it back into the player. There is no
@@ -1993,6 +1993,16 @@ So while the page plays in the foreground, native runs a **shadow** (`createShad
 - created only while the app is active and the page is **playing**. It is retired by
   any other takeover (glasses, AirPlay, Cast), a disarm, or the switch going off;
 - its layer sits behind the webview (`attachPiPSurface`), carrying the PiP controller.
+
+**The audio session is MIXABLE while only the shadow plays (20.8.1).** WebKit's `<video>`
+plays in an audio session of its own, and two exclusive sessions interrupt each other.
+Without this, the page's player and the muted shadow took the audio from each other
+every few seconds, and WebKit paused the page each time (`interruption began` →
+`unasked-pause`). `activateAudioSession` picks `.mixWithOthers` while the shadow exists
+(and keeps it after the shadow goes, because switching back to exclusive while the page
+plays is itself an interruption). Only `startNative` asks for `exclusive: true`, so a
+promoted shadow becomes the Now Playing app with the lock-screen controls. Each switch
+writes `audio-session {mix}`.
 
 **The swipe home.** iOS calls `willStartPictureInPicture` and `promoteShadow(pip: true)`
 hands the shadow to `startNative(reason: "pip", adopting:)`: same player, same item,
@@ -2025,10 +2035,10 @@ controller and the view.
 from the phone's own loopback server) and a second video decode, for as long as an
 episode plays with the switch on.
 
-**Open:** whether iOS floats a layer that sits behind an opaque webview. The log
-answers it: `pip-possible on:true` then `pip-will-start` means it does;
-`pip-auto-missed` after `possible:true` means iOS declined. If it does not, the next
-thing to try is a small, actually-visible layer.
+**Verified on device 2026-10-03 (20.8.0):** iOS does float the layer behind the
+webview: `pip-possible on:true`, then `pip-will-start` (app `inact`) on the swipe home,
+`pip-active`, and `pip-app-returned` → `restore` on the way back. The same run found the
+audio fight above (fixed in 20.8.1, which is not yet verified).
 
 ### 2c. Subtitle image packs (styled ASS + PGS/VOBSUB)
 

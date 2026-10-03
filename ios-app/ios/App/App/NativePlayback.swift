@@ -921,6 +921,9 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     /// beat that crossed with our flush cannot stop a second session.
     private var yielded = false
     private var sessionActivated = false
+    /// The session was categorised `.mixWithOthers` for the PiP shadow. See
+    /// activateAudioSession.
+    private var sessionMixable = false
     /// Last audio-session activation failure, surfaced in the diagnostics.
     private var audioSessionError = ""
     /// The header used to read `sessionActivated`, which stopNative() resets — so
@@ -1406,13 +1409,33 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
 
     /// Idempotent. Records why it failed rather than swallowing it: a silent
     /// `try?` here is what hid this bug for the life of the feature.
-    private func activateAudioSession() {
+    private func activateAudioSession(exclusive: Bool = false) {
+        // MIXABLE WHILE ONLY THE SHADOW PLAYS (20.8.1). WebKit's <video> plays in
+        // an audio session of its own, and two non-mixable sessions interrupt each
+        // other. Measured 2026-10-03 on 20.8.0: every time the page played, our
+        // session took an `interruption began`; syncShadow restarted the muted
+        // shadow, which took the audio back, and WebKit paused the page's player
+        // (`unasked-pause`) — every ~3 s for as long as the shadow ran. A mixable
+        // session neither interrupts nor is interrupted. The moment the shadow
+        // becomes THE player (PiP, lock) it must be exclusive again, or it is not
+        // the Now Playing app and the lock-screen controls go elsewhere.
+        //
+        // Only startNative asks for `exclusive`. Anywhere else a mixable session
+        // STAYS mixable once the shadow is gone: re-activating it exclusive while
+        // the page plays is itself an interruption, and pauses the page once.
+        let mix = !exclusive && player == nil && cast == nil
+            && (shadowPlayer != nil || sessionMixable)
+        if sessionActivated, mix != sessionMixable { sessionActivated = false }
         guard !sessionActivated else { return }
         let s = AVAudioSession.sharedInstance()
         do {
-            try s.setCategory(.playback, mode: .moviePlayback)
+            try s.setCategory(.playback, mode: .moviePlayback,
+                              options: mix ? [.mixWithOthers] : [])
             try s.setActive(true)
             sessionActivated = true
+            sessionMixable = mix
+            DiagLog.shared.write("audio-session", ["mix": mix, "shadow": shadowPlayer != nil,
+                                                   "native": isNativeActive], cat: "app")
             audioSessionError = ""
             audioEverActivated = true
         } catch {
@@ -1614,7 +1637,9 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // Normally already done at arm time, while foreground — see
         // activateAudioSession(). Kept here as a fallback for the paths that reach
         // startNative without an arm (takeover from a remote command).
-        activateAudioSession()
+        // Exclusive: we are THE player now, and a promoted shadow's mixable
+        // session would leave the lock screen to another app.
+        activateAudioSession(exclusive: true)
 
         endedFlag = false
         // THE DECISION IS MADE HERE, NOT IN THE SEEK COMPLETION.
@@ -3246,6 +3271,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         shadowFile = armed.filePath
         shadowArmedURL = armed.url
         shadowLastSeek = .distantPast
+        activateAudioSession()     // mixable now that only the shadow would play
         shadowStatusObs = it.observe(\.status, options: [.new]) { [weak self] obs, _ in
             guard obs.status == .readyToPlay || obs.status == .failed else { return }
             self?.onMain {

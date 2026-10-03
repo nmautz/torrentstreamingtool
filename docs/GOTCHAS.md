@@ -3032,6 +3032,12 @@ relief pitcher would take its audio anyway. Hence the **shadow player** (STREAMI
   after the restore already ended it. Check `state().pip` before becoming a remote.
 - Not for on-demand: two readers of a JIT encode request different segments and drag
   the encoder between positions.
+- **A muted player still takes the audio.** Muting is a volume; the session is still
+  active and exclusive, and WebKit's `<video>` has its own session, so the two interrupt
+  each other and WebKit pauses the page (20.8.0's "keeps pausing"). The session must be
+  `.mixWithOthers` while the shadow exists, and exclusive again only in `startNative`.
+  Never switch it back to exclusive while the page plays: that activation is itself an
+  interruption.
 
 ### AirPlay receivers fetch the URL themselves — loopback and Tailscale URLs are dead to them
 

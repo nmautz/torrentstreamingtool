@@ -1,5 +1,22 @@
 # Changelog
 
+## [20.8.1] — 2026-10-03
+### Playing on the phone no longer keeps pausing
+
+- **Fixed: since 20.8.0 an episode playing on the phone (not in PiP) paused itself every
+  few seconds.** The silent copy that makes automatic PiP possible was fighting the phone's
+  player for the audio. WebKit's video has an audio session of its own, and two exclusive
+  sessions interrupt each other. Each time the player started, it interrupted the copy. The
+  copy was restarted within a second, took the audio back, and WebKit paused the player.
+  Seen in the phone's log on 2026-10-03: `interruption began` then `unasked-pause`, every
+  ~3 s, only while the copy existed.
+- The app's audio session is now set to mix with others while only the silent copy plays,
+  so neither side interrupts the other. It becomes exclusive again the moment the copy
+  becomes the real player (PiP or a lock), so the lock-screen controls stay ours. A new
+  `audio-session {mix}` log row shows each switch.
+- The same log confirms automatic PiP works on the device: `pip-will-start` on the swipe
+  home, `pip-active`, and the restore on return.
+
 ## [20.8.0] — 2026-10-02
 ### Picture in Picture starts by itself, like YouTube
 
