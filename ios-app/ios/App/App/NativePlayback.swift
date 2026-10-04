@@ -974,6 +974,8 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private var volView: MPVolumeView?
     private var volObs: NSKeyValueObservation?
     private var volPhoneOriginal: Float = -1
+    /// The level the last release put back, and when. See startVolumeCapture.
+    private var volRestored: (level: Float, at: Date)?
     /// Picture in Picture. `pipOn` from the moment iOS floats the promoted
     /// shadow until PiP ends; the view is the PiP source, at the back of the
     /// app's window. See "Auto Picture in Picture".
@@ -2578,6 +2580,8 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // report, observed rather than described.
         PlaybackLiveActivity.shared.audit("becomeActive", playing: isNativeActive || armed.active)
         restoreStrandedBrightness()
+        // The volume buttons drive the TV only while the app is in front.
+        onMain { [weak self] in self?.startVolumeCapture() }
         drainPendingCommand()
         // Hand the external display back to mirroring: the web player is about to
         // become primary again, and TV Mode's whole premise is that the monitor
@@ -2880,6 +2884,8 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         if armed.active, armed.handoffEnabled, wantsOwnExternalWindow {
             onMain { [weak self] in self?.ensureExternalWindow() }
         }
+        // Out of the app the volume buttons are the phone's (startVolumeCapture).
+        stopVolumeCapture()
         onMain { [weak self] in self?.diagSnap("resignActive") }
     }
 
@@ -3635,8 +3641,15 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     // phone's volume at 50% through a hidden MPVolumeView (whose presence also
     // hides the system volume HUD), turn each move away from 50% into one TV
     // step, and park it again. The phone's own level is put back at the end.
+    //
+    // ONLY WHILE THE APP IS IN FRONT. Locked, on the home screen, in another app
+    // or under Control Centre the buttons are the phone's again: a viewer who
+    // left the app to turn their phone down found it snapping back to 50% and
+    // the TV changing instead. appWillResignActive releases the buttons (and
+    // puts the phone's level back), appDidBecomeActive takes them again.
     private func startVolumeCapture() {
-        guard volView == nil,
+        guard volView == nil, castLive,
+              UIApplication.shared.applicationState == .active,
               let root = UIApplication.shared.connectedScenes
                   .compactMap({ $0 as? UIWindowScene })
                   .first(where: { $0.session.role == .windowApplication })?
@@ -3647,7 +3660,13 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         root.addSubview(v)
         volView = v
         let session = AVAudioSession.sharedInstance()
-        volPhoneOriginal = session.outputVolume
+        // A release moments ago (a banner, a glance at Control Centre) may not
+        // have reached the system yet, and outputVolume would still read our 50%.
+        if let r = volRestored, Date().timeIntervalSince(r.at) < 1 {
+            volPhoneOriginal = r.level
+        } else {
+            volPhoneOriginal = session.outputVolume
+        }
         // The slider exists only after a layout pass.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
             self?.setPhoneVolume(0.5)
@@ -3669,7 +3688,10 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             guard let self = self else { return }
             self.volObs?.invalidate(); self.volObs = nil
             guard let v = self.volView else { return }
-            if self.volPhoneOriginal >= 0 { self.setPhoneVolume(self.volPhoneOriginal) }
+            if self.volPhoneOriginal >= 0 {
+                self.setPhoneVolume(self.volPhoneOriginal)
+                self.volRestored = (self.volPhoneOriginal, Date())
+            }
             self.volPhoneOriginal = -1
             // Let the restore land before the slider it goes through disappears.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { v.removeFromSuperview() }

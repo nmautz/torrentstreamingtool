@@ -1,5 +1,17 @@
 # Changelog
 
+## [20.8.11] — 2026-10-04
+### While casting, the volume buttons drive the TV only while the app is open
+
+- **Changed (built, not yet run on a device): on a Chromecast the phone's volume
+  buttons control the TV only while the app is in front.** Before, they were taken for
+  the whole cast: on the lock screen, the home screen and in other apps the phone's
+  volume snapped back to 50% and the TV changed instead. Now leaving the app (or
+  opening Control Centre) gives the buttons back to the phone and restores its own
+  level; coming back takes them for the TV again.
+- **AirPlay is unchanged and cannot be changed.** While sound is routed to an AirPlay
+  receiver iOS points the volume buttons at it; the app does not capture them there.
+
 ## [20.8.10] — 2026-10-04
 ### The app stays usable while it downloads, and the download activity goes away when the bytes stop
 

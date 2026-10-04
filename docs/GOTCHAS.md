@@ -3175,7 +3175,13 @@ reached through Tailscale is on no network the TV can see. So AirPlay always goe
   position in the receiver's TEXT list.
 - **The phone's volume buttons are captured by parking the volume at 50%**
   (`startVolumeCapture`). If you remove the restore in `stopVolumeCapture`, the
-  viewer's phone is left at 50% after every cast. **Both run on main, always.**
+  viewer's phone is left at 50% after every cast. The capture is held **only while
+  the app is active** (20.8.11; `appWillResignActive` releases, `appDidBecomeActive`
+  retakes): the silent keep-alive keeps the process running in the background, so
+  without that the phone's volume snapped back to 50% on the lock screen and in every
+  other app for as long as the cast lasted. A retake within a second of a release
+  reuses the level that release put back (`volRestored`), because `outputVolume` can
+  still read our 50% then. **Both run on main, always.**
   `stopNative` reaches `stopVolumeCapture` straight from Capacitor's plugin queue
   (`resume` → `reclaim`, `disarm`). Moving the hidden `UISlider` there leaves an
   implicit `CATransaction` on a GCD worker thread. iOS 27 commits it when that worker

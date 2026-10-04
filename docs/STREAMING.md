@@ -1966,7 +1966,11 @@ Not yet exercised: seek, auto-skip, advance, and a locked phone.
   (`castVolume`, the receiver's `SET_VOLUME`; the label is the level the receiver
   reports back). The phone's **hardware buttons** drive it too: a hidden `MPVolumeView`
   parks the phone's volume at 50%, each move away from it becomes one ±5% TV step, and
-  the phone's own level is restored when the cast ends.
+  the phone's own level is restored when the cast ends. **Only while the app is in
+  front** (20.8.11): on resign-active (lock, home, another app, Control Centre) the
+  capture is released and the phone's level put back, so the buttons are the phone's;
+  it is taken again on become-active. AirPlay is never captured: there iOS itself
+  points the buttons at the receiver, and no API changes that.
 - **Back to phone.** It replaces **To TV** in the remote's last row and in the header
   while on AirPlay or a Chromecast. `release()` drops the hold, and the usual
   `_npHandBack()` → `reclaim` → `stopNative` stops the TV and resumes the page's element
