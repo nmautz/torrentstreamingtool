@@ -4,8 +4,18 @@ Audio-fingerprint-driven intro/credits detection. Runs per-series; results store
 
 ## Dependencies
 
-- **`ffmpeg`** — audio decode + ffprobe duration
-- **`fpcalc`** (chromaprint) — fingerprinting (`-raw` mode emits integer frames)
+- **`ffmpeg`** — audio decode. `_media_duration` runs the **ffprobe** sitting next to it, located by swapping
+  only the *filename* (`Path(ff).with_name(...)`): a blanket `str.replace("ffmpeg", "ffprobe")` mangles the
+  bundled Windows path, which silently demoted every Windows host to the brittle ffmpeg-stderr fallback — and
+  that fallback's `re.search` then crashed every series. See
+  [GOTCHAS.md](GOTCHAS.md#derive-the-ffprobe-path-from-ffmpegs-filename--a-blanket-strreplace-breaks-every-windows-install)
+- **`fpcalc`** (chromaprint) — fingerprinting (`-raw` mode emits integer frames). **Not a general decoder:** the
+  static 1.5.1 build `setup.py` installs has no DTS, so it cannot be trusted to open a file by itself — see
+  step 1 and [GOTCHAS.md](GOTCHAS.md#fpcalc-is-not-a-decoder--the-static-build-has-no-dts-so-the-head-fingerprint-must-fall-back-to-ffmpeg)
+- Every one of these subprocesses is captured with **`encoding="utf-8", errors="replace"`**, never bare
+  `text=True` — on Windows that decodes with the ANSI code page and a non-Latin track title or path makes
+  the call return empty output with `rc=0`, no exception. See
+  [GOTCHAS.md](GOTCHAS.md#subprocessruntexttrue-on-windows-silently-returns-empty-stdout-with-rc0--always-pass-encodingutf-8-to-a-media-tool)
 - Both are detected by `setup.py` and stored as `_FFMPEG_BIN` / `_FPCALC_BIN` in `.env`
 - `analyzer.is_available()` returns False if either is missing — feature degrades to manual entry only (admin editor still works)
 
@@ -13,18 +23,20 @@ Audio-fingerprint-driven intro/credits detection. Runs per-series; results store
 
 Chromaprint emits ~7.8 32-bit hash frames per second of audio.
 
-1. **Fingerprint** ([analyzer.py:69](../analyzer.py#L69)): For each episode, call `fpcalc -raw -length 360 <path>` for the head (first 6 min) and `ffmpeg -ss <tail_start> -t 600 | fpcalc -raw -length 600 -` for the tail (last 10 min). Episodes are fingerprinted `FP_CONCURRENCY` (2) at a time
+1. **Fingerprint** ([analyzer.py:69](../analyzer.py#L69)): For each episode, call `fpcalc -raw -length 360 <path>` for the head (first 6 min) and `ffmpeg -ss <tail_start> -t 600 | fpcalc -raw -length 600 -` for the tail (last 10 min). Episodes are fingerprinted `FP_CONCURRENCY` (2) at a time. **The head falls back to the same ffmpeg pipe** (`_fpcalc_direct` → `_fpcalc_piped`, `-ss 0`) whenever fpcalc returns nothing on its own — it has no DTS decoder, so on a DTS release the direct read fails for every file. The two paths are frame-aligned (measured: shift 0, every frame matching), so a series may mix them freely
 2. **Greedy clustering** ([analyzer.py:307](../analyzer.py#L307)): pick first un-clustered episode as anchor; pairwise `_find_longest_match` against every other. The longest run ≥ `MIN_MATCH_FRAMES` (~15 s) with Hamming distance ≤ 6 bits per frame is kept — **bridging mismatch gaps** up to `MATCH_GAP_FRAMES` (~4 s) as long as the merged run stays ≥ `MATCH_MIN_RATIO` matched (each chromaprint frame spans ~2.4 s of audio, so 1 s of episode-specific audio inside the theme smears across ~20 frames; a strict-consecutive matcher truncated real intros). A match only counts where the frame is **informative** (`MIN_FRAME_DELTA_BITS` vs its predecessor, in both episodes) — stationary audio (silence/drones/tones) emits runs of near-identical hashes that bogus-match for tens of seconds otherwise. Matching is numpy-vectorized (`_find_longest_match_np`, XOR + 16-bit popcount LUT, ~50-100× the pure-Python `_find_longest_match_py` fallback used when numpy is missing — the fallback is strict: no gap bridging, no informative mask). Unmatched episodes recurse on the next pass (new anchor)
-3. **Intersection** ([analyzer.py:209](../analyzer.py#L209)): within a cluster, the anchor's intro/outro range is the intersection of anchor-side windows across all pair matches. Per-non-anchor episodes use the `offset_in_other` from their pair match — so cold opens of different lengths still align correctly
+3. **Consensus window + projection**: within a cluster, the anchor-side range is a **trimmed-quantile** intersection of the pair windows (`_intersect_match`) — the worst `CLUSTER_TRIM_Q` at each edge is ignored so one short match can't truncate a whole season. `int(n * 0.2)` is 0 for n < 5, so small clusters are bit-identical to the old hard intersection. That single window is then **projected into every member's own frame coordinates** (`_project`) through its pair alignment, clamped to that member's matched evidence and fingerprint length, so every episode in a cluster reports the same intro duration. A member the projection can't place keeps its raw pair match rather than losing its skip point. When the intersection collapses entirely, `_medoid_window` picks the real member interval with the greatest total overlap (the old fallback took the median offset and median length *independently*, which could synthesise a window matching no actual pair)
 4. **Consensus filtering** (`_filter_cluster_consensus`): real shared intro/credits make every cluster member match the **same** anchor region, so their anchor-side offsets agree. An outlier episode whose real intro/credits is absent can still pairwise-match the anchor on some *other* recurring audio (a stinger, a repeated gag, a transition sting) at a different anchor offset — left in, it produces a bogus skip point (the "credits kick in early, cut off the end" bug). Members whose `offset_in_anchor` deviates from the cluster median by more than `CLUSTER_OFFSET_TOL_FRAMES` (~8 s) are pruned (the median member always survives, so genuine clusters are untouched). Applied to **both** intro and outro clusters
-5. **Credits acceptance — fingerprint-only, no fabricated fallback** (finalize loop): credits time comes **only** from a confirmed cross-episode match. A matched outro run is accepted as `source="auto"` only when it both **starts late enough** (`credits_start ≥ duration × MIN_CREDITS_PCT`) **and runs to ~the end** (`credits_end ≥ duration − OUTRO_END_MARGIN_SEC`). Rationale: real credits run to the end of the file; a recurring non-credits cue near the end is followed by more content, so its run ends well before the end → rejected. If nothing qualifies, `credits_start = None` and the file records an `ERR_NO_SKIP` failure (the "Skip unavailable" chip) — there is **no** black-frame detector and **no** flat-92% guess. A single file with no peer episodes likewise gets no credits (nothing to match against)
+5. **Credits acceptance — fingerprint-only, no fabricated fallback** (finalize loop): credits time comes **only** from a confirmed cross-episode match. A matched outro run is accepted as `source="auto"` only when it both **starts late enough** (`credits_start ≥ duration × MIN_CREDITS_PCT`) **and runs to ~the end** (`credits_end ≥ duration − OUTRO_END_MARGIN_SEC`). Rationale: real credits run to the end of the file; a recurring non-credits cue near the end is followed by more content, so its run ends well before the end → rejected. If nothing qualifies the **subtitle pass** (§ Credits from subtitles) gets a turn; failing that, `credits_start = None` and the file records an `ERR_NO_SKIP` failure (the "Skip unavailable" chip) — there is **no** black-frame detector and **no** flat-92% guess
 
 ## Constants ([analyzer.py:22](../analyzer.py#L22))
 
 | Name | Value | Meaning |
 |------|-------|---------|
-| `ANALYZER_VERSION` | 4 | Bumped to force re-analysis when the algorithm changes (4 = fingerprint-only credits + consensus filtering; 3 = gap-tolerant matcher) |
-| `FP_FRAMES_PER_SEC` | 7.8 | Chromaprint's emission rate |
+| `ANALYZER_VERSION` | 10 | Bumped to force re-analysis when the algorithm changes (10 = head fingerprint falls back to ffmpeg, so DTS releases get intros; 9 = chapters outrank the subtitle credits estimate; 8 = credits from subtitles, structural audio pass removed; 7 = structural credits + boundary refinement; 5 = correct frame rate + consensus projection + edge trim; 4 = fingerprint-only credits + consensus filtering; 3 = gap-tolerant matcher) |
+| `FP_FRAMES_PER_SEC` | 8.0768 | Chromaprint's emission rate. **Was 7.8, which was wrong** — see §Frame timing |
+| `FP_FRAME_LEADIN` | 21.43 | Constant frame shortfall; makes `_rate_for` affine |
+| `FP_RATE_SANITY` | (7.5, 8.6) | Self-calibration outside this band is rejected |
 | `INTRO_SEARCH_SECS` | 360 | Look for intro in first 6 min |
 | `OUTRO_SEARCH_SECS` | 600 | Look for outro in last 10 min |
 | `MIN_INTRO_SEC` | 15 | Smallest segment we'll call an intro |
@@ -35,11 +47,45 @@ Chromaprint emits ~7.8 32-bit hash frames per second of audio.
 | `MIN_MATCH_FRAMES` | int(15 × 7.8) | Minimum frames (span) for a match |
 | `MATCH_GAP_FRAMES` | int(4 × 7.8) | Mismatch gap the matcher bridges inside a run (chromaprint frame smear — see §Algorithm) |
 | `MATCH_MIN_RATIO` | 0.6 | Min fraction of matched frames in a gap-bridged run |
+| `MATCH_EDGE_MIN_FRAMES` | int(1.5 × 8.0768) | A terminal segment shorter than this is trim-eligible |
+| `MATCH_EDGE_GAP_FRAMES` | int(2.0 × 8.0768) | ...if the gap separating it is at least this |
+| `CLUSTER_TRIM_Q` | 0.2 | Members ignored at each edge of the consensus window (0 for n < 5) |
 | `MIN_FRAME_DELTA_BITS` | 2 | Frame must differ ≥ this from its predecessor to count as match evidence (stationary-audio guard) |
 | `FP_CONCURRENCY` | 2 | Episodes fingerprinted in parallel |
 | `MIN_CREDITS_PCT` | 0.75 | A matched outro must start no earlier than this fraction of runtime |
 | `OUTRO_END_MARGIN_SEC` | 120 | A matched outro must reach within this many seconds of the file end |
 | `CLUSTER_OFFSET_TOL_FRAMES` | int(8 × 7.8) | Max anchor-offset deviation before a cluster member is pruned as an outlier |
+
+## Frame timing — the thing that was wrong for a long time
+
+Chromaprint emits **8.0768** raw frames/s, not the 7.8 this module assumed for most of its life.
+Measured against the fpcalc 1.5.1 build `setup.py` installs, on synthetic clips of exactly known
+length: `frames = 8.07677 × seconds − 21.43`, stable from a 30 s window to a 360 s one.
+
+Because 7.8 was a **scale** error, the damage grew with the timestamp — which is why it read as a
+matcher bug for so long:
+
+| boundary | reported under 7.8 | true | error |
+|---|---|---|---|
+| `intro.start` ≈ 12 s | 12.4 | 12.0 | +0.4 s (invisible) |
+| `intro.end` ≈ 105 s | 108.7 | 105.0 | **+3.7 s** |
+| credits 480 s into the tail window | — | — | **+17 s** |
+
+`frames_to_seconds(frames, rate)` now takes a per-fingerprint rate. `_rate_for(fp_len, window_sec)`
+recovers it from the window actually requested — **affinely**, adding `FP_FRAME_LEADIN` before
+dividing, because the classifier's 16-frame window plus FFT fill leaves a constant ~21.4 frame
+shortfall. A naive `fp_len / window_sec` reads 7.37 at 30 s and 8.02 at 360 s and would
+under-correct badly. Outside `FP_RATE_SANITY` the constant wins (that's the truncated-fingerprint
+case).
+
+Two rules that follow, both in [GOTCHAS.md](GOTCHAS.md):
+
+- **Don't add window compensation.** A frame index is the start of a ~2.23 s window, but a frame
+  only matches while its window is *mostly* shared audio, so the last matching frame already sits
+  ~1 s *before* the true boundary. Compensating pushes boundaries later — the wrong direction.
+- **A seeked fingerprint must return its own time base.** `_fingerprint_one` carries `tail_start`
+  through to `tail_starts[]`; never re-derive it in the finalize loop. Doing so made every
+  `credits_start` late by `frac(duration)`.
 
 ## Greedy clustering ([analyzer.py:307](../analyzer.py#L307))
 
@@ -48,6 +94,20 @@ The greedy approach handles three failure modes the original single-anchor appro
 - **Mid-season intro changes** — eps with the new opening drop out of the first cluster and form their own on the second pass
 - **Episode 0 is a special** — first pass finds an empty cluster and moves on; the real intro group still gets detected from ep 1+
 
+## Known limitation: a recurring in-head segment longer than the intro
+
+With the consensus projection in place, "longest span wins" ([analyzer.py `_find_longest_match_np`](../analyzer.py))
+is mostly harmless — an over-extended bridged run and the true intro share one alignment, so the
+consensus window trims the divergent tails. It still bites in exactly one shape: a show with a
+recurring segment in the first 6 minutes that is **longer than the intro itself** — a fixed
+next-episode preview, a long recurring eyecatch, a sponsor card. Every pair then agrees on the
+wrong region, consensus filtering endorses it, and the projection endorses it too.
+
+The structural fix is for `_best_gap_run` to return the top-K runs and let the cluster stage pick
+the one with the best cross-pair support. That's a much larger change and isn't done. If a show
+reports a confident but plainly wrong intro that is *consistent across every episode*, this is the
+first thing to check.
+
 ## Concurrency
 
 - One series at a time within a series — `lock_for_series(key)` returns a per-series `asyncio.Lock`
@@ -55,11 +115,90 @@ The greedy approach handles three failure modes the original single-anchor appro
 - **Subprocess work** (ffmpeg / fpcalc / ffprobe via `_media_duration`, `_fpcalc_raw`) runs off the loop on the analyzer's **own** `ThreadPoolExecutor` (`_FP_EXECUTOR`, via `_fp_thread`), **not** `asyncio.to_thread`. The default loop executor is shared process-wide and `get_library()` / `put_library()` ride it; each fingerprint parks its worker for the whole decode (head 6 min / tail 10 min of audio), so several series at once flooded the default pool and starved library I/O — every hot loop and HTTP handler queued behind the decodes and the dashboard froze while the host (and RDP) stayed healthy. A private pool keeps the default pool free for library I/O. Fingerprinting still runs `FP_CONCURRENCY` (2) episodes at a time behind a semaphore
 - **The pure-Python matcher (`_find_longest_match`) runs in a separate low-priority *process***, not a thread. It's CPU-bound Python that holds the GIL for seconds per pair; a worker thread would still starve the event loop via the GIL convoy effect (dashboard freezes for seconds while the host looks healthy — the "UI laggy but RDP fine" report). `analyze_series` spins up a one-worker `ProcessPoolExecutor` (`_new_match_executor`, dropped to BELOW_NORMAL by `_match_worker_init`) for both matching stages and tears it down in `finally`; `_run_match` falls back to `asyncio.to_thread` if the host can't create a pool. See [GOTCHAS.md](GOTCHAS.md).
 
+## Credits from subtitles
+
+**Precedence: chapters > fingerprint > subtitles > shots.** The pass runs only for episodes that
+still have no `credits_start` *after* refinement — not merely those the fingerprint
+missed. Those two sets differ, because refinement can supply an exact time from a chapter
+marker, and the list of fingerprint misses is built before it runs. Check the entry, never
+the stale list (12.5.1; it moved one file 106.9 s).
+
+
+For episodes the fingerprint gave no credits, `refiner.credits_from_subtitles` asks a
+different question: not "where does the recurring audio start?" but **"where does the
+dialogue stop for good?"** — which is what "the content is over" actually means.
+
+It reads the last `SUB_SEARCH_SEC` (420 s) of the best text subtitle track, classifies
+each cue as speech or not (song lyrics `♪ … ♪` and bracketed annotations like
+`[MUSIC PLAYING]` are not), and takes the end of the last speech cue. Nothing is decoded
+— cues are demuxed as text — so this is the cheapest detector in the pipeline by two
+orders of magnitude and, measured, the most accurate: **2139.6 s against a true cut at
+2139.7 s** on Hacks S05E05, where the audio-only detector it replaced said 2120.5.
+
+Guards, all failing closed to "no credits":
+
+| guard | why |
+|---|---|
+| text codecs only (`subrip`/`ass`/`mov_text`/…) | `hdmv_pgs_subtitle` and `dvd_subtitle` are pictures; they'd need OCR |
+| ≥ `SUB_MIN_SPEECH` (10) speech cues in the window | a forced/signs-only track's last cue is just its last cue, not the end of the dialogue — this is the one failure mode that could land EARLY |
+| `SUB_MIN_ROLL` ≤ roll ≤ `SUB_MAX_ROLL` | 25–300 s; outside that it found something else |
+| `≥ duration × MIN_CREDITS_PCT` | same 75 % floor the fingerprint path uses |
+| `+ SUB_LATE_PAD` (1.5 s) | the closing song often starts under the final shot; late costs seconds of credits, early destroys content |
+
+**No cross-episode consensus, deliberately.** That is what failed in 12.4.0 — see
+[GOTCHAS.md](GOTCHAS.md) on why agreement among estimates sharing a systematic error
+proves precision rather than accuracy. It would also reject single-episode library items,
+which is how most rotating-theme content is filed.
+
+**Known residual risk: a wordless ending.** This detector equates "the dialogue stopped"
+with "the content ended". Those come apart when an episode closes on a long silent
+sequence — a montage, a wordless action beat, a lingering final shot — and the skip would
+then fire at the last line of dialogue and cut it. `SUB_MIN_ROLL`/`SUB_MAX_ROLL` bound the
+damage (a silent stretch over 300 s is rejected outright) but do not eliminate it, and
+nothing else in the pipeline can currently corroborate the boundary for a file that has no
+chapters and no fingerprint match. This is the same class of error as the 12.4.0 failure —
+confidently early — so treat any "skipped the ending" report on a subtitle-derived credits
+value as this, and prefer the shot-boundary pass (which measures the picture, not the
+dialogue) over loosening the guards here.
+
+Coverage is release-dependent, not show-dependent: two rips of the same episode differ.
+Measured on this library, 309 of 370 files carry an English text track; the gaps are
+bitmap-subtitle rips (Chernobyl, Steins;Gate) and a couple of RARBG encodes with no
+subtitle streams at all.
+
+## Credits from shot boundaries (the last resort)
+
+For files nothing cheaper reached — no chapters, no fingerprint match, no text subtitles —
+`refiner.credits_from_shots` measures the **picture**, which is the one place the boundary
+is always present. A credit roll is a single static or slowly-scrolling shot; content cuts
+every few seconds. So credits start at the last shot boundary opening a long cut-free run
+to the end of the file.
+
+**It deliberately does not use blackness.** "The first long black run" is the obvious idea
+and it is wrong — it fired 52 s early on Hacks S01E03 by latching onto a fade-to-black
+*inside* the final scene. Blackness says the picture went dark, which happens mid-episode
+constantly; cut density says the picture stopped changing, which is what a credit roll is.
+It also means this works for credits over a background or a slow scroll, not only on black.
+
+Guards: `SHOT_MIN_CUTS` (a tail that isn't cutting at all makes "longest run" meaningless),
+`SHOT_DOMINANCE` (the winner must beat the runner-up run by 1.5×, so an ordinary long shot
+can't win by a hair), roll bounds, the 75 % floor, and a late pad. Measured profile:
+correct or silent — it fired on 2 of 5 test files, +1.0 s on both, and returned nothing on
+the rest.
+
+**This is the most expensive thing the app does** (~30–190 s of video decode per file), so
+it runs in its own worker (`shot_scan_loop` in `main.py`), never inline with analysis —
+see [ARCHITECTURE.md](ARCHITECTURE.md) and the ordering rules in [GOTCHAS.md](GOTCHAS.md).
+
+Full credits precedence: **chapters > fingerprint > subtitles > shots.**
+
 ## Progress reporting
 
 `analyze_series(items, progress_cb)` invokes `progress_cb(stage, current, total, message, episode_name, progress)` at each step. `main.py`'s `_set_analysis_status` broadcasts these as SSE `analysis_status` events. Stages: `starting` → `fingerprinting` → `matching-intros` → `matching-outros` → `finalizing` → `done`.
 
 `progress` is a **monotonic 0..1 fraction across the whole run** (stage spans in `_STAGE_SPAN`) — progress bars must use it, not `current/total`: `current/total` resets at every stage boundary, and the matching stages' `total` is a *growing estimate* (greedy clustering can't know its pair count up front), both of which read as the bar "restarting"/jumping backward. The admin Smart Skip badge and the Activity tab both consume `job.progress`.
+
+**`finalizing` covers two very different amounts of work.** The per-episode refine loop advances `progress` across the 0.95–1.00 band normally. The subtitle credits pass that can follow it sits at the **top** of that band and cannot advance the bar at all — `_emit` clamps `progress` monotonic, so anything it emits is already pinned at 1.0. It therefore reports by **message** instead, counting through the episodes it is checking. Keep that per-episode emit: an iteration can block for minutes on a slow mount, and without it the Activity tab freezes on a single line that is indistinguishable from a hang.
 
 ## Trigger flow (in `main.py`)
 
@@ -111,21 +250,25 @@ prepped content is the right population.) On macOS prep is disabled
 3. **Credits window**: if `pos ≥ credits_start - 2s` and not at the very end — with auto-skip on (profile pref + `pos ≥ credits_start`) start the **credits countdown**; otherwise set `state.skip_offer = {type:"credits", credits_start, file_path, has_next, next_file_path}`
 4. **Outside any window** → clear offer
 
+**Transition-tick guard (10.10.1):** the tick's `pos/dur` come from `status.json` while the current file resolves from a separate `playlist.json` call, so the tick straddling an episode change can pair the outgoing episode's near-credits position with the incoming episode's metadata — which used to fire the credits countdown instantly on the new episode and chain the skip several episodes ahead. The tracker now skips the offer evaluation on any tick where the file just changed (`file_changed`). See [GOTCHAS.md § straddle](GOTCHAS.md).
+
 The `SKIP_PREROLL_SEC = 2.0` ([main.py:1352](../main.py#L1352)) gives the user 2 s of visual time to react before the range starts.
 
 `state.skip_offer_file` carries the file path while an offer is active. After acting/dismissing, it gets a `#intro-done` / `#credits-done` suffix so the same offer doesn't re-emit on the next tick.
 
 ## Auto-skip countdown (on-TV marquee)
 
-When auto-skip is enabled, Smart Skip does **not** cut instantly — it counts down on the TV over the `lead` seconds *before* the skip point, then acts the moment playback reaches it, so the intro/credits is skipped in full. Leads: `SKIP_COUNTDOWN_INTRO_SEC = 5`, `SKIP_COUNTDOWN_CREDITS_SEC = 10`. The skip **point** (`target`) is the **intro start** (skip → `seek` to intro end+1) and the **credits start** (skip → `vlc_next_file`, else `pl_stop`). So an intro at 1:30 counts 5→1 from 1:25 and seeks at 1:30.
+When auto-skip is enabled, Smart Skip does **not** cut instantly — it counts down on the TV over the `lead` seconds *before* the skip point, then acts the moment playback reaches it, so the intro/credits is skipped in full. Leads: `SKIP_COUNTDOWN_INTRO_SEC = 5`, `SKIP_COUNTDOWN_CREDITS_SEC = 10`. The skip **point** (`target`) is the **intro start plus `SKIP_INTRO_START_PAD_SEC = 1.5`** (`_intro_skip_at()`, clamped to the intro end — firing early cuts the scene before the opening, firing late costs only theme; see [GOTCHAS.md](GOTCHAS.md)) and the **credits start** (skip → `vlc_next_file`, else `pl_stop`). So an intro at 1:30 counts 5→1 from 1:26.5 and seeks at 1:31.5. The landing position comes from `_intro_seek_target()` — see [GOTCHAS.md](GOTCHAS.md) on why all three seek sites share it and why the old `+1 s` pad was removed.
 
-- `_maybe_emit_skip_offer` calls `_start_skip_countdown(kind, item, file_path, end_at, target, lead)` once the position enters `[target − lead, …)`. While `state.skip_countdown_task` is alive, the helper early-returns so the tracker doesn't fight it. (The manual, auto-skip-off button still uses the narrower `[target − SKIP_PREROLL_SEC, …)` window.)
+- `_maybe_emit_skip_offer` calls `_start_skip_countdown(kind, item, file_path, end_at, target, lead)` once the position enters `[target − lead, …)`. While `state.skip_countdown_task` is alive, the helper early-returns so the tracker doesn't fight it. (The manual, auto-skip-off button still uses the narrower `[target − SKIP_PREROLL_SEC, …)` window — which, because `target` carries the start pad, also means tapping it the instant it appears can no longer cut into the scene before the opening.)
 - `_run_skip_countdown` is a dedicated coroutine that is **position-driven** (polls `vlc_status` every 0.5 s). The displayed number is `ceil(target − pos)` clamped to `[1, lead]`, so it tracks real playback — it **freezes while paused** (pos is frozen) and grows/shrinks as the viewer seeks; updates marquee + broadcasts `state` (`state.skip_countdown = {type, file_path, n}`) only when the number changes. It **fires** when `pos ≥ target` and **aborts** (clearing the popup) if the file changes, the viewer seeks back so `target − pos > lead + preroll`, or — for an intro — seeks past the intro end (`pos ≥ end_at`). On fire it re-checks the live playlist URI, performs the skip, and sets the `#…-done` marker. The `finally` always clears the marquee file.
 - `_cancel_skip_countdown()` cancels the task and clears the popup; it's called from Stop / Next / Prev / a new Play, and as a backstop in the tracker's playback-ended branch.
 
-### Deferred "watched" when the credits guess is wrong
+### Skipping credits and "watched"
 
-Smart Skip's `credits_start` can still land **early** in rare cases (an outro cluster that matched real recurring content the consensus/end-anchoring checks didn't catch). To make a wrong-early guess harmless, advancing to the next episode (from **any** position) does **not** mark the episode watched immediately — `_arm_credit_skip_watch` arms a `CREDIT_SKIP_WATCH_DELAY_SEC = 60` grace timer (`state.pending_watch`). If the viewer realises they skipped real content and returns to that file, `vlc_progress_tracker` cancels the timer and their real progress stands; otherwise `_mark_file_watched_internal` marks it `completed`. Armed from the **Next** button (`/api/vlc/next`), the credits **Skip** offer (`/api/skip-now`), and the auto-skip-credits countdown — i.e. every path that jumps to the next episode. See [LIBRARY_DATA.md § Progress](LIBRARY_DATA.md#progress-per-profile).
+`credits_start` moves the **tail** an episode has to reach to count as watched: `credits_start − 10 s` instead of 90 % of the runtime. Skipping the credits (the **Skip** offer via `/api/skip-now`, the auto-skip-credits countdown, or **Next**) finalises the outgoing file at its live position through `_finalize_stopped_file` — at the credits, so an episode that was actually watched completes. It also has to have been genuinely *played* (`played_sec ≥ 60 %` of runtime), so a `credits_start` that lands **early** — an outro cluster that matched real recurring content — can't credit an episode by itself, and neither can scrubbing straight to the credits. See [LIBRARY_DATA.md § What counts as watched](LIBRARY_DATA.md).
+
+(Until 17.5.0 every next-episode path armed a 60 s timer, `_arm_credit_skip_watch`, that marked the episode watched from **any** position unless the viewer came back to it. It was built to soften a wrong-early `credits_start`; in practice it credited an episode left 33 s in. Removed.)
 
 ### How the popup reaches the TV
 
@@ -134,11 +277,11 @@ The popup is a VLC **`marq` sub-source**, not dashboard UI — it draws on the v
 ## Endpoints
 
 User-facing:
-- `POST /api/skip-now {type}` — execute. Intro = seek to `end_at + 1`. Credits = `vlc_next_file` (or `pl_stop`)
+- `POST /api/skip-now {type}` — execute. Intro = seek to `_intro_seek_target(end_at)` (`end_at + SKIP_INTRO_PAD_SEC`, rounded to VLC's whole-second granularity). Credits = `vlc_next_file` (or `pl_stop`)
 - `DELETE /api/skip-now` — dismiss without acting
 
 Admin:
-- `GET /api/admin/library/{id}/skip-data` — per-file editor data (now also returns `error_code` / `error` for failed files)
+- `GET /api/admin/library/{id}/skip-data` — per-file editor data (now also returns `error_code` / `error` for failed files); plus `method` (`fingerprint` / `chapters` / `fingerprint+silence` / `subtitles`) and the `refine` block (pre-refinement audio values + per-boundary confidence and source)
 - `PATCH /api/admin/library/{id}/skip-data` — manual override (sets `analysis.source="manual"`)
 - `POST /api/admin/library/{id}/analyze` — force re-run for the item's series
 - `GET /api/admin/analyzer-status` — `{available, ffmpeg, fpcalc}`
@@ -152,7 +295,7 @@ Admin:
     "intro": { "start": 12.0, "end": 105.0 },     // or null
     "credits_start": 2940.0,                       // or null
     "analysis": {
-      "version": 4,
+      "version": 5,
       "source": "auto" | "manual" | "failed",   // credits time is fingerprint-only ("auto")
       // Only present when source == "failed":
       "error_code": "no_binary" | "file_missing" | "no_duration" |
@@ -198,7 +341,7 @@ Error codes (defined as constants at the top of `analyzer.py`):
 | `no_binary`        | ffmpeg or fpcalc missing on host | Re-run `setup.py` after installing the dep |
 | `file_missing`     | Path exists in library.json but not on disk | Library scan / clean orphans |
 | `no_duration`      | ffprobe couldn't read the container | Re-encode or remux; check codec support |
-| `fp_empty`         | fpcalc produced no fingerprint for the head | Unsupported audio codec, silent track, corruption |
+| `fp_empty`         | No head fingerprint from fpcalc **or** the ffmpeg fallback | Silent track, corruption, a codec ffmpeg can't decode either. **Only reported when the file also got no credits** — a file with an empty head and a matched tail is stored as an ordinary credits-only success, which is how the DTS bug hid |
 | `no_skip_points`   | No qualifying match: no shared intro, no credits run that passes consensus + end-anchoring, **or** a lone file with no peer episodes to match against | Admin re-run after more peers in the series are prepped (no longer auto-retries) |
 | `exception`        | Unhandled error inside `analyze_series` | See `streamlink_app.log` for the traceback |
 
@@ -223,7 +366,7 @@ left untouched even on a forced admin re-run).
 
 `renderSkipOffer(offer)` displays a fixed-position amber tile at the bottom of the viewport (above the player footer / fullscreen controls). Renders whenever `state.skip_offer` is non-null. The label is "Skip intro" or "Skip credits" depending on `offer.type`. `triggerSkip()` POSTs `/api/skip-now`; `dismissSkip()` DELETEs.
 
-Per-profile `auto_skip_intro` / `auto_skip_credits` toggles live in the profile-settings modal (gear icon next to the navbar avatar).
+Per-profile `auto_skip_intro` / `auto_skip_credits` toggles live in the profile-settings modal (gear icon next to the navbar avatar). They drive **both** playback paths: the VLC/TV countdown (above) and the on-device HLS player (`lpEvaluateSkipOffer` → countdown then auto-skip; see [STREAMING.md § Skip-intro / credits](STREAMING.md)).
 
 ## See also
 

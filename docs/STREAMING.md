@@ -32,6 +32,13 @@ Read this when changing anything related to:
   `prepFileState`
 - The bulk **Prep for Streaming** button on library cards
   (`prepItemForStreaming`, `/prep-all`)
+- **Bundle integrity** — `bundlecheck.py`, the pre-swap check in `_run_offline_job`,
+  `_run_bundle_audit`, `/api/admin/bundle-audit`, `files[].bundle_check`. See
+  [§ Bundle integrity](#bundle-integrity--born-verified-plus-a-sweep)
+- **Source eviction** — `srcevict.py`, `_build_evict_plan`,
+  `/api/admin/source-eviction*`, `files[].bundle`, the source-optional addressing
+  helpers (`_file_evicted` / `_bundle_dir_for_file`). Dry run only in 18.0.0. See
+  [§ Source eviction](#source-eviction-1800--deleting-the-source-keeping-the-bundle)
 - The prep **lag warning** (`#prepWarnModal`, `confirmStreamPrepWarning`), the
   **Pause/Resume** controls on `#globalPrepBar` (`/api/offline-prep/pause` +
   `/resume`, `_pause_prep` / `_resume_prep`), or **automatic auto-prep**
@@ -40,6 +47,10 @@ Read this when changing anything related to:
 - **On-demand (JIT) streaming** — `stream-ondemand`, the `_od_*` session manager,
   the `/api/library/ondemand/<key>/…` virtual-playlist + segment endpoints, and the
   client `lp.mode === "ondemand"` path. See [§ On-Demand](#on-demand-just-in-time-streaming)
+- **Cross-device sessions** — the "playing elsewhere" banner and pull-over:
+  `/api/playback/session`, `…/yield`, `/api/playback/sessions`, `/api/playback/pull`,
+  `state.playback_sessions`, the client's `_pb*` block + `#elsewhereBanner`, and
+  `NativePlayback.maybePostSession` / `honourYield`. See [§ 8](#8-cross-device-sessions--playing-elsewhere-and-pull-over-1780)
 - The play chooser (`#playChooserModal`, `playLibraryWithChooser`, `pcChoose`)
 - The **Handoff** (both directions): TV→device (`handoffToDevice`, `#handoffBtn`,
   `#fcHandoffBtn`) and device→TV (`lpHandoffToVlc`, the local player's **To TV** button)
@@ -53,13 +64,52 @@ For player-style UI changes that don't touch streaming logic, see
 
 ---
 
+## Where bundles live (co-located, v8+)
+
+As of **v8 (`OFFLINE_CACHE_VERSION = "v8-colocated"`)** each prepped file's HLS
+bundle lives **beside its source file**, in a hidden
+`<file_dir>/.streamlink_cache/<key>/` — *not* in the old central
+`.offline_cache/` at the repo root. The single source of truth for the location
+is `_offline_cache_dir(src)` in `main.py`; everything else routes through it.
+
+- **Key is path- and mtime-independent:** `_offline_cache_key(src) =
+  sha256("v8-colocated | <filename> | <size>")[:24]` (see `_offline_cache_key_for`
+  for the from-metadata variant the move op uses). Dropping the absolute path and
+  mtime makes the key **move-stable** — a bundle stays valid wherever the file goes,
+  including a cross-device move where mtime changes. Two files can't share a name in
+  one dir, and identical name+size in *different* dirs land in different
+  `.streamlink_cache/` dirs, so there's no collision. mtime is safe to omit because
+  the in-place rewrite paths (repair / compress) already purge the bundle explicitly.
+- **Serving uses a key→dir index.** The route `/api/library/offline-cache/<key>/<file>`
+  can't do `OFFLINE_CACHE / key` anymore, so `_bundle_index` (`dict[key, Path]`) maps
+  each key to its dir. It's discovered by *directory name* (`_rebuild_bundle_index_sync`
+  walks every library file's parent `.streamlink_cache/` + the legacy central dir — no
+  source stat needed), registered on prep-completion / cached-hit
+  (`_bundle_index_register`), and invalidated on move / migrate / delete
+  (`_invalidate_bundle_index`). A cold miss rebuilds once then 404s.
+- **Startup migration (`_migrate_offline_cache_layout`).** Pre-v8 installs kept bundles
+  centrally. On boot — **before** the prep loops spawn, so nothing half-migrated gets
+  re-queued — each old `.offline_cache/<legacy_key>/` (legacy key =
+  `sha256("v7-hls-abr | <abs_path> | <mtime> | <size>")`, via `_offline_cache_key_legacy`)
+  is **moved** to its co-located home with a plain directory move. **No re-encode**,
+  idempotent, best-effort per file. Stale central bundles (source changed/removed) aren't
+  matched and are left for the orphan purge.
+- **Moving a series carries the cache.** `POST /api/library/{id}/move` (admin) relocates a
+  series; because the key is move-stable, the co-located bundle is just moved alongside the
+  media (`_move_series_files_sync`). See [ADMIN.md](ADMIN.md) / [API.md](API.md).
+- The legacy `OFFLINE_CACHE` (`.offline_cache/`) constant still exists only so the migration
+  and the inventory can find/relocate pre-v8 stragglers. The `.ondemand_cache/` (transient
+  JIT) stays central at the repo root.
+
 ## Output format
 
-Every prepped source produces a directory `<sha>/` under `.offline_cache/`
-with the following layout:
+Every prepped source produces a directory `<key>/` inside its file's
+`.streamlink_cache/` with the following layout (the on-disk parent is
+`<file_dir>/.streamlink_cache/`; pre-v8 this was `.offline_cache/` at the repo
+root):
 
 ```
-.offline_cache/
+<file_dir>/.streamlink_cache/
   <sha24>/
     master.m3u8           ← top-level playlist (video variants + alternate audio)
     video.m3u8            ← original (source-resolution) video rendition
@@ -102,16 +152,25 @@ audio rendition (`{idx, playlist, label, language, default}`) and each subtitle
 (`{idx, file, label, language, title}` where `file` is the bundle-relative
 `sub_<i>.vtt`), plus a `skipped_image_subs` list noting PGS/VOBSUB tracks that
 couldn't be included (they need image-OCR or burn-in, neither of which is
-implemented). The UI reads `meta.json` via `/offline-prepare` to populate the
+implemented). Three A/V-sync fields describe how the bundle was built and are read
+by the resync detector, not the UI: `audio_padded_to_video_start` (each audio
+rendition was pinned to the video rung's first PTS) with `audio_pad_pts_sec` (the
+target used, `null` when unpinned), and `video_reencoded` (the original rung was
+re-encoded rather than stream-copied — it then carries a frame-reorder residual, so
+the detector applies a looser threshold). Bundles prepped before 11.12.0 carry the
+superseded `audio_padded_to_zero` instead, which meant both at once. The UI reads
+`meta.json` via `/offline-prepare` to populate the
 audio/subtitle dropdowns — it never re-probes the bundle. The **quality** menu
 is instead built from hls.js `levels` (the master-playlist parse), so it never
 depends on `videos[]` ordering; `videos[]` is informational (admin/API).
 
-Cache key (`_offline_cache_key`) is
-`sha256(OFFLINE_CACHE_VERSION | path | mtime | size)[:24]`. Re-encoding the
-source invalidates the bundle. `OFFLINE_CACHE_VERSION = "v7-hls-abr"`; bumping it
-forces every bundle to be rebuilt on next prep (old `<sha>/` dirs become
-orphans, listed in Admin → Offline Cache for one-click purge).
+Cache key (`_offline_cache_key`) is `sha256(OFFLINE_CACHE_VERSION | filename |
+size)[:24]` (v8+, path/mtime-independent — see *Where bundles live* above).
+Re-encoding the source changes its size, so the key changes and the old bundle
+is purged (repair/compress do this explicitly). `OFFLINE_CACHE_VERSION =
+"v8-colocated"`; bumping it forces every bundle to be rebuilt on next prep (old
+`<key>/` dirs become orphans, listed in Admin → Offline Cache for one-click
+purge).
 
 > **Not available on macOS hosts.** When the server runs on macOS, ffmpeg /
 > ffprobe (children of the non-GUI Python process) are blocked by TCC from
@@ -124,6 +183,342 @@ orphans, listed in Admin → Offline Cache for one-click purge).
 
 ---
 
+## Bundle integrity — "born verified", plus a sweep
+
+A bundle can be structurally dead and still look perfectly built. See
+[GOTCHAS.md § ffmpeg exiting 0 does not mean the bundle is watchable](GOTCHAS.md)
+for the full mechanism; the short version is that a source with holes in it
+(qBit writes **sparse** files, so a half-fetched episode is full-length) makes
+ffmpeg duplicate the last frame and pad silence, exit `0`, and land the result on
+the key the *finished* file resolves to — so it is never rebuilt.
+
+**A still, silent ending is content, not a hole (19.10.0).** On the final pre-swap
+rejection, `_dead_span_is_content` decodes only the dead window of the source. When it
+comes back clean, the bundle is published with `bundle_check.content_verified: true`,
+and the audit keeps that verdict. See [GOTCHAS.md § A still, silent ending is not a
+hole](GOTCHAS.md).
+
+### What the check is
+
+`bundlecheck.py` — a leaf module (stdlib only, no `main` import, tests in
+`tests/test_bundlecheck.py`). It is **segment-size arithmetic**: no ffmpeg, no
+decode, a few hundred `stat` calls per bundle. Two detectors, both scored against
+the rendition's **own** p90 so nothing needs to know its bitrate:
+
+| detector | fires on |
+|---|---|
+| `dead` | a run of segments under `DEAD_FRACTION` (0.20) of the p90 |
+| `frozen` | a run of `IDENTICAL_RUN` (4+) **byte-identical** sizes under half the p90 |
+
+A run must last `MIN_RUN_SECS` (15 s), and the **last segment of every rendition
+is never judged** — it is a legitimately tiny tail.
+
+**The verdict is not a per-rung decision.** A dead video rung alone means nothing:
+a credits roll encodes to almost nothing, and a held production card is
+byte-identical to a frozen frame. What makes the real failure unmistakable is
+that it kills both sides at once — an MP4 interleaves audio with video, so one
+hole takes both. So:
+
+* **primary** — the *overlap* of dead video and dead audio ≥ `MIN_TOTAL_SECS` (20 s).
+  No credits roll (audio playing) and no quiet passage (picture moving) can
+  produce it.
+* **secondary** — `frozen` spans alone ≥ `FROZEN_ALONE_SECS` (60 s). This is what
+  covers a bundle with no audio rendition at all, and it is deliberately strict.
+
+Every threshold is set so a **false positive** — which costs a pointless
+re-encode of a whole episode — is much more expensive than a miss, which the
+sweep picks up on its next pass anyway. Validated against the live box: it flags
+Hacks S03E03 (49 % dead, worst window 1:23–7:38) and S03E04 (16 %), and calls
+their five healthy siblings clean.
+
+### Where it runs
+
+1. **Prep time** — `_run_offline_job` scans `tmp_dir` **before the atomic swap**,
+   so a wreck is never published. A first rejection re-queues the job (the
+   completeness gate then parks it until qBit says the file is whole); a second
+   one from a file qBit calls finished means the holes are in the file itself, so
+   the job errors, records `files[].bundle_check.unbuildable`, and
+   `_enqueue_library_prep` stops picking it up. `BUNDLE_DAMAGE_RETRIES` is the
+   limit. The marker is pinned to the cache key **and** the file signature, so a
+   re-download, a repair or a recompress retires it and prep resumes by itself.
+2. **Idle sweep** — `_run_bundle_audit`, a third pass in
+   `background_maintenance_loop` alongside fingerprinting and source validation
+   (`settings.auto_maintenance.bundles`, default on). It runs *first* because it
+   is stats rather than decode, and because a bundle nobody can watch is more
+   urgent than a skip marker nobody has missed. Repair is **purge + re-queue
+   ordinary bulk prep** — it never holds the encode slot itself. Verdicts persist
+   as `files[].bundle_check`, so it resumes across restarts and never re-scans a
+   settled bundle.
+3. **On demand** — `POST /api/admin/bundle-audit` (Admin → Content → Automatic
+   Maintenance → **Scan Now**) re-checks everything, verdict or not.
+
+While a damaged bundle is purged and waiting to re-prep, playback falls back to
+**on-demand JIT**, which reads the source directly and is unaffected — better
+than sitting through the frozen copy.
+
+### `files[].bundle_check`
+
+```jsonc
+{
+  "damaged": true,
+  "dead_secs": 932.0,
+  "total_secs": 1895.7,
+  "detail": "15:32 of 31:35 dead (49%) — picture frozen over silence; worst video 1:23-7:38",
+  "spans": [{"rendition": "video", "start": 83.4, "end": 458.8, "reason": "frozen"}],
+  "key": "2d875416183a7db114b2635b",   // the bundle judged — a rebuild retires the verdict
+  "sig": "1789088941:887958693",       // mtime:size of the source — ditto
+  "at": "2026-09-19T19:40:00+00:00",
+  "unbuildable": true                  // only after BUNDLE_DAMAGE_RETRIES failures
+}
+```
+
+---
+
+## On-device as the TV surface
+
+Since **13.0.0** a library play on the host's TV kiosk opens in the kiosk's **own**
+`<video>` — the same `#localPlayer` a phone uses, in the same `?tv=1` document that
+was already on screen. VLC is the fallback. This exists because the dashboard's
+full-screen controls were unreachable from the couch (issue #8); playing in the page
+inherits the whole control surface instead of re-plumbing it key by key.
+
+### Why this is safe for any library
+
+The browser path **never direct-plays** — every byte goes through ffmpeg to
+H.264/AAC HLS (see § ffmpeg invocation). Container and codec are therefore not a
+variable: MKV, HEVC, AV1, 10-bit, DTS, TrueHD all arrive at Chrome as the same
+normalised stream. Measured on the reference host (NVENC), cold JIT on a 1080p
+HEVC 10-bit MKV with no bundle: **4.5 s to first picture, 2.4× realtime sustained**.
+A CPU-only host is a much weaker story — `OD_CPU_MAX_HEIGHT` caps libx264 JIT at
+720p precisely so it keeps up.
+
+### Accepted regressions vs VLC
+
+Surface these when deciding whether a given household wants the default:
+
+| | On-device | VLC |
+|---|---|---|
+| Audio | **AAC 160k stereo, always** (`-ac 2`) | native 5.1/7.1 bitstream |
+| HDR10 | **flattened** — prep is `scale` → `yuv420p`, no tone mapping | handed to the display |
+| Seek precision | **±6 s** (snaps to the fmp4 segment boundary) | frame-accurate |
+| Image subs (PGS/VOBSUB) | dropped (now *stated* in the menu) | rendered natively |
+| Quality menu (ABR) | yes | n/a |
+| Per-file A/V sync slider | yes | n/a |
+
+The reference household runs stereo TV speakers, which is why "device" is the
+default. A 5.1 setup should turn on **User Settings → Always Use VLC on the TV**.
+
+### State model
+
+`state.tv_local_*` is the **third playback surface**, alongside VLC and
+YouTube-on-TV (see [REMOTE.md](REMOTE.md) § The three playback surfaces).
+
+- `tv_local_active` — the kiosk's `<video>` is the active TV playback.
+- `tv_local_playback` / `tv_local_item_id` / `tv_local_file_path` / `tv_local_seen_at`.
+- `active_title` / `vlc_time` / `vlc_duration` are **reused for display**, exactly as
+  the YouTube path reuses them, so every dashboard's full-screen controls render
+  against the same fields whichever surface is playing.
+
+**`tv_ui_active` stays TRUE the whole time.** It is a separate axis, not a
+replacement — it is the only thing making `vlc_focus_and_fullscreen` and
+`background_video_loop` stand down, so clearing it would let VLC or the idle video
+steal the display mid-film. `tv_ui_loop` also skips its idle hand-back while
+`tv_local_active`, because a film produces no HID input.
+
+### Lifecycle
+
+```
+POST /api/tv-local/state {active:true, …}   ← page, every 2 s: claim + mirror position
+POST /api/tv-local/state {active:false}     ← page, on stop/ended: release
+tv_command {playpause|seek|player_volume_step|stop}  → page (remote relay)
+tv_command {open, item_id, file_path, seek}          → page (VLC → device switch)
+```
+
+Released by: the page's own `active:false`; `/api/stop`; `vlc("in_play")` (VLC taking
+the screen also tells the page to close its player); and `tv_ui_loop` reaping a
+heartbeat older than `TV_LOCAL_STALE_SECS` (15 s — a crashed or reloaded kiosk).
+
+### Fallback to VLC
+
+`tvFallbackToVlc(reason)` in `static/index.html`, **one shot per file** (the guard
+clears in `_lpLoadIndex`, so a new episode gets a fresh budget). Without the guard a
+VLC-side failure would bounce playback straight back. Triggers:
+
+1. `/offline-prepare` fails (or the host can't prep at all)
+2. `/stream-ondemand` fails
+3. a terminal hls.js fatal — after `recoverMediaError()` was tried or didn't apply
+4. a **second** consecutive `_lpStallWatch` kick on the same file (`_lpStallKicks`);
+   one kick is a normal recovered dead request, and counting avoids tripping on a
+   single cold on-demand seek
+
+It captures the position (preferring `lp.lastKnownT` when `currentTime` reads ~0 — a
+dying pipeline reports 0 and VLC would restart the episode), releases the surface,
+then POSTs an ordinary `/api/library/{id}/play` with `seek_first_to`.
+
+### The dashboard's full-screen controls
+
+They drive this surface too, and the routing is **server-side**: every `/api/vlc/*`
+control endpoint relays to the kiosk player over `tv_command` when `tv_local_active`.
+Branching there rather than per-button in the UI is deliberate — it is the one place
+every client already goes, so the phone, the iOS app and the physical remote all get
+on-device control with no changes and no room to drift (issue #8: *"route each selection
+through the same backend paths the dashboard already uses"*).
+
+Data flows back the same way. The heartbeat carries the player's **track list** (in
+`/api/vlc/tracks`' exact response shape, so `loadTracks()` needs no branching), its
+**volume** (the element's own gain — the real amp on this surface, unlike YouTube where
+the OS mixer is), and its **playlist length + index** (which can be a cross-item
+merged-series run, so it overrides the VLC-derived nav pair in `state_snapshot`).
+
+The heartbeat also sets `library_item_id` / `library_current_file` / `library_profile_id`.
+Those aren't cosmetic: the episode-nav row, Clip and Exit Shuffle gate on
+`is_library_playback`, Save gates on its absence, `stop()`'s progress finalise plus the
+delete-while-playing guard both key off `library_item_id`, and the finalise *also* needs
+the profile (see **Who a play belongs to** below).
+
+It carries two more things the page is the only source of, because they exist only in the
+page: its live **Smart Skip offer** and whether its run is **shuffled**. See
+[Smart Skip on this surface](#smart-skip-on-this-surface).
+
+One thing behaves differently by necessity:
+
+- **Volume clamps at 100.** A media element has no gain above 1.0; VLC's scale runs to
+  200 (it amplifies). The effective ceiling is `min(settings.max_volume, 100)` — the
+  admin cap is applied first and still holds, exactly as it does for VLC.
+
+Two more are implemented differently but reach the same place:
+
+- **Starting volume.** `settings.vlc_start_volume` (a % of the admin cap) is applied to
+  VLC once at host startup; a media element just comes up at 1.0, so before 14.3.0 the
+  kiosk played every film at full gain regardless of the setting. `_tvApplyStartVolume()`
+  applies it at the start of each TV playback *session* — `lpPlay` only, never a
+  within-run episode advance, which would undo a mid-film adjustment. Cap first, then
+  clamped to 100, matching the rule above.
+- **Night Mode.** A VLC audio filter can't reach a `<video>`, so the page builds the
+  equivalent in Web Audio: `<video>` → `MediaElementAudioSource` → pre `Gain` →
+  `DynamicsCompressor` → makeup `Gain` → volume `Gain` → out, with a bypass path for off
+  (`_lpNightSync` in
+  `static/index.html`). The compressor settings are **derived from** `NIGHT_MODE_PRESETS`
+  server-side by `_night_mode_webaudio` and served on `GET /api/settings/night-mode` as
+  `webaudio`, so Medium sounds like Medium on both surfaces and there is exactly one set
+  of numbers. On/off and the preset ride the normal `state` broadcast, so the fullscreen
+  moon button drives whichever surface is playing. `_apply_night_mode` still refuses to
+  relaunch VLC while the kiosk player owns the TV — it now broadcasts `state` on that
+  path so the page picks the change up immediately.
+
+  Two constraints shape the implementation. `createMediaElementSource()` captures an
+  element's audio **permanently** and a silent graph is a silent film, so the graph is
+  built lazily — only once night mode is actually switched on, and only once its
+  `AudioContext` is confirmed `running` (a context that won't resume leaves the element
+  untouched instead of muting it) — and "off" is a bypass, never a teardown. Skipped
+  inside the iOS app, where playback can hand off to a native `AVPlayer` that a Web Audio
+  graph on the WKWebView element has no part in. It applies to **any** on-device
+  playback, phones included, not only the kiosk.
+
+  Two corrections keep it at VLC's loudness and under the volume control (15.2.1, see
+  GOTCHAS § "A browser compressor sits *after* the element's volume"): the pre/volume
+  gains move the element's volume from in front of the compressor to behind it
+  (`_lpNightVolSync`, on `volumechange`), and the node's own built-in makeup gain is
+  measured offline per preset (`_lpNightAutoMakeup`) and divided out of the makeup gain.
+
+### Who a play belongs to
+
+The kiosk is permanently signed in as one household profile, but a play pushed from a
+phone belongs to whoever pressed **On the TV** there. `POST /api/library/{id}/play` puts
+that `profile_id` in the `open` command; until 14.3.0 `_tvLocalOpen` dropped it, so every
+pushed play wrote its progress onto the kiosk's profile — **the viewer's own resume
+position never moved, and their next Play restarted the episode from the top.**
+
+`lp.profileId` holds the override (empty ⇒ the signed-in profile owns the session) and
+`_lpProfileId()` is what every profile-scoped call in the player reads — progress
+(`saveProgress` takes it as a 5th argument), `/local-tracks`, `/saved-tracks`, the
+`/files` playlist expansion, `_lpAutoSkipPrefs`, and the `force_vlc` fallback. The
+heartbeat reports it so the server pins `state.library_profile_id` via
+`_set_playback_owner`; `stop()`'s final flush and the "who's watching" chip follow from
+that. Both `open` paths (`_tv_local_start_play` and `POST /api/tv-local/open`) go through
+`_set_playback_owner` too — pinning the id alone left the chip's name/colour blank. It is cleared by `lpStop`, so a play started *on* this browser is always the
+signed-in profile's.
+
+The same `open` command carries the **server-resolved playlist** (`files`, `items`,
+`shuffle`, `shuffle_scope`) — also discarded before 14.3.0, which turned a
+selected-episode queue, a merged-series run or a shuffled run pushed from a phone into a
+plain natural-order tail. `POST /api/tv-local/open` (the VLC → device switch) carries only
+the one file and still falls back to expanding it.
+
+### Smart Skip on this surface
+
+`vlc_progress_tracker` finds intro/credits windows by polling VLC, and there is no VLC to
+poll here — so `state.skip_offer` stayed null and the dashboard's Skip tile never appeared
+while the TV played on-device. Walking over to the remote was the only way to skip.
+
+The page owns the playhead, so the page is the source of truth:
+
+- `lpEvaluateSkipOffer` runs as before against its own `<video>`, drawing `#lpSkipOffer`.
+- `_tvSkipOffer()` packages the live offer in `state.skip_offer`'s existing shape — plus
+  `label`, the tile's literal text, so an auto-skip countdown ("Next Episode in 4") reads
+  identically on the phone. Sent on **every** beat, `null` included, so a cleared offer
+  clears server-side rather than sticking.
+- `POST /api/skip-now` relays `skip_accept` and `DELETE` relays `skip_dismiss` to the page
+  (which marks the file done in `lp.skipDoneFor`, so the next beat can't re-show it).
+- `renderSkipOffer` prefers `offer.label`, and no-ops entirely in `TV_MODE` — the kiosk
+  already draws its own in-player tile and would otherwise stack a second one over the film.
+
+**`vlc_progress_tracker` stands down entirely while `tv_local_active`.** Besides having
+nothing useful to compute, its `vlc_playlist_uri()` read would stomp `library_current_file`
+with whatever VLC happened to still be holding.
+
+Shuffle rides along for the same reason: the shuffled order is the page's own
+`lp.playlist`, so `library_shuffle_order` is empty and the fullscreen **Exit Shuffle**
+tile had no way to know. The heartbeat reports `shuffle`, `state_snapshot`'s
+`library_shuffle` ORs it in, and `POST /api/library/unshuffle` relays `unshuffle` to the
+page (`lpExitShuffle` rebuilds the natural-order tail itself). **15.6.0** adds the mirror:
+`POST /api/library/shuffle` relays `shuffle`, and `lpEnterShuffle` reshuffles the tail behind
+the untouched playing file. Both source their episode list from `_lpShowFiles()`, which widens
+to `/api/library/series/{key}` — using the `series_key` now returned by `/files` — when the
+queue spans items, because a show held as per-episode torrents has one file per item.
+
+### How a play reaches this surface
+
+**`POST /api/library/{id}/play` is "play on the TV", not "play on VLC".** It picks the
+surface from `settings.tv_playback_mode` — after the playlist and seek are resolved, so
+both surfaces play the same run from the same position, and before any VLC state is
+touched.
+
+That endpoint is the one that matters, because it is what a phone's **On the TV** button
+posts. Until 13.2.0 it hardcoded VLC, so the setting only applied when somebody pressed
+Play on the kiosk itself — which nobody does, and the whole feature looked broken from a
+phone. Deciding it server-side is also what carries it to the iOS app.
+
+Safety rails, all three load-bearing:
+
+- A kiosk that won't come up (`_tv_ui_show` leaves `tv_ui_active` false), or never
+  acknowledges the open within `TV_LOCAL_OPEN_WAIT_SECS`, **falls the whole play back to
+  VLC**. "On the TV" must never mean "nothing happened".
+- **`force_vlc:true` opts out**, and every switch-to-VLC path must send it — the
+  More-panel toggle and `tvFallbackToVlc`. Without it the server routes them straight back
+  to the surface they are trying to leave. See [GOTCHAS.md](GOTCHAS.md).
+- The `open` command carries the **server-resolved playlist** (`files`, `items`,
+  `shuffle`, `shuffle_scope`) and the requesting **`profile_id`**, so episode nav,
+  auto-advance and progress attribution match VLC rather than the page re-deriving a tail
+  from a single path and crediting its own signed-in profile. `_tvLocalOpen` ignored all
+  five fields until 14.3.0 — see [Who a play belongs to](#who-a-play-belongs-to).
+
+### Switching on purpose
+
+- **User Settings → Always Use VLC on the TV** → `settings.tv_playback_mode`
+  (`"device"` | `"vlc"`, default `"device"`). Global, not per-profile — the TV is one
+  physical screen. Only affects where the *next* play opens.
+- **Full-screen controls → More → Play on Device / Play on VLC** (`fcSwitchTvSurface`)
+  moves what the TV is playing *right now*, keeping position. Hidden in TV mode with
+  the rest of `#fullscreenControls` — this tile is how a **phone** moves the TV
+  between surfaces. Device → VLC is an ordinary `/api/library/{id}/play`; VLC →
+  device is `POST /api/tv-local/open`.
+
+Distinct from `handoffToDevice` / `lpHandoffToVlc`, which move playback between the TV
+and *this browser*. Both of these stay on the host.
+
+---
+
 ## ffmpeg invocation
 
 `_build_hls_ffmpeg_args` in `main.py` constructs the command. The shape:
@@ -133,9 +528,12 @@ orphans, listed in Admin → Offline Cache for one-click purge).
 # Source video is mapped ONCE PER LADDER RUNG (here: original + 720p + 480p).
 ffmpeg -y -progress pipe:1 -nostats \
   # `-hwaccel cuda` is inserted here (before -i) ONLY on the NVENC path when
-  # something actually decodes — routes decode through NVDEC so the CPU isn't
-  # the bottleneck. Transparent form (no -hwaccel_output_format): frames
-  # auto-download for the CPU scale and unsupported codecs fall back to SW.
+  # something actually decodes AND the NVDEC probe (`_gpu_can_hwdecode`, the
+  # `hw_decode` flag) confirms this GPU can decode the source codec — routes
+  # decode through NVDEC so the CPU isn't the bottleneck. It does NOT reliably
+  # fall back for codecs whose hwaccel init hard-fails (AV1 on a Pascal card),
+  # so an un-decodable source CPU-decodes here; NVENC still encodes. See
+  # docs/GOTCHAS.md "`-hwaccel cuda` does NOT gracefully fall back".
   -thread_queue_size 1024 -rtbufsize 64M -i /abs/path/src.mkv \
   -map 0:v:0 -map 0:v:0 -map 0:v:0 -map 0:a:0 -map 0:a:1 \
   # v:0 = original (copy when browser-safe H.264, even with NVENC present):
@@ -161,6 +559,15 @@ ffmpeg -y -progress pipe:1 -nostats \
   -map 0:s:0 -c:s webvtt -f webvtt "sub_0.vtt" \
   -map 0:s:1 -c:s webvtt -f webvtt "sub_1.vtt"
 ```
+
+**`-level:v:N` is computed, not fixed.** `_h264_level_for(width, height, fps)`
+picks the lowest H.264 level whose MaxFS *and* MaxMBPS cover that rung, floored
+at the legacy height-based value so it can only ever go **up**. It matters
+because levels cap macroblocks per second, not per frame: 1080p50 needs 4.2, and
+handing NVENC 4.1 makes it refuse with `Invalid Level` and fail the whole job
+(which prep then retried forever). If the encoder rejects the level anyway, the
+job retries once with no `-level` at all. See [GOTCHAS.md](GOTCHAS.md).
+
 
 Note the two output groups: the HLS bundle (video variants + audio) comes
 first, then one extra WebVTT output file per text subtitle. Both are produced in
@@ -240,13 +647,132 @@ Key decisions:
   re-encoded at 160 kbps. Multi-channel preservation is not implemented;
   for 5.1 playback on TV, use VLC's path which reads the source MKV
   directly.
+- **On-demand carries exactly ONE audio track**, so there is nothing to select at
+  playback time — the track the JIT encoder muxed (`-map 0:a:<idx>`) is the only
+  audio in the stream. The server therefore resolves the viewer's remembered
+  preference itself (`_resolve_saved_audio_idx`, mirroring the client's
+  `_lpResolveAudioSel` / `_lpResolveAudioPref` — keep the three in step), reports
+  it back as `default_audio_idx`, and the client takes its dropdown selection
+  from that rather than from its own resolution. Before 13.2.1 the server used
+  only the legacy per-file index, so a **first** play muxed the source default
+  while the menu showed the remembered language: the UI named a track that was
+  not in the stream. Switching is a session restart, and the pick rides on the
+  `stream-ondemand` request — relying on the fire-and-forget `_lpSaveLocalTracks`
+  landing first lost the race and re-muxed the previous track. Bundle mode keeps
+  every rendition, so the client's richer resolution wins there.
+  See [GOTCHAS.md](GOTCHAS.md).
+- **Audio is timestamp-locked to the video clock** (`+genpts` on the input,
+  `aresample=async=1` on each audio output). The original video rung is
+  stream-*copied* while audio is *re-encoded*, and the two are **separate HLS
+  renditions sharing one timeline** — so a source with a per-stream `start_time`
+  skew, broken/missing PTS, or audio gaps would desync the re-encoded audio from
+  the copied video (intermittent, source-dependent). `-fflags +genpts` gives
+  every stream a clean monotonic clock; the per-output `-filter:a:{i}
+  aresample=async=1:min_hard_comp=0.100000` stretches/squeezes the audio and pads
+  gaps with silence so it tracks the video. This handles the **drift / gap** class.
+- **Every audio rendition is pinned to the video's first PTS** (`:first_pts=<v_start
+  × that track's sample_rate>` on the same `aresample`, on **both** the copy and
+  re-encode paths since 11.12.0). A source's per-track audio delay — *Promised
+  Neverland S02* carries +0.5s on the English dub alone — is otherwise reproduced as
+  a **cross-rendition `baseMediaDecodeTime` gap** that Safari / iOS AVPlayer /
+  hls.js **drop**, anchoring each rendition to playback start so that track plays
+  ~0.5s early (VLC and single-program JIT honor the gap, which is why the symptom is
+  bundle-only). The pin pads the rendition's start with real silence up to the
+  video's own start, so there is no gap to drop and the dialog still lands at its
+  true time. The anchor is the **video's** first PTS, never a hardcoded 0: a
+  stream-copied rung keeps its own arbitrary start, so 0 would *introduce* an offset
+  there — which is why the copy path was previously left unpinned (issue #13) at the
+  cost of needing a full re-encode to fix. `HLS_AUDIO_PAD_MAX_SECS = 1.0` bounds it:
+  past that the pin would trim real audio instead of padding silence, so prep leaves
+  the copy path unpinned. Recorded in `meta.json` as
+  `audio_padded_to_video_start` / `audio_pad_pts_sec`. This handles the **constant
+  offset** class for everything except an edit list.
+- **Constant-offset guard: re-encode the original rung when the source has a video
+  edit list.** `aresample` fixes drift but **not** a fixed offset. The dominant
+  real-world cause of a fixed offset is a video **edit list** in the source (common
+  in `-ss` stream-copies, web-DL, and many MP4 muxers — and the container still
+  reports `start_time=0`, so it's invisible to a start-time check): stream-copying
+  the video mishandles the edit list while the re-encoded audio is normalized to
+  zero, so audio ends up a steady amount early/late (VLC plays the source fine —
+  this is purely a prep artifact). `_source_has_editlist(src)` detects it by
+  comparing the first video pts with the edit list applied vs. `-ignore_editlist 1`;
+  when they differ by more than `EDITLIST_REENCODE_SECS` (0.05s), `_run_offline_job`
+  sets `copy_original = False` (via `_build_hls_ffmpeg_args(force_reencode_original=…)`)
+  so the original rung is **re-encoded** — applying the edit list to the frames and
+  keeping A/V aligned. Costs a full encode of the original rung for those files only
+  (probed only when we'd otherwise copy); clean sources still stream-copy. The
+  repair tool below forces this on every bundle it rebuilds.
 - **Text subs become standalone WebVTT sidecars** (`sub_<i>.vtt`), *not*
   in-manifest renditions — ffmpeg's HLS muxer can't package more than one
-  WebVTT track. subrip / ass / ssa are transparently converted; ASS styling
-  (karaoke, positioning, custom fonts) is **lost** — see
-  [GOTCHAS.md](GOTCHAS.md) for the libass.js deferral. Image-based subs
+  WebVTT track. subrip / ass / ssa are transparently converted. Image-based subs
   (`hdmv_pgs_subtitle`, `dvd_subtitle`, `dvb_subtitle`, `vobsub`) are filtered
   out by `_ffprobe_full` and noted in `meta.json:skipped_image_subs`.
+  > **Styled ASS/SSA subs also get a raw sidecar + fonts (libass path).** For a
+  > sub whose codec is `ass`/`ssa` (`meta.subtitles[i].styled`), `_run_offline_job`
+  > additionally emits the **raw** `sub_<i>.ass` (stream-copied, styling intact,
+  > referenced by `meta.subtitles[i].ass_file`) and extracts the source's embedded
+  > fonts as flat `font_<n>.<ext>` files listed in `meta.json:fonts`
+  > (`_extract_bundle_fonts`, a separate best-effort ffmpeg `-dump_attachment`
+  > pass). In **bundle mode** the on-device player renders that raw ASS with
+  > **libass-wasm (SubtitlesOctopus)** on a canvas overlay (`_lpApplyStyledSub`,
+  > vendored `static/vendor/subtitles-octopus*` + `libass-fallback-font.ttf`), so
+  > karaoke/positioning/fonts survive. **On-demand/JIT now renders styled subs the
+  > same way (8.10.0)** — it extracts `sub_<i>.ass` + fonts into its session dir; see
+  > the On-Demand § "Tracks" note below. The flattened `sub_<i>.vtt` is kept as the
+  > **universal fallback** — used for old bundles (no `ass_file`), the iOS
+  > device-copy path (no bundle dir), and any libass failure. Re-prep an existing item to
+  > gain styling (`OFFLINE_CACHE_VERSION` isn't bumped). The **iOS app** renders
+  > styled subs on both surfaces: the online in-app dashboard reuses this same
+  > path, and the **offline downloads player** (`ios-app/www/downloads.html`) has a
+  > parallel implementation with the octopus assets vendored into `ios-app/www/`
+  > (the `.ass`/`font_*` files download with the bundle and are served by the
+  > native `LocalMediaServer`). Reliability plumbing (7.16.5, both players): the
+  > overlay apply is guarded by an attempt *token* (`_lpOctopusSeq`) so
+  > concurrent applies for the same sub can't each construct-and-leak an
+  > instance; a resize "nudge" on the video's `resize`/`loadeddata`/`playing`
+  > events un-sticks an overlay constructed before `videoWidth` was known; and a
+  > `TextTrackList` `change` enforcer keeps every VTT `<track>` disabled while
+  > the overlay is up. **Cue-clearing clock pump (9.10.3):** libass only *erases*
+  > a finished cue when its worker re-renders past the cue's end, and the worker
+  > re-renders continuously only while it thinks the video is *playing*. Because
+  > the overlay is built after the ~3 MB wasm loads (often after `playing`
+  > already fired) and the worker also self-pauses on its own "no currentTime for
+  > > 5 s" watchdog whenever `timeupdate` gaps (iOS/HLS ManagedMediaSource does
+  > this routinely), a finished styled cue could stay painted until the *next*
+  > cue — up to a minute over a quiet stretch. `_lpOctopusPumpStart` runs a
+  > 250 ms interval while the overlay is up that re-asserts the real play/paused
+  > state and feeds `currentTime`, so the 5 s watchdog never trips and cues erase
+  > on time (stopped by `_lpTeardownOctopus`). **Stationary-cue renderer (9.11.1):**
+  > the pump wasn't enough for *stationary* cues — libass only erases a cue when
+  > its worker *posts* a "now empty" frame, and the default `wasm-blend` renderer
+  > (`renderBlend()`) doesn't reliably flag that empty transition as changed, so a
+  > stationary cue's single end-of-cue post never fired and it lingered until the
+  > next cue (moving cues post every frame, so they were fine). The overlay is now
+  > built with `renderMode:"js-blend"` (stock libass `renderImage()` + libass's own
+  > `detect_change`), which clears stationary cues on time. **Synchronous draw —
+  > the real fix (9.11.2):** on-device it turned out the worker was fine (rendering
+  > continuously) but the canvas wasn't being *repainted* — opening devtools
+  > cleared a stuck cue. The vendored `subtitles-octopus.js` drew each frame from a
+  > `window.requestAnimationFrame` callback, and a playing `<video>` starves the
+  > page's rAF, so a stationary cue's lone end-of-cue draw sat un-serviced. We
+  > **patched the lib** (`renderCanvas`/`renderFastCanvas` → draw synchronously in
+  > the worker-message handler; grep `StreamLink patch`) — re-apply after any
+  > SubtitlesOctopus upgrade. **Loopback bundles (7.17.1, both players):** when the
+  > ass/fonts live on the loopback `LocalMediaServer` (a downloaded copy), the
+  > page prefetches them on the main thread and passes octopus `subContent` +
+  > `blob:` font URLs — the worker's own sync-XHR fetch of a loopback URL is a
+  > cross-origin worker request WKWebView doesn't reliably allow (its failure =
+  > silent VTT fallback). Host-bundle playback keeps plain URLs.
+  > See [GOTCHAS.md](GOTCHAS.md).
+  > **Each generated `sub_<i>.vtt` is run through `_clean_webvtt()`** before the
+  > bundle finalizes. ffmpeg's ASS→WebVTT conversion of heavily-typeset fansub
+  > tracks emits each overlapping Dialogue *layer* as a separate **identical**
+  > cue (lines render doubled on screen), dumps `\p` vector **drawings** as raw
+  > coordinate-blob cues, and leaks ASS escapes like `\h`. The sanitiser drops
+  > drawing-blob cues, de-duplicates same-timing-same-text cues, and fixes the
+  > escapes; it's **idempotent**, so the same heal is applied in-place when
+  > serving `.vtt` from an older bundle (`offline_cache_bundle_file`) and inside
+  > `_sub_to_vtt` for on-demand sidecar conversion. See [GOTCHAS.md](GOTCHAS.md).
 - **No usable text sub ⇒ AI generation.** After a successful HLS encode,
   `_run_offline_job` calls `_ensure_stt_for`: if the source has no usable text
   subtitle (none, image-only, or — per the admin default-language setting — none
@@ -317,6 +843,161 @@ Changing the default is **forward-only** and intentionally does **not** bump
 and rewrites `meta.json videos[]`. Bundles with an active prep job are skipped; a
 `dry_run` sums the bytes that *would* be freed for the UI estimate. See
 [ADMIN.md § Storage & Compression](ADMIN.md).
+
+## Repairing audio-misaligned bundles
+
+Bundles built **before** the audio-sync fix (`+genpts` + `aresample=async=1`, see
+the audio bullet under *Key decisions* above) can have audio drifted out of sync
+with video. The admin **Detect & Repair Audio Sync** tool (`_hls_resync_bundles` →
+`_bundle_audio_sync_delta`, `POST /api/admin/hls-resync`) finds and repairs them:
+
+- **Detection — two complementary checks, flag on EITHER:**
+  - **Drift** (`_bundle_audio_sync_delta`) sums each bundle's `#EXTINF` durations
+    for the **video** rendition vs every **audio** rendition — a plain playlist
+    parse, no decode — and flags when the worst `|audio − video|` divergence exceeds
+    `max(HLS_SYNC_FLAG_SECS=1.0s, 1% of duration)`.
+  - **Constant offset** (`_bundle_introduced_av_offset`) ffprobes the bundle's
+    audio-vs-video first-pts **gap** `apts − vpts` (`_probe_rendition_first_pts`
+    reads each rendition playlist + its fmp4 EXT-X-MAP init) for **every audio
+    rendition** — not just the nominal default — and flags the worst one, returning
+    `(gap, "audio_2/eng")` so the log names it. Probing one rendition missed a
+    per-track dub delay entirely, and since `meta:audios[].default` is copied
+    verbatim from the source disposition (often *every* track is `default:true`) the
+    old `next(x for x in audios if x.get("default"))` could only ever pick
+    `audios[0]` — issue #13. `stop_at` returns the first rendition over threshold, so
+    a bad bundle costs fewer probes; a clean one probes them all. Thresholds:
+    `AV_OFFSET_FLAG_SECS=0.12s`, or the looser `AV_OFFSET_PAD_FLAG_SECS=0.35s` when
+    meta `video_reencoded` is set (pre-11.12 bundles: `audio_padded_to_zero`, which
+    meant the same thing) — a re-encoded original rung carries a frame-reorder
+    residual (~0.125s on B-frame sources) that re-prep can't remove, while a
+    stream-copied one doesn't (measured ≈0.02s) and keeps the tight bound. This
+    catches the
+    fixed early/late offset the duration check is structurally blind to (both
+    renditions are the same length, just shifted). **It flags the raw gap rather than
+    diffing against the source's intended offset:** `av_probe.py` showed the bundle
+    player (Safari / iOS AVPlayer / hls.js on separate fmp4 renditions) ignores a
+    cross-rendition `baseMediaDecodeTime` gap and anchors each rendition to playback
+    start — so a *faithfully reproduced* source delay (e.g. EMBER BDRips' +1.0s audio)
+    is itself the desync, even though single-program on-demand + VLC honor it. The
+    fix is to collapse the gap, not preserve it. No source needed for detection (only
+    for repair).
+- **Repair** (non-`dry_run`) purges each flagged bundle (`_delete_cache_artifacts`
+  + `_invalidate_bundle_index`) and re-queues a prep — **cheap first**:
+  - **Offset-only, on a bundle that was never pinned** ⇒ a plain
+    `_maybe_start_prep_job(src, item_id)`. Since 11.12.0 the re-prep pins the audio
+    to the video's start on the **copy** path too, so a 6 GB remux is repaired at
+    remux speed instead of paying for a full 1080p re-encode of every episode.
+  - **Drift, or an offset that survived a pin** (`audio_padded_to_video_start` /
+    legacy `audio_padded_to_zero` already set) ⇒ escalate to
+    `force_reencode_video=True`, which re-encodes the original rung so both streams
+    route through one timestamp normalization.
+
+  That escalation makes repair self-limiting at two passes: the cheap re-prep writes
+  `audio_padded_to_video_start`, so anything still flagged next scan gets the hammer.
+  Edit-list sources are covered either way — `_run_offline_job` forces the re-encode
+  itself via `_source_has_editlist`. The log line records which mode ran
+  (`… (offset=+0.48s on audio_2/eng, remux)`). Re-preps run at the usual bulk
+  concurrency / pause semantics (background, not blocking). Bundles with an active
+  prep job, or whose source is gone, are skipped.
+- `scope` restricts to one library item (by `meta.json src`); `dry_run` only counts
+  the flagged bundles for the UI estimate. See [ADMIN.md § Storage & Compression](ADMIN.md).
+
+## Manual audio offset (viewer-side)
+
+The repair tool above fixes a bundle. The **Sync** row in the on-device player's
+options panel (`#lpSyncRow`, gear button) fixes a *playback*, immediately, with no
+re-prep — the bandaid for the case the detector misses or hasn't been run on
+(issue #14; the motivating defect is issue #13, where 8 of 11 *Promised Neverland
+S02* bundles carry **+478 ms** on the English rendition only).
+
+> **Reset a stored offset to 0 after a bundle is repaired.** Since 11.12.0 prep
+> cures that defect at the source (the audio pin above) and the resync tool repairs
+> existing bundles, but a saved per-file offset is **not** cleared by either — it
+> would then double-correct, pushing the audio as far late as it used to be early.
+> The value lives in the library's per-file progress (`audio_offset_ms`, written by
+> `/api/library/.../local-tracks`) *and* in a `localStorage` mirror
+> (`streamlink_audio_offsets`), so clearing it server-side alone would not stick;
+> the reliable move is the row's **Reset** in the player that set it.
+
+- **Range 0–1000 ms, 25 ms steps**, value shown numerically, with a **Reset**.
+- **One-directional, by construction.** The mechanism is a WebAudio `DelayNode`
+  spliced between `#lpVideo` and the speakers (`_lpEnsureAudioGraph` →
+  `createMediaElementSource` → `createDelay` → `destination`). It can push audio
+  **later**; it cannot push audio earlier, because that would mean delaying video
+  and nothing can. That is the direction this failure mode always needs — a player
+  that drops the cross-rendition gap makes the delayed track land *early*. The UI
+  says so in words ("audio delay — raise if the dub plays early") rather than
+  offering a ± the lower half of which would be dead.
+- **Why not `timestampOffset` on the audio SourceBuffer** (the symmetric
+  alternative): it costs a buffer flush + re-append on every adjustment, it depends
+  on hls.js internals, it is unavailable on the Safari-native path (no MSE), and it
+  **silently no-ops in on-demand mode**, where the JIT stream is a single muxed
+  program in one SourceBuffer, so shifting the offset moves audio and video
+  together. The DelayNode works in bundle mode, on-demand mode, device-copy
+  playback and Safari-native alike. Revisit only if a negative offset is ever
+  actually needed in the field.
+- **Two mechanisms, picked per file by `_lpOffsetMode()`.** WebAudio cannot carry
+  this on WebKit: Safari accepts `createMediaElementSource()` on an MSE-backed
+  element and then never taps it — no error, no signal (measured 0.00 analyser RMS
+  against 0.43 for a plain element, Safari 26.5.2) — and every playback path here
+  is MSE-backed. So:
+  - `"webaudio"` — Chromium/Firefox. Instant, no re-buffer, works in **every** mode
+    including on-demand. Applies live while dragging.
+  - `"buffer"` — **macOS Safari only.** Biases the **audio** SourceBuffer's
+    `timestampOffset`, which adds to
+    every appended frame's presentation timestamp and so moves audio relative to
+    video. Verified on Safari 26.5.2 *and* Chrome: with a 0.475 bias the audio
+    buffer's `buffered.start(0)` moves to 0.475 while the video buffer stays at 0.
+    Only fresh appends carry a new bias, so a change **commits on release** and
+    re-loads at the current position (`_lpLoadIndex`, the same pattern
+    `lpSetAudio` uses for on-demand) — hence the row's caption changes to warn of
+    the brief re-buffer.
+  - `"none"` — **all of iOS**, and WebKit playing **on-demand**. The row is hidden
+    and no value is accepted.
+    - **iOS is excluded deliberately** (`_lpSbSupported` → `!_isIOSDevice()`).
+      The identical bias verifiably works on macOS Safari but has no audible
+      effect on iPhone/iPad, in mobile Safari *and* the app's WKWebView — iOS is
+      the one platform where hls.js runs over **ManagedMediaSource** rather than
+      classic MediaSource. Root cause was not chased further: this control is a
+      bandaid, and the prep-time fix in **issue #13** cures the underlying desync
+      on every platform at once with no viewer-side lever. Do not re-enable it
+      there without a measurement on a real device — a control that silently does
+      nothing is the exact mistake this shipped twice already.
+    - On-demand muxes one program into a single `video/mp4` SourceBuffer where a
+      shift would move audio and video together. `_lpAdoptAudioSb` only ever
+      adopts an `audio/…` buffer, so that case also excludes itself structurally.
+
+  The `addSourceBuffer` hook is installed **only once a non-zero offset is in
+  play**, so a viewer who never touches the slider gets a completely untouched
+  media pipeline. The shadow property stores what hls.js *intended* and writes
+  intent+bias through, keeping hls.js's own `p - sb.timestampOffset` delta maths
+  correct; in practice hls.js 1.5.17 only writes `timestampOffset` for
+  `audio/mpeg` containers and our bundles are fMP4, so it never fights us.
+- **The graph is built lazily**, on the first non-zero value only —
+  `createMediaElementSource` is irreversible and moves iOS playback onto the
+  WebAudio audio session. See [GOTCHAS.md](GOTCHAS.md).
+- **Persistence is per file and nothing else.** `lpSetAudioOffset(ms, persist)`
+  POSTs `audio_offset_ms` via `_lpSaveLocalTracks("offset")` →
+  `POST /api/library/{id}/local-tracks` → `file_progress[path].audio_offset_ms`,
+  and `/offline-prepare` hands it back in `saved_tracks`. Unlike `audio_sel` /
+  `subtitle_sel` it is deliberately **never** broadcast to the series: it describes
+  one encode's defect, not a viewer preference, and a season is not guaranteed to be
+  uniformly broken (3 of the 11 episodes above are clean). A value of 0 deletes the
+  key rather than storing a zero. It is also mirrored into `localStorage`
+  (`streamlink_audio_offsets`, keyed by `offKey(itemId, filePath)`, 200-entry cap)
+  so the **fully offline** iOS player can restore it with no host to ask — that
+  mirror is why this feature needs no Swift change and no app rebuild.
+- **Re-applied on every `_lpLoadIndex`, including as 0.** There is one
+  `<video id="lpVideo">` for the whole page, so the graph outlives the file; without
+  the unconditional re-apply an episode advance would inherit the previous
+  episode's delay.
+- **Applies to the TV kiosk too, since 13.0.0.** `?tv=1` used to force `no-hls`,
+  so the on-device player never opened there and the kiosk always played through
+  VLC (which honours the source's track delay correctly — exactly why the defect
+  is bundle-only). Now that the kiosk plays bundles itself, a desynced bundle is
+  audible on the TV as well. The Sync slider lives in `#fullscreenControls`, which
+  is hidden in TV mode, so from the couch the fix is the admin Detect & Repair
+  tool, or the More-panel switch to VLC from a phone.
 
 ## Source-file compression
 
@@ -394,6 +1075,23 @@ Two ways to populate the cache:
 > Net effect: holding **Prep for Device** boots the in-flight bulk encode and starts
 > your file within a tick; the booted bulk file resumes once interactive prep clears.
 
+> **Prep priority orders bulk work (three tiers, mid default).** Within the bulk /
+> auto-prep class, a per-item **prep priority** (`item.prep.priority_default` +
+> per-file `item.prep.priority`, `low`/`mid`/`high`) decides which files build first.
+> `_maybe_start_prep_job` stamps each bulk job's numeric tier as `_prep_prio` (from
+> `_effective_prep_priority`), and the precedence gate in `_run_offline_job` parks a
+> bulk job while `_higher_priority_bulk_pending(_prep_prio) > 0` — i.e. any *strictly*
+> higher-tier bulk job is `pending`/`processing` — in the **same** loop that already
+> defers to `_priority_hls_pending()`. So a "high" series/episode jumps the auto-prep
+> queue ahead of "mid"/"low" work. Two boundaries: (a) **interactive + admin prep
+> still outrank every bulk tier** (they're counted by `_priority_hls_pending`, not this
+> gate), and (b) a running **bulk** encode is **never preempted for a higher-tier bulk
+> job** — HLS can't checkpoint, so only *queued* order changes; the top tier never
+> parks (no starvation/deadlock), and equal tiers stay FIFO. `POST
+> /api/library/{id}/prep-priority` re-stamps any already-queued bulk jobs for the
+> affected files so a change takes effect immediately. See
+> [LIBRARY_DATA.md § prep](LIBRARY_DATA.md).
+
 > **Staying responsive while prepping.** Three layers keep controls/UI/VLC-control
 > snappy under heavy prep:
 > 1. **The server runs at raised OS priority.** `_raise_own_priority()` (called
@@ -423,13 +1121,15 @@ Two ways to populate the cache:
 
 ### 2. Play on this device
 
-1. User taps Play (or the "📱 On Device" button on a library card). The
-   flow goes through `playLibraryWithChooser`, which opens
+1. User taps the library card's Play/Resume (movies and shows alike as of
+   11.6.0 — there's no longer a separate "On Device" button; Play itself asks).
+   The flow goes through `playLibraryWithChooser` (movies via
+   `resumeLibraryItemWithChooser` → `_resumeNormal`), which opens
    `#playChooserModal` — **On TV (VLC)** vs **On This Device**.
 2. "On This Device" calls `lpPlay(itemId, files, seekTo, label)`. The
    player sets `lp.itemId/playlist/pi`, applies the `.lp-active` class to
    `#localPlayer`, and calls `_lpLoadIndex(seekTo)`. A **single-file** `files`
-   (per-episode Play / Resume / one-file On Device) is expanded to the item's
+   (per-episode Play / Resume / a one-file movie played to device) is expanded to the item's
    **full ordered file list** by fetching `/api/library/{id}/files`
    (season/episode-sorted) positioned at the chosen file, so Prev/Next span the
    whole series; multi-file queues (selected episodes / Play All / handoff tail)
@@ -471,7 +1171,10 @@ Two ways to populate the cache:
 >    override (`_lpInstallIosPreroll`, v5.42.0): it overrides the hls.js
 >    instance's `pauseBuffering` on true iOS devices so the MMS `endstreaming`
 >    stop is ignored until the forward buffer reaches `IOS_PREROLL_TARGET_SECS`
->    (`backBufferLength` is trimmed to 30 s on iOS to offset the memory). Outages
+>    (`backBufferLength` is trimmed to 30 s on iOS to offset the memory). The
+>    override **stands down for 3 min** whenever iOS evicts media near the
+>    playhead or an append hits the quota (`_lpNotePressure`, 19.13.1) —
+>    refusing the OS while it is short of memory makes the picture stutter. Outages
 >    beyond the banked buffer still fall through to the reconnect loop.
 >    See [GOTCHAS.md](GOTCHAS.md) § ManagedMediaSource.
 > 2. **Indefinite reconnect loop** (`_lpNetLost` / `_lpNetRetryNow` /
@@ -510,6 +1213,20 @@ Two ways to populate the cache:
 >    kicked. The global `online` event also kicks immediately via
 >    `_lpNetOnline → _lpKickIfStalled` when playback is starved (tunnel exit the
 >    OS *does* notice). Watchdog state resets in `_lpDestroyHls`.
+> 5. **iOS cold-start kick** (`_lpArmColdStartKick` / `_lpColdStartKickTick`,
+>    v8.11.1). A separate failure from the outage handling above, at the *very
+>    start*: on iOS the only MSE is ManagedMediaSource, and it occasionally never
+>    fires the first `startstreaming`, so hls.js's loaders never begin — `play()`
+>    resolves and the first frame decodes (the video *looks* ready) but the buffer
+>    stays empty and playback is wedged with **no error**. The manual cure is to
+>    skip ±10 s (a real seek makes MMS start fetching), so this automates it:
+>    armed after the cold-start `play()`, a 900 ms poll runs while `!lp.everPlayed`
+>    and, once a genuine sustained stall is confirmed (~1.8 s; not paused/scrubbing,
+>    `readyState < 3`, resume-seek applied), applies a tiny imperceptible forward
+>    `currentTime` nudge each tick until playback starts, giving up after ~6 s.
+>    iOS-only, disarmed on the first `playing` and in `_lpDestroyHls`. Piece 4's
+>    `_lpStallWatch` can't cover this — it arms only *after* the first `playing`.
+>    See [GOTCHAS.md](GOTCHAS.md) § ManagedMediaSource.
    - **Safari** (iOS + macOS): set `<video>.src = master_url` directly.
      Safari plays HLS natively, exposing `AudioTrackList` for audio
      switching. Wait for `loadedmetadata` → populate dropdowns. (Subtitles
@@ -517,14 +1234,47 @@ Two ways to populate the cache:
 5. Track switching:
    - **Quality** (ABR, hls.js only): `_lpRenderTrackRows` builds the **Res**
      dropdown from `lp.hls.levels` (sorted high→low) as `Auto` + each
-     resolution; `lpSetQuality(idx)` sets `lp.hls.currentLevel` (`-1` = Auto/ABR,
+     resolution; `lpSetQuality(val)` sets `lp.hls.currentLevel` (`-1` = Auto/ABR,
      a level index pins that rung — a brief rebuffer on switch is expected).
      Quality is **session-only** — not persisted via `/local-tracks`, since the
      right rung is connection-dependent and Auto is the sensible default. Safari
      native HLS auto-adapts among the variants but exposes no reliable manual
      level API, so its Res row stays hidden (auto-only).
+     **Auto's start rung is seeded, not discovered (10.10.2):** hls.js's
+     duration-weighted EWMA never climbs off its 500 kbps default on a fast LAN
+     (millisecond segment loads carry ~no weight), so Auto used to sit on the
+     lowest rung forever. The Hls config now sets `abrEwmaDefaultEstimate` from
+     `_lpBwSeed()` — the last self-measured throughput (median of ≥300 KB
+     fragment samples via `_lpBwNoteFrag`, persisted to `localStorage` in
+     `_lpBwPersist`; bundle-mode server streaming only — on-demand and
+     device-copy samples would poison it), defaulting to 20 Mb/s. See
+     [GOTCHAS.md](GOTCHAS.md) § "hls.js Auto quality sticks to the lowest rung".
+     **iOS app, device-copy playback**: the downloaded master is trimmed to ONE
+     rung, so `hls.levels` can't drive the menu. It's built from the bundle's
+     own `meta.json` ladder instead: `"<label> — On device"` (value `dev`,
+     selected) + every other rung as `"<label> — Server"` (`srv:<height>`;
+     hls.js engine only) + `"Auto — Server"` (`srv:auto`, the only server
+     option on Safari-native / old bundles without `videos[]`). A `srv:*` pick
+     sets a **per-file, session-only** override (`lp._srvOverride`) and
+     re-enters `_lpLoadIndex` at the current position — the server master then
+     loads normally and, for a numeric pick, the level is pinned **by height**
+     in `MANIFEST_PARSED` (level indices don't survive the source switch; a
+     ladder changed since the download simply stays Auto). While overridden,
+     the server-side menu carries a `"— On device"` option to switch back. The
+     override is dropped whenever a different file loads, so each episode in
+     back-to-back playback defaults to its own device copy; if the server
+     switch fails (host unreachable) `_lpFallBackToLocal` clears the override
+     and reloads the downloaded copy instead of stopping.
    - **Audio** (in-manifest): hls.js path sets `hls.audioTrack = idx`; Safari
-     native sets `video.audioTracks[i].enabled = (i===idx)`.
+     native sets `video.audioTracks[i].enabled = (i===idx)`. Applied via
+     `_lpApplyAudioIdx` → `_lpApplyAudioIdxRetry`, which **retries until the
+     audio-track list is populated** (Safari fills `video.audioTracks`
+     asynchronously — at `loadedmetadata` it's often empty, and a one-shot set
+     is silently dropped, leaving the default playing under a dropdown that
+     shows the remembered track) and re-applies if Safari later reverts to its
+     default; it bails when `lp.pendingAudioIdx`/`lp.filePath` change so a stale
+     retry never fights a manual pick. See GOTCHAS.md § "VLC re-runs its default
+     audio selection".
    - **Subtitles** (`<track>` children): `_lpLoadIndex` appends one `<track>`
      per bundle `sub_<i>.vtt` then per on-disk sidecar, recording each in
      `lp.subTracks` as `{el, key}` in dropdown order (key = `"i"` for bundle,
@@ -541,6 +1291,17 @@ Two ways to populate the cache:
      `/subtitle` endpoint converts SRT/ASS/SSA → WebVTT **on demand** — and
      `_lpIndicateSubLoading` flashes a "Loading subtitles…" hint until that
      fetch lands (or errors).
+   - **Suspend-drop recovery (iOS).** When the WKWebView is suspended (app
+     backgrounded / another app opened) while a `<track>` is *showing*, iOS
+     WebKit discards that track's parsed cues; re-setting `mode="showing"` never
+     re-fetches, so the active subtitle silently goes blank (other tracks, not
+     yet shown at suspend time, still load fine on selection). `_lpSubTrackBroken`
+     detects the terminal-but-empty state (`readyState` LOADED with no cues, or
+     ERROR) and `_lpRecreateSubTrack` removes + re-appends the `<track>` to force
+     a fresh fetch. `_lpRecoverActiveSub` runs it for the active track on
+     `visibilitychange`→visible; `lpSetSubtitle` runs it when the user re-selects
+     a dropped track. Healthy tracks (cues present) are never recreated, so
+     nothing flickers. See [GOTCHAS.md](GOTCHAS.md).
    - Each switch POSTs to `/api/library/{id}/local-tracks` with the new
      pick so it persists across sessions. The pick travels as a resolvable
      **descriptor** `subtitle_sel` (`{off, lang, ai, name}`), saved per-file
@@ -550,6 +1311,24 @@ Two ways to populate the cache:
      next play the resolver (`_lpResolveSubSel`) matches the file's, then the
      series', descriptor against the live track list: `name` → `lang`+kind →
      any-kind in that language → lone-option.
+   - **Audio picks work the same way (8.9.0).** An audio switch POSTs
+     `audio_sel` (`{lang, title, idx, sig, at}` — no sidecar/AI/off, since audio
+     is always embedded), saved per-file *and* per profile+series
+     (`series_audio_prefs`). `_lpResolveAudioSel` restores the newest of the
+     file/series pick by same-layout slot → group → language → title, falling
+     back to the legacy `audio_idx` then the `default` rendition. Both this
+     player and the VLC/TV path read and write it, so an audio choice follows
+     the viewer across a device↔VLC switch and onto the next episode. **Between
+     the descriptor chain and the `default` rendition sits the profile-level
+     language fallback (8.9.4):** `_lpResolveAudioPref(saved.audio_language_pref)`
+     matches by language (then slot, when the track count matches). This carries
+     an audio pick across episodes that are *separate library items* (empty
+     `series` → no shared per-series key — the common case for individually
+     downloaded episodes). `audio_language_pref` arrives in `saved_tracks` from
+     the host; for fully-offline playback the app reads a per-profile
+     `localStorage` mirror (`_appLearnAudioPref`/`_appReadAudioPref`) written on
+     every pick, since `library.json` is unreachable in airplane mode. See
+     [LIBRARY_DATA.md](LIBRARY_DATA.md) and [GOTCHAS.md](GOTCHAS.md).
    - **Late-sub upgrade.** When the default selection lands on an *auto-applied*
      AI sub (`lp.subAutoApplied`), `_lpStartSubUpgradePoll` polls
      `GET /api/library/{id}/subs` every 15 s for a real preferred-language sub
@@ -570,7 +1349,7 @@ Two ways to populate the cache:
    (the seek commits once on release — in on-demand mode every cold seek
    restarts the JIT ffmpeg, so don't seek per pointermove), ±10 s tiles,
    play/pause, mute, a **gear button** that opens the options panel
-   (`#lpTrackRow`: quality / audio / subtitles / AI / Clip — hidden
+   (`#lpTrackRow`: quality / audio / **sync** / subtitles / AI / Clip — hidden
    otherwise), and OS fullscreen on the **whole container** (so the gear
    panel stays usable in fullscreen). iPhone Safari lacks
    element-fullscreen, so there the button falls back to
@@ -582,22 +1361,879 @@ Two ways to populate the cache:
    the video also minimizes the browser bar (app-shell escape hatch — see
    [FRONTEND.md](FRONTEND.md) § Layout). An **orientation-lock button**
    (`#lpRotBtn`, touch devices only) keeps playback landscape even when the
-   phone auto-rotates to portrait: native `screen.orientation.lock` where it
-   works (Android + OS fullscreen), CSS 90°-rotation fallback everywhere
-   else (iPhone Safari has no lock API) — see the footgun in
-   [GOTCHAS.md](GOTCHAS.md). Auto-hides 3 s into playback; tap to toggle.
+   phone auto-rotates to portrait. Three mechanisms (`_lpOrientApply`): the
+   **iOS app** turns the real interface and pins one landscape side
+   (`AppShell.setOrientationLock`, 20.3.0; it also overrides iOS's own
+   rotation lock); a browser uses `screen.orientation.lock` where it works
+   (Android + OS fullscreen); everywhere else, and in an app older than
+   20.3.0, a CSS 90° rotation (iPhone Safari has no lock API) — see both
+   footguns in [GOTCHAS.md](GOTCHAS.md). Auto-hides 3 s into playback; tap to toggle.
    Full detail in [FRONTEND.md](FRONTEND.md); the iOS/fullscreen footgun is
    in [GOTCHAS.md](GOTCHAS.md).
 
+### 2a-bis. Download power & data policy (iOS app only, 18.20.0)
+
+Downloading a library is expensive in exactly one currency, and it isn't time:
+the 2026-09-23 run cost **~3.0% of battery per gigabyte**, flat across every
+transfer rate sampled. So the app exposes **gates** — whether the queue may run —
+and deliberately **no speed setting**, because slowing a download pays the same
+per-byte energy bill over a longer radio-on window and costs *more*. The reasoning
+and the numbers are in [GOTCHAS.md](GOTCHAS.md); the rules themselves live in
+`DownloadGate` / `DownloadPolicy` in `BundleDownloader.swift`.
+
+**Where.** Downloads dashboard → **Power & data** (app only; hidden on any shell
+whose `BundleDownloader` has no `getPolicy`).
+
+| Setting | Default | Effect |
+|---|---|---|
+| Download over cellular | **off** | Gated on `NWPath.isExpensive`, so personal hotspots count too. |
+| Only while charging | off | Today's behaviour unless switched on. |
+| Pause below *N*% | **20%** | Matches where iOS itself starts offering Low Power Mode. |
+| *(no setting)* | — | **Low Power Mode always pauses downloads.** |
+
+**Precedence** (`currentGate()`): cellular is judged first and independently — 17 GB
+of mobile data is no cheaper on a charger. Then **plugged in ⇒ every power gate
+opens**, which is what stops iOS's own 20% Low Power prompt from keeping the queue
+stopped for the hour it takes to charge past 80%. Then charger-only, Low Power,
+battery floor.
+
+**Storage.** `UserDefaults`, not `library.json`. The policy is about *this* phone's
+battery and *this* phone's data plan, and the gate must work with the host
+unreachable — which rules out anything fetched over the network.
+
+**Closing a gate** cancels every in-flight transfer (keeping the jobs, so `pump`
+resumes them from disk), hands back the continued-processing grant, emits
+`dl-gated`, fires the `bundleGated` JS event and **takes the download Live Activity
+down** (`la-suppressed why:"gated"`, 20.8.10; before that it stayed up in an orange
+paused state). The page's banner is what says why.
+
+**The download Live Activity is up only while bytes are moving and the process can
+update it** (20.8.10). `updateLiveActivity` ends it under a grant (`cpt`: the system
+draws its own panel), behind a shut gate (`gated`), in the background without a grant
+(`background`: the process is about to be suspended) and after a 30 s heartbeat in
+which no byte arrived (`stalled`). A failed run is removed at once; only a completed
+one leaves a 4 s terminal frame. In practice the system's panel is the lock-screen
+progress, and ours covers the foreground stretch before a grant arrives.
+
+**Progress reports are paced** (20.8.10): `emitProgress` runs at most every 0.5 s per
+bundle, so `bundleProgress`, the Live Activity sync and the grant's progress number
+no longer fire on every `didWriteData`.
+
+**The limitation.** A grant can only be requested while the app is foreground, so a
+gate that reopens while backgrounded falls to the slow out-of-process session until
+the app is next opened — and a *suspended* app is not woken by plugging in at all.
+That is why every pause string names its condition rather than just saying
+"paused".
+
+**The player snapshot is exempt** (19.9.2). The `__player__` job (the offline copy of
+the dashboard, see [PLAYER_CACHE_PLAN.md](PLAYER_CACHE_PLAN.md)) ignores every gate,
+cellular included, **while the app is in the foreground** (`bypassesGate`). It goes to
+the **front** of `jobOrder`, and closing a gate does not cancel it. It never requests
+the continued-processing grant, and it has no Live Activity or haptic. Content behind a
+shut gate stays paused, and the banner still says so. If the app is
+backgrounded behind a shut gate, the snapshot's tasks are cancelled rather than
+migrated (`dl-player-bg`), and `pump` restarts them on the next foreground.
+
+### 2b. Native background playback (iOS app only)
+
+**The problem.** The player is a `<video>` inside a WKWebView. WebKit **pauses any
+video-bearing `<video>` the moment the app backgrounds**, regardless of audio-session
+configuration — so locking the phone used to stop playback dead. Screen *mirroring* to
+an external monitor dies at lock for the same reason (the lock screen replaces it).
+
+**The shape of the fix.** Two complementary paths, both armed at once, both
+switchable off in ☰ App → Settings → Playback (`streamlink_app_bgplay`,
+`streamlink_app_tvmode`; default on):
+
+| Path | Trigger | Monitor | Styled ASS | Phone screen |
+|---|---|---|---|---|
+| **Mirroring** | a display connects, app stays foreground | mirroring | **yes** (libass + custom UI) | normal, but **never auto-locks** (`setAwake`) |
+| **Native handoff** | app backgrounds (lock / app switch), or a display arrives in Early mode | `AVPlayer` on a surface of its own | no — plain VTT | locked; the page becomes a remote |
+
+They're orthogonal: keep-awake doesn't disable the handoff, it just prevents the
+*auto-lock* that would trigger it. Pressing the power button still hands off.
+
+**What the lock screen calls it (18.24.0).** The arm carries `title` and `series` from the
+file's label (`labelNowPlaying`, see `eplabel.py`): the episode's **name** is `title` (Now
+Playing's title, the Live Activity's big line) and `Show · S01E03` is `series` (Now
+Playing's artist, the Live Activity's small line). No episode name ⇒ `title` is
+`Show · S01E03` and `series` is empty. `nextTitle` **and `nextSeries`** are armed together,
+because the native side advances on its own while the page is frozen; Swift keeps
+`nextSeries` optional so an older page (no key) keeps the old line, while an empty string
+clears it. See [GOTCHAS.md](GOTCHAS.md) § A file's name is not what it is called.
+
+**TV Mode was the old name for the mirroring row, and it is gone (18.13.2).** It
+bundled five behaviours behind one switch — backlight to 0, a transparent
+tap-swallowing shield with double-tap to exit, force-hiding the transport, a
+three-second countdown that engaged the lot by itself, and keeping the screen awake.
+The first four made a *mirrored* phone pleasant, and mirroring has been superseded by
+the real external-display handoff; the countdown also raced that handoff and dimmed the
+phone during glasses playback (see [GOTCHAS.md](GOTCHAS.md)). Only keep-awake had no
+replacement — a `<video>` playing inline in WKWebView does not reliably hold iOS awake,
+and a sleeping phone takes the mirrored monitor with it — so it became `setAwake`,
+driven automatically by `_npSyncAwake` whenever the phone itself is playing and **not**
+during a native handoff, where playback survives a lock by design.
+
+**One rule still follows from mirroring, and 14.1.1 fixed a violation of it.**
+
+*TV Mode may not draw anything opaque.* The monitor receives the phone's
+**framebuffer**, so a black curtain over the player blanks the monitor with it — which
+is exactly what `#lpTvVeil` used to be, and why the episode vanished from both screens
+at once. The only lever that darkens the phone without touching a mirrored pixel is
+the **backlight** (`UIScreen.main.brightness = 0`, native `applyBlank`). `#lpTvVeil` is
+therefore a *transparent* touch shield: it swallows stray taps and carries the
+double-tap-to-exit gesture, nothing more. The transport bar is retired (`lp-idle`) on
+entry for the same reason, and the confirmation chip (`#lpTvHint`) fades itself out
+after ~3.5 s rather than sitting on the TV.
+
+*The handoff needs a video surface, not just routing flags.* `allowsExternalPlayback`
+and `usesExternalPlaybackWhileExternalScreenIsActive` describe how an
+already-**presented** video is routed. The handoff built a bare `AVPlayer` with no
+`AVPlayerLayer` anywhere, so it presented nothing: audio kept playing,
+`isExternalPlaybackActive` never flipped, and the monitor went on mirroring — i.e.
+showed the lock screen. `attachVideoSurface()` now gives the player a real layer on
+every path, in one of two modes (☰ App → Settings → Playback → **Monitor feed while
+locked**, `streamlink_app_extmode`, passed through `arm()` as `extMode`):
+
+| Mode | What it does | When to pick it |
+|---|---|---|
+| **Early** (`early`, default) | a `UIWindow` of our own in the external display's **`UIWindowScene`** (`UIWindow(windowScene:)`), with an `AVPlayerLayer` in it, claimed **the moment an episode starts** and held across foreground/background. Putting content in that scene **replaces mirroring** for the display, so the lock screen never reaches the monitor. The monitor goes black until the phone is locked, and that black screen is the proof the claim landed. | always — this is the one that works |
+| **Mirrored** (`route`) | leaves mirroring up and gives the player a full-screen `AVPlayerLayer` at the back of the app's own window (invisible behind the opaque webview), so AVFoundation's external-screen route has something to take over. | only if an adapter refuses Early |
+
+> **Removed in 18.9.0: "At lock" (`window`).** Same window, claimed at
+> `willResignActive` instead. That is one composite pass before the app loses the
+> ability to draw, by which point mirroring is already collapsing — so the claim
+> arrived too late and the monitor showed the lock screen, the exact failure this
+> setting exists to escape. It was also the default. Anything still holding
+> `"window"` in `localStorage` reads as `"early"`, in JS and in Swift.
+
+> ### Wired external display: what actually works (18.5.x)
+>
+> This took a full day of on-device trails and three wrong diagnoses. The
+> conclusion is one sentence: **everything must be claimed BEFORE the lock, because
+> the moment of the lock is the one moment nothing can be claimed.**
+>
+> **1. The display is reached through its SCENE, not its screen.** `UIWindow(frame:)`
+> + `w.screen = external` is the pre-iOS-13 path; since iOS 13 that setter means
+> "move me to the window scene on that screen", and with no scene named the window
+> is never presented. `UIWindow(windowScene:)` against the external-display scene is
+> what kicks iOS out of mirroring. **The scene exists even with no
+> `UIApplicationSceneManifest`** — measured on iOS 27, `connectedScenes` carries
+> `UIWindowSceneSessionRoleExternalDisplayNonInteractive` via UIKit's compatibility
+> path. Do not re-derive its absence from the manifest's absence; read
+> `connectedScenes`.
+>
+> **2. The scene must be claimed early, and held.** iOS tears the external-display
+> scene down at the lock even when we own it, and `willResignActive` is already too
+> late — the scene is gone by then. `maybeClaimEarly()` claims it on `arm`, while
+> foreground, and `didBecomeActive` does **not** hand it back (doing so returns the
+> display to mirroring on every unlock, and the next lock kills it again).
+> `sceneDidConnect` reclaims if the scene returns mid-session — **by calling
+> `maybeClaimEarly()`, not by repeating it.** Claiming and handing off are one act:
+> until 18.11.0 that site did the claim alone, so a display plugged in mid-episode
+> got a window of ours with no player in it (mirroring replaced, glasses black,
+> episode still playing on the phone) until the user stopped and restarted.
+>
+> **3. The player must be started early too.** iOS lets a backgrounded app
+> *continue* audio; it does not let one *start* a fresh `AVPlayer`. The old model
+> built the player at `didEnterBackground` and called `play()` there — the trails
+> showed the audio session active, the seek landing exactly, `play()` issued, and
+> `tcs=pause` regardless. Early mode now hands off at `earlyClaim` time, foreground,
+> and JS pauses the web element on `nativeStarted`.
+>
+> **4. The layer must be a BACKING layer.** An `AVPlayerLayer` added as a sublayer
+> with `l.frame = root.bounds` reads the bounds at attach time — and the window is
+> rebuilt from `sceneDidConnect` while backgrounded, where no layout pass runs.
+> `ExternalPlayerView` (`layerClass = AVPlayerLayer`) cannot have the wrong size.
+>
+> **5. Once native holds the display, the page is a REMOTE.** Playing the web
+> element starts a second engine, which takes the audio session and interrupts the
+> player feeding the display. `lpTogglePlay` / `_lpCommitSeek` / `lpSeekBy` route to
+> `setPaused` / `seekTo`; `_lpCtlSync` and `_lpCtlTick` read a 1 Hz mirror of the
+> native transport (`_npStartPoll`), because the element is parked at a stale
+> position; `_lpFlushProgress` and `lpStop` must never write that stale position.
+>
+> **6. …and the hold ends when the DISPLAY does (18.11.0).** `_npHolding` is only
+> true because native owns a window on the monitor, so unplugging the monitor ends
+> it: the window dies with its scene and the AVPlayer is left decoding into nothing
+> while the page still defers to it. `_npOnDisplayChange(false)` now hands back —
+> but **only while `document.visibilityState === "visible"`**, because handing back
+> to a suspended WKWebView stops playback outright; unplugged-while-locked is
+> repaired on the return to the foreground instead, which is why the
+> `visibilitychange` guard is `_npHolding && _npExternal` rather than `_npHolding`.
+> `_npHandBack()` clears the flag itself once `resume()` confirms native stopped.
+> Note that the unplug's audio-session interruption (`reason: 4`,
+> `.routeDisconnected`) gets **no `ended` event** — nothing will resume the native
+> player for you, and nothing should.
+>
+> **Measuring it:** ☰ App → Settings → Playback → **Monitor diagnostics** calls
+> `NativePlayback.extDiag()`. It prints the app build, page version, audio-session
+> state and scene roles, then a buffered trail sampled at every lifecycle edge plus
+> `locked+3s/10s/20s`. It is buffered because the readings only mean anything while
+> the phone is locked. Read `tcs=` and `pos=` first: a trail can look perfect on
+> every structural column and still be a player that never started.
+>
+> **Traps the trails walked into, each of which cost a round:**
+> - `app=act` does **not** mean the phone unlocked. With a live external-display
+>   scene iOS keeps the app active because it is driving a screen that is still on.
+> - A run with no `locked+` row tested nothing.
+> - The display hotplugs at every lock (`scr` 2→1→2), which is normal.
+> - `UIApplication.State`, `applicationState` and the page's `<video>.paused` all
+>   describe something other than what you are asking about.
+
+**With no display connected, neither layer is attached** — deliberately. A main-screen
+`AVPlayerLayer` is the classic way to get AVFoundation to *suspend* video on background
+(the documented cure for background audio is `playerLayer.player = nil`), so attaching
+one unconditionally would risk the plain lock-the-phone-and-listen case to serve a
+monitor that isn't there. Layerless = audio-only is the bug with a monitor and the
+correct behaviour without one.
+
+Which of the two an adapter + iOS version honours through a lock is not decidable from
+the host, hence a setting rather than a guess. Like the other playback prefs it must be
+seeded across the proxied loopback origin (`am=` in `_appTryLocalHandoff` ↔
+`_appProxiedSeedStorage`) or a downloaded episode reads the default.
+
+**Why pre-arm instead of "hand off on `visibilitychange`".** That event is not
+guaranteed to run — nor to finish its bridge round-trip — before the process is
+suspended. So JS continuously *pre-arms* the native plugin (`_npArm` on every
+material change, `_npTick` at 1 Hz from `_lpClockTick`) and the **native side owns
+the transition**, firing from `didEnterBackgroundNotification`. It reconstructs the
+playhead as `armedPosition + wallClockElapsed × rate − 0.3 s`; the deliberate rewind
+keeps residual error *behind* the true position, because repeating a third of a
+second is invisible and skipping content is not.
+
+**Hand-back.** On foreground, `_npHandBack()` calls `resume()` and then, in strict
+order: sets `lp.lastKnownT` **first** (every recovery path reads it, and a
+`currentTime` of 0 from an element iOS reset while suspended would restart the
+episode), arms `lp.resumeSec`, pushes `lp.lastSaveAt` forward so the first tick can't
+clobber the native writer, and seeks via **`_lpCommitSeek`** — a multi-minute jump is
+exactly the swallowed-seek case `_lpVerifySeek` exists for. The two recovery probes
+(`_lpRecoverActiveSub`, `_lpRecoverMediaPipeline`) are **chained after** the
+hand-back rather than racing it on independent timers; pointed at a torn-down or
+mid-seek element, the frame-counting probe would misfire.
+
+**A paused return after more than a minute away rebuilds instead of seeking (20.8.4).**
+A paused episode leaves nothing playing, so iOS suspends the app. Measured 2026-10-03
+(three paused locks of 3 to 12 minutes): after the return the picture was choppy under
+clean sound, the playhead and both players' segment fetches were at normal pace, seeks
+did not help, and reopening the episode did. So when `resume()` reports `paused`, hls.js
+is the engine and the page was hidden for `NP_REBUILD_AFTER_SEC` (60 s) or more,
+`_npHandBack` calls `hls.recoverMediaError()` (a new MediaSource) and lets the armed
+`loadedmetadata` resume put the playhead back, in place of `_lpCommitSeek`. The time
+away comes from `_npHiddenAt`, stamped by the `visibilitychange` hidden branch and
+passed in by the visible branch only, so the other callers (PiP ended, AirPlay ended,
+Back to phone) never rebuild. A playing return is left alone: native kept the app
+awake, and a rebuild there would be an audible gap. Every hand-back logs `handback
+{at, paused, away, rebuilt}`, and `_npWatchFrames` logs `handback-frames {sec, wall,
+total, dropped, fps, height}` over the first 10 s of play after it. **Not yet verified
+on a device**: the cause is inferred, and `handback-frames` is what will confirm it
+(`fps` near the source's with `rebuilt: true`) or show it wrong.
+
+If native advanced to another episode during the hold, there is nothing to seek: the
+element still holds the episode the hold started on. The hand-back then loads the
+episode native is on (`_lpLoadIndex(position)`, logged as `handback-reload`). It knows
+from `resume().filePath` differing from `lp.filePath` (the page was frozen for the
+advance) **or** from `lp._nativeAdvancedTo` (the page saw the advance and already
+moved `lp.filePath`: every cast, AirPlay and wired-display hold).
+
+**Progress while locked.** The webview's JS timers are frozen, so `_lpClockTick`'s
+15 s save never fires. The plugin POSTs `/api/library/{id}/progress` itself every
+15 s (and on pause/stop/end), reusing the same near-zero `position < 5` guard. Without
+this, an episode watched with the phone locked would record nothing.
+
+**Subtitles — the synthesized playlists.** `AVPlayer` renders only subtitles that are
+real media tracks, but prep emits standalone `sub_<i>.vtt` sidecars (ffmpeg's HLS
+muxer cannot package multi-track WebVTT — see [GOTCHAS.md](GOTCHAS.md)). That limit is
+on ffmpeg *writing* them, so the server generates two extra playlists **on read,
+never on disk**:
+
+```
+GET /api/library/offline-cache/<key>/master-native.m3u8
+    → master.m3u8 + one #EXT-X-MEDIA:TYPE=SUBTITLES per meta.json subtitle,
+      SUBTITLES="subs" appended to every #EXT-X-STREAM-INF, and every
+      TYPE=AUDIO rendition renamed NAME="audio_<n>" from its URI audio_<n>.m3u8
+
+GET /api/library/offline-cache/<key>/sub_<i>.m3u8
+    #EXTM3U
+    #EXT-X-VERSION:3
+    #EXT-X-TARGETDURATION:1426
+    #EXT-X-MEDIA-SEQUENCE:0
+    #EXT-X-PLAYLIST-TYPE:VOD
+    #EXTINF:1425.600,
+    sub_0.vtt
+    #EXT-X-ENDLIST
+```
+
+`master.m3u8` on disk is untouched, so the web player is byte-for-byte unaffected and
+**`OFFLINE_CACHE_VERSION` does not move** — no bundle is invalidated, no re-prep. The
+subtitle *number* is read back out of each `meta.subtitles[i].file` rather than taken
+from array position, because the serving route maps `sub_<n>.m3u8` straight onto
+`sub_<n>.vtt` and a mismatch would silently serve the wrong language. Clients get the
+URL from the additive `native_master_url` field on `/offline-prepare`,
+`/offline-job/{id}` and `/stream-ondemand`.
+
+**A DOWNLOADED bundle generates the same two names itself (17.14.0).** "On read, never
+on disk" has a consequence that is easy to miss: a device copy is a copy of the
+bundle's *files*, so neither name is in it, and in a proxied session a request for one
+falls through to the host, which doesn't recognise a `/StreamLinkBundles/<sha>/…` path.
+So `_appStartLocalPlayback` had no `native_master_url` to report, `_npOk()` was false,
+**nothing armed, and locking the phone during a downloaded episode suspended the whole
+app** — taking the loopback server (and with it the page's own origin) down with it;
+see [GOTCHAS.md](GOTCHAS.md) § a suspended app loses its loopback server.
+`LocalMediaServer.derivedPlaylist` now synthesizes both from the bundle's own
+`master.m3u8` + `meta.json`, a direct port of `_native_master` /
+`_sub_wrapper_playlist` — **change one, change both** — and the device prep reports
+`native_master_url: <base>/master-native.m3u8` like any streamed file. It is resolved
+*before* the proxy fallthrough, or the host would 404 it.
+
+**Audio renditions are renamed to `audio_<n>` (19.2.1).** The page arms `audioName:
+"audio_<playlist index>"` and `applyTrackSelection` matches it against the option's
+`displayName` (the HLS `NAME`). ffmpeg names renditions by *output stream* index, which
+counts the video rungs, so a two-rung bundle calls `audio_0.m3u8` "audio_2". The name
+never matched, and the language fallback compared `"eng"` with AVFoundation's `"en"`,
+so **AirPlay stayed on the `DEFAULT=YES` track whatever the user picked**. Both are
+fixed: the native master renames from the URI, and `langKey` folds ISO 639-1/-2
+through `Locale`. Subtitles stay index-first, checked against the language, because
+one bundle can hold two tracks in one language (Forced + Full).
+
+**AirPlay gets a master with ONE audio rendition (19.2.2).** Fixing the names was not
+enough: an AirPlay TV fetches the master itself and chooses its own audio, and the
+phone's `AVPlayerItem.select` never reaches it (LG, 2026-09-28: Spanish through every
+toggle). So `NativePlayback.airplayURL` appends `?audio=<n>&lang=<code>` to the native
+master URL it hands the TV. `_pin_audio` (main.py) / `pinAudio` (LocalMediaServer) then
+keep only that rendition, as `DEFAULT=YES,AUTOSELECT=YES`. It is picked by number when
+the number's LANGUAGE agrees with `lang`, else by the first rendition in `lang`, else by
+number, else nothing changes. The language matters because the NEXT episode is armed
+with the same query and its tracks may be in another order. An audio change during
+AirPlay is a `replaceItem` at the playhead (`airplay-audio` row), not a selection.
+`tracks-applied` logs what AVPlayer really selected. Cast is untouched (it picks by
+track id).
+
+**On-demand (JIT) is deliberately reduced**: its `master-native.m3u8` is identical to
+`master.m3u8` (video + audio only). OD segments are MPEG-TS, and AVPlayer needs an
+`X-TIMESTAMP-MAP` in the WebVTT to anchor cues to segment PTS — the JIT timeline isn't
+zero-based per segment, so a naive wrapper would render subtitles at the wrong times,
+which is worse than none. Handoff still works on a not-yet-prepped file.
+
+**What cannot be done** (don't re-attempt): burning styled ASS into the stream during
+playback — `AVVideoComposition` is unsupported for HLS assets — and rendering the
+libass overlay to an external `UIScreen` while backgrounded, because a backgrounded
+app cannot **draw** at all. (That limit is about app-drawn content; an
+`AVPlayerLayer` is fed by the media server, which is why the Early mode above can
+still show video there.) Keeping the app foreground with mirroring alive is the answer
+to both.
+
+**Verification sequence** (on-device; each is a go/no-go gate): bare background audio
+→ position fidelity across a lock/unlock → wired HDMI unlocked → **wired HDMI locked**
+(the load-bearing assumption — try **Early** first, then flip the setting to
+**Mirrored** and repeat; `nativeStarted` carries `extMode` / `extWindow` and
+`displays()` carries `ownWindow` / `externalPlayback` to say which path actually ran)
+→ mirroring with the phone left alone for longer than its auto-lock interval, **with the
+episode still visible on the monitor** →
+Live Activity clock advancing between pushes → native subs in sync → progress written
+while locked → the same against an LMS-served bundle in Airplane Mode → no-regression
+in a desktop browser.
+
+**The phone is a remote, and is built like one (18.12.0, rebuilt 18.13.0).** While
+`_npHolding` is true the page's `<video>` is parked on a frozen frame and the controls
+that address it — mute, fullscreen, orientation lock, the whole Options panel — reach
+nothing. `.lp-remote` on `#localPlayer`, set by `_npSyncRemoteUi` at every site that
+writes `_npHolding`, hides **`#lpControls` entirely** and puts `#lpRemote` in its place.
+
+The first two attempts drew a panel *on the stage*, around the overlay. That was the
+mistake: the overlay is designed to be small, sparse and out of the picture's way, and on
+a remote there is no picture, so it leaves most of the screen empty by construction. From
+18.13.0 the remote is a **control panel built in the same idiom as the TV's
+`#fullscreenControls`** — a full-height flex column of fixed rows (status strip,
+now-playing line, seek bar, skip offer) over a `flex-1` tile grid: seek steps, a
+full-bleed play tile, episode nav with the readiness dots, and Stop / To TV. The tiles
+reuse `.fc-tile` and the fullscreen grid's own class strings. See
+[GOTCHAS.md](GOTCHAS.md) § "A remote is a control panel, not an overlay".
+
+`#lpSeekBar` and `#lpSkipOffer` are **relocated** into the column — the real nodes, not
+copies — so `_lpSeekBarInit`, `_lpCtlTick` and `lpEvaluateSkipOffer` keep working
+untouched; the restore branch runs on every `_npHolding` write, both directions, because
+nothing else knows the page stopped being a remote. The header's location line
+(`#lpWhere`) flips to "On Glasses" and back in the same function.
+
+**The remote's seek bar is locked** (18.29.0), exactly like the TV remote's `.seekBar`:
+hold for 0.5 s, then RELEASE, then a 0.5 s settle before it unlocks, and it re-locks 5 s
+after the last touch. It honours the same device setting (`_seekLockEnabled`). The state
+is its own (`_lpRmLock*`); the badge and fill reuse the `.seekBar` CSS, whose state rules
+are mirrored onto `#lpSeekBar`. Outside remote mode the bar carries `.unlocked`
+permanently, so the on-phone player still seeks with a tap. This applies to glasses,
+AirPlay and Chromecast alike.
+
+`#lpRemote` and `#lpSeekBar` (with everything inside them) are `user-select: none` with
+`-webkit-touch-callout: none` (20.6.2). The unlock hold is a long press, and on iOS a long
+press on selectable text starts a selection whatever `pointerdown` does with
+`preventDefault`. `#fullscreenControls` has carried the same rule from the start; any new
+hold gesture needs it on its own container.
+
+What the remote can drive is what `NativePlayback` exposes: `lpTogglePlay` →
+`np.setPaused`, `_lpCommitSeek` → `np.seekTo`, plus the existing episode-advance path.
+**There is deliberately no volume row on the glasses:** the phone's hardware volume
+buttons already drive them. A Chromecast gets one (see the Chromecast section).
+
+**More** (19.9.0; was **Audio & Subs**, 18.30.0). The remote's bottom row has a
+**More** tile (`#lpRemoteMoreBtn`, always shown) that opens `#moreModal`, filled by
+`lpRemoteMore`. It carries everything the on-phone Options panel has, and what the
+current route can't do is listed **greyed with the reason** rather than dropped:
+
+| Section | On glasses / AirPlay / Chromecast |
+|---|---|
+| Audio | the bundle's renditions (`lpSetAudio`). On-demand: greyed, since switching there re-encodes through the parked web player |
+| Subtitles | the bundle's text subs (`lpSetSubtitle`). Downloaded sidecars and **Find subtitles online** are greyed: sidecars live only on the phone's `<track>`s |
+| Quality | Auto / Up to N p: the **native quality cap** (below). Greyed for a downloaded copy (one rung), a single-rung episode, or an app older than 19.9.0 |
+| Audio delay | greyed: it is WebAudio on the phone's own element |
+| Sleep | `lpSetSleep`, which native already runs |
+| Clip | `lpClip`, which reads the native playhead (`_npUiTime`) while holding, not the parked element |
+| Shuffle | `lpEnterShuffle` / `lpExitShuffle` |
+
+Audio/sub picks go through `lpSetAudio` / `lpSetSubtitle`, whose `_lpSaveLocalTracks` re-arms.
+`arm()` notices `audioName`/`subIndex` changing for the same file and calls
+`applyTracksLive()`: an AVPlayer (glasses, AirPlay) re-runs `applyTrackSelection` on the
+live item, and a Chromecast re-runs `applyCastTracks` against the last status that listed
+tracks.
+
+**Native quality cap** (19.9.0). The pick is `lp.nativeMaxH` (0 = Auto; kept for the run,
+cleared when the player closes) and rides every arm as `maxHeight`. Native appends it to
+the native master URLs as `?maxh=<h>` (`cappedURL`, `url` and `nextUrl`), and
+`_cap_variants` in `main.py` drops the `#EXT-X-STREAM-INF` / I-frame variants taller than
+it. If none fit, only the smallest is kept, so the ladder is never emptied. It is done in the
+master, not with `preferredMaximumResolution`, because an AirPlay TV or a Chromecast fetches
+the master itself and runs its own ABR: nothing set on the phone's player item reaches
+it (the same reason as the AirPlay audio pin). A change for the same file is a
+`replaceItem` at the playhead on every transport (`quality-cap` log row). The loopback
+server (`LocalMediaServer`) ignores `maxh`: a downloaded master has one rung.
+
+Native side: `ios-app/ios/App/App/NativePlayback.swift` (+ `PlaybackLiveActivity.swift`,
+`Shared/PlaybackIntents.swift`, `StreamLinkLiveActivities/PlaybackWidget.swift`).
+
+#### AirPlay (18.26.0 — spike, not yet verified on a receiver)
+
+AirPlay is a third route for the same takeover. The **AirPlay** button in the player's
+control row (`#lpAirplayBtn`, app only, shown when the file has a native master) calls
+`lpAirPlay()` → `NativePlayback.airplay()`. The native player takes the playback (a
+`nativeStarted` with `reason: "airplay"`), the page becomes the remote exactly as it does
+for the glasses (`#lpWhere` reads "On AirPlay"), and the system route sheet opens.
+
+**Why this needs more than `allowsExternalPlayback`.** An AirPlay receiver is not a
+screen. It is handed the HLS URL and **fetches the stream itself**. None of the native
+player's URLs are reachable from a TV. `http://127.0.0.1:<port>/…` is the TV's own
+loopback, and the box over Tailscale is on no network the TV is on. So `AirPlayDoor`
+(in `LocalMediaServer.swift`) opens a second listener on the phone's **Wi-Fi**
+interface. It reverse-proxies the one upstream origin the player was using (the loopback
+server or the box) under a per-session secret prefix:
+
+    http://<wifi-ip>:<port>/ap/<128-bit token>/<upstream path + query>
+
+Relative URIs inside the playlists resolve against the playlist's URL, so no playlist is
+rewritten. Offline bundles and box streams share the one path. While a session is up,
+`arm()` passes every armed URL (`url`, `nextUrl`) through `lanURL(for:)`, so auto-advance
+also stays on the door. The door only answers GET/HEAD, and only with the token. It
+closes in `stopNative`. The loopback server stays loopback-only.
+
+**Which copy the next episode comes from (20.8.9).** `_lpArmNextNative` asks the phone
+first: on the loopback page (`_appOffline` / `_appProxied`) a fully downloaded next
+episode is armed as `/StreamLinkBundles/<sha>/master-native.m3u8` (`next-armed
+via:"device"`), so an advance on a TV, the glasses or a locked phone plays the device
+copy and works with no host at all. Only an episode that is not on the phone goes to
+the box's `/offline-prepare`. From the plain host page the box is always asked: the
+door proxies one upstream origin, and there it is the box. Before 20.8.9 the box was
+the only source, and offline nothing was armed. **Built, not yet run on a device.**
+
+Subtitles reach the TV through `master-native.m3u8`'s subtitle group (text subtitles
+only; ASS styling and image subtitles don't). Audio and subtitles are chosen when the item
+loads, from the armed selection. As with the glasses, the remote cannot switch them
+mid-play yet.
+
+**Ending.** If no route engages within 45 s (the sheet was dismissed), native emits
+`airplayEnded {reason: "never-picked"}`. A route that engaged and then dropped emits
+`reason: "route-lost"`. The page answers both with `_npHandBack()`, so the episode
+returns to the phone at the native playhead. `stopNative` closes the door.
+
+**Verified on device, 2026-09-25:** an LG TV on the parents' 192.168.86.x Wi-Fi,
+playing a downloaded bundle. The route engaged (`airplay-route external:true`), the
+episode resumed at the right position, and its final progress was written. The earlier
+failure had the phone on a different network (10.0.0.x) from the TVs. Since 18.28.0
+AirPlay always starts playing; before that it inherited a paused intent.
+
+**Back to phone** (18.28.0): see the Chromecast section. For AirPlay there is one
+catch. The audio **route** belongs to the system, not the player, so after the hand-back
+the page's own `<video>` keeps sending sound to the TV (confirmed on device). No API
+picks a route for the user. Since 18.29.0, `routeCheck()` looks at
+`currentRoute.outputs`, and if they are still AirPlay it opens the route sheet so one tap
+on iPhone fixes it.
+
+**Auto-advance while locked** (18.29.0): see the "hold across the swap" note under
+GOTCHAS. `replaceItem` now holds a background task from the swap until the new item is
+ready, and writes `swap-ready {ms, app}` (or `swap-failed`).
+
+**Still open:**
+- Does a receiver really fetch from the door? Watch for `airplay-route external:true` in
+  the client log, then segment GETs.
+- Does the process stay alive with the phone locked while AirPlay plays?
+- Does a hotel Wi-Fi with client isolation block it? Almost certainly, because
+  discovery fails before the door matters.
+
+**Test attempt, 2026-09-25 (still untested).** On an Xfinity gateway network (10.0.0.x),
+an LG TV with AirPlay switched on was not visible to the phone or a Mac: no
+`_airplay._tcp`, no `_raop._tcp`, and no SSDP/DLNA reply from the TV. Only the gateway
+answered. Nothing is broken on our side; the TV was not reachable on that Wi-Fi at all.
+Check the TV's own IP (Settings → Network) against the phone's before blaming the door.
+
+#### Chromecast / Google TV (18.27.0 — spike, not yet verified on a device)
+
+The **Cast** button (`#lpCastBtn`) sits next to AirPlay and is shown under the same
+condition. `lpCast()` calls `NativePlayback.castScan()`, which browses Bonjour
+`_googlecast._tcp` for 3 s (`CastDiscovery`), and lists the devices in `#castModal`.
+Picking one calls `cast({deviceId})`.
+
+**No Google Cast SDK.** `CastSession.swift` implements the Cast v2 protocol directly: TLS
+to port 8009 (self-signed; accepted), a hand-rolled six-field `CastMessage` protobuf with
+a JSON payload, heartbeats, and launching Google's stock **Default Media Receiver**
+(`CC1AD845`). It uses LOAD / PLAY / PAUSE / SEEK / EDIT_TRACKS_INFO and a 1 Hz media
+`GET_STATUS`. That means no pod, no registered receiver app, and no Google developer
+account. Discovery is Bonjour, which needs only `NSBonjourServices` and the local-network
+prompt. SSDP (DLNA) would need Apple's multicast entitlement, which a sideloaded build
+cannot get.
+
+**A second transport, not a second player.** The Cast session sits in
+`NativePlaybackManager` beside the AVPlayer. `isNativeActive` is true for either, and
+`castStatus` is the Cast session's version of the time observer: it writes `armed.position`
+and `paused` (the receiver is the authority, since the TV's own remote can pause it), and
+emits `nativeProgress`. It also runs `maybePostProgress` / `maybePostSession` /
+`maybeAutoSkip`. `setPaused`, `seekTo`, `replaceItem` (advance and file switch) and
+`reachedEnd` branch on `cast`. So progress, cross-device sessions, Smart Skip and
+auto-advance are the code the glasses already use. The page becomes the remote on
+`nativeStarted {reason: "cast", name}` (the header reads "On <TV name>"). That event only
+fires once the receiver reports our media playing. Until then the phone keeps playing.
+
+**What the TV loads.** It gets the same `master-native.m3u8` as AirPlay, through
+`AirPlayDoor`, with `hlsSegmentFormat`/`hlsVideoSegmentFormat: "fmp4"` (the receiver
+otherwise assumes MPEG-TS). Audio and subtitles are picked from the tracks the receiver
+reports after load (`applyCastTracks`). Its TEXT and AUDIO tracks come in manifest order,
+the same order as `subIndex` / `audio_<n>`. The door answers CORS preflights (`OPTIONS`)
+without the token, because the receiver is a web page on another origin.
+
+**Staying alive.** The TV fetches every segment through the phone, and nothing plays
+locally. So `SilentKeepAlive` loops silence (mixable) under the `audio` background mode
+for the whole session. Without it, a locked phone is a stalled TV one buffer's length
+later. If the TLS link drops anyway, `rejoin()` finds the running receiver app and joins
+its transport rather than reloading: up to 3 tries in the foreground, or on the next
+foreground.
+
+**Ending.** Stop on the phone (`stopNative`) also stops the receiver app on the TV. A
+failure before the TV went live emits `castEnded {live: false}`; the page re-arms and
+says so. A failure or stop from the TV while live emits `castEnded {live: true}` and the
+page takes the episode back through `_npHandBack()`.
+
+**Unverified (the spike's questions):**
+- Does the Default Media Receiver load plain-HTTP HLS from a LAN address? Its page is
+  HTTPS, so mixed content is the main risk. `cast-end why:load_failed` in the log is
+  the tell.
+- Does it handle our CMAF fMP4, the separate audio rendition, and the WebVTT subtitle
+  playlists in `master-native.m3u8`? `cast-tracks` lists what it found.
+- Does the keep-alive hold with the phone locked for a whole episode?
+
+**First device test, 2026-09-25: it works.** A Chromecast ("Ansel's room TV") was found
+by the scan, loaded a downloaded HxH episode through the door at the right position
+(1178 s) about 8 s after LOAD, and play/pause from the phone reached it. Progress POSTs
+went to the host at 200 throughout, and Stop stopped the TV. So **plain-HTTP HLS from a
+LAN door is accepted** by the Default Media Receiver, and our CMAF fMP4 plays. Three
+observations:
+- `cast-tracks audio:2 text:0`. The dual-audio rendition was recognised, but the
+  receiver exposed **no text tracks** from `master-native.m3u8`'s subtitle group.
+- The cast started **paused** (`cast-load autoplay:false`). The page's `armed.paused` was
+  true after an audio interruption, and the load inherited it.
+- `cast-live` / `hold-start` report position 0: the first status is BUFFERING, before
+  the seek lands. This is cosmetic.
+Not yet exercised: seek, auto-skip, advance, and a locked phone.
+
+**18.28.0, from that test:**
+- **Subtitles ride in the LOAD** as sidecar WebVTT tracks (`trackId = index + 1`, a
+  boxed `textTrackStyle`), with `activeTrackIds` set from `subIndex`. The page puts the
+  current file's list in every arm (`subs`, tagged `subsFile`). After a native advance
+  the list describes the previous episode, so `castSubs(for:)` reads the next bundle's
+  `meta.json` through `AirPlayDoor.upstreamURL`. The phone can't read through its own
+  door, because the door is Wi-Fi-only and a self-connection arrives on loopback.
+  On-demand sessions have no `meta.json`, so an advance into one casts without subs.
+- **`fmp4` only for bundles.** On-demand (`/ondemand/`) segments are MPEG-TS, the
+  receiver's default.
+- **Always autoplay.** Sending it to the TV is pressing play.
+- **TV volume.** The remote shows a Vol − / Mute (level %) / Vol + row while casting
+  (`castVolume`, the receiver's `SET_VOLUME`; the label is the level the receiver
+  reports back). The phone's **hardware buttons** drive it too: a hidden `MPVolumeView`
+  parks the phone's volume at 50%, each move away from it becomes one ±5% TV step, and
+  the phone's own level is restored when the cast ends. **Only while the app is in
+  front** (20.8.11): on resign-active (lock, home, another app, Control Centre) the
+  capture is released and the phone's level put back, so the buttons are the phone's;
+  it is taken again on become-active. AirPlay is never captured: there iOS itself
+  points the buttons at the receiver, and no API changes that.
+- **Back to phone.** It replaces **To TV** in the remote's last row and in the header
+  while on AirPlay or a Chromecast. `release()` drops the hold, and the usual
+  `_npHandBack()` → `reclaim` → `stopNative` stops the TV and resumes the page's element
+  at the native playhead.
+
+#### Sleep timer (19.5.0)
+
+The Options panel's **Sleep** row (`#lpSleepSelect` → `lpSetSleep`): Off, **End of
+episode**, 15 / 30 / 45 min, 1 / 1.5 / 2 hours. A small moon badge with the time left
+(`#lpSleepBadge`) sits next to the clock while one runs; tapping it opens Options.
+
+- **The clock pauses.** The sound fades over the last 10 s (`LP_SLEEP_FADE_SEC`), then
+  playback pauses and the volume is restored.
+- **End of episode ends the episode**: it's marked watched and the player closes, the
+  same as the last episode of a run. The morning's Resume then lands on the next
+  episode instead of restarting this one. It stops where the episode would have
+  advanced: the credits auto-skip point when that is on and a next episode exists,
+  otherwise the real end.
+- **Two runners, one timer.** The page runs it (`_lpSleepTick`, 4 Hz) while it is the
+  player. It also rides every arm (`sleepId` / `sleepAt` epoch seconds / `sleepEpisode`),
+  and native runs it (`maybeSleep`, from the AVPlayer time observer and the Cast status
+  poll, ahead of auto-skip) while native holds playback. Once the phone locks, the
+  page's timers are frozen, so native is the only thing that can fire it. Native tells
+  the page with `sleepFired {id, at: clock|credits|end|lapsed}`. For `end`, the page's
+  next `_lpAdvanceOrEnd` is swallowed (`_lpSleepSwallow`), because native already ended
+  the episode.
+- **`sleepId` makes it fire once.** It is the `Date.now()` of the setting. Native
+  remembers the last id it fired (`sleepFiredId`) and strips it from any later arm. A
+  page waking from a lock re-arms before the queued `sleepFired` reaches it, and would
+  otherwise hand native a timer that is already spent.
+- **A clock that runs out while paused is spent, not due.** Both runners drop it
+  silently instead of pausing the moment play is pressed. The page also drops a clock
+  that ran out while it was frozen (a tick gap over 3 s).
+- **The fade is audible only on the native player.** iOS ignores `<video>.volume`, so
+  on a foreground iPhone the page's fade is silent and the pause lands on time. The
+  AVPlayer's own `volume` ramps at 10 Hz. Cast has no local volume, so it just pauses.
+- **Setting it buzzes** (`_hap("selection")`); running out never does.
+
+#### Picture in Picture — automatic, on leaving the app (20.8.0; PiP verified on a device)
+
+Swipe home (or switch apps) while an episode plays on the phone and it carries on in a
+floating window. Coming back to the app brings it back into the player. There is no
+button. The 20.7.0 button and `pip()` were removed. Switch: ☰ App → Settings → Playback →
+**Picture in Picture** (`streamlink_app_pip`, default on, in `_appPrefKeys` and the `am=`
+seed). It rides every arm as `autoPip`, which is false for on-demand (`lp.mode ===
+"ondemand"`), because a second reader of a JIT encode would drag the encoder to two
+positions.
+
+**Why a shadow player.** iOS starts PiP by itself only for a native `AVPlayerLayer`
+that is **already playing** when the app leaves
+(`canStartPictureInPictureAutomaticallyFromInline`). The phone's player is WebKit's
+`<video>`, and the native player only starts at `didEnterBackground`, which is too late.
+WebKit's own PiP can't start without a tap, and the relief pitcher would take its audio.
+So while the page plays in the foreground, native runs a **shadow** (`createShadow`):
+
+- muted, capped at `PIP_SHADOW_MAXH` (540p) through `?maxh=`, with
+  `preferredForwardBufferDuration = 10`, since it only has to keep pace;
+- in its own `shadowPlayer`, **not** `player`, so nothing keyed on `isNativeActive`
+  (progress, Now Playing, the ignored page ticks) sees it;
+- following the page: `syncShadow` runs on every arm and every 1 Hz tick. It re-seeks
+  when it drifts more than 1.5 s (at most every 3 s), pauses when the page pauses, and
+  is rebuilt on a file or URL change;
+- created only while the app is active and the page is **playing**. It is retired by
+  any other takeover (glasses, AirPlay, Cast), a disarm, or the switch going off;
+- its layer sits behind the webview (`attachPiPSurface`), carrying the PiP controller.
+
+**The audio session is MIXABLE while only the shadow plays (20.8.1).** WebKit's `<video>`
+plays in an audio session of its own, and two exclusive sessions interrupt each other.
+Without this, the page's player and the muted shadow took the audio from each other
+every few seconds, and WebKit paused the page each time (`interruption began` →
+`unasked-pause`). `activateAudioSession` picks `.mixWithOthers` while the shadow exists
+(and keeps it after the shadow goes, because switching back to exclusive while the page
+plays is itself an interruption). Only `startNative` asks for `exclusive: true`, so a
+promoted shadow becomes the Now Playing app with the lock-screen controls. Each switch
+writes `audio-session {mix, ms}`.
+
+Two refinements (20.8.2):
+- With `autoPip` on, the session is mixable **from the first arm**, not only once the
+  shadow exists. The arm and the post-hand-back arm used to activate it exclusive
+  ~100 ms before the shadow made it mixable, which paused the page once at every start
+  and every return from PiP.
+- On a **PiP** promotion the exclusive switch is deferred to `didStart` and run off the
+  main thread (`makeSessionExclusiveSoon`). Until it has landed, `activateAudioSession`
+  returns early for any non-exclusive caller while `pipOn` (20.8.3): the page arms the
+  moment it becomes the remote, and that arm otherwise made the same switch inline. Inline, it cost 0.9 s of main thread inside
+  the PiP opening animation, and it broke WebKit's still-live element ("Media failed
+  to decode"). The lock promotion (no PiP) still switches inline: nothing is on screen,
+  and the relief pitcher must be the Now Playing app at once. A promoted shadow also
+  keeps its external-playback flags unless a display is connected, because flipping them
+  on a playing player re-evaluates its video output.
+
+**The swipe home.** iOS calls `willStartPictureInPicture` and `promoteShadow(pip: true)`
+hands the shadow to `startNative(reason: "pip", adopting:)`: same player, same item,
+unmuted, buffer back to automatic, seeking only if it drifted more than 2 s. From here
+on it is an ordinary native takeover, and the page becomes the remote on
+`nativeStarted reason:"pip"`. That event usually lands only on the way back, so the
+page checks `state().pip` before becoming a remote (`pip-start-stale` otherwise).
+
+**No PiP** (a lock, PiP switched off in iOS Settings): `appDidEnterBackground` waits
+0.8 s for `willStart`, then promotes the shadow **without** PiP (`pip-auto-missed`). The
+layer is dropped first, because an attached layer is how AVFoundation pauses video in the
+background. The relief pitcher is then a player that was already playing, which iOS
+continues, where it will not reliably start a new one.
+
+**Ending** (native reports `pipEnded {reason}`; the page's `_npHandBack()` takes it back):
+
+| How | `reason` | Native | Page |
+|---|---|---|---|
+| back in the app (`appDidBecomeActive` stops PiP) or the window's restore button | `restore` | keeps playing | hands back, element plays |
+| the window's X | `closed` | `setPaused(true, "pip-closed")` | hands back paused on return |
+| PiP failed to open | `failed` | drops the layer, plays on as the background handoff | hands back on return |
+
+The hand-back runs only while the page is **visible**. The `visibilitychange` guard is
+`_npHolding && (_npExternal || _npPip)`, and `pipEnded` clears `_npPip` so that whichever
+of the two arrives second does it. `_npHandBack` also drops a stale remote state when
+`resume()` finds nothing native left. `stopNative` → `endPiPSession` removes the
+controller and the view.
+
+**Cost:** a second stream at ≤540p (none extra for a downloaded episode, which plays
+from the phone's own loopback server) and a second video decode, for as long as an
+episode plays with the switch on.
+
+**20.8.2 verified 2026-10-03 01:31:** mixable from the first arm (no start pause), PiP
+open in 565 ms with no WebKit decode error, and a clean return.
+
+**Verified on device 2026-10-03 (20.8.0):** iOS does float the layer behind the
+webview: `pip-possible on:true`, then `pip-will-start` (app `inact`) on the swipe home,
+`pip-active`, and `pip-app-returned` → `restore` on the way back. The same run found the
+audio fight above. **20.8.1 verified the same night:** `audio-session mix:true` at the
+shadow's start, not one `interruption` row across play → PiP → restore, and the session
+went exclusive at the promotion (`mix:false` just before `startNative adopted:true`).
+The one `unasked-pause` left is the parked element during the hand-back seek
+(`seeking:1`); it played on, and the seek landed 3 s later.
+
+### 2c. Subtitle image packs (styled ASS + PGS/VOBSUB)
+
+**The problem.** An HLS subtitle rendition may carry WebVTT or IMSC1 and nothing else, so
+every sign, font, colour and karaoke effect is flattened on the way into `sub_<i>.vtt`.
+The web player dodges that by running libass-wasm over the video — but that is a canvas
+the *app* draws, so it cannot exist on a locked phone, where the native `AVPlayer` owns
+the picture and renders only real media tracks. Separately, HLS has no bitmap subtitle
+track type at all, so PGS/VOBSUB are dropped at prep (`skipped_image_subs`) and are
+currently unplayable on **every** on-device surface.
+
+**The approach.** Stop making the renderer the player's problem. `subpack.py` renders the
+subtitles once, server-side, with real libass — fonts, `\move`/`	` transforms, `\p1`
+vector drawings, karaoke — and emits a **display list of transparent PNGs**. A client then
+only has to composite one image at a time: a `CALayer` can do that from the render server
+while the app is backgrounded, and a `<canvas>` can do it in any browser.
+
+The alternative — burning subtitles into the picture with `-vf ass=` — was rejected
+because it re-encodes the video for every file, which throws away the prepped bundle
+entirely. This is **purely additive**: the pack lives in `<bundle>/subpack_<i>/`, no
+segment is rewritten, `OFFLINE_CACHE_VERSION` does not move, and no existing bundle is
+invalidated or re-prepped.
+
+```
+<bundle>/subpack_<i>/
+  manifest.json      display list: [{t, file, x, y, w, h} | {t, clear}]
+  c_<frame>.png      one image per VISUAL CHANGE, PTS-named
+  sub.ass            extracted source subtitle (text kinds)
+  fonts/             attachments, so libass uses the intended typefaces
+```
+
+`cues` is time-ordered and gap-free: the image named at `t` stays up until the next cue's
+`t`; a `clear` cue means show nothing. `x/y/w/h` is the ink bounding box, so a client can
+crop rather than decode a full 1920×1080 RGBA frame per cue.
+
+**How the frames are produced.** libass draws over a transparent canvas at the video's own
+geometry; `mpdecimate` collapses every frame where nothing changed, so a normal dialogue
+track costs one image per cue boundary rather than one per sampled frame. A `split` feeds
+the surviving frames to both the PNG writer and `cropdetect`, whose per-frame metadata
+becomes the bounding boxes — no second pass and no image library (there is no Pillow in
+the venv, by design). `-frame_pts 1` names each file by presentation time, so the
+timestamps are exact and need no sidecar. Two ffmpeg defaults will silently ruin this;
+both are in [GOTCHAS.md](GOTCHAS.md) and neither surfaces as an error.
+
+**Cost, measured** (1080p, 25-min episodes, NVENC host, no video decode involved):
+
+| Track | Images | Size | Time |
+|---|---|---|---|
+| AoT dialogue (incl. OP/ED karaoke) | 954 | 80 MB | 82 s (18.9× RT) |
+| AoT Signs & Songs | 685 | 68 MB | 60 s (25.8× RT) |
+| Code Geass dialogue | 433 | 20 MB | 95 s |
+
+Size is dominated by animated typesetting (OP/ED karaoke), where every sampled frame
+differs and `mpdecimate` saves nothing — plain dialogue is a few hundred KB. `DEFAULT_FPS`
+(5) is the lever, and `MAX_FRAMES` (6000) is the guard: a track that blows through it is
+marked `truncated`, and the caller must fall back to the plain VTT rather than serve a
+pack that silently stops partway.
+
+**For streaming this is not a transfer concern** — the client fetches each PNG as the cue
+changes (~20–60 KB every few seconds), not the pack as a whole. It only matters for
+offline bundle downloads.
+
+**Endpoints** (built lazily on first request, mirroring `_od_extract_ass`; the source is
+resolved from the bundle's own `meta.json["src"]`, so the cache key is all a caller needs):
+
+```
+GET  /api/library/offline-cache/<key>/subpack/<i>/status   → {state: missing|building|ready|error, …}
+POST /api/library/offline-cache/<key>/subpack/<i>          → start (idempotent)
+GET  /api/library/offline-cache/<key>/subpack/<i>/manifest.json
+GET  /api/library/offline-cache/<key>/subpack/<i>/c_<n>.png
+```
+
+**Not yet wired to any client.** The renderer, the storage layout and the endpoints are
+done and verified; the iOS `AVSynchronizedLayer` overlay and the web `<canvas>` path are
+the remaining work. See [GOTCHAS.md](GOTCHAS.md).
+
 ### 3. Skip-intro / credits
 
-`lpEvaluateSkipOffer(t)` runs on every `timeupdate` and mirrors the backend
-`_maybe_emit_skip_offer`:
+`lpEvaluateSkipOffer(t)` runs on every `_lpClockTick` — the `timeupdate`
+handler **plus** the 500 ms `_lpClockPump` fallback interval, because iOS MMS
+gaps `timeupdate` for seconds at a time while the clock advances (10.8.2; see
+[GOTCHAS.md](GOTCHAS.md)) — and mirrors the backend
+`_maybe_emit_skip_offer` — **including its per-profile auto-skip**. The current
+profile's `auto_skip_intro` / `auto_skip_credits` toggles are read live via
+`_lpAutoSkipPrefs()` (the freshly-fetched `allProfiles` entry, falling back to
+the stored `profile`; `saveAutoSkip` also writes the new values straight into
+both caches so a mid-session toggle takes effect on the next tick without a
+re-fetch). Behaviour per window:
 
-- Intro window: `start - 2 ≤ t < end - 2`. Show "Skip Intro" button.
-- Credits window: `t ≥ credits_start - 1`. Show "Skip Credits" / "End"
-  depending on whether there's a next file.
-- Dismissed offers add `<filePath>#intro` / `#credits` to `lp.skipDoneFor`.
+- **Auto-skip OFF (manual, unchanged):**
+  - Intro window: `start - 2 ≤ t < end - 2`. Show "Skip Intro" button.
+  - Credits window: `t ≥ credits_start - 1`. Show "Skip Credits" / "End"
+    depending on whether there's a next file.
+- **Auto-skip ON (countdown then auto-fire, mirrors the VLC marquee):** once
+  `t` enters `[skip_point − lead, skip_point)` the tile counts down (intro lead
+  `LP_SKIP_LEAD_INTRO = 5`, credits lead `LP_SKIP_LEAD_CREDITS = 10` — the same
+  leads as VLC's `SKIP_COUNTDOWN_*_SEC`) showing e.g. "Skipping Intro in 3" /
+  "Next Episode in 7" / "Ending in 7", and at `t ≥ skip_point` calls
+  `lpAcceptSkipOffer()` automatically (intro → seek to `end + 1`; credits →
+  `_lpAdvanceOrEnd`). The countdown is clock-tick-driven, so it freezes while
+  paused and tracks seeks, and the user can still tap the tile to skip early or
+  **Hide** to cancel. Intro auto-skip only engages while there's still >1 s of
+  intro left to skip (matching VLC).
+- Dismissed offers add `<filePath>#intro` / `#credits` to `lp.skipDoneFor`
+  (suppresses both the manual button and the auto countdown for that file), and
+  **re-arm the native player** — while it holds a display it owns the firing, and a
+  "Hide" that stopped at the page would be overruled by it seconds later.
+
+**While the native player holds an external display, the page does not fire.** It is not
+the player and it is not even reliably running: `_lpClockTick`'s two drivers are the
+parked element's `timeupdate` and a pump that returns early on `v.paused`, so during a
+handoff the evaluator has no clock at all, and once the phone locks its timers are frozen
+outright. From 18.12.0 the split is:
+
+- **Native fires** (`maybeAutoSkip`, off the same 1 Hz observer that drives the seek bar
+  and progress). The windows and the two profile toggles travel with the arm
+  (`introStart` / `introEnd` / `creditsStart` / `autoSkipIntro` / `autoSkipCredits`), as
+  do the NEXT episode's (`nextIntroStart` / …, fetched by `_lpAttachNextSkip` and
+  promoted by `advanceToNext`) — an advance that happens with the phone locked has
+  nothing awake to fetch them afterwards.
+- **The page draws**, off `_npApplyNativeTransport`'s native position:
+  `lpEvaluateSkipOffer` still shows the tile and its countdown, but `const remote =
+  _npHolding` stops it calling `lpAcceptSkipOffer` itself. Two actors seeking the same
+  skip is a double jump.
+- **`skipDone` flags OR, never assign** (`arm(from:)`): the page's copy is older than
+  ours whenever it was asleep. Only a file switch clears them.
+- **Credits with nothing armed to advance into does nothing.** The page's
+  `_lpAdvanceOrEnd` would end the session; with the glasses on and the phone in a pocket
+  that reads as the player dying mid-credits, so native lets it play out and `itemDidEnd`
+  owns the real end. The tile stays tappable for anyone who wants out early.
 
 The offer (`#lpSkipOffer`) renders only when the player is in full overlay
 (`.lp-active`) — hidden by CSS in tiny mode. The same CSS rule hides
@@ -605,7 +2241,8 @@ The offer (`#lpSkipOffer`) renders only when the player is in full overlay
 
 ### 4. Watch progress
 
-`#lpVideo`'s `timeupdate` calls `saveProgress(itemId, filePath, posSec, durSec)`
+`_lpClockTick` (`#lpVideo`'s `timeupdate` + the `_lpClockPump` interval) calls
+`saveProgress(itemId, filePath, posSec, durSec)`
 at most once every 15 s (matches `vlc_progress_tracker`). `saveProgress` is a
 single best-effort POST to `/api/library/{id}/progress`; failure is silent
 because the next tick or flush will overwrite anyway.
@@ -621,17 +2258,39 @@ exit/transition:
 
 `lpStop` and `ended` flush via `saveProgress` directly.
 
+**In the app, the native player writes its own progress and has its own flush
+rule** (`maybePostProgress` in `NativePlayback.swift`) — the webview's JS timers
+are frozen while backgrounded, so none of the above runs once the phone is
+locked. Same endpoint, same 15 s throttle, and the same need for a forced flush
+at teardown. All four teardown paths must post `force: true` **before** tearing
+down, and `disarm()` must flush and stop **before** it resets `armed`: it reset
+first until 18.7.1, which silently dropped the tail of every episode and fired
+on every advance, not just at stop. See
+[GOTCHAS.md § The one teardown path that wiped its state before saving it](GOTCHAS.md).
+
 `update_progress` preserves the file's existing `audio_track` /
 `subtitle_track` (VLC ES IDs) **and** `local_audio_idx` /
-`local_subtitle_idx` / `subtitle_sel` (HLS rendition indices + the subtitle
-descriptor) across writes, so a progress
-write doesn't wipe either track-pref system.
+`local_subtitle_idx` / `subtitle_sel` / `audio_sel` / `audio_offset_ms` (HLS
+rendition indices, the subtitle & audio descriptors, and the manual audio
+delay) across writes, so a progress
+write doesn't wipe any track-pref system. The canonical list is
+`_TRACK_PREF_KEYS` in `main.py` — every `file_progress` writer spreads it.
 
 ### 5. Auto-advance + manual Prev/Next + next-episode warm-prep
 
 When `<video>` fires `ended`, `_lpAdvanceOrEnd` saves a final 100% progress
 write, increments `lp.pi`, and calls `_lpLoadIndex(0)`. That re-runs the
-prep flow for the next file. If the next episode has already been prepped,
+prep flow for the next file. The 100% write does **not** by itself make the
+episode watched — the server also requires `played_sec` (see
+[LIBRARY_DATA.md § What counts as watched](LIBRARY_DATA.md)).
+
+**`ended` right after a seek is not the end of watching (17.5.0).** HLS lands a
+seek on a segment boundary, so asking for 5 s before the end lands *on* the end
+and fires `ended`. Measured live, that rolled the viewer into the next episode
+mid-scrub, so their scrub back landed in the wrong one. The `seeked` listener
+stamps `lp.lastSeekAt`; an `ended` within `LP_SEEK_END_GRACE_MS` (2.5 s) of it
+just holds on the last frame with the controls up — Next or the scrub bar take
+it from there. If the next episode has already been prepped,
 playback resumes within a network round-trip; otherwise the user sees the
 same "Building stream…" overlay.
 
@@ -668,11 +2327,25 @@ browser, time-synced:
 2. Slices the remaining-playlist tail from `app.library_playlist` starting at
    `app.library_current_file`, so on-device auto-advance continues the series.
 3. Fires `POST /api/stop` (202; VLC teardown is backgrounded) **and** calls
-   `lpPlay(itemId, tail, capturedTime, label)`. Because stop returns immediately,
-   the device's prep/transcode overlaps the TV teardown. The resume seek is
-   pinned to `capturedTime` (applied on `loadedmetadata`), so the device lands on
-   the same frame no matter how long prep takes — VLC is stopped, so the position
-   doesn't drift while the device prepares.
+   `lpPlay(itemId, tail, capturedTime, label, app.library_shuffle, app.library_shuffle_scope)`.
+   Because stop returns immediately, the device's prep/transcode overlaps the TV
+   teardown. The resume seek is pinned to `capturedTime` (applied on
+   `loadedmetadata`), so the device lands on the same frame no matter how long prep
+   takes — VLC is stopped, so the position doesn't drift while the device prepares.
+
+**Shuffle carries across the handoff (both directions).** The `tail` is already
+the shuffled remaining order (VLC's `library_playlist` stays shuffled during a
+shuffle session — `vlc_next`/`prev` slice it from `library_shuffle_order`), so the
+*order* survives regardless. What the handoff also threads through is the **shuffle
+flag + scope**: TV→device passes `app.library_shuffle` / `app.library_shuffle_scope`
+(the latter published in `state_snapshot`, masked to `""` when not shuffling) so the
+device sets `lp.shuffle`, shows **Exit Shuffle**, walks its random order on
+Next/Prev, and records the persisted pref with the right scope; device→TV
+(`lpHandoffToVlc`) passes `lp.shuffle` / `lp.shuffleScope` into `playLibraryFiles`'s
+`/play` body so the server re-establishes `state.library_shuffle_order`. Without
+this the destination treated the handoff as a normal play and snapped Next/Prev back
+to natural order. `lpPlay` also skips its single-file→full-series expansion when
+`shuffle` is set, so a 1-file shuffled tail isn't padded with un-shuffled episodes.
 
 Needs `app.is_library_playback && app.library_item_id` (both published in
 `state_snapshot()`); the footer **Device** button and fullscreen **To Device**
@@ -727,6 +2400,151 @@ Guarded by `withInflight("handoff_vlc")`.
 
 ---
 
+### 8. Cross-device sessions — "playing elsewhere" and pull-over (17.8.0)
+
+Sections 6 and 7 move playback between **the TV and this device**. This section
+is the general case: *any* device seeing *any* other device's playback, and
+taking it.
+
+#### Why it needed anything new
+
+The TV was always visible to everyone, because VLC and the kiosk are server
+state — `vlc_status` polling and `/api/tv-local/state` both land in `AppState`,
+which `state_snapshot()` broadcasts to every dashboard. A phone playing in its
+own `<video>` is the opposite: entirely client state. The only trace it left on
+the host was `POST /api/library/{id}/progress` every 15 s — enough to remember
+where you got to, nowhere near enough to say "this is playing **right now**, on
+**that** device, and here is how to take it".
+
+So on-device players now beat a session report to the host.
+
+#### The registry (`main.py`, the "Cross-device playback sessions" block)
+
+- **`state.playback_sessions`** — `device_id → record`, **in memory only**. Never
+  written to `library.json`: a session is a fact about right now, and a host
+  restart genuinely does end every session it knew about.
+- **The beat** is `POST /api/playback/session`, ~every 2 s from the web player
+  (`_pbBeat`) and every 5 s from the backgrounded native iOS player
+  (`maybePostSession`). `PLAYBACK_SESSION_STALE_SECS = 15` reaps a session that
+  stops beating — swept from `stat_broadcaster`'s existing 2 s tick
+  (`_playback_reap_sessions`), not a task of its own.
+- **The continuity payload** (`playlist`, `playlist_items`, `shuffle`,
+  `shuffle_scope`) rides only on the beats where it **changed** — a run can be a
+  hundred-plus paths and this beats at 2 s. The record keeps the last value it
+  was given, so a pull triggered by a bare position beat still gets the whole run.
+- **VLC and the kiosk are not in the registry.** They already report themselves
+  two other ways, and a third would be a third source of truth for one screen.
+  `_playback_tv_session()` reads the shared fields they both populate
+  (`active_title`, `vlc_time`, `vlc_duration`, `library_*`) back out in the
+  session shape, on read.
+
+#### Who sees what
+
+`GET /api/playback/sessions` filters **server-side**, per caller:
+
+| | Visible to |
+|---|---|
+| A device session | the **same profile** only, and never itself — and, when the item is `admin_only`, only if the request also *proves* elevation (`_is_elevated`), because a `profile_id` query param is a claim, not proof |
+| The TV | **every** profile, tagged with the `profile_name`/`profile_color` that started it |
+
+The TV is special on purpose. It is one physical screen in a shared room and the
+dashboard has always shown its now-playing to everyone (the footer player, the
+fullscreen controls) — hiding it here would be a regression dressed as privacy.
+Naming who started it is what keeps taking it over a deliberate act.
+
+Filtering cannot happen in the `state` broadcast: that is one message to every
+connected dashboard whatever profile it is signed in as, so putting the records
+in it would ship every profile's titles to every device in the house. `state`
+carries only **`playback_sessions_rev`**, a change counter — "the set moved,
+re-fetch". A position-only beat never bumps it; the client ages a playing
+session's clock from `seen_at` instead (`_pbAgedPos`).
+
+#### The takeover: command → flush → take
+
+`POST /api/playback/pull` blocks, on purpose:
+
+1. **Command.** Arm `yield_to` on the session, broadcast `playback_command`.
+2. **Flush.** Wait up to `PLAYBACK_YIELD_WAIT_SECS` (2.5 s) for the source to
+   `POST …/yield` with its **exact** playhead and stop. This is the difference
+   between the episode resuming on the same frame and resuming up to a beat
+   behind.
+3. **Take.** Return position + the tail sliced from the current file forward +
+   shuffle flag and scope, for the caller to `lpPlay`.
+
+*A source that is asleep still hands over.* On timeout the pull returns anyway —
+`exact:false`, position from the last beat **aged forward** by up to 6 s when it
+was `playing` — and **leaves `yield_to` armed**, so the source stops when it next
+beats. A slow source costs accuracy, never the takeover. `PLAYBACK_YIELD_ARM_SECS`
+(30 s) disarms a yield a surviving-but-slow session never honoured.
+
+**Two channels carry the yield, and the second one is the load-bearing one.**
+SSE (`playback_command`) reaches a page that is awake within a tick. But the case
+that matters most — a phone in a pocket, native `AVPlayer` running with the
+screen off — has a frozen WebView: no JS timers, no live `EventSource`. That
+device is still *posting*, so the answer to its own heartbeat (`yield: true`) is
+the one channel guaranteed to arrive. `NativePlayback.honourYield` acts on it,
+flushes, stops, and emits `nativeYielded` so the web player tears down to match
+when the app comes back.
+
+*Pulling is **not** prep-gated, unlike the footer Handoff button.* `handoffToDevice`
+greys out when the current file has no HLS bundle, because it would stop the TV
+and then sit in a full encode. A pull takes the on-demand (JIT) path instead —
+the same thing the fullscreen To-Device tile does when you hold it mid-prep
+(`allowOnDemand`) — so playback starts in seconds rather than being refused. The
+only hard gate is `hlsAvailable` (false on a macOS host).
+
+**`session_id: "tv"`** takes the server-side path (`_playback_pull_tv`) — the
+host reads VLC's live position itself (fresher than the ≤2 s `state.vlc_time`,
+same reason `handoffToDevice` re-reads `/api/vlc/tracks`), builds the tail from
+`library_playlist` + `library_series_map`, then `await stop()`. Not on the
+kiosk's own player, where VLC is idle by design and would answer with zeros.
+
+#### What travels, and what already did
+
+| | How |
+|---|---|
+| Position | the yield flush (exact), or the aged last beat |
+| Remaining episodes, incl. a merged-series item map | the session's continuity payload, sliced to the tail |
+| Shuffle flag + scope | same |
+| Audio / subtitle picks, audio delay | **not** the payload — `library.json`'s per-file and per-series pick memory, which both players already write on every deliberate choice and read on every load. That is what carries a pick across a device↔TV switch today, and it is fresher than a session snapshot could be. `audio_sel` / `subtitle_sel` ride on the wire for diagnostics only. |
+| Progress | `lpStop()` on the source writes it as it always did, before the destination starts |
+
+#### Client side (`static/index.html`)
+
+- **Identity** — `_pbDeviceId()` is a plain `localStorage` UUID; the host keeps
+  sessions in memory, so there is nothing to register and nothing to revoke.
+  `_pbDeviceName()` is the coarse UA-derived default ("iPhone · Safari"),
+  overridable in **Settings → This Device → Device Name** (`saveDeviceName`,
+  device-local like the rest of that block). Both are seeded across the proxied
+  loopback origin by `_appTryLocalHandoff` ↔ `_appProxiedSeedStorage` (`did=` /
+  `dnm=`) — that origin has its own `localStorage`, so without it the same phone
+  would mint a second identity halfway through an episode.
+- **Beating** — `_pbBeatStart()` from `lpPlay` (at the *start* of a play, not the
+  first frame: a cold JIT start takes seconds and a session nobody can see yet is
+  a session nobody can pull), `_pbBeatStop()` from `lpStop` and from `pagehide`
+  with a beacon.
+- **The banner** — `#elsewhereBanner`, rendered by `renderElsewhere()`, one row
+  per session, hold-to-pull (`_pbPullFromBtn` → `pullPlayback`). Refreshed by
+  `_pbOnRev()` off the `state` event and on a profile switch. A 1 Hz timer
+  repaints only the clock cells — a full re-render mid-hold would drop the hold.
+  It renders **inside the navbar**, standing in for the `#navLogo` wordmark while
+  it is up (18.5.4) — as its own strip above `<header>` it had no safe-area inset
+  of its own and the iOS status bar covered it. See
+  [FRONTEND.md § Cross-device playback sessions](FRONTEND.md).
+- **Not on the `?tv=1` kiosk.** It is the couch surface, driven by a remote with
+  no pointer, and it is itself one of the sessions being listed.
+
+#### iOS (`NativePlayback.swift`)
+
+`maybePostSession` and `honourYield` hang off the same 1 s time observer that
+already writes progress, so background playback costs one extra request every
+5 s. `ArmedPlayback` gains `deviceId` / `deviceName` / `sessionProfileId` /
+`sessionSource`, pushed from `_npPayload()`. `yielded` is reset on each fresh
+`arm` — without it one takeover would leave the flag set for the life of the
+process and every later session on that device would refuse to hand over.
+
+---
+
 ## On-Demand (just-in-time) streaming
 
 The full-prep bundle above encodes an **entire** file before playback can start.
@@ -761,24 +2579,61 @@ wins (on-demand is a supplement, never a replacement).
 - **ffmpeg shape** (`_od_build_ffmpeg_args`): `-ss <start_seg*6>` **before** `-i`
   (fast keyframe seek, output PTS reset to 0), `-map 0:v:0 -map 0:a:<idx>`, video
   **always transcodes** (NVENC transparent tier when present, else `libx264
-  -preset veryfast`) with `-force_key_frames expr:gte(t,n_forced*OD_SEGMENT_SECS)`,
-  audio → AAC stereo, `-hls_segment_type mpegts -start_number <start_seg>
-  -hls_segment_filename seg_%d.ts -hls_list_size 0`. All outputs are **bare names**
-  run with `cwd=<session dir>` (same Windows-safe rule as the bundle path). Reuses
-  `_ffmpeg_nice_prefix()` / `_FFMPEG_SUBPROCESS_KW` (below-normal priority) and
-  `_has_nvenc()`.
+  -preset veryfast`) with `-force_key_frames expr:gte(t,n_forced*OD_SEGMENT_SECS)`.
+  **The CPU path must beat real-time** or the client's forward buffer drains and
+  playback stalls at the buffer edge (the "won't play past the buffer" glitch,
+  which then triggers stall-kicks / 410 reloads that can reset position → lost
+  progress). So on the **non-NVENC** path the encode **downscales to at most
+  `OD_CPU_MAX_HEIGHT` (720p)** via `-vf scale=-2:720` and uses **`-threads 0`**
+  (all cores — this is interactive playback, not bulk prep; the below-normal
+  priority still keeps the server snappy). NVENC keeps source resolution (it
+  already beats real-time, and the bridge stream stays sharper). The HLS `-level`
+  is derived from the **output** height (720p → 4.1). Then
+  audio → AAC stereo, `-muxpreload 0 -muxdelay 0 -output_ts_offset <start_seg*6>
+  -hls_segment_type mpegts -hls_flags independent_segments+temp_file
+  -start_number <start_seg> -hls_segment_filename seg_%d.ts -hls_list_size 0`. All
+  outputs are **bare names** run with `cwd=<session dir>` (same Windows-safe rule as
+  the bundle path). Reuses `_ffmpeg_nice_prefix()` / `_FFMPEG_SUBPROCESS_KW`
+  (below-normal priority) and `_has_nvenc()`.
+  - **Three flags are load-bearing for the virtual-playlist contract** (each fixed a
+    real "JIT is buggy" symptom — see [GOTCHAS.md](GOTCHAS.md)):
+    - `-forced-idr 1` on the **NVENC** branch. Without it `h264_nvenc` silently
+      **ignores** `-force_key_frames` and emits keyframes only at its default GOP
+      (~250 frames ≈ 10.4 s), so segments come out ~10 s instead of 6 s → the
+      index↔time map is wrong (seeks land seconds off, subs desync, PTS drifts ahead
+      of the playlist → buffer holes). libx264 honors `-force_key_frames` unaided.
+    - `-muxpreload 0 -muxdelay 0`. The MPEG-TS muxer otherwise starts the first PTS
+      at ~1.4 s, so every segment's PTS lands 1.4 s above its playlist slot → a gap
+      at each segment/seek boundary. Zeroed, seg *N* starts at exactly *N*·6.
+    - `temp_file` in `-hls_flags`. Segments are written to `seg_N.ts.tmp` and
+      renamed to `seg_N.ts` only on finalize, so the serve gate (`seg_path.exists()`)
+      never streams a half-written `.ts`.
 - **Why mpegts + forced keyframes** (see [GOTCHAS.md](GOTCHAS.md)): TS segments are
   self-contained (no shared `EXT-X-MAP` init), so independently-seeked encodes never
   produce mismatched init segments the way fmp4 would. Forcing keyframes every
-  `OD_SEGMENT_SECS` (with the PTS reset from input-seek) guarantees segment *N*
-  covers exactly `[N*6,(N+1)*6)` — which is what makes the virtual playlist's timing
-  correct and seeking land precisely. Stream-copy can't guarantee that boundary
-  alignment, so it stays a full-prep-only win.
+  `OD_SEGMENT_SECS` (with the PTS reset from input-seek, `-forced-idr 1` so NVENC
+  actually obeys the force, and `muxdelay/muxpreload 0` so the PTS isn't skewed)
+  makes segment *N* cover **exactly** `[N*6,(N+1)*6)` with its first PTS landing on
+  *N*·6 — which is what makes the virtual playlist's timing correct and seeking land
+  precisely. Stream-copy can't guarantee that boundary alignment, so it stays a
+  full-prep-only win.
 - **Lifecycle.** `_od_reaper` (a `lifespan` task) terminates ffmpeg + `rmtree`s the
   dir for sessions idle past `OD_SESSION_IDLE_SECS` (90 s) and caps the live count at
-  `OD_MAX_SESSIONS`. Active playback refreshes `last_access` on every segment fetch,
-  so a watching session is never reaped mid-stream. `POST …/close` (a sendBeacon on
-  stop/unload) tears a session down promptly; the reaper is the backstop.
+  `OD_MAX_SESSIONS`. Active playback refreshes `last_access` on every segment fetch.
+  `POST …/close` (a sendBeacon on stop/unload) tears a session down promptly; the
+  reaper is the backstop.
+
+  > **Reaping vs. a deliberately deep client buffer.** "Active playback refreshes
+  > `last_access`" is necessary but **not sufficient** — the player buffers far ahead
+  > (`maxBufferLength`, up to 180 s) and while **paused or fully buffered** can go
+  > longer than the 90 s idle window without fetching a segment, so the reaper *could*
+  > delete a session that's still being watched. The next fetch then `410`s. The
+  > client guards both ends (see [§ Client — session keepalive & 410 recovery]
+  > (#client-staticindexhtml)): a **keepalive ping** (`_lpOdKeepAlive`, ~30 s) keeps
+  > `last_access` fresh while not fetching, and a `410` triggers a **re-prepare at the
+  > current position** (`_lpReloadOnDemand`) that promotes to the now-ready full bundle
+  > or starts a fresh OD session — never the dead-session retry loop. So a reaped
+  > session is recoverable, not a wedge.
 - **Background full prep.** `stream-ondemand` also fires `_maybe_start_prep_job`
   (**bulk** queue — low priority, honors the global pause / idle-kill) so a
   *subsequent* play uses the rich ABR/multi-audio bundle. JIT only bridges the gap
@@ -792,6 +2647,18 @@ wins (on-demand is a supplement, never a replacement).
   `{ready:false, ondemand_only:true}` — every on-device play stays on JIT and nothing
   permanent is written. VLC (TV) playback is unaffected (it never uses HLS). See
   [ADMIN.md § Storage & Compression](ADMIN.md).
+- **Flagging an item on-demand-only cancels prep that's already in flight, not just
+  queued work.** `_apply_ondemand_only` sets `job["_ondemand_cancelled"] = True` on
+  every matching job **before** `proc.terminate()` — mirroring the `_admin_stopped` /
+  `_paused_kill` pattern (see [GOTCHAS.md](GOTCHAS.md)). Without that flag the worker
+  read the terminate's non-zero exit as a real failure: a full-GPU encode **restarted
+  on the transparent path** (the encode just kept running, ignoring the toggle) and a
+  regular encode surfaced a spurious `ffmpeg failed`. `_run_offline_job` now treats the
+  flag as a clean cancel (drop the partial `.part`, mark `cancelled`, no retry) ahead of
+  the full-GPU retry branch; the flag also feeds `is_stopped` so an in-flight
+  validate/repair phase bails, and a guard before the encode loop catches a flip that
+  lands during validation. Existing permanent bundles are still reclaimed by the
+  detached `_purge_ondemand_bundles`.
 
 ### Client (`static/index.html`)
 
@@ -818,8 +2685,64 @@ wins (on-demand is a supplement, never a replacement).
   **identical** `<track>` machinery as the bundle (`prep.subtitles` + `prep.subs` from
   `_list_sidecar_subs`) — `subBase` resolves to `/api/library/ondemand/<key>/sub_<i>.vtt`.
   So a show played via JIT (un-prepped fallback **or** an *on-demand-only* item) keeps its
-  in-MKV subtitles. The **Clip** row is hidden in OD mode — clipping needs the bundle
-  (`409` otherwise), so it returns once the file is fully prepped.
+  in-MKV subtitles. **Styled ASS/SSA subs are rendered with full libass styling in OD too
+  (8.10.0).** `_od_subs_meta` flags a styled sub with `ass_file` (mirroring the bundle
+  meta); the raw `sub_<i>.ass` is stream-copied out lazily on first fetch (`_od_extract_ass`)
+  and the source's embedded **fonts** are extracted eagerly at session-create
+  (`_extract_bundle_fonts` into the session dir, only when a styled sub exists), returned in
+  the `stream-ondemand` `fonts` list. `ondemand_file` serves `sub_<i>.ass` + `font_*`, and the
+  client's `_lpStyledSubFor` / `lp.fonts` now accept `lp.mode==="ondemand"`, so
+  `_lpApplyStyledSub` (SubtitlesOctopus) fires exactly as in bundle mode. The flattened
+  `sub_<i>.vtt` stays the fallback on any libass failure. All are reaped with the session dir.
+  The **Clip** row is now **shown in OD mode too (8.10.0)** — `_build_clip` cuts straight from
+  the source, so `make_clip` accepts either a bundle `master.m3u8` **or** a live OD session for
+  the source (both prove it's on disk + probed); the old bundle-only `409` gate is relaxed.
+- **Session keepalive & 410 recovery.** The OD session is short-lived (the reaper
+  deletes it `OD_SESSION_IDLE_SECS` after the last fetch), but the player buffers far
+  ahead and — paused / fully buffered — can out-wait that window, so the session can be
+  reaped mid-watch. Three client pieces keep that from wedging playback:
+  - `_lpOdKeepAlive(force?)` (called from the 3 s `_lpStallWatch` tick, self-throttled to
+    ~30 s) GETs the session's `master.m3u8` while `lp.mode==="ondemand"`, refreshing the
+    server's `last_access` even when no segments are being fetched.
+  - **Silent in-place resurrect (10.10.4).** The keepalive can still *lose* when the
+    page's timers freeze through the whole 90 s idle window — system/display sleep or a
+    long-backgrounded tab, the classic "paused on a laptop, came back later" case. So
+    the keepalive inspects its response: on `410` it calls `_lpOdResurrect()`, which
+    re-POSTs `/stream-ondemand` for the current file. Because `_od_session_key` is
+    deterministic per (source, audio track), the server re-attaches at the **same
+    `master_url`** — the live hls.js instance and its buffered content are untouched
+    (works equally while paused; the next segment fetch just restarts the encode at
+    that position). This heads off the *visible* mid-watch reload below, which
+    previously read as "resume after a pause has to reload from the server". `play`
+    and the foreground-return `visibilitychange` handler force an un-throttled check
+    (`_lpOdKeepAlive(true)`) so the heal races ahead of the user noticing; wake from
+    display-sleep (no `visibilitychange` fires) is covered by the stall-watch tick
+    resuming. If the re-attach resolves to a *different* key (a saved audio pick
+    changed elsewhere) it falls back to `_lpReloadOnDemand`; on fetch failure it does
+    nothing and the next tick retries.
+  - When a fetch still 410s (a reap won the race, or the tab was backgrounded with
+    throttled timers), `_lpReloadOnDemand(reason)` re-runs `_lpLoadIndex` at the current
+    playhead instead of the dead-session retry loop. **"Current playhead" must not
+    trust `video.currentTime` blindly (9.12.2):** the reap most often wins while the
+    app is suspended, and iOS can reset the media element in that same stretch, so
+    `currentTime` reads 0 on return — reloading there restarted playback (and the
+    next 15 s progress save, which then clobbered the server's position) from the
+    beginning. The player tracks a per-file last-known-good playhead (`lp.lastKnownT`,
+    fed by `_lpClockTick` (`timeupdate` + the 500 ms pump) >2 s and every
+    `seeked`, reset by `_lpLoadIndex`) and all
+    recovery paths — `_lpReloadOnDemand`, both `recoverMediaError()` sites, the
+    Safari-native `load()` reloads, the OD audio-switch reload — fall back to it
+    (or `lp.resumeSec`) when `currentTime` reads ~0. `recoverMediaError()` also
+    resets `currentTime` to 0 by rebuilding the MediaSource, so those sites arm the
+    resume machinery (`lp.resumeSec`/`resumeApplied`) before recovering — see
+    GOTCHAS.md. That re-POSTs `/offline-prepare`: if
+    the background full prep finished it **switches to the rich bundle**; otherwise it
+    creates a fresh OD session (same deterministic `_od_session_key`) and resumes. The
+    hls.js path detects the 410 directly (`_lpIsOdSessionGone` → `data.response.code===410`);
+    the Safari-native path (no HTTP status on the `<video>` `error`) escalates to the same
+    reload once the reconnect backoff has grown past a couple of failed attempts. A
+    re-entry guard (`_lpReloading`) collapses the burst of 410s from every queued fragment
+    into a single reload.
 
 > **Not on macOS.** Like all HLS prep, on-demand is disabled when `HLS_AVAILABLE` is
 > false (the TCC block). The endpoints `503` and the dashboard never reaches the OD
@@ -854,9 +2777,18 @@ quieter **Clip last…** custom-length button (`_clipPromptSeconds`):
 
 **Shared client core.** `_doClip(itemId, filePath, endSec, seconds, audioIdx,
 btn)` POSTs `/api/library/{id}/clip`, then `_shareOrDownload(url, filename)`
-fetches the result and hands it to the OS **share sheet** when the platform can
-share files (`navigator.canShare({files})` — iOS/Android), else triggers a
-download (desktop), with a `window.open` last resort.
+delivers the result:
+
+- **iOS app (Capacitor):** opens the clip's host URL in **Safari** via the native
+  `BundleDownloader.openExternal({url})` method, where iOS previews the MP4 with a
+  native Save-to-Files/Photos + Share sheet. This is required because the dashboard
+  runs in the WebView over a plain-http host origin (not a secure context), so
+  `navigator.share`'s file API is unavailable and `<a download>` / `window.open`
+  are no-ops inside the WebView. The clip URL's random token is the capability, so
+  no extra header is needed. See [GOTCHAS.md](GOTCHAS.md).
+- **Web/desktop:** hands the file to the OS **share sheet** when the platform can
+  share files (`navigator.canShare({files})` — iOS/Android Safari/Chrome), else
+  triggers a download (desktop), with a `window.open` last resort.
 
 **Server.** `POST /api/library/{id}/clip` re-encodes `[end_sec-duration,
 end_sec]` of the **original source** (not the HLS segments — best quality +
@@ -882,6 +2814,58 @@ probed. `503` on macOS (`HLS_AVAILABLE` false).
 > rendition index. Windows/Linux/macOS-agnostic; gated on HLS like all prep.
 
 ---
+
+## Never prep an incomplete download
+
+**A bundle built from a half-downloaded file is permanently broken, and looks
+fine while it happens.** qBittorrent writes pieces into a sparse file whose
+reported length reaches its final value long before the last piece lands, so
+`Path.exists()` and `st_size` cannot tell a partial file from a finished one —
+it is simply full of holes. ffmpeg stream-copies straight through those holes,
+emits a full-duration playlist and exits 0. Playback then runs for a few
+seconds and cuts to black.
+
+What makes it unrecoverable is the cache key. `_offline_cache_key` is
+`sha256(version|name|size)[:24]` and the size is *already final*, so the garbage
+bundle lands on exactly the key the finished file will resolve to.
+`_maybe_start_prep_job` then reports `cached` forever and nothing ever rebuilds
+it. (Observed on *Hacks S04E01*: the encode finished 29 s before qBittorrent
+finished the download; the bundle was 1,637 MB where a clean rebuild is 2,112 MB.)
+
+Two gates, because prep has more than one entry point:
+
+- **`_enqueue_library_prep`** calls `_incomplete_download_paths(item)` per item —
+  qBit's **per-file** `progress < 1.0` — and skips those paths, so auto-prep
+  never queues them in the first place. An item that isn't `status="downloading"`
+  costs no qBit call.
+- **`_run_offline_job`** re-checks with `_src_still_downloading(src)` immediately
+  before the encode, so play-driven (`play_prep`), interactive and admin
+  force-prep jobs can't slip one past either. A job that hits this gate parks as
+  `pending` and re-checks every 15 s, mirroring the `_is_compressing` park just
+  above it.
+
+Both err towards *not* encoding: if the item is downloading and qBit can't
+confirm the files (torrent gone, qBit down), every file is treated as incomplete.
+
+**`progress == 1.0` is not the finish line.** qBit flips a file's per-file
+progress the moment its last piece *verifies*, then flushes to disk
+asynchronously, so the sparse file's length reaches its final value a beat
+later. Prep in that window reads complete data — the bytes are in qBit's cache
+— but `_offline_cache_key` reads `st_size`, so the bundle is filed under a
+length the finished file will never have and no later lookup can find it.
+`_incomplete_paths_sync` therefore also requires the on-disk size to equal
+qBit's authoritative `size` for that file.
+
+**The key is re-derived at encode time.** `job["out"]` is computed when the job
+is *queued*, and a job can sit pending behind this gate, the pause gate and the
+priority queue for a long time. `_run_offline_job` recomputes
+`_offline_cache_dir(src)` after the gate passes and retargets (adopting an
+existing bundle if one already sits at the new key) rather than encoding into a
+directory the source no longer maps to.
+
+> **Existing damage isn't self-healing.** A bundle already built this way keeps
+> the finished file's key. Delete it (**Admin → Offline Cache**, or
+> `DELETE /api/admin/offline-cache/{cache_key}`) and re-prep.
 
 ## Pause / resume + auto-prep
 
@@ -975,7 +2959,9 @@ schedule. `item["prep"]["files"][path] ∈ {now, idle, never}` (read via `_prep_
 `POST /api/library/{id}/prep-schedule`:
 
 - **now** — `/prep-schedule` immediately enqueues a bulk prep job per file (a scoped
-  `/prep-all`).
+  `/prep-all`) at the asked tier `_PREP_PRIO_ASKED`, ahead of all auto-prep (and
+  promotes a job auto-prep already queued for the file). Interactive/admin prep
+  still outrank it; a running bulk encode is not preempted.
 - **idle** — the implicit default: `auto_prep_loop` builds the bundle during the
   idle/always window.
 - **never** — opt out of **all** automatic prep. Both `_enqueue_library_prep` (the
@@ -1090,6 +3076,222 @@ disk until the admin purges them. Pre-`v3-hls` MP4 caches surface as
 
 ---
 
+## Source eviction (18.0.0) — deleting the source, keeping the bundle
+
+A prepped episode exists on disk **twice**: the source the torrent downloaded,
+and the HLS bundle prep built from it.
+
+> **The "~1.7x" figure in *State + storage* is an average almost no individual
+> series sits near, and the direction flips.** Measured across the reference
+> library — 456.2 GB of sources against 364.2 GB of bundles, **0.80x** overall,
+> so deleting every source would reclaim **56%** of the pair:
+>
+> | Series | Source | Bundle | Bundle/source |
+> |---|---|---|---|
+> | Hunter x Hunter (Blu-Ray 10-bit) | 95.4 GB | 37.7 GB | **0.40x** |
+> | Code Geass (Blu-Ray) | 45.2 GB | 16.5 GB | 0.37x |
+> | Star Wars Ep III | 13.2 GB | 13.0 GB | 0.98x |
+> | Vinland Saga S2 | 11.0 GB | 17.7 GB | 1.62x |
+> | Futurama S05 | 3.9 GB | 9.1 GB | 2.36x |
+> | Death Note (x265 10-bit) | 5.7 GB | 18.9 GB | **3.31x** |
+>
+> The driver is the source's own bitrate. A fat Blu-Ray rip re-encodes to a
+> VBV-capped H.264 ladder **much smaller** than the original; an already-tight
+> x265 encode re-encodes to a ladder **several times bigger**. Eviction's value is
+> therefore not a constant — it is large where the source is big, and actively
+> poor where the source is already small. **Ordering candidates by age alone
+> ignores this**, and on the reference library the eligible pool was dominated by
+> Death Note, the single worst series to evict (source is 23% of its pair).
+
+The bundle is what every phone, every browser and the TV kiosk actually play. The
+source is what **VLC** plays, and what a fixed list of features re-reads later.
+Eviction therefore buys disk and sells capability, per file:
+
+| Still works | Gone for that file |
+|---|---|
+| On-device / browser playback (bundle) | VLC on the TV: 5.1 audio, HDR10, image subs, frame-accurate seek |
+| iOS download-to-device (`/bundle-manifest`) | On-demand JIT — the fallback when a bundle is purged |
+| Subtitles already mirrored into the bundle | Automatic subtitle fetch (`subsync` aligns against source audio) |
+| Progress, skip data, watched state | Source validation, repair, compression, fingerprinting, clips |
+| Re-adoption on re-download (see *Recovery*) | Any future `OFFLINE_CACHE_VERSION` rebuild |
+
+That last row is the quiet one. The bundle format has moved v3 -> v7 -> v8 and
+gained the audio pin, the edit-list re-encode and the resync repair — **all
+applied by rebuilding from source**. An evicted file's bundle is frozen at the
+format it was built in.
+
+### The policy: two clocks, two disk marks
+
+The arithmetic is in **[srcevict.py](../srcevict.py)** (pure, `tests/test_srcevict.py`);
+`main.py` gathers the facts. The split is the whole design:
+
+* **Age decides what is ELIGIBLE.** A series untouched for `idle_days` (default
+  **15**) joins the pool. A series nothing has **ever** played ages from its
+  download date on the shorter `never_played_days` (default **7**).
+* **Free space decides what is TAKEN.** Nothing is deleted while the disk is above
+  `floor_gb`; below it, the oldest candidates are taken until free space is back
+  above `target_gb`, then it stops. `policy_from` forces `target_gb > floor_gb` —
+  without hysteresis a disk sitting on the line sweeps one file every tick forever.
+
+The short default clock is safe *because* of that split: a deep candidate pool
+means the sweep always has something old to take and never has to reach for
+something recent.
+
+> **The clock is per SERIES, not per file and not per item.** Touching any episode
+> protects the whole show, so a part-watched season is never half-evicted under a
+> viewer. Per *item* would not do — a show downloaded one torrent per episode is
+> many items, and an item-level clock ages each episode separately, which is the
+> per-episode behaviour this rejects. `_series_clocks_sync` rolls up every
+> profile's every `file_progress.updated_at` across every item sharing a
+> `_series_key`, falling back to the **newest** `added_at` (a show still receiving
+> episodes is live content even if nobody has started it).
+
+### The gate
+
+`_evict_candidates_sync` blocks a file unless **every** check passes, and any
+check it cannot *establish* blocks rather than passes — missing evidence is not
+permission. The blockers (all surfaced in the dry run) are:
+
+`not-aged` · `no-bundle` · `unverified` (no current `bundle_check`) · `damaged` · `no-source`
+(nothing on disk and no `bundle` record — distinct from `already-evicted`, which means
+a sweep really did take it) ·
+`incomplete-bundle` (`_bundle_playable_sync`: a playlist references a missing or
+zero-byte segment, or the `init_*.mp4` is gone) · `source-incomplete` (qBit not at
+100%, or unreachable) · `in-progress` (a non-completed position > 5s for any
+profile) · `next-up` (any profile's `find_series_resume_hint`, for profiles that
+have actually started that series) · `busy` (playing in VLC, mid-compress, feeding
+a JIT session, prep job on the key, or the item is racing) · `already-evicted` ·
+`not-video`.
+
+The dry run reports each reason twice: once counting **every** file that carries it,
+and once counting only files where it is the **sole** blocker
+(`srcevict.sole_blocker_summary`). The second is the actionable one — a file also
+waiting on the clock is not waiting on the bundle audit, so counting it under
+`unverified` would promise a pool that finishing the audit could not deliver.
+
+`unverified` is load-bearing: `bundle_check` is what proves the bundle is not a
+frozen-picture wreck, and it is written by the idle audit, so a freshly prepped
+file is not evictable until the sweep has looked at it.
+
+### Addressing a bundle with no source
+
+`_offline_cache_key(src)` **stats the source**, so every path above it assumes the
+media file is there. The `files[].bundle` record is what replaces that stat:
+
+```jsonc
+"bundle": {
+  "key": "2d875416183a7db114b2635b",   // the key VERIFIED at eviction, never recomputed
+  "sig": "1789088941:887958693",       // the source's frozen mtime:size
+  "source_evicted": true,
+  "evicted_at": "2026-09-19T20:00:00Z"
+}
+```
+
+Three helpers read it — `_file_evicted`, `_evicted_bundle_dir`,
+`_bundle_dir_for_file` (the one entry point that works in both modes) — plus
+`_file_sig_for`, which keeps `_bundle_check_current` from retiring every verdict
+on every evicted file the moment there is no signature left to read.
+
+> **The key is stored, never re-derived.** Deriving it from `files[].size_bytes`
+> would be wrong: the compression tool rewrites a file in place and sets
+> `compressed`/`compressed_at` but **never refreshes `size_bytes`**, so a
+> compressed file's stored size is stale and would address a bundle that does not
+> exist. See [GOTCHAS.md](GOTCHAS.md).
+
+### Recovery
+
+`_reconcile_evicted_sources` (a cheap unconditional pass at the top of
+`background_maintenance_loop`) drops the `files[].bundle` record from any evicted
+file whose source is back on disk. Without it the library keeps describing the
+file as source-less — the **Bundle Only** badge stays, the dry run counts it
+`already-evicted`, and `_assert_source_present` keeps refusing VLC and JIT. It
+also closes a correctness hole: `_bundle_dir_for_file` prefers the stored key over
+a stat, so if what came back is a *different* release (different size, different
+real key) the stale record would go on addressing a bundle that no longer
+describes the file.
+
+The v8 key is `sha256(version | filename | size)` — path- and mtime-independent.
+**Re-download the identical release and it produces the same key and re-adopts the
+existing bundle**, with progress and skip data intact and no re-prep. A wrong
+eviction therefore costs bandwidth, not the episode.
+
+### The sweep (18.1.0)
+
+`source_eviction_loop` ticks every 5 minutes and costs **one `shutil.disk_usage`
+call** in the common case: the expensive walk only happens once free space is
+below `floor_gb`. When it is, and the box is idle, `_run_source_eviction` works
+down `plan.would_delete` until free space clears `target_gb`. `POST
+/api/admin/source-eviction/run` (Admin -> Storage -> **Reclaim Now**) skips the
+wait but not the conditions — it still refuses while the policy is off or the disk
+is above the floor.
+
+### Manual reclaim by release (18.33.0)
+
+Admin -> Storage -> **Pick Releases** lists every library item with a source on
+disk (`POST /api/admin/source-eviction/releases`, built by
+`srcevict.release_summary` over the same candidates the dry run weighs) and
+reclaims the checked ones now (`POST /api/admin/source-eviction/reclaim`,
+`_run_manual_reclaim`). The admin's pick **replaces the policy gates**: it runs
+with the policy off and the disk above the floor, and it overrides the blockers
+that only guess at intent: `srcevict.MANUAL_OVERRIDABLE` = `not-aged`, `next-up`,
+`in-progress`. Those three still show as **Overrides** on the row before you
+confirm. **No playability gate is overridden.** A file whose bundle is missing,
+unaudited, damaged or incomplete, whose torrent isn't verified complete, or which
+is busy is kept and counted under **Kept**. Deletion goes through the same
+`_evict_paths` → `_evict_one_source` path as the sweep (record first, re-check
+immediately before the delete), and progress rides on `state.source_eviction`,
+so the status line and Stop work unchanged.
+
+> **Delete Watched (18.34.0) is not a reclaim.** It removes the source *and* the
+> bundle of finished episodes (`_delete_files_now`), including the bundle of an
+> already-evicted file. See [ADMIN.md](ADMIN.md) and [API.md](API.md).
+
+> **The record is written BEFORE the file is deleted, and the order is not
+> negotiable.** The two crash windows are not symmetric:
+>
+> * *record then crash* — a file marked evicted whose source still exists.
+>   Harmless: `_evicted_bundle_dir` resolves to the same directory the stat would
+>   have produced, so nothing breaks; at worst that file is never re-evicted.
+> * *delete then crash* — a source-less file with **no** record. Its bundle then
+>   matches no library file, lands in `orphans`, and `cache_autopurge_loop` deletes
+>   it the next time the cache passes its cap. Total loss, recoverable only by
+>   re-downloading.
+>
+> A failed `os.remove` rolls the record back, so a locked file never ends up badged
+> Bundle Only while it is still perfectly playable in VLC.
+
+`_evict_one_source` **re-checks every precondition immediately before deleting** —
+bundle still present, segment check still passing, not compressing, no prep job on
+the key, not the current VLC file, no live JIT session. The plan is computed
+against a library snapshot that can be seconds old, and a viewer can start an
+episode inside that window. The loop also aborts between files the moment
+`_machine_in_use` goes true: this is housekeeping and a viewer outranks it.
+
+### Measured on the live library (18.0.1, 613 files)
+
+The first real dry run is the reason to be honest about what this feature is worth:
+
+| | |
+|---|---|
+| Files weighed | 613 (8.4 s) |
+| Eligible | **0** |
+| Sole-blocker `unverified` | 34 files / **5.3 GB** — the pool the bundle audit would unlock |
+| Sole-blocker `no-bundle` | 121 files / 58.9 GB — never prepped, so nothing to fall back on |
+| `not-aged` | 410 files / 372.9 GB |
+| Free space | 350.7 GB, against a 100 GB floor — so `triggered` was false anyway |
+
+Every file with a source belongs to a series touched within **60 days**, and 410 of
+613 within 15. Combined with the per-series clock, that is a library where almost
+nothing ages out: the realistic ceiling at the shipped defaults is **~5 GB**.
+Dropping `never_played_days` from 7 to 1 takes it to 62.3 GB — that is the
+downloaded-but-never-opened backlog, and a 1-day clock is aggressive for exactly
+the content you have not got to yet.
+
+**Read that before tuning anything.** On a heavily-watched library the per-series
+clock, not the gate, is the binding constraint.
+
+---
+
 ## Things that are **not** stream-to-device
 
 - The Search tab — depends on Jackett, which depends on the host.
@@ -1099,6 +3301,8 @@ disk until the admin purges them. Pre-`v3-hls` MP4 caches surface as
 - VLC playback — needs the host; reads the source MKV directly so all
   audio tracks / 5.1 channels / image subs work natively (the local
   browser player limitations don't apply to TV mode).
+  **A source-evicted file has no MKV to read**, so it is device-only — see
+  [§ Source eviction](#source-eviction-1800--deleting-the-source-keeping-the-bundle).
 - Truly-offline playback — gone. If the host is unreachable, neither the
   chooser nor `lpPlay` can do anything useful.
 
@@ -1121,6 +3325,377 @@ endpoint is `/api/library/offline-cache/{cache_key}/{filename}` with strict
 regex validation on both segments. The `OFFLINE_CACHE_VERSION` bump to
 `v3-hls` orphans every pre-existing MP4 cache; they remain on disk under
 the "legacy" orphan kind until purged.
+
+---
+
+## Offline download to the iOS app (true offline, not streaming)
+
+Everything above **streams** a bundle from the host (the player swaps `master_url`
+to a host URL). The native iOS client (see [IOS_APP_PLAN.md](IOS_APP_PLAN.md), M2)
+adds **download-to-device**: the same `.offline_cache/<sha>/` bundle is copied to
+the phone and played from a loopback server with **no host connection** (Airplane
+Mode). The browser dashboard is untouched — all the glue below is gated behind a
+Capacitor native-platform check (`isApp`), so it's inert in a plain browser.
+
+> **In the app, every download path is a device save.** The browser's host
+> downloads — the streamed ZIP (`POST /api/library/{id}/download-zip`) and the raw
+> `GET /api/library/{id}/download` — are **never** offered when `isApp`. A ZIP in
+> iOS's download tray is a file the app can't play, can't sync progress for and
+> can't delete, so each entry point routes to an offline bundle instead: the
+> library card's *Download all* → `appDownloadAllBundles`, the season header (*Save
+> Season*, not *Save ZIP*) and multi-select *Download (N)* → the same, the movie
+> panel's action → `_appDlWideHTML`/`appDownloadBundle`, and the per-episode row →
+> `_appDlBtnHTML`. `_triggerZipDownload` is the choke point every bulk path funnels
+> through and returns `appDownloadAllBundles(itemId, label, filePaths)` off the top
+> when `isApp`, so a new bulk caller inherits the rule for free.
+> **On a host that can't prep HLS** (`hlsAvailable === false`, e.g. macOS) the
+> buttons still render — there is no ZIP left to put in their place, and a control
+> that silently disappears reads as a bug. `appDownloadBundle` /
+> `appDownloadAllBundles` warn on tap instead. Removing an *already saved* bundle
+> keeps working regardless (that branch runs before the HLS guard).
+
+**Which server, whose download (20.0.0).** A phone can hold downloads from more than
+one server, and it is one person's. So every bundle is tagged with the server it came
+from (`meta.server_id` / `server_name`, added by `appDownloadBundle`), every durable
+queue entry with the server it is to come from (`serverId`), and offline progress with
+the server it must go back to (`serverId` on the `OfflineStore` record). The Downloads
+tab shows one server at a time; `_appResumeDownloadQueue` drives only the connected
+server's entries; `_appFlushOfflineProgress` sends only the plays that belong to it
+(`_appPendingFor`). Progress is seeded and read for the account **pinned** to the phone
+on that server, not for whoever is signed in. A bundle saved before 20.0.0 has no tag:
+it is placed by the address it was fetched from, and failing that it belongs to the
+phone's primary server. The registry and its rules are in
+[FRONTEND.md § iOS app shell](FRONTEND.md).
+
+**Pause, retry, next (20.0.0).** A queue entry carries `state`: `""` wanted, `paused`,
+`failed` (with `error`). The resumer skips the last two. Pause cancels the native
+transfer (`BundleDownloader.cancel` keeps the files on disk) and bumps the download's
+generation (`_appDlGen`), which is what stops a download still in its host round-trip
+from handing itself over after the user said stop. A permanent failure is kept as a
+`failed` row with its reason and a Retry instead of vanishing. *Next* is
+`BundleDownloader.prioritize({sha})`: the job moves to the front of `jobOrder`, and
+`list()` reports each bundle's `order` so the row visibly moves. All of it needs the
+20.0.0 shell; an older one stores no state, so the page clears a failed intent as before.
+
+**Download.** A per-row **Download** button (`appDownloadBundle` in
+[static/index.html](../static/index.html), app-only via `_appDlBtnHTML`; the movie
+panel's full-width twin is `_appDlWideHTML`, refreshed by the same
+`_appRefreshDlBtn` via an `.ep-appdl-wide[data-path]` slot):
+1. `GET /api/library/{id}/bundle-manifest?file_path=…` (plan A1). On **409
+   not_ready** the app POSTs the normal `/offline-prepare`, polls
+   `/offline-job/{id}` until the host bundle is built, then retries the manifest.
+2. The manifest's flat `files[]` (name + size) + `cache_key` + `bundle_url` +
+   `master_m3u8` are handed to the native **`BundleDownloader`** ([BundleDownloader.swift](../ios-app/ios/App/App/BundleDownloader.swift)),
+   which fetches every file over a foreground `URLSession` (held alive across a
+   brief backgrounding by a `UIApplication` background-task assertion — a
+   *background* session deferred all progress to the next launch, see
+   [GOTCHAS.md](GOTCHAS.md)) into `Application Support/StreamLinkBundles/<sha>/`
+   (non-evictable, `isExcludedFromBackup`), keyed by the cache sha so a re-download
+   of an unchanged source is a no-op. Files are written into the final dir as they
+   complete, so a partial download **resumes** by skipping files already on disk at
+   their expected size, and completed bundles are **durable across an app kill**.
+   Progress + completion are pushed to JS via `bundleProgress` / `bundleComplete`
+   events.
+
+   **Diagnosing a download that stops when the phone locks (18.14.0).** Two
+   sessions run side by side — a default one in-process while the app is
+   foreground, and the background session that survives suspension — and every
+   foreground/background transition **migrates** the in-flight transfers between
+   them (`migrateTasks`). That transition is the whole bug surface, and until
+   18.14.0 neither side of it wrote a row, so "background downloads don't work"
+   could be any of four unrelated things. The transcript now carries `dl-bg` /
+   `dl-fg` (jobs, pending files, transfers actually moved, and `left` — the
+   seconds of execution iOS is granting), `dl-bgtask-expired` (the assertion
+   being reclaimed, which is normal *if* the migration already happened),
+   `dl-bg-events` / `dl-bg-flushed` (the OS relaunching us to deliver finished
+   transfers), and a 30 s `la-progress` byte heartbeat — the one measurement that
+   separates "stalled" from "not running". See
+   [DIAGNOSTICS.md](DIAGNOSTICS.md) § Recipe: "the download stopped when I locked
+   the phone".
+
+   **Measured 2026-09-23: ~3.3 MB/s foreground vs ~46 KB/s locked — about 72x.**
+   A 1.73 GB queue is ~8 minutes with the app open and ~10 hours with the phone
+   locked, so a download that looks dead overnight is usually just suspended-slow.
+   Two fixes came out of that same transcript: a temp-file move failure during a
+   fg/bg migration used to be classed as permanent and **discarded a bundle
+   617/622 files complete**, and the background-task assertion was never re-taken
+   after its first expiry, leaving later backgroundings with no window to migrate
+   transfers in. Both in [GOTCHAS.md](GOTCHAS.md).
+
+> **Single-rung downloads + the quality chooser.** A downloaded file is always
+> played at one resolution, so `files[]` is filtered server-side
+> (`_bundle_select_rung` in `main.py`) to **one** video rung; the others' playlist +
+> init + segments are dropped. The default is the **original (idx 0, source)** rung,
+> but the manifest also returns the **full ladder** as `videos[]` (`[{idx, name,
+> height, label, bytes}]`, `bytes` = the *download* size if that rung is chosen — its
+> own video files plus the shared audio/sub/playlist/meta) via `_bundle_rung_info`,
+> and accepts **`?quality=<height>|original`** to ship a specific rung. The app uses
+> this for a **Download Quality** chooser (`_appChooseQuality`): on a download, if
+> `videos[].length > 1` it lists each rung with its size and re-fetches the manifest
+> for the pick. A **bulk** download (card *Download all* → `appDownloadAllBundles`,
+> a season header *Save Season* → `epDownloadSeason` → `_triggerZipDownload`'s app
+> branch → `appDownloadAllBundles(itemId, label, paths)` — or, on a **merged** show
+> (no single `epItemId`), straight to `_appSaveFiles(files)` with each file keyed to its
+> own `item_id`, since a merged season is often one item per episode — or multi-select
+> *Download (N)* → `epDownloadSelected`) asks **once** via
+> `_appBatchQuality` (which probes the first file's ladder) and passes the chosen
+> `quality` to every per-file `appDownloadBundle` so the prompt isn't repeated; a
+> ≤1-rung bundle skips the prompt entirely. The manifest's **`master_m3u8`** carries a
+> non-destructive in-memory rewrite of `master.m3u8` referencing only the kept rung
+> (the shared on-disk bundle is untouched and still serves all rungs to streaming
+> clients); `BundleDownloader` writes it verbatim from the `masterContent` param
+> **before** its resume scan, so the dropped rungs are never fetched or referenced by
+> the offline player. (`master_m3u8` is `null` for a ≤1-rung bundle ⇒ master is
+> fetched as-is.)
+
+**Offline entry point — the cached player (v8.0.0,
+[PLAYER_CACHE_PLAN.md](PLAYER_CACHE_PLAN.md)).** The dashboard is served *by the
+host*, so it can't load from the host with no connection — instead the app keeps
+a **device snapshot of the dashboard** (`index.html` + `vendor/*`: tailwind,
+hls.min.js, the octopus wasm/worker/font) and serves *that* offline, so the SAME
+player UI works with no host. The pieces:
+
+- **Snapshot refresh** (`_appRefreshPlayerSnapshot`, static/index.html): every
+  online in-app boot fetches `GET /api/player-manifest` ({version, allowlisted
+  files+sizes} — see [API.md](API.md)); a version mismatch removes the old
+  snapshot, then `BundleDownloader.download` fetches everything from the root
+  StaticFiles mount under the sentinel key **`__player__`** (nested `vendor/…`
+  names; the native side creates intermediate dirs). Same-version runs are a
+  cheap heal (size-match resume). The sentinel is filtered out of the Downloads
+  overlay, the durable-queue resumer, and downloads.html's list.
+- **Serving — LMS "player mode"** (`start({playerRoot})`,
+  [LocalMediaServer.swift](../ios-app/ios/App/App/LocalMediaServer.swift)): the
+  snapshot dir is the server root (so the page's absolute `/vendor/*` paths
+  work) and the whole `StreamLinkBundles/` storage dir is mounted at
+  `/StreamLinkBundles/` — every downloaded bundle is same-origin and the server
+  **never restarts while serving the page** (offline playback builds
+  `origin + "/StreamLinkBundles/<sha>/"` instead of calling `lms.start`, and
+  never sets `_lmsActive`, so nothing ever stops the page's own server). MIME
+  map covers html/js/css/wasm — WKWebView won't render an octet-stream page.
+  **What *we* never do, iOS still does**: a suspended app has its sockets closed,
+  and this listener is serving the page itself, so it must be able to come back
+  on the **same port** — `heal()` probes its own `desiredPort` on every
+  `didBecomeActive` (and on the plugin's `ensureRunning()`, which `_appLmsHeal`
+  calls from `visibilitychange`) and rebinds that exact number if nothing
+  answers. A fresh ephemeral port would strand the page's origin, which is why
+  "never restarts" is still the rule for every other reason. See
+  [GOTCHAS.md](GOTCHAS.md) § a suspended app loses its loopback server.
+- **Offline boot mode** (`?offline=1&host=<url>` → `_appOfflineBoot`,
+  static/index.html): no SSE, no host fetches. The server and the account come
+  from the native registry (20.0.0: `host` is looked up there, and the account
+  **pinned** to that server is who offline plays are recorded for; a shell older
+  than that falls back to `OfflineStore.getProfile()`). The loopback origin's
+  localStorage is empty and its port is ephemeral, so nothing can be read from
+  storage. The UI is the **Downloads and App tabs** of the bottom tab bar, with
+  the three server tabs greyed (`html.is-offline` hides the header chrome that
+  needs a server). See [FRONTEND.md § iOS app shell](FRONTEND.md). Quality menu
+  device-rung only, Prev/Next expands across the item's *downloaded* episodes
+  from the native index, and a Reconnect probe (auto every 15 s while nothing
+  plays + a manual button) that `location.replace(host)`s back to the real
+  dashboard. The Downloads menu's Play (`_appPlayDownloaded`) resumes from the
+  host when online and from `OfflineStore` otherwise — before 18.21.5 it read
+  nothing online and always started at 0. It binds the native player's events (`_npBindEvents`) exactly as
+  the online boot does — without them a glasses handoff plays with no remote on
+  the phone (fixed 18.21.4). It arms native with an **empty `serverUrl`** (18.21.6):
+  the loopback origin 405s a progress POST, so native skips its own writes
+  (`progress-skipped why:"no-server"`). From 18.21.7 it also sends `offline: true`,
+  and native writes `OfflineProgressStore` itself (every 15 s, on stop and at the end,
+  `progress-local` rows). That is the only writer while the phone is locked,
+  because the page's timers are frozen. An app build older than 18.21.7 ignores the
+  flag, and the page's own OfflineStore write is then the only record. Progress + track picks write to `OfflineStore` explicitly
+  (the loopback `/api` 404s RESOLVE — they don't throw — so the online code's
+  catch-based fallback would never fire); resume and audio/subtitle picks are
+  restored from `getProgress` (which returns the saved track fields). The M3
+  sync machinery pushes it all to the host on the next online session.
+- **App server discovery** (19.14.0; `ServerDiscovery.swift` + `ios-app/www/index.html`).
+  The Connect screen lists servers; the address box remains underneath and is all a plain
+  browser gets. `ServerDiscovery.scan` runs three things at once and reports each server
+  as a `found` event the moment it answers:
+  1. **Bonjour** `_streamlink._tcp` (TXT carries `ip`/`port`). A Bonjour answer skips the
+     probe queue.
+  2. **Wi-Fi sweep**: `GET /api/discovery` on every address of each `en*` interface's
+     subnet (clamped to the phone's own /24 on a wider network), 96 at a time, 2 s each.
+  3. **VPN sweep**: the kernel routing table (`sysctl NET_RT_DUMP`, parsed by offset since
+     iOS ships no `<net/route.h>`) gives the subnets routed through `utun*`; each of /22 or
+     narrower is swept the same way. This is what finds a box behind a Tailscale subnet
+     router. Labelled `Tailscale` when the tunnel's own address is in `100.64/10`.
+
+  `known` URLs (every address of every remembered server) are probed first with a longer
+  timeout. A host from before 19.14.0 has no `/api/discovery`; a 404 there falls back to
+  `/api/version`, so it is listed, with no id.
+  The shell keeps `streamlink_servers` (`[{id, name, url, urls, seen}]`, capacitor origin):
+  `urls` is every address a server reported in `addrs` or was reached at. One box that
+  answers at several addresses is ONE tile; the address offered is the saved one if it
+  answered, else a LAN address, else `100.x` (the LAN address is the same origin at home
+  and away, so the dashboard keeps its login).
+  **Launch:** `checkHost` (native `probe`) replaces the fetch probe and also returns the
+  server's identity, which is how an install that only ever had an address typed in learns
+  its server's id. If the saved address is dead and the id is known, `findMovedServer`
+  scans with `wantId` (returns the instant that id answers, 5 s cap) and follows the box to
+  its new address. No id, no scan. No network interface, the scan returns at once.
+  Diagnostics: a `netmap` row per launch (interfaces, routes read, nets that would be
+  swept) and a `discover` row per scan, both `cat: "app"`.
+- **Shell routing** (`ios-app/www/index.html`): probe fails → `goOffline()`
+  prefers the snapshot (`goToCachedPlayer`) and falls back to
+  **`downloads.html`** — which is now a **feature-frozen fallback** (first-ever
+  offline launch / corrupt cache only; new player features belong in
+  static/index.html where offline mode inherits them).
+
+**Device-copy playback is always SAME-ORIGIN.** The on-device bundle plays from the
+loopback `LocalMediaServer` **only when it can be loaded same-origin** — because
+**online the dashboard is a remote host page**, so a device copy loaded directly
+would be a *cross-origin* (and, on an HTTPS host, mixed-content) loopback load, which
+WKWebView stalls indefinitely (a downloaded episode "never loads while connected"; a
+fetch probe can't detect it — CORS `*` lets `fetch()` succeed while the media pipeline
+hangs). Two paths keep page and media same-origin:
+
+- **Offline** — the whole dashboard is already served from the loopback player-mode
+  LMS, so `_lpLoadIndex`'s device branch (gated `_appOffline || !hlsAvailable`) loads
+  the bundle directly. `!hlsAvailable` also covers a no-HLS macOS host.
+- **Online proxied playback session (8.7.0)** — the downloaded copy plays while
+  connected **with full feature parity** (Play-to-TV, live SSE, library, auto-manage,
+  `/api` progress + track sync). `lpPlay` (host side) calls **`_appTryLocalHandoff(itemId,
+  filePath, seekTo)`**: if the episode **and** the player snapshot (`__player__`) are
+  both fully downloaded, it starts the LMS in **proxy mode** — `lms.start({playerRoot,
+  proxyHost: location.origin, proxyDeviceId})` — and `location.replace`s to the loopback
+  page with `?proxied=1&host=<origin>&item=&file=&seek=&profile=&am=<automanage prefs>&did=&dnm=&tok=`.
+  In proxy mode the native `LocalMediaServer` serves the snapshot + bundles locally and
+  **reverse-proxies every non-local request (`/api/*`, SSE, server-stream media) to the
+  host**, tagged with the phone's `X-Device-Id` (see below + [GOTCHAS.md](GOTCHAS.md)). On the
+  loopback page `_appProxied` is set but **`_appOffline` stays false**, so it takes the
+  **normal online boot** — SSE, library, Play-to-TV, auto-manage, and real `/api` sync
+  all run, just served from the loopback. `_appProxiedSeedStorage` seeds the profile,
+  auto-manage prefs (superseded by `_appPrefsRestore` on an app from 20.0.0 on, 20.6.4), device identity and the **PIN token** (`tok=`, 18.23.2 — without
+  it a PIN-protected profile boots unverified and is asked for its PIN mid-episode;
+  stripped from the URL once seeded) — the loopback origin's localStorage is empty; `_appProxiedAutoPlay`
+  starts the handed-off episode after the profile restores; `lpStop` →
+  **`_appProxiedReturnHost()`** navigates back to the direct host origin (progress
+  already synced live via the proxied `/api`). Prev/Next spans the **full series** —
+  downloaded episodes play from the device same-origin, non-downloaded ones stream from
+  the host through the proxy — one seamless playlist. **Every** play hands off when its
+  first file is on the device (18.32.1; until then only single-file, non-shuffle plays
+  did, so a show made of several downloads — whose Play/Resume always goes through
+  `playSeries` with a queue — silently streamed). A multi-file queue travels with the
+  handoff as `#q=<json {f: files, i: owning items, l: label, sh, ss}>` in the URL
+  **fragment**, never the query (the query is resent as the Referer on every request,
+  and the LMS drops a request whose headers pass 64 KB); `_appProxyTarget` parses it
+  and `_appProxiedAutoPlay` replays the same queue. A snapshot older than 18.32.1
+  ignores the fragment and falls back to the single file's own item list. Any miss (episode or snapshot not fully
+  downloaded, no plugin) falls through to normal server streaming. This supersedes 8.6.0's
+  `offline=1&live=1` offline-mode handoff (which lost every live feature during playback).
+
+See [GOTCHAS.md § On-device (loopback) playback is SAME-ORIGIN only](GOTCHAS.md).
+
+**Native reverse proxy (proxied session).** `LocalMediaServer.start({proxyHost,
+proxyDeviceId})` makes the hand-rolled `NWListener` server (`HLSStaticServer`) route each
+request: a path that resolves to a local snapshot/bundle file (GET/HEAD) is served from
+disk (existing `serveFile` + Range); **everything else is forwarded to `proxyHost`** via
+a per-request `URLSession` (`ProxyForwarder`). The forwarder streams JSON, long-lived
+**SSE** (`/api/events` — the response never ends; chunks relay until the client
+disconnects), and **ranged media** (`206`/`Content-Range` relayed verbatim) identically,
+with **back-pressure** (the delegate queue blocks on a semaphore until the socket accepts
+each chunk — the same discipline `streamBody` uses for local files), passes the
+page's own `Authorization` through and adds `X-Device-Id: <proxyDeviceId>` when the
+page didn't send one (hls.js segment fetches don't), sets `Accept-Encoding: identity` (so the host's
+`Content-Length` stays accurate to relay), and **accepts the host's self-signed TLS**
+(URLSession server-trust challenge → `.useCredential`, matching the app's
+`NSAllowsArbitraryLoads`). Because `master.m3u8`/segments are served at the **relative**
+`/api/library/offline-cache/…` path, server-stream media proxies same-origin with no
+URL rewriting. Offline player mode leaves `proxyHost` nil, so `/api` still 404s there.
+
+**Playback (offline, or no-HLS host).** When the device branch is taken,
+`_lpLoadIndex` checks `BundleDownloader.getLocal({itemId, filePath})`; if a
+**complete** local copy exists, `_appStartLocalPlayback` serves it same-origin
+(offline: the player-mode LMS's `/StreamLinkBundles/<sha>/`; no-HLS host: a fresh
+`LocalMediaServer` over the bundle dir), reads `meta.json` for `audios`/`subtitles`,
+and sets `master_url` accordingly — synthesizing the same shape `/offline-prepare`
+returns, with **no host round-trip for the stream itself**. Everything downstream
+(tracks, embedded `sub_*.vtt` renditions, skip-intro, the custom controls) is
+unchanged. On any failure it falls through to the normal prepare path. Online, this
+device branch is reached inside the **`proxied=1` session page** (same-origin snapshot),
+never on the remote host page directly — the whole "play a downloaded episode" gesture is
+redirected to the snapshot up front (see the proxied session above); there a mixed
+playlist plays downloaded episodes locally and streams the rest through the proxy.
+
+Extras around the local path (7.17.0; runs whenever the device branch is taken —
+offline, no-HLS host, or the `proxied=1` online session):
+- **Remembered track picks**: the local path fires a parallel best-effort
+  `GET /saved-tracks` (skipped offline via `navigator.onLine`) so audio/subtitle
+  restore matches a server stream ([API.md](API.md)).
+- **Downloaded-rung identity**: `_appStartLocalPlayback` also fetches the local
+  `master.m3u8` and `_appIdentifyLocalRung` matches its single variant URI
+  against the `meta.json` ladder (fallback: `RESOLUTION=` height) — this drives
+  the device/server **quality menu** (see step 5 above) and the Dev-Mode HUD's
+  `source` row (`on-device bundle · 127.0.0.1:<port> · 480p` vs
+  `server · <host> · bundle|ondemand`).
+- **Warm-next**: `_lpWarmNextEp` skips the host-side prep kick entirely when the
+  next episode is already downloaded (it plays instantly from the device, even
+  on a no-HLS macOS host).
+- **LMS lifecycle**: the loopback server is stopped eagerly when an episode
+  advance (or a server-quality switch) moves playback local→server, and `lpStop`
+  keys its teardown on `lp._lmsActive` — not `lp._localBase`, which each load
+  nulls — so it can't be left running.
+
+**Scope (M2).** Offline **playback** of the bundle; embedded text subtitles (the
+`sub_*.vtt` renditions inside the bundle) work offline, but host-side **sidecar**
+subs (served via `/subtitle?path=`, source-file-dependent) are online-only.
+
+> **Except one (17.7.0).** A subtitle found via Find Subtitles is written into
+> the bundle as the next free `sub_<n>.vtt` (plus `sub_<n>.ass` when styled) and
+> appended to `meta.json`'s `subtitles` with `"external": true` and the sidecar's
+> filename, so it rides along in an offline download and in the native AVPlayer
+> playlist. Online responses filter `external` entries out (`_bundle_subs_online`)
+> because those players list the sidecar itself — without that the track appears
+> twice. A device that downloaded the episode **before** the subtitle was found
+> has to re-download to get it. See `_mirror_sub_into_bundle`.
+
+**Offline progress + auto-sync (M3).** The offline `downloads.html` player now
+captures watch progress (the same `timeupdate`/`pause`/`seeked`/`ended`/`pagehide`
+events the dashboard uses) into the native **`OfflineStore`**
+([OfflineStore.swift](../ios-app/ios/App/App/OfflineStore.swift)) — a durable,
+file-backed log keyed by `(profileId, itemId, filePath)` (Application Support,
+backup-excluded), the only place offline history can live (the host dashboard can't
+load offline). Playback also **resumes from the saved offline position**. The active
+profile is pushed to the store by the dashboard (`OfflineStore.setProfile`) while
+online so the offline player records under the right profile. When the device
+reconnects, the dashboard drains the store: `_appFlushOfflineProgress` reads
+`OfflineStore.pending()` (events where `clientUpdatedAt > baseSyncedAt`) and POSTs
+them to **`/api/sync/progress`** (plan A2 — conflict detection via the
+`base_synced_at` watermark; see [API.md](API.md) / [LIBRARY_DATA.md](LIBRARY_DATA.md)),
+then `OfflineStore.markSynced()` records each applied file's new watermark. It fires
+on profile-select and the window `online` event; the dashboard's own
+`saveProgress` also falls back to the store when an online POST fails. All of this
+is `isApp`-gated, so the browser dashboard is unaffected.
+
+**Conflict resolution (M4).** When `/sync/progress` returns genuine divergences in
+`conflicts` (the same file advanced both offline *and* elsewhere, positions too far
+apart to auto-merge), `_appFlushOfflineProgress` collects them and opens the
+`#syncConflictModal` "keep mine / keep server" UI (`_appShowConflicts` →
+`_appRenderConflicts`; titles enriched from each download's persisted `meta`). On
+**Apply**, `_appApplyConflictResolutions` POSTs the choices to
+**`POST /api/sync/resolve`** (plan A3): a "keep mine" win writes the device
+values server-side and the device just advances its watermark via
+`OfflineStore.markSynced`; a "keep server" win writes nothing host-side and the device
+adopts the server's values with a **forced** `OfflineStore.seedProgress` (`force:true`
+overrides the unsynced-record guard). Until resolved, conflicts stay pending and
+re-report on the next flush.
+
+**Bidirectional seeding (so offline resume reflects online history).** Push alone
+would mean an episode watched partway *online* resumes at 0 offline. So sync is
+two-way: **`POST /api/sync/pull`** returns the profile's current server
+progress for the device's downloads, and `OfflineStore.seedProgress` adopts it as
+the local baseline (settled — never re-pushed; never clobbers an unsynced offline
+edit). The dashboard seeds at **download time** (the bundle-manifest returns the
+file's `progress`) and again on every reconnect (`_appSeedFromServer`, run right
+after `_appFlushOfflineProgress`).
+
+**Offline picker metadata.** The bundle-manifest also returns a `meta` block —
+series/title, season·episode, episode name, overview, and the **poster inlined as a
+`data:` URL** (`_tmdb_image_data_url`, so it renders with no network). `BundleDownloader`
+persists `meta` in its index and exposes it via `list()`/`getLocal()`; the offline
+`downloads.html` **groups downloads by series** with poster + episode list (S·E +
+name) + overview + per-episode **watch-progress bars** ("Watched" / "Resume …") read
+from `OfflineStore`.
 
 ---
 

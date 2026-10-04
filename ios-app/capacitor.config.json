@@ -1,0 +1,15 @@
+{
+  "appId": "com.streamlink.client",
+  "appName": "StreamLink",
+  "webDir": "www",
+  "ios": {
+    "scheme": "StreamLink",
+    "contentInset": "never",
+    "backgroundColor": "#030712",
+    "limitsNavigationsToAppBoundDomains": false
+  },
+  "server": {
+    "iosScheme": "capacitor",
+    "allowNavigation": ["*"]
+  }
+}

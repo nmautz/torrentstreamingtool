@@ -4,7 +4,7 @@ High-level system overview. Read this first if you're new to the project.
 
 ## What it is
 
-P2P StreamLink — a local web dashboard that searches Jackett indexers, buffers magnet links through qBittorrent, and streams the file into VLC. Mullvad VPN is enforced as a kill-switch. There is also a persistent **library** (downloaded items kept around), per-profile watch history, intro/credits Smart Skip, subtitle download, and an admin panel.
+P2P StreamLink — a local web dashboard that searches Jackett indexers, buffers magnet links through qBittorrent, and streams the file into VLC. A VPN kill-switch is enforced (mode-selectable: Mullvad CLI, any generic VPN tunnel, or off — see `vpncheck.py`). There is also a persistent **library** (downloaded items kept around), per-profile watch history, intro/credits Smart Skip, subtitle download, and an admin panel.
 
 ## Service topology
 
@@ -24,7 +24,7 @@ All four services (VLC, qBittorrent, Jackett, dashboard) run on the same host ex
 
 - **One Python process** runs FastAPI/uvicorn (the dashboard). All state is in-memory in `AppState` ([main.py:138](../main.py#L138)).
 - **External processes**: VLC, qBittorrent, Jackett — launched by `run.py` and supervised by `watchdog.py`. They keep running after the dashboard is stopped.
-- **VPN guard task** runs `mullvad status` every 3 s inside the dashboard process and kills `qbittorrent` via psutil on VPN drop.
+- **VPN guard task** verifies the VPN every 3 s inside the dashboard process and kills `qbittorrent` via psutil on VPN drop. The verification method is set by `settings.vpn_killswitch.mode` (mirrored to `state.vpn_mode`): `mullvad` (`mullvad status`), `generic` (any VPN tunnel interface up), or `off` (disabled). The mode-read + generic tunnel check are shared across `main.py`/`run.py`/`watchdog.py` via the leaf module `vpncheck.py`.
 - **Persistence**: a single `library.json` file at the repo root. No database.
 
 ## Code map (where things live)
@@ -37,7 +37,12 @@ All four services (VLC, qBittorrent, Jackett, dashboard) run on the same host ex
 | `daemon.py` | 545 | launchd / systemd / Task Scheduler service installer |
 | `watchdog.py` | 519 | Background thread (or standalone process) that restarts crashed deps |
 | `analyzer.py` | 540 | Smart Skip — chromaprint fingerprinting (fingerprint-only credits detection) |
+| `episodes.py` | — | Season/episode attribution — folder-aware structural parse + TMDb-aware absolute-number resolution. Pure, no deps. See [LIBRARY_DATA.md](LIBRARY_DATA.md) § Season/episode attribution |
+| `dvprobe.py` | — | Dolby Vision / HDR signalling read from a container header (MKV EBML + MP4 boxes). Pure stdlib, no ffmpeg. Flags Profile 5 — the green-picture case. See [GOTCHAS.md](GOTCHAS.md) |
+| `relquality.py` | — | Release quality from a torrent title (resolution / source / codec), cross-checked against file size vs TMDb runtime. Only ever demotes. Pure, no deps. Feeds the download race |
+| `racerules.py` | — | The download race's pure decision arithmetic — who is leading, who to drop. Split out so it is testable without qBittorrent. Pure, imports only `relquality` |
 | `stt.py` | — | AI subtitles — whisper.cpp wrapper (audio extract → transcribe/translate). See [STT.md](STT.md) |
+| `remote_input.py` | — | HID wireless remote (air-mouse) — global pynput keyboard/mouse hooks: media keys + 🏠 Home → playback control, any-input feed → TV UI wake. See [REMOTE.md](REMOTE.md) |
 | `static/index.html` | 3608 | Main UI — vanilla JS, Tailwind CDN, SSE-driven |
 | `static/admin.html` | 990 | Admin panel — indexer management, content lock, Smart Skip editor |
 | `static/tv.html` | — | YouTube-on-TV kiosk page (host display): IFrame Player API + `yt_command` SSE listener + state heartbeat. See [YOUTUBE.md](YOUTUBE.md) |
@@ -53,11 +58,13 @@ All four services (VLC, qBittorrent, Jackett, dashboard) run on the same host ex
 
 ## Data flow examples
 
-### Stream-now (Search tab → Play)
-1. Browser POST `/api/stream` `{magnet, title}` → returns 202 immediately.
-2. `stream_pipeline` task: adds magnet to qBit with `sequentialDownload=true`, waits for torrent metadata (up to 30 s), polls every 1 s until `BUFFER_MIN_MB` or `BUFFER_MIN_PCT`, resolves the largest video file path, sends `in_play` to VLC's Lua HTTP, optionally fullscreens VLC.
-3. `stat_broadcaster` keeps pushing `state` snapshots every 2 s with download progress and VLC playback position.
-4. On `/api/stop` (or new Play): cancel the task, delete torrent + files via qBit, `pl_stop` VLC.
+### Play-now (Search / Explore / show page → Play) — **persists to library** (11.2.0)
+1. Browser opens the stream file picker (`/api/stream/prepare` adds the magnet, returns the file list), then POST `/api/library/play-now` `{magnet, title, torrent_hash, file_index, series, season, episode, profile_id}` → 202.
+2. `library_play_now` **adopts** the prepared torrent into the library (creates a `downloading` item, or reuses a live one on the same hash), then `_begin_library_file_stream` → `_library_stream_file_launch`: sets the picked file `high`, torrent sequential, buffers to `BUFFER_MIN_MB`/`BUFFER_MIN_PCT`, then `in_play` to VLC.
+3. `stat_broadcaster` keeps pushing `state` snapshots every 2 s. `_stream_rebuffer_guard` recovers from buffer underruns (slow-link VLC EOF stalls) by re-buffering a margin and resuming from the last position; `_sequential_off_when_complete` restores non-sequential downloading once the file finishes.
+4. On `/api/stop`: because `state.library_item_id` is set, the torrent + files are **NOT** deleted — the item stays in the library until manually deleted. The whole torrent keeps downloading in the background.
+
+*(Legacy transient path: `POST /api/stream` still exists — `stream_pipeline`, same buffer/`in_play` flow, but `library_item_id` stays `None` so `/api/stop` deletes the torrent + files. The UI no longer routes Play through it; it deletes on stop.)*
 
 ### YouTube on TV (Search tab → Play on TV)
 1. Browser POST `/api/youtube` `{url}` → 202. Backend extracts the video id, sets `youtube_active`, stops VLC, broadcasts `yt_command:load`, and launches a fullscreen Chrome kiosk at `/tv?v=<id>` (or hot-swaps if the page is already open).
@@ -75,7 +82,7 @@ All four services (VLC, qBittorrent, Jackett, dashboard) run on the same host ex
 ## Key invariants
 
 - **VPN gating**: `/api/stream` and `/api/library/download` return 403 if `state.vpn_secure` is False. `watchdog.py` enforces the same at the process level: qBit is killed on VPN drop and not restarted until VPN reconnects.
-- **No sequential download for library items**: only stream-now uses sequential. Library items download normally so all files arrive complete.
+- **No sequential download for library items**: only stream-now uses sequential. Library items download normally so all files arrive complete. One scoped exception: `/api/library/{id}/stream-file` (play an unfinished file now) toggles sequential ON while that file is being streamed ahead of completion, and a watcher toggles it back OFF as soon as the file finishes.
 - **Track IDs are VLC ES IDs**, not sequential 1/2/3 counters. See [GOTCHAS.md](GOTCHAS.md).
 - **`state.library_item_id is not None`** means the active playback is a library item — `/api/stop` will NOT delete the torrent. See [main.py:2580](../main.py#L2580) (`stop` handler).
 

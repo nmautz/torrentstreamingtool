@@ -6,12 +6,31 @@ Vanilla JS, Tailwind CDN, no build step. Two pages: `static/index.html` (main da
 
 Metro UI throughout — flat tiles, no rounded corners, bold uppercase typography, accent stripes, sharp dividers. No `backdrop-blur`. All status dots are square. Modals are bottom-sheets on mobile, centered on desktop.
 
-**Layout — mobile-first, use all available space.** The app shell (navbar, `<main>`, player footer rows) is capped at `max-w-screen-2xl` (1536px) and centered, so it fills wide desktops/TVs (the Windows-primary target) instead of stranding margins. The three list surfaces are **responsive grids** that stay single-column on phones and add columns as the viewport grows: search results (`#resultsGrid`) → `grid-cols-1 sm:grid-cols-2 xl:grid-cols-3`; library cards (the per-series group wrapper in `renderLibrary`) → `grid-cols-1 lg:grid-cols-2`; the episode list (unwatched/watched wrappers in `renderEpList`) → `grid-cols-1 xl:grid-cols-2`. All use `items-start` so a card growing (e.g. the library Files expander) doesn't stretch its row neighbour. Don't reintroduce a narrower fixed-width column or revert these to `space-y-*` / `divide-y` single-column stacks.
+### Iconography — no emoji, ever (10.8.0)
+
+**Emoji and dingbat characters are banned in all rendered UI.** They draw from the OS emoji font, so the same page looks different on Windows / iOS / Android / TV Chrome (and iOS force-promotes many codepoints — `▶ ⚠ ⏸ ↩ ⚡ 🌙 …` — to rounded colour emoji that clash with Metro). Every pictographic glyph comes from the **inline SVG sprite** instead:
+
+- **The sprite** — a hidden `<svg>` of `<symbol id="i-NAME" viewBox="0 0 24 24">` defs, right after `<body>` in `index.html` **and** `admin.html`. The two copies must stay **byte-identical**; when you add a symbol, add it to both. `tv.html` currently uses no glyphs — copy the sprite there too if it ever needs one.
+- **Names** — `play pause resume hourglass check x warn bolt star menu gear up down moon ban lock unlock key phone folder dots chev-up chev-down chev-right ext monitor`. Semantic mapping: `resume` = the old `↩` (continue-from-position), `ban` covers both `🚫` and `⊘` (not-downloaded / skipped / never), `x` covers close ✕ **and** failed ✗, `dots` is the Metro square-dot "More" ellipsis, `ext` = external link ↗, `monitor` = a desktop display (the TV kiosk's Use-My-PC toggle).
+- **Static HTML** — `<svg class="ic" aria-hidden="true"><use href="#i-NAME"/></svg>`.
+- **JS-built HTML** — `${ic("NAME")}` (or `ic("NAME","extra-classes")`); the helper sits at the top of each page's main script. Icons are markup, so the sink must be `innerHTML` / a template — **never** `textContent`.
+- **Sizing/colour** — `.ic` (in each page's `<style>` head) is `1.1em` square, `fill:currentColor`, baseline-aligned, `flex-shrink:0`, `pointer-events:none`. Icons therefore inherit the surrounding text size and colour automatically — size them with the text (`text-2xl` etc. via `ic("warn","text-2xl")`), don't add width/height.
+- **Plain-text sinks** (`confirm()`, `title="…"`, `textContent`, the sync debug log) can't carry markup: use words (`"Download"`, `"! conflict"`, `"ERR"`) — do **not** reintroduce glyph characters there.
+- **Allowed as text**: pure typography with no emoji presentation — `— … · → ⇒ ↓ ↑ ★ ‹ ›`. (`★` appears in `textContent`-built meta lines; that's fine, it has no emoji form.)
+- **Drawing new symbols** — keep them Metro: single `fill` path(s) on the 24×24 grid, hard corners, geometric (square dots, straight bars), `fill-rule="evenodd"` for cutouts. No strokes, no rounded caps, no multi-colour.
+- **Enforcement** — this grep must return 0 matches on `static/*.html`: `grep -cE '⚠|▶|⏸|⏳|↩|✓|✗|✕|⚡|☰|⚙|⬆|⬇|🌙|🚫|⊘|🔒|🔓|🔑|📱|🏠|📁|⋯|↗|▼|▲|▴|▾|▸' static/*.html`
+
+**Layout — mobile-first, use all available space.** The app shell (navbar, `<main>`, player footer rows) is capped at `max-w-screen-2xl` (1536px) and centered, so it fills wide desktops/TVs (the Windows-primary target) instead of stranding margins. The three list surfaces are **responsive grids** that stay single-column on phones and add columns as the viewport grows: search results (`#resultsGrid`) → `grid-cols-1 sm:grid-cols-2 xl:grid-cols-3`; library cards (the per-series group wrapper in `renderLibrary`) → `grid-cols-1 lg:grid-cols-2`; the episode list (`renderEpList`) → `grid-cols-1 xl:grid-cols-2`. All use `items-start` so a card growing (e.g. the library Files expander) doesn't stretch its row neighbour. Don't reintroduce a narrower fixed-width column or revert these to `space-y-*` / `divide-y` single-column stacks.
 
 - **Single-item series go full width.** `renderLibrary` only uses the 2-col grid when a series group has **more than one** item (`gridCls = gItems.length>1 ? grid… : "space-y-2"`); a single-item series would otherwise strand an empty second column.
-- **Library card buttons.** Primary actions accumulate in `buttons`; icon-only buttons (download / prep / hide / delete) accumulate in `iconBtns` and render as one cluster that follows the primaries (no `ml-auto` — it absorbs the row's slack and leaves a gap). The whole row is `.lib-card-actions`; its CSS forces every primary button to a uniform 44px single-line height so nothing wraps to two lines or mismatches. Symbol glyphs in the primary buttons (`↩ ▶ ⏸ ⏳`) carry a `︎` (U+FE0E text-presentation) selector so iOS renders them as flat monochrome Metro glyphs, not rounded colour emoji. Prefer this selector (or an SVG) for any new dingbat-style glyph in a button.
+- **Library card buttons.** Primary actions accumulate in `buttons`; icon-only buttons (download / prep / hide / delete) accumulate in `iconBtns` and render as one cluster that follows the primaries (no `ml-auto` — it absorbs the row's slack and leaves a gap). The whole row is `.lib-card-actions`; its CSS forces every primary button to a uniform 44px single-line height so nothing wraps to two lines or mismatches. Symbol glyphs in the primary buttons (resume / play / pause / hourglass) are sprite icons — see § Iconography above; the old U+FE0E variation-selector trick is retired.
 - **Height-locked app shell — the document never scrolls (with one exception).** `html`/`body` are `100dvh` + `overflow:hidden` + `overscroll-behavior:none`; `<main>` (`flex-1 overflow-y-auto`) and the overlay lists are the **only** scroll containers. This is what stops mobile rubber-banding/pull-to-refresh from detaching the fixed footer and overlays or scrolling the page behind a modal. Consequences when adding UI: the body must **not** get `min-h-screen` back (`100vh` overshoots `100dvh` while the mobile URL bar is shown and clips the bottom); `sticky top-0` at body level is inert — top bars stay visible because they're `flex-shrink-0` siblings above `<main>`; never attach scroll listeners to `window` (scroll `<main>` or the specific container); any **new scrollable region** must get `overscroll-behavior:contain` (the `.overflow-y-auto` Tailwind class is already covered by a blanket rule in the `<style>` head — elements made scrollable via bespoke CSS, like `#epHero`/`#fcTileGrid`/`#lpTrackRow`, must be added to that rule). `touch-action:manipulation` on the shell disables double-tap zoom app-wide (pinch still works). **The exception:** while the on-device player is open full-screen (`#localPlayer.lp-active:not(.lp-tiny)`, coarse pointers only), an `html:has(...)` rule re-enables root scrolling by making `<body>` 45vh taller than the viewport, because the browser URL bar only auto-hides on a *document* scroll — swiping up on the video minimizes the browser chrome. The overflow must be the body's own box (an absolutely-positioned spacer below body doesn't reliably extend Safari's root scroll range); the extra height and its scroll offset vanish when the player closes or minimizes. True fullscreen on iPhone Safari (no element-fullscreen API) comes from the player's fullscreen button falling back to `video.webkitEnterFullscreen()` — see [STREAMING.md](STREAMING.md).
-- **Mobile landscape.** A `@media (orientation:landscape) and (max-height:500px)` block in the `<style>` head keeps short landscape phones usable (tablets ≥744px tall are excluded). The episode page flips to a **two-pane split** (`#episodePage{flex-direction:row}`): the hero (`#epHero`) is a scrollable ~¼-width left column with the series art + description (`#epHeroContent` stacks vertically), and the season tabs + episode list + actions — wrapped in `#epRightPane` — fill the right ¾. (`#epRightPane` is a `flex-col flex-1` wrapper that's transparent in portrait, so the same DOM serves both orientations.) The block also trims the player-footer button/select padding + seek-bar height, and makes the fullscreen-controls tile grid (`#fcTileGrid`) scroll with natural-height rows instead of crushing its up-to-6 `flex-1` rows into an overlapping pile.
+- **Mobile landscape.** A `@media (orientation:landscape) and (max-height:500px)` block in the `<style>` head keeps short landscape phones usable (tablets ≥744px tall are excluded). The episode page flips to a **two-pane split** (`#episodePage{flex-direction:row}`): the hero (`#epHero`) is a scrollable ~¼-width left column with the series art + description (`#epHeroContent` stacks vertically), and the season tabs + episode list + actions — wrapped in `#epRightPane` — fill the right ¾. (`#epRightPane` is a `flex-col flex-1` wrapper that's transparent in portrait, so the same DOM serves both orientations.) The block also strips the playback UI to **transport-only** so nothing scrolls.
+
+- **Footer → name + fullscreen button on one line.** The seek bar (`#seekBarWrapper`), the Audio/Subs row (`#trackControls`), the PLAYING badge (`#statusBadge`), and the whole transport row (`#playerControlsRow`) are hidden; `_applyPhoneLandLayout()` moves the fullscreen button (`#fullscreenBtn`) into the title row (`#playerStatusRow`) so it shares that line. The button is compacted (overrides its `flex-[2]`) and gets `z-index` so it wins on overlap; the title is `flex-1 min-w-0 truncate` so it shrinks beside it rather than overlapping.
+- **Fullscreen overlay.** The seek bar + transport rows (play/seek, ep-nav, stop/device) keep their default `flex-1` so they grow to fill the grid (`#fcTileGrid`) — no dead space at the bottom (`overflow-y:auto` is a safety net only). **Volume** stays reachable without opening More: the ep-nav row carries inline `−`/`+` buttons (`.fc-land-vol`, shown via `#fcEpNav > .fc-land-vol`), which shrink Prev/Next to share the line; the standalone slider row `#fcVolRow` is dropped when ep-nav is present (`#fcEpNav:not(.hidden) ~ #fcVolRow { display:none }`) and kept visible for single-file playback (ep-nav hidden) where there's room. The **Audio/Subs row (`#fcTrackRow`)** is **relocated into the "More" sheet** (`#fcMoreBody`, above Night Mode) by `_applyPhoneLandLayout()` — it moves the **real DOM node** (not a copy, so the single `loadTracks` sync path is untouched) and restores it to its grid slot (before `#fcStopRow`) in portrait/large layouts.
+
+`_applyPhoneLandLayout()` runs at init, on `openFullscreenControls()`, and on a `matchMedia("(orientation:landscape) and (max-height:500px)")` change listener so live rotation is handled. If the More sheet outgrows one screen as controls are added, it can be paginated later.
 
 ## `static/index.html` (3608 lines)
 
@@ -30,10 +49,11 @@ Metro UI throughout — flat tiles, no rounded corners, bold uppercase typograph
 | 449–480 | Storage paths modal |
 | 482–550 | Episode page (full-screen, Netflix-style — hero / season tabs / episode cards / sticky action bar). Replaced the legacy bottom-sheet modal in Milestone 12 |
 | 552–575 | Stream file picker modal (`/api/stream/prepare` picker) |
-| 577–609 | Subtitle search modal (query box + **language filter** `#subSearchLang`, defaulting to `subtitleDefaultLang`, "All languages" option) |
-| 611–615 | Global toast (visible from any tab — sits under navbar). `top-24 sm:top-16` because the mobile navbar is two rows. |
+| 577–609 | Subtitle search modal (query box + **language filter** `#subSearchLang`, defaulting to `subtitleDefaultLang`, "All languages" option). Serves **both** surfaces: `openSubtitleModal()` with no argument works on whatever the TV is playing, `openSubtitleModal({itemId, filePath, label})` on one library file — the on-device player's **Find** button (`#lpFindSubBtn` → `lpFindSubtitles`) |
+| — | `#noticeStack` — one fixed layer holding `#serverAttentionBanner` + `#globalToast` as opaque `.notice-card`s, pinned under the safe area (never in the flow). See the notice notes below. |
 | 618–671 | Navbar (tabs, VPN pill, SSE dot, profile avatar, settings gear). On mobile portrait the row is `flex-wrap`: row 1 = logo + status/profile/settings, row 2 = the three tabs (each `flex-1`, full-width). `sm:` and up collapses back to a single row. `ml-auto` on the right cluster doubles as the desktop spacer. Tab order swaps via `order-3 sm:order-2` on tabs and `order-2 sm:order-3` on the right cluster. |
 | 677–750 | Search tab + Library tab containers |
+| — | `#downloadsTab` + `#appTab` (inside `<main>`) and `<nav id="appTabs">` (after it): the iOS app's two own tabs and its bottom tab bar. Hidden everywhere else. See § iOS app shell. |
 | 752–793 | Skip / Resume offer floating tiles |
 | 796–939 | Player footer (seek bar, track selectors, controls row) |
 | 942–1159| Fullscreen controls overlay (5-row tile grid + safe-area handling) |
@@ -54,7 +74,7 @@ let app = { vpn_secure, vpn_status, stream_status, active_title, progress,
 ```
 - `profile` — currently selected profile object (persisted to `localStorage.streamlink_profile`)
 - `allProfiles` — fetched list from `/api/profiles`
-- `activeTab` — `"search"`, `"library"`, or `"offline"`
+- `activeTab` — `"search"`, `"explore"`, `"library"`, or `"offline"`. Starts as `"library"` (19.3.0): the markup ships `#libraryTab` visible and `#searchTab` hidden, and the boot restore calls `loadLibrary()` once the saved profile is back (a picker login gets it from `_doSelectProfile`). Keep the markup, the tab-button classes and this initial value in agreement if the default ever moves again
 - `expandedDownloads: Set<itemId>` — which library download cards have file list expanded
 - `downloadFilesData: Map<itemId, files[]>` — cached file lists
 - `libDownloadStats: Map<itemId, payload>` — latest `library_progress` event per item
@@ -65,23 +85,42 @@ let app = { vpn_secure, vpn_status, stream_status, active_title, progress,
 Single `EventSource('/api/events')`. Every handler first calls `_noteSSEMsg()` (stamps `app._lastSSEMsg` for the liveness watchdog — see "SSE reconnect supervision"). Handlers:
 - `ping` — server keep-alive (≥ every 20 s), no payload; only proves the pipe is alive.
 - `state` — full snapshot; `Object.assign(app, d)`, then `renderVpn` + `renderPlayer` + `updateDlBadge`. Also re-renders the library (`loadLibrary()`) when `download_idle_open` flips while on the Library tab, so the cards' "Idle — waiting" ↔ "Idle download" chips update as the idle/night window opens/closes
-- `vpn_status` — show alert; update VPN pill + overlay
+- `vpn_status` — show alert; update VPN pill + overlay (`renderVpn` → `applyVpnGate`); re-render the library so downloading rows flip their badge to/from "⚠ VPN down — paused"
 - `stream_status` — phase transitions (`buffering`/`playing`/`error`/`idle`); push progress fields
-- `library_progress` — per-item dl speed/ETA (~every 5 s while item is downloading). Stored in `libDownloadStats` and rendered into `#dl-stat-<itemId>` (`formatDlStat` shows "Waiting for idle window" when `paused`). Also calls `refreshDownloadFiles(item_id)` so an expanded per-file list's progress bars + ✓complete badges stay live
-- `library_update` — item status changed (`downloading`→`ready`/`error`); triggers `loadLibrary()` if on the Library tab
-- `progress_saved` — quiet refresh of the library tab so watch-progress bars update. If the episode picker is open for the same item, also calls `refreshEpFiles()` so the picker never displays stale watch data once the server has new state
+- `library_race` — a download race changed state (16.0.0). `upgraded` / `upgrade_available` toast; `started`/`culled`/`settled`/`exhausted` only repaint, because the card chips already show them and a toast per dropped candidate would be noise. Always `loadLibrary()` on the library tab and `_epLiveRefresh()` for a concerned episode page.
+- `library_progress` — per-item dl speed/ETA (~every 5 s while item is downloading). Stored in `libDownloadStats` and rendered into `#dl-stat-<itemId>` (`formatDlStat` shows "Waiting for idle window" when `paused`, and "Finding peers…" when `awaiting_metadata` — qBit has no file list yet, so nothing is actually transferring). Also calls `refreshDownloadFiles(item_id)` so an expanded per-file list's progress bars + ✓complete badges stay live, **and `_epLiveRefresh()` when the open episode page shows that item** (see § Keeping the episode page live)
+- `library_update` — item status changed (`downloading`→`ready`/`error`); triggers `loadLibrary()` if on the Library tab, and `_epLiveRefresh()` (via `_epConcerns(id, true)`) when the episode page is open — `loose`, because the payload carries no series and a brand-new member is by definition not in the list yet
+- `progress_saved` — quiet refresh of the library tab so watch-progress bars update, plus `_epLiveRefresh()` when the open episode page is concerned. Before 12.7.2 this was gated on `epItemId`, so a show opened as a **merged series** (where `epItemId` is null) never refreshed at all
 
 ### Key render functions
 
-- `renderPlayer(s)` — drives the footer + fullscreen overlay. The seek bar shows **VLC position** when `stream_status==="playing"` and `vlc_duration > 0`; otherwise download progress. On mobile (<768 px) the fullscreen overlay auto-opens on **buffering OR playing** (not just `playing`) so slow-network Play taps get immediate visible feedback. The overlay is **never auto-closed** on `stream_status==="idle"` — the server can take seconds to publish the next track, and the volume slider must stay reachable during that gap. Closing the fullscreen is manual only (the X button, which sets `_fcDismissed=true`). For library plays the buffering badge says **"Loading…"** and the fullscreen status says **"Starting playback…"** (instead of the misleading "Buffering…" / "Connecting…" copy — those imply network work, but the file is already local).
+- `renderPlayer(s)` — drives the footer + fullscreen overlay. The seek bar shows **VLC position** when `stream_status==="playing"` and `vlc_duration > 0`; otherwise download progress. On mobile (<768 px) the fullscreen overlay auto-opens on **buffering OR playing** (not just `playing`) so slow-network Play taps get immediate visible feedback. The overlay is **never auto-closed** on `stream_status==="idle"` — the server can take seconds to publish the next track, and the volume slider must stay reachable during that gap. Closing the fullscreen is manual only (the X button, which sets `_fcDismissed=true`). For library plays the buffering badge says **"Loading…"** and the fullscreen status says **"Starting playback…"** (instead of the misleading "Buffering…" / "Connecting…" copy — those imply network work, but the file is already local). It also toggles **`body.tv-idle`** (19.11.0) when the TV has nothing on it — not `playing`, not `buffering`, not `error`, and no `youtube_active` — which hides the whole `footer` and drops `<main>`'s `pb-36` to `4.5rem` + safe area (enough to clear the app's floating APP button). `error` deliberately keeps the footer so the failure stays readable. With the footer hidden, `_offerBottom` measures `offsetHeight` 0 and falls back to its safe-area position.
 - `renderPlaybackOwner(s)` — paints the **"started by" chip** (`#ownerBadge` in the footer status row + `#fcOwner` in the fullscreen overlay): a colored profile dot + the owner's name (`· you` when `s.library_profile_id === profile.id`). Driven by the `library_profile_*` snapshot fields and shown only while a library item is playing. Surfaces *whose* progress the shared VLC controls feed — a second viewer driving pause/seek/next can't reattribute the session, so this tells them their controls save to the starter's profile, not their own. Called from `renderPlayer`; seeded optimistically in `_optimisticBuffering` (the local profile owns a play it just started).
-- `renderSkipOffer(offer)` / `renderResumeOffer(offer)` — manage the floating amber/blue offer tiles.
-- `renderLibrary(items)` — groups items by `series`, renders cards with Play/Resume/Delete; in-progress downloads show a live ETA chip. The card's **title/meta block is a clickable surface** (`.lib-tile-open`, wired via `data-item-id`/`data-title` + `addEventListener` after render, same escaping-safe pattern as `.lib-restart-btn`) that opens the info page (`openEpisodePicker`) for any ready/downloading item — episode list for a series, **movie panel** for a single-file item. A **downloading multi-file** item shows an **☰ Episodes** button (opening that same page, which manages in-flight downloads) instead of the old inline Files expander; the Files expander now renders only for the finished-partial case (`download_partial && torrent_hash`).
-- `renderEpList()` — episode picker rows with progress bars, per-episode ▶ button, checkbox selection, watched toggle. The watched toggle is an element-based handler (`epToggleWatched(this)` reading `data-path`/`data-watched`); the prior inline `JSON.stringify(f.path)` form blew up the `onclick="…"` quoting and broke the button silently. **Movie mode:** when `epIsMovie` (single-file item — set in `openEpisodePicker`), it renders `_epMoviePanel(epFiles[0])` instead of the list — a detail panel (status + watch/download progress + Download-to-device / ⚡ Prep / 🗑 Delete; for a still-downloading file, Download-to-host + Now/Idle schedule). `_epApplyMovieChrome(isMovie)` hides `#epBulkChips` + the multi-select bottom buttons (`#epDownloadSelBtn`/`#epPlaySelBtn`) and shows the single `#epMoviePlayBtn` (→ `epPlayFrom(0)`, label reflects resume).
+- `renderSkipOffer(offer)` / `renderResumeOffer(offer)` — manage the floating amber/teal offer strips. Both dock through `_offerBottom(stack)`: flush on the footer's **measured** top edge (`footer.offsetHeight`, which already includes the safe-bottom padding), or 12px above the safe area in fullscreen. The footer's height varies (Audio/Subs row, seek bar, wrapped title); the old fixed 200px left a band of library showing between strip and player. Resume stacks on Skip by Skip's real `offsetHeight`.
+- `renderLibrary(items)` — groups items by `series`, then renders in one of **two view modes** (toggled per-device in Settings → This Device; see § Library view mode). Both modes build every item from the **shared `_libItemChrome(item)`** (returns the badges + the `buttons`/`iconBtns` action set + progress/meta/flags), so **no action is view-only** — that shared source is the invariant that keeps the two views at feature parity. `_libItemChrome` is the single place per-item actions are defined; edit it, not two copies.
+  - **Order: most recently watched first (17.12.0).** The server already hands `items` back that way (per profile — see [API.md](API.md) `GET /api/library`), and `renderLibrary` repeats the ordering at **tile** level: every tile — franchise shelf included — is built into a `units[]` array carrying its own `at` (`_libLastWatched(items)`, the newest `last_watched_at` in it), then stably sorted newest-first with the never-watched keeping the server's A-Z order behind them. That last part is the reason the pass exists at all: a franchise tile used to be emitted unconditionally *above* the grid, so the show you watched last night rendered below a collection you hadn't touched in a year. Build a new kind of tile into `units`, never straight into `html`.
+  - **List view** (`_libItemListHtml`) — the original grouped layout: per-series header + a wide row per item with the full `.lib-card-actions` strip inline. The row's **title/meta block is a clickable surface** (`.lib-tile-open`, wired via `data-item-id`/`data-title` + `addEventListener` after render, same escaping-safe pattern as `.lib-restart-btn`) that opens the info page (`openEpisodePicker`) — episode list for a series, **movie panel** for a single-file item.
+  - **Card view (default)** (`_libItemCardHtml`) — a flat responsive **poster grid** (no per-series headers; the poster + title identify the show). Each card is a 2:3 poster with a ▶ Play/Resume overlay (ready items), the status badges + a watch-progress bar overlaid, and a **⋯ button** (`_libCardMore`) that toggles an in-card **drawer** holding the *identical* `.lib-card-actions` set the list shows (Episodes / Download / Prep / Hide / Delete / download Pause↔Idle / When-Ready / the partial-download Files expander are all present; the primary Play/Resume itself opens the On-TV-vs-On-Device chooser, so there's no separate "On Device" action). Posters **lazy-load** per card (`_libWirePosters` → IntersectionObserver → `_libLoadPoster`) from `/api/library/{id}/metadata` (`poster_url` or `img_base`+`poster_path`), cached in `_libPosterCache` (cleared in `renameSeries`/`_applyMetaResult`). `renderLibrary` rebuilds the grid with `innerHTML` on every SSE refresh, so painted `<img>` nodes are lifted out first (`_libKeepPosters`, only while their `src` still equals the cache entry) and moved into the new cards (`_libRestorePosters`); `_libWirePosters` skips those. `loadLibrary` drops a response older than the last one painted (`_libLoadSeq`/`_libPaintedSeq`); a flat Metro title tile (`.lib-poster-ph`) shows until/unless art arrives (retries a couple times while a first-ever TMDb fetch is `pending`). Merged multi-item series collapse into one poster card via `_libShowCardHtml` (reuses `.lib-show-open`/`.lib-show-play` so the existing post-render delegation wires it).
+  - A **downloading multi-file** item shows an **☰ Episodes** action (opening the episode page, which manages in-flight downloads) instead of the old inline Files expander; the Files expander now renders only for the finished-partial case (`download_partial && torrent_hash`). In-progress downloads show a live ETA chip.
+  - A **still-downloading** item (single- or multi-file) also carries a card-level **▶ Play now** / **⟳ Resume now** button (11.4.0): it streams a file on the TV while the torrent is still downloading via `streamLibraryFile` → `POST /api/library/{id}/stream-file` (sequential + first/last-piece → play once buffered). Target = the resume file when the item has progress (`hasProgress`, reads "Resume now"), else `first_file` (the earliest video). It's distinct from the **When Ready** queue button, which instead waits for the whole download to finish. Only rendered when the item is torrent-backed and not compressed.
+
+#### Library search + toolbar (19.3.0)
+
+The Library tab opens with a search box (`#libSearchInput`, clear button `#libSearchClear`) and ends with a toolbar under `#libraryContent`: disk space (`#diskSpaceContainer`) + the storage gear on the left, **Upload** / `#libHiddenToggle` / **Refresh** on the right. Those controls used to sit in the tab's header; the TV and Simple-mode CSS still hide them by `onclick` value / id, so the move changed nothing there.
+
+Search is a pure client-side view over `window._libCache` (`onLibSearchInput` → `renderLibrary`), so SSE-driven re-renders keep the filter. `libSearchQuery` is in-memory only. `_libNorm` strips accents and punctuation. Every typed word must appear in the item's `display_show` / `series` / `title` / `display_title` (`_libItemMatches`). It filters whichever side is showing (visible or hidden) *after* the Hidden-toggle count is painted, so that count always describes the whole library. Franchise shelves: a shelf whose **name** matches stays folded with every member present; a query that only hits some of a shelf's members shows those members as their own tiles instead of a one-film collection. No match renders "Nothing in your library matches …" with a Clear button. **Esc** clears.
+
+#### Library view mode (device-local)
+
+`libViewMode` (`"card"` default | `"list"`) is a **device-local** UI preference persisted to `localStorage.streamlink_libview` — like Dev Mode / Locked Progress Bar it is never per-profile or server-stored. The **Settings → This Device → Library View** segmented control (`#psLibViewCard`/`#psLibViewList`) calls `setLibView(mode)`, which persists, repaints the control (`_renderLibViewToggle`, seeded in `openProfileSettings`), and re-renders the library tab live from `window._libCache`. `renderLibrary` branches on `libViewMode` right after grouping; only card mode opens the outer grid `<div>` and calls `_libWirePosters`. All post-render event wiring (`.lib-restart-btn`, `.lib-tile-open`, `.lib-show-open`, `.lib-show-play`, the `expandedDownloads` re-populate) runs for both views because both reuse the same class names + data attributes.
+- `renderEpList()` — episode picker rows with progress bars, per-episode ▶ button, checkbox selection, watched toggle. The watched toggle is an element-based handler (`epToggleWatched(this)` reading `data-path`/`data-watched`); the prior inline `JSON.stringify(f.path)` form blew up the `onclick="…"` quoting and broke the button silently. **Movie mode:** when `epIsMovie` (single-file item — set in `openEpisodePicker`), it renders `_epMoviePanel(epFiles[0])` instead of the list — a detail panel (status + watch/download progress + Download-to-device / ⚡ Prep / 🗑 Delete; for a still-downloading file, Download-to-host + Now/Idle schedule). **In the app** the download action is not a raw host download but an offline device save — `_appDlWideHTML` inside an `.ep-appdl-wide[data-path]` slot, live-refreshed by `_appRefreshDlBtn` alongside the episode rows' `.ep-appdl-slot` (see [GOTCHAS.md](GOTCHAS.md) § never hand the app a host ZIP). `_epApplyMovieChrome(isMovie)` hides `#epBulkChips` + the multi-select bottom buttons (`#epDownloadSelBtn`/`#epPlaySelBtn`) and shows the single `#epMoviePlayBtn` (→ `epPlayFrom(0)`, label reflects resume). **TV mode (`?tv=1`) renders a browse+play-only episode page**: `TV_MODE` guards in `renderEpList`/`_epCardHtml`/`_epMoviePanel` drop the scheduling/recheck bar, Save ZIP, checkboxes, per-episode action rows, priority rows, and the movie panel's secondary actions, while `.tv-mode` CSS hides the hero's rename/metadata/on-demand buttons, the bulk chips, and the selection-driven bottom buttons; the library is forced to card view. See [REMOTE.md](REMOTE.md) § TV layout.
+- **Keeping the episode page live (12.7.2).** `_epLiveRefresh()` is the single repaint entry point for SSE-driven change while `#episodePage` is open, and `_epConcerns(itemId, loose)` decides whether an event applies (exact in single-item mode; `epFileItem` membership in merged-series mode; `loose` for callers that may be announcing a new member; an event with no `item_id` is treated as ours). Two constraints shape it and both are load-bearing: `renderEpList` rebuilds `#epList.innerHTML` and `#epList` is the **scroll container**, so `_epLiveRefresh` captures and restores `scrollTop` — without that, a live page yanks itself to the top every few seconds, which is worse than a stale one (the restore is skipped while `_epAutoScrollArmed`, where the repaint has already re-landed on the next-up row); and `library_progress` fires per downloading item, so repaints coalesce behind one `EP_LIVE_MS` (1.5 s) trailing timer rather than issuing a fetch per event.
 - `refreshEpFiles()` — re-fetches `/api/library/{id}/files` for the open picker and re-renders. Called after `epToggleWatched` and from the `progress_saved` SSE handler. Preserves `epChecked` selections that still exist; does not touch the modal title (so it's safe to call mid-session).
 - `setFcTitle(title, filePath)` — sets the fullscreen overlay's title. Uses `parseEpisodeInfo` to extract "S01E04 · Episode Name" when possible.
-- `renderVpn(secure, statusText)` — updates the navbar pill + toggles the full-screen red overlay.
-- `renderPerfBanner(d)` — shows `#perfBanner` (sticky, amber=degraded / red=overloaded) from the `state` event's `sys_status.overall`, naming the hot resource(s) (CPU/GPU/RAM/network). Non-blocking; auto-hides the moment `overall` returns to `ok`. This is the user-facing "host is busy — performance may be reduced" warning while the box sheds/finishes background work after a viewer arrives. Admin sees the full per-resource breakdown in **Admin → System → System Health**. **Collapsed by default** (`.perf-collapsed` → just a small tone-coloured chevron tab pinned top-right, rest of the strip transparent + click-through) so it never clips/blocks the navbar or prep pill; `togglePerfBanner()` (the `#perfBannerToggle` chevron) expands the full message and flips the chevron up. The `perfBannerExpanded` flag is re-applied on every per-tick `className` rewrite so the user's choice sticks.
+- `renderVpn(secure, statusText)` — updates the navbar pill + toggles the full-screen red overlay, then calls `applyVpnGate`.
+- Episode **Prev/Next** (footer `#prevEpBtn`/`#nextEpBtn` and the fullscreen `#fcEpNav` row + `#fcEpCounter`) appear when `library_nav_count > 1` on a live library playback. Read that, **not** `library_item_file_count` — a show downloaded one episode per library item reports `1` there for every episode, which hid the controls outright (11.19.1). The counter uses `library_nav_index`/`library_nav_count`; `library_playlist_count`/`library_current_index` describe the shrinking VLC tail and count *down*. See [GOTCHAS.md](GOTCHAS.md) § cross-item series playback.
+- `applyVpnGate(secure)` — VPN-down feature gate. Toggles `body.vpn-down` (CSS greys every `.vpn-gated` control: Search box/button, the Save/Play buttons on results, the "Recheck hashes" button) and swaps each gated control's `title` to an explanatory message (restoring the original when the VPN returns). Greying is pure CSS off the body class, so it also covers controls rendered *after* the drop; `applyVpnGate()` is additionally called at the end of `doSearch` and `renderEpList` to title freshly-rendered controls. Clicks are blocked by a capture-phase `click` listener (installed in init) that stops any `.vpn-gated` click and shows an alert. `vpnBlocked()` is the matching guard for keyboard/programmatic paths (`doSearch` on Enter, `epRecheckSelected`). Downloading library rows also swap their badge to "⚠ VPN down — paused" — the `vpn_status` handler re-renders the library so this updates live.
+- Host-performance banner — **removed (7.4.1).** There is no longer a user-facing "host is busy/overloaded" banner. The `state` event's `sys_status` (CPU/GPU/RAM/network + `overall`) still flows; the admin sees the full per-resource breakdown in **Admin → System → System Health**. (Transient background-work load wasn't user-actionable, so it was dropped to cut notification noise.)
 
 ### Search source picker
 
@@ -91,17 +130,57 @@ A collapsible **Sources** control under the search box (`#srcWrap` → `#srcTogg
 
 ### Server notices — always visible, never blocking
 
-The three top notice surfaces — `#serverAttentionBanner` (reboot/update + missing-key), `#perfBanner` (host busy/overloaded incl. network), and `#globalToast` (error/warning/info via `showAlert`) — are all raised to **`z-[70]`** so they paint **above modals (`z-[60]`)**: a notice is never lost behind an open dialog. Because `z-[70]` also sits above the on-device player (`#localPlayer`, `z-50`) and its top Stop / To TV control bar, all three are **`pointer-events:none`** so they can never swallow a tap meant for those buttons — the rule is set **by ID** in the `<style>` block so it survives the `className` rewrites in `renderServerAttention`/`renderPerfBanner` (`#globalToast` already sets it on its container); the interactive children — `#serverAttentionLink` (Admin Panel) and `#serverAttentionDismiss` (the `×`) — re-enable `pointer-events:auto`. The banner/toast backgrounds are translucent (`/70`) so they sit lightly over the video.
+The two top notice surfaces — `#serverAttentionBanner` (reboot/update + missing-key) and `#globalToast` (error/warning/info via `showAlert`) — live together in **`#noticeStack`**, a `position:fixed` layer at **`z-[70]`** (above modals at `z-[60]` and the on-device player at `z-50`). It is **out of the flow on purpose** (19.11.1): the banner used to be a sticky strip *above* the header with no safe-area inset, so in the iOS app it sat under the Dynamic Island and pushed the whole UI down. The stack's top edge clears the status bar the way `.safe-top` does — pinned `67px` portrait / `8px` landscape under `html.is-app` (env() is unreliable there), `env(safe-area-inset-top) + 8px` on the web. Each notice is an **opaque** `.notice-card` toned by a `.notice-<red|amber|yellow|indigo|blue|green>` class (CSS vars `--nc/--nb/--nt`); `renderServerAttention` sets `notice-card notice-<tone>`, `showAlert` maps its type through `NOTICE_TONES`. The stack container is `pointer-events:none`; the banner re-enables `auto` **by ID** (it is dismissable, so a tap on it must not fall through), the toast stays click-through.
 
-**Dismiss/collapse:** every banner can be cleared. `#perfBanner` collapses to a chevron tab (above). `#serverAttentionBanner` is **dismissible** — `dismissServerAttention()` stores the active notice's key (`update:<phase>` / `missing:<labels>` / `degraded`, written to `el.dataset.noticeKey` on each render) in `serverAttentionDismissedKey` and hides it; `renderServerAttention` re-shows the banner only when the freshly-computed key differs, so a dismissed notice reappears on its own when the underlying condition changes (a new update phase, a different missing key, indexer health flipping). The admin panel's `#indexerHealthBanner` is dismissible the same way via `dismissIndexerHealthBanner()` / `_indexerHealthDismissedKey` (keys `degraded`/`healthy`).
+**Dismiss/auto-hide:** `#serverAttentionBanner` is **dismissible** — `dismissServerAttention()` stores the active notice's key (`update:<phase>` / `missing:<labels>`, written to `el.dataset.noticeKey` on each render) in `serverAttentionDismissedKey` and hides it; `renderServerAttention` re-shows the banner only when the freshly-computed key differs, so a dismissed notice reappears on its own when the underlying condition changes (a new update phase, a different missing key). It **also auto-hides 5s** after a notice first appears (`serverAttentionTimer`) — treated as a dismiss (sets `serverAttentionDismissedKey`) so the same condition won't immediately re-pop it; the timer is (re)armed only on a genuine notice-key change so per-tick re-renders of the same notice don't keep resetting it. The `degraded` ("some search sources") notice was **removed (7.4.1)**. The admin panel's `#indexerHealthBanner` is still dismissible via `dismissIndexerHealthBanner()` / `_indexerHealthDismissedKey` (keys `degraded`/`healthy`).
 
 The fullscreen VLC controls overlay (`#fullscreenControls`, `z-50`, opaque) is the exception — a `z-[70]` banner pinned to the top would cover its Close/Night header buttons. So `openFullscreenControls`/`closeFullscreenControls` toggle **`body.fc-open`**, whose CSS **hides** those three elements and reveals `#fcNotice` instead — a dedicated strip inside the overlay, **absolutely positioned over the title row** (`top: safe-top + 48px`). Being absolute it **never reflows the control tiles below** (Play/Seek/Volume keep their positions — users rely on muscle memory there) and it's `pointer-events:none` so it can never block a tile.
 
-`renderFcNotice()` is the single painter: it reads the live banner/toast DOM as the source of truth (no parallel state), collects the visible ones in priority order (reboot/update → host/network → latest alert), and renders one tone-coloured `.fc-notice-line` per notice (`_fcNoticeTone` maps the source element's Tailwind colour → amber/red/indigo/green). It's a no-op (hides the strip) when the overlay is closed. **Every notice mutation calls it** — `showAlert` (+ its timeout), `hideAlert`, `renderServerAttention`, `renderPerfBanner`, and both fullscreen open/close — so the strip and the normal banners never diverge. (Native-fullscreen on the on-device `<video>` player escapes DOM stacking and is **not** covered by this strip.)
+`renderFcNotice()` is the single painter: it reads the live banner/toast DOM as the source of truth (no parallel state), collects the visible ones in priority order (reboot/update → latest alert), and renders one tone-coloured `.fc-notice-line` per notice (`_fcNoticeTone` maps the source card's `.notice-<tone>` class → amber/red/indigo/green). It's a no-op (hides the strip) when the overlay is closed. **Every notice mutation calls it** — `showAlert` (+ its timeout), `hideAlert`, `renderServerAttention`, and both fullscreen open/close — so the strip and the normal banners never diverge. (Native-fullscreen on the on-device `<video>` player escapes DOM stacking and is **not** covered by this strip.)
+
+### Help tips (user-facing jargon)
+
+The dashboard ports admin.html's `help-tip` component: a small square "?" chip (`class="help-tip" tabindex="0" data-tip="…"`) served by one shared `#tipPop` popover. Hover/keyboard-focus shows a tip transiently; **tapping the chip pins it** so it works on touch (the dashboard is used from phones, where `title=` tooltips never appear). `helpTip(text)` builds the escaped chip markup for JS templates (near `ic()`); the popover logic (`_tipShow`/`_tipHide` + document-level mouseover/focusin/click/scroll/resize listeners) mirrors admin.html. Attached to the top jargon offenders: **prep** (defined in the prep-warning modal + a `helpTip` on the "Prep Prio" label), the **play chooser** (relabelled "On the TV" / "On this device" with plain descriptions — no chip needed), the **Search Sources** picker, the **Smart/Classic** toggle, and **seeders** ("sorted by seeders"). The "Compressed" badge tooltips were reworded off "no longer torrent-backed" to plain "this copy was shrunk to save space…".
+
+### First-run setup checklist
+
+`refreshSetupChecklist()` (called fire-and-forget in the `DOMContentLoaded` init) fetches `GET /api/setup-status` and, when a prerequisite is missing, paints `#setupChecklist` (a card at the top of `#searchTab`) so a fresh install explains *why* its tabs are empty instead of showing blank screens. It lists each not-ok item with its label/detail/how-to-fix and a **"Fix"** button that deep-links to `/admin#<admin_tab>` (admin.html's `showDashboard` honours the hash → `switchTab`). Hides itself once every `required` item is ok. `dismissSetupChecklist()` sets a `sessionStorage` flag to hide it, but a failing **required** item (e.g. no indexer) re-shows it on reload so the real blocker can't be permanently hidden. No-op in the offline/app snapshot (`_appOffline`). The old Search empty-state copy ("Public domain archives…") was replaced with accurate "Search for movies & shows" text pointing at this checklist.
 
 ### Download scheduling (per-item)
 
 A downloading library card shows a download-mode badge ("↓ Downloading", or "↓ Idle download" / "⏸ Idle — waiting" when `item.download_mode==="idle"`, gated on `app.download_idle_open`) plus a Pause↔Resume button: **⏸ Idle** (`setDownloadSchedule(id,"idle")` — download only during the idle/night window) ↔ **▶ Resume** (`setDownloadSchedule(id,"now")`). The download modal's **Download at idle/night only** toggle (`#dlIdleOnly`) sends `download_mode:"idle"` on submit and warns (`#dlIdleWarn`) when `app.download_idle_configured===false` (no admin prep window enabled).
+
+### Pack-first for one episode (17.9.0)
+
+A request for a single episode reaches for a **whole-season pack** whenever one covers it
+and clears the filters, and keeps only that episode out of it. Lives beside the existing
+whole-season pack machinery in the detached-run block.
+
+| Function | Role |
+|----------|------|
+| `_packEpisodeCount(ctx, p)` | How many episodes a pack holds, counted from TMDb's `all_seasons`, never from the release name ("Complete" means nothing arithmetical). 0 = can't tell ⇒ judge the pack whole. |
+| `_bgPackForEpisodes(ctx, season, wanted, filt)` | The best pack to slice. Audio preference first (as `_bestPackFrom`), then the Auto size window applied to the **per-episode share**, then `app.pack_first_max_bytes` as a hard whole-torrent ceiling. Returns null when `app.pack_first` is off. |
+| `_packCoversEpisodes(ctx, p, season, wanted)` | Which of `wanted` the pack covers. `_packCoversScope` only accepts a pack spanning the whole season, so today this is "all of them" — written as a real test because the caller must carry a remainder correctly the day that changes. |
+| `_bgStartPackSlice(…, wanted, filt, fallback)` | The twin of `_bgStartPack` for a scope smaller than a season. Sends `want_episodes` + `pack_fallback`, and **races** — cheaper here than anywhere, since each challenger is sliced too (three packs cost three *episodes* of bandwidth). |
+| `_packNeedsSeasonSlice(p, want)` / `_packScopeBytes(meta, p, want)` | **19.12.0.** Whether a pack holds more than the one season asked for (a `multiseason` pack does), and what it will then cost: the season's share of the torrent by TMDb episode count. An estimate, so every surface says "about"; falls back to the whole size when the inventory can't say. `_bestPackFrom(…, sizeOf)` judges the Auto size window on it. |
+| `_packScopePool(packs, want, seasons, meta)` | The packs covering a scope, minus any that would need slicing and whose **season share** (`_packScopeBytes`, 19.12.1 — it was the whole torrent in 19.12.0) exceeds `app.pack_first_max_bytes` — unless that leaves nothing. Share unknown ⇒ judged whole. Unlike `_bgPackForEpisodes`, which still caps the whole torrent. |
+| `_packSeasonSlice(meta, pack, season)` / `_packSeasonSliceToast(…)` | The options (`want_seasons:[n]`, **never raced** — challengers run unsliced until culled) and the sentence ("Getting only Season 1 out of the seasons 1–13 pack — about 16.3 GB of its 206.9 GB…") shared by `_bgStartPack`, `ssSimpleGetSeason` and `ssBulkUsePack`. Not applied to a foreign pack, which is wanted whole. |
+| `_dlFileSeason(name)` / `_dlRenderSeasonChips()` / `_dlPickSeason(v)` | The Add-to-Library file picker's season chips. The season is read off the path only to GROUP rows; what downloads is still the ticked rows. `updateDlFileCount` shows the ticked size against the whole. `#dlPackHint` warns when the modal is opened on a multi-season pack (`overrides.pack`). |
+| `_packScopeName(seasons)` + `item.pack_scope` | The library card's "Season 1 only · 15.2 GB of 206.9 GB" badge, in place of the plain Partial badge. |
+| `_packLookup(season, episode, ident)` / `_packFetch(body)` | `GET /api/library/pack-lookup` and `POST /api/library/pack-fetch`. `ident` (`tmdb_id` or `series_key`) is mandatory — every show has an S01E05. |
+| `_bgFetchFromPacks(ctx, missing)` | The episodes of `missing` already sitting at "skip" in a pack here, now downloading. Returns what it handled so the caller narrows its hunt. **Step 0 of every auto flow**, before any query. |
+| `epFetchFromPack` / `epFetchSeasonFromPack` / `ssFetchFromPack` | The one-tap buttons — episode row, season header, and the search show page (which has no item id, so it addresses the pack by TMDb identity). |
+| `_epOnBox(f)` / `_epPackEpisodes(s)` / `_covPackEps(row,s)` | The skip-aware predicates. A `"skip"` file is **not** owned: it is in the torrent but priority 0 means it will never be fetched. `coverage.in_pack` is the third bucket — missing, but a priority write away. |
+
+`_epGetMissing` runs them in order: **0.** anything already in a pack here → fetch, no query; **1.** the existing whole-season branch; **2.** pack-first for the remaining gaps (the same season query the gap fill would run anyway, so it costs no extra round trip); **3.** the per-episode hunt for whatever is left, with `ctx.owned` narrowed so it can't re-hunt what steps 0–2 just started. `epPlayEpisode` does the same, and leads with the **season** query — it returns packs *and* episodes in one trip, where the episode query can only ever return single-episode releases.
+
+### Content lock at download time (11.21.0)
+
+`#dlLockBtn` (Add-to-Library / Save-Stream modal header), `#ssLockBtn` (show view source sheet) and `#ssBulkLockBtn` (bulk sheet) are small lock/unlock icon toggles that send **`admin_only:true`** on `POST /api/library/download` / `/api/stream/save-to-library`, creating the item already content-locked instead of leaving it in the open library until someone flips it in the admin Content Lock tab.
+
+Two flags back them — `_dlLocked` (modal) and `_ssLocked` (one shared choice across both show-view sheets). `syncLockButtons()` repaints all three via `_paintLockBtn(id,on)` (swaps the sprite `<use href>` between `#i-unlock` and `#i-lock`, toggles `text-amber-400`, sets `aria-pressed` and `title`) and shows `#dlLockNote`, the one amber line that explains the state — the bare icon is cryptic and `title=` never renders on touch. It is called every time one of the three surfaces opens; `_dlLocked` resets on each modal open and `_ssLocked` on each `openSearchShow`/`openSearchShowFromTmdb`, so a lock is never carried silently into the next download.
+
+**`canLockContent()`** decides whether the icon is drawn at all: the selected profile must be `elevated` *in the freshly-fetched `allProfiles`* **and** equal to `_verifiedProfileId` from `GET /api/profiles`. If it returns false, `syncLockButtons` also clears both flags, so an expired 12 h PIN session can't leave a stale toggle riding along into a request the server will 403. This is presentation only — the endpoints re-check with `_is_elevated`. See [ADMIN.md § Content Lock](ADMIN.md).
 
 The **Files** expander now appears **only on a finished partial item** (`download_partial && torrent_hash`), so the full per-file controls stay available after the kept files complete — clicking **Now**/**Top** on a ⊘-skipped row re-downloads it (the server flips the item back to `downloading`). `renderLibrary` re-populates any open expander after a re-render (a status flip rebuilds the card). A **downloading** item no longer uses this expander at all — it routes to the episode page via the **☰ Episodes** button (and the clickable tile), which carries the per-season download/prep scheduling bar.
 
@@ -111,9 +190,9 @@ The **Files** expander now appears **only on a finished partial item** (`downloa
 - **Stream-prep row** (only when `hlsAvailable`) — **PREP · This season** → ⚡ Now · 🌙 Idle · ⊘ Never (`epSchedPrep(mode)` → `POST /prep-schedule`; `_epPrepBtn(mode,…,cur)` highlights the active segment from `_visibleSeasonPrepMode()`). `now` also `_startPrepPolling(epItemId)` so per-row Prep icons update live. Mirrors the download row but for HLS prep — see [STREAMING.md § Per-file prep schedule](STREAMING.md).
 - **Recheck row** — **Recheck hashes (N)** (`epRecheckSelected` → `POST /recheck` on the **checked** episodes `epChecked`; `#epRecheckCount` tracks the count via `updateEpCount`). Confirms, then toasts the damaged/cache-purged result.
 
-Per episode, `_epCardHtml` shows the device-download `<a>` **only when `complete`**; a not-on-disk episode shows ⊘ Not downloaded (skipped) / 🌙 Idle — deferred with a **⬇ Download** button (`epDownloadSkipped` → fetch to host now), or ⬇ %  when actively downloading (no button) — and play is blocked either way. All picker actions `refreshEpFiles()` after.
+Per episode, `_epCardHtml` shows the device-download `<a>` **only when `complete`**; a not-on-disk episode shows ⊘ Not downloaded (skipped) / 🌙 Idle — deferred with a **⬇ Download** button (`epDownloadSkipped` → fetch to host now), or ⬇ %  when actively downloading (no button). **Since 11.1.0 an incomplete torrent-backed episode is playable**: tapping its still calls `epStreamNow` → `streamLibraryFile` → `POST /api/library/{id}/stream-file` (forces the file `high`, torrent sequential, plays to VLC once the beginning is buffered — also un-skips a deselected file); only a compressed/torrentless missing file keeps the blocked ⊘ overlay. All picker actions `refreshEpFiles()` after.
 
-`renderDownloadFiles(itemId, files)` (the "Files" expander, `#dl-files-<id>`) is folder-grouped: `_dlFolderGroups(files)` splits each path (handling Windows `\` too) and groups files by their sub-folder beneath the torrent's common root — a flat torrent renders one unlabeled group (no header), a season pack gets per-folder headers with bulk controls. Each file row (`_dlFileRow`) shows name + size, a download progress bar + `dl_pct`%, a **✓ Complete** badge, and a per-row segmented schedule control (`_schedControl`: **Top**/`high` · **Now**/`now` · **Idle**/`idle` · **Skip**/`skip`, highlighting the active mode — replaces the old scroll-to-bottom "Prioritize Selected"). A **▶ Play** button appears on `complete` files and plays that single file to VLC via `playLibraryFiles` even while the rest of the torrent downloads; incomplete files keep the queue-when-ready ▶ toggle.
+`renderDownloadFiles(itemId, files)` (the "Files" expander, `#dl-files-<id>`) is folder-grouped: `_dlFolderGroups(files)` splits each path (handling Windows `\` too) and groups files by their sub-folder beneath the torrent's common root — a flat torrent renders one unlabeled group (no header), a season pack gets per-folder headers with bulk controls. Each file row (`_dlFileRow`) shows name + size, a download progress bar + `dl_pct`%, a **✓ Complete** badge, and a per-row segmented schedule control (`_schedControl`: **Top**/`high` · **Now**/`now` · **Idle**/`idle` · **Skip**/`skip`, highlighting the active mode — replaces the old scroll-to-bottom "Prioritize Selected"). A **▶ Play** button appears on `complete` files and plays that single file to VLC via `playLibraryFiles` even while the rest of the torrent downloads; incomplete files get a **▶ Play now** button (`.dl-snow-btn` → `streamLibraryFile` → `/stream-file`, sequential fetch → play when buffered) plus the queue-when-ready ⏳ toggle.
 
 - `setFileSchedule(itemId, paths, mode)` → `POST /file-schedule`; optimistically updates the cached `f.mode` then re-renders. Folder header buttons pass every file's path in the group.
 - `setDownloadSchedule(itemId, mode)` → `POST /download-schedule`; then `loadLibrary()`.
@@ -124,27 +203,40 @@ Per episode, `_epCardHtml` shows the device-download `<a>` **only when `complete
 
 VLC's volume slider is debounced — `oninput="updateVolumeDisplay"` updates label only, `onmouseup`/`ontouchend="vlcSetVolume"` sends the actual request. This was a fix for VLC lag when scrubbing the slider. Hard cap is the global `settings.max_volume` (fetched once at startup into `globalMaxVolume`, also refreshed when the profile-settings modal opens); `applyMaxVolumeToSliders` enforces it on the slider `max` attribute.
 
-### Night mode (VLC dynamic-range compression)
+### Night mode (dynamic-range compression)
 
-A global on/off toggle reachable from **two** controls: the subtle moon button in the fullscreen-overlay header (`#fcNightBtn`, opposite the Close button) and a checkbox in the **Global** section of profile settings (`#psNightMode`). Both call `toggleNightMode(el)`, which flips `app.vlc_night_mode` optimistically, `renderNightMode()`s the controls, then `POST`s `/api/settings/night-mode` with `{night_mode}`.
+A global on/off toggle reachable from **two** controls: the moon tile inside the fullscreen **More** sheet (`#fcNightBtn`, in `#fcMorePanel` — relocated there in 7.10.0 from the header, which now holds the **More** button) and a checkbox in the **Global** section of profile settings (`#psNightMode`). Both call `toggleNightMode(el)`, which flips `app.vlc_night_mode` optimistically, `renderNightMode()`s the controls, then `POST`s `/api/settings/night-mode` with `{night_mode}`.
 
 The **intensity picker** (`#psNightModePreset`, Light/Medium/Max) is **settings-menu only** — deliberately not in the fullscreen UI. `setNightModePreset(preset)` POSTs `{preset}` only (so it never clobbers the on/off state) and persists independently of the toggle, so the chosen intensity is remembered the next time night mode is switched on. `NIGHT_PRESET_DESC` drives the one-line blurb under the picker.
 
 `renderNightMode()` (also called from the `state` SSE handler, since every snapshot carries `vlc_night_mode`) recolors the moon + fills its icon when active, checks the checkbox, and syncs the preset `<select>` + blurb. The server relaunches VLC to apply the filter (see [GOTCHAS.md](GOTCHAS.md)), so playback briefly re-buffers — these are intentionally low-prominence controls, not hot-path tiles (a preset change *while off* doesn't relaunch). `openProfileSettings` fetches the fresh `night_mode` + `preset` so both controls are correct even before the first SSE state event.
 
+**It applies to on-device playback too** (14.3.0). A VLC launch argument can't reach a browser `<video>`, so the local player builds the equivalent in Web Audio — `<video>` → `DynamicsCompressor` → makeup `Gain`, with a bypass path for off (`_lpNightSync`, driven from `renderPlayer` and the video's `play` event). The compressor settings are *derived from* the VLC presets server-side and served as `webaudio` on `GET /api/settings/night-mode`, so there is one set of numbers, not two. The moon tile is therefore no longer hidden while the TV plays on-device, and `toggleNightMode`'s status line drops the “restarting VLC” wording when a local player is what will apply it. Skipped inside the iOS app (native `AVPlayer` handoff). See [STREAMING.md](STREAMING.md) and [GOTCHAS.md](GOTCHAS.md).
+
 ### Profile Settings modal — progressive load
 
 `openProfileSettings()` is **synchronous**: it shows `#profileSettingsModal` immediately, calls `_psSetLoading()` (dims every control via `.ps-loading`, sets the value labels to "…"), then kicks off seven independent loaders that run **concurrently** (`_psLoadProfilePrefs`, `_psLoadMaxVolume`, `_psLoadVlcStartVolume`, `_psLoadSysVolume`, `_psLoadYtStartVolume`, `_psLoadHostVolume`, `_psLoadNightMode`). Each loader fetches its own setting and calls `_psReady(...ids)` to clear the loading state on just the controls it owns, so the window feels responsive instead of blocking on the slowest request. `_psLoadHostVolume` is the exception: it leaves the slider `disabled` when the host mixer is unavailable ("N/A") and only drops the `.ps-loading` pulse. `_PS_CONTROLS` / `_PS_VALUE_LABELS` list the affected element ids.
 
-The modal ends with a **This Device** section — settings persisted in the browser's `localStorage`, never on the server (they're not in `_PS_CONTROLS`, so they have no loading state). Currently one control: the **Dev Mode** checkbox (`#psDevMode`, `toggleDevMode`), which enables the on-device player's diagnostics HUD (see § Dev Mode HUD below). Seeded synchronously in `openProfileSettings` from the `devMode` flag (`localStorage.streamlink_devmode`).
+The modal ends with a **This Device** section — settings persisted in the browser's `localStorage`, never on the server (they're not in `_PS_CONTROLS`, so they have no loading state), seeded synchronously in `openProfileSettings`: the **Dev Mode** checkbox (`#psDevMode`, `toggleDevMode`, `streamlink_devmode`) enabling the on-device player's diagnostics HUD (see § Dev Mode HUD below); the **Locked Progress Bar** checkbox (`#psSeekLock`, `toggleSeekLock`, `streamlink_seeklock`); and the **Library View** segmented control (`#psLibViewCard`/`#psLibViewList`, `setLibView`, `streamlink_libview` — see § Library view mode).
 
 ### Use My Computer (window-control pause)
 
-The **Global** section has a **Use My Computer** tile (`#wcButtons`: **60 Sec** / **2 Min** / **Until I Stop**) that tells the server to pause the idle background video + every VLC focus/minimize/fullscreen assertion so the user can use the desktop. `pauseWindowControl(seconds)` POSTs `/api/window-control` `{action:"pause", seconds}` (0 = until resume) optimistically; `resumeWindowControl()` POSTs `{action:"resume"}`. State rides the SSE `state` event as `app.window_mgmt_paused` / `app.window_mgmt_pause_remaining` (-1 = until resume). `renderWindowControl()` (called from the `state` handler and `openProfileSettings`) swaps `#wcButtons` for `#wcResume` (a "Paused — resumes in m:ss" line + Resume button) and runs a 1 s local countdown ticker (`wcCountdownTimer`) between SSE updates, flipping back to the buttons when it hits 0 (the server auto-expires server-side). `closeProfileSettings` clears the ticker.
+The **Global** section has a **Use My Computer** tile (`#wcButtons`: **30 Min** / **2 Hours** / **Until Disabled**) that tells the server to pause the idle background video + every VLC focus/minimize/fullscreen assertion so the user can use the desktop. `pauseWindowControl(seconds)` POSTs `/api/window-control` `{action:"pause", seconds}` (0 = until resume) optimistically; `resumeWindowControl()` POSTs `{action:"resume"}`. State rides the SSE `state` event as `app.window_mgmt_paused` / `app.window_mgmt_pause_remaining` (-1 = until resume). `renderWindowControl()` (called from the `state` handler and `openProfileSettings`) swaps `#wcButtons` for `#wcResume` (a "Paused — resumes in m:ss" line + Resume button) and runs a 1 s local countdown ticker (`wcCountdownTimer`) between SSE updates, flipping back to the buttons when it hits 0 (the server auto-expires server-side — note a timed pause's deadline *slides* while the desktop is in use, so the next SSE `state` may re-assert paused with ~2 min remaining). `closeProfileSettings` clears the ticker.
+
+On the **TV kiosk** the settings panel is hidden, so the pause has its own entry point: a TV-mode-only nav button (`#tvUseComputerBtn`, `i-monitor` icon, shown via `body.tv-mode` CSS). `tvUseComputer()` confirms, then starts a **2 h timed** pause (never indefinite — the remote is dead while paused, so a forgotten pause must expire on its own); while paused the button reads **Resume TV** (label synced in `renderWindowControl`) and toggles `resumeWindowControl()`. The server minimizes the kiosk on pause; restore it from the taskbar (or use any other device) to resume.
 
 ### Subtitle defaults (per-profile override + search filter)
 
 Profile Settings has a **Subtitles** `<select>` (`#psSubtitles`: Default / On / Off). `openProfileSettings` seeds it from the profile's `subtitles_on` (`true`→On, `false`→Off, null→Default); `saveSubtitlesPref()` POSTs `/api/profiles/{id}/subtitles` with `subtitles_on` = `true`/`false`/`null`. This is just the *preference* — VLC track selection happens server-side in `_apply_subtitle_policy` on the next play (see [GOTCHAS.md](GOTCHAS.md)), so there's no live VLC call here.
+
+`runSubtitleSearch` / `applySubtitle` follow `_subCtx` (the modal's context):
+library routes when it is set, the TV routes when it is not. With an empty query
+the server returns only subtitles it can confirm ARE this episode; results are
+badged **Exact File Match** (hash), **Best Match** (top of the ranking) or
+**Check Episode** (metadata couldn't confirm it). After a download the toast says
+what the timing check did — shifted by N seconds, verified, or "couldn't verify".
+`_lpOnSubtitleAdded` (driven by the `sub_added` relay) re-lists `/subs` and
+selects the new sidecar on whichever surface is playing that file.
 
 The **Find Subtitles** modal's language filter (`#subSearchLang`) is populated from a small common-language list plus `subtitleDefaultLang` (the admin preferred language, carried in every `state` snapshot as `subtitle_default_language`), and defaults to it (or "All languages" when Any). `runSubtitleSearch` passes the selected `lang` to `/api/subtitles/search`; the per-result download still uses each result's own language.
 
@@ -152,14 +244,14 @@ The **Find Subtitles** modal's language filter (`#subSearchLang`) is populated f
 
 Every control that waits on a server round-trip must show an **immediate** pending state so the UI never looks dead. The single mechanism is `_markLoading(el, on)` + `withInflight(key, el, fn)` (defined just after `doSearch` in `static/index.html`):
 
-- `_markLoading(el, on)` toggles the spinner: buttons get `.ctrl-loading` (an inline 18px spinner overlay + dim + `pointer-events:none`), `<select>`/`<input>` get `.ctrl-loading-form` (dim + `disabled`), and `aria-busy` is set either way. It's a **no-op when `el` is falsy**, which is why functions called both manually (passing `this`) and programmatically (passing nothing) — e.g. `loadLibrary`, `loadComponents` — can share one body.
+- `_markLoading(el, on)` toggles the spinner: buttons get `.ctrl-loading` (an inline 18px spinner overlay + dim + `pointer-events:none`), `<select>`/`<input>` get `.ctrl-loading-form` (dim + `disabled`), and `aria-busy` is set either way. Since 12.7.5 it **also sets `el.disabled`** on anything that supports it, remembering the prior value in `dataset.wasDisabled` and restoring it when cleared. `pointer-events:none` blocks a mouse and nothing else — a marked `<button>` kept `disabled === false`, stayed focusable, and still fired its `onclick` from a native **Enter**, which is exactly what the `?tv=1` remote's OK button sends. Don't re-add manual `disabled` bookkeeping around a `_markLoading` call; it owns that now, and setting `disabled` yourself *before* clearing busy will be captured as the "prior" state and stick. It's a **no-op when `el` is falsy**, which is why functions called both manually (passing `this`) and programmatically (passing nothing) — e.g. `loadLibrary`, `loadComponents` — can share one body.
 - `withInflight(key, el, fn)` wraps `fn` in `_markLoading(el, true/false)` (always cleared in `finally`) **and** dedupes by `key`: while a `key` is in flight, repeat invocations are dropped. Use it for any fetch-backed action; pass the clicked element so its spinner shows. For inline handlers add `this` to the `onclick` (`foo()` → `foo(this)`); for `addEventListener`-wired buttons pass the `btn` you already have.
 
 The CSS (`@keyframes ctrl-spin`, `.ctrl-loading`, `.ctrl-loading-form`) lives in both `static/index.html` and `static/admin.html`. **`admin.html` carries its own copy of `_markLoading`/`withInflight`** (ported verbatim, same names) so admin buttons get the identical treatment. When adding a new server-waiting control, route it through this — don't invent a per-button `disabled` toggle. Controls with their own richer feedback (upload progress bars; in-region "Loading…/Searching…" text painted into a results box) are the only exceptions and are intentionally left without the overlay.
 
 ### Optimistic Play UI + in-flight guards
 
-`continueLibraryItem` and `playLibraryFiles` run under `withInflight("play_${itemId}", …)` so a frustrated double-tap during a slow VLC handoff is dropped client-side instead of racing extra `in_play` requests to VLC. Before the fetch they call `_optimisticBuffering(label, itemId)` which:
+`continueLibraryItem`, `playLibraryFiles` **and `streamLibraryFile`** (12.7.5 — it was the odd one out, with neither guard nor optimistic paint) run under `withInflight("play_${itemId}", …)` — one shared key, so Play and Stream-this-episode cannot race each other either so a frustrated double-tap during a slow VLC handoff is dropped client-side instead of racing extra `in_play` requests to VLC. Before the fetch they call `_optimisticBuffering(label, itemId)` which:
 
 - Flips `app.stream_status="buffering"` + `is_library_playback=true` immediately and calls `renderPlayer`.
 - Seeds `app.active_title` from the optional `label` (e.g. the episode-specific "S01·E04 · Name") so the user sees what's loading, while seeding `_fcAutoTitle` from the cached item title (so the server's confirming state event with the canonical title doesn't trip "new track → re-open fullscreen" and pop the overlay back up if the user has dismissed it).
@@ -186,47 +278,275 @@ The native `EventSource` only auto-reconnects while it's in the `CONNECTING` sta
 
 Both the footer bar (`#seekBarWrapper`) and the fullscreen-controls bar share the `.seekBar` class and unified **Pointer Event** handlers (`handleSeekPointerDown`/`Up`/`Leave`) plus the hover tooltip (`handleSeekBarHover`/`Leave`). Use pointer events (not `onclick`/`ontouch*`): on `touchend` `e.touches` is an empty-but-truthy `TouchList`, so reading `e.touches[0].clientX` throws and used to leave the tooltip stuck over the bar on mobile — pointer events always carry `clientX`. A seek calls `POST /api/vlc/seek/to?position_pct=N` — VLC's `seek` uses `val=N%` for absolute and `val=±Ns` for relative. **Don't mix the two**.
 
-**Accidental-click lock.** The bar defaults to **LOCKED** (greyed track, "HOLD TO UNLOCK" padlock badge); taps are ignored and the tooltip is suppressed. Unlocking is a guided three-phase gesture, all phases still locked (`_seekPhase` 0 idle / 1 holding / 2 ready / 3 settling): **phase 1** `holding` (0.5s press-and-hold via `_seekHoldTimer`, indigo `seekUnlockFill` grows; a too-short release or mouse-leave aborts via `_cancelArming`), **phase 2** `ready` (hold satisfied — badge turns green and pulses "RELEASE", then **waits for `pointerup` with no timer**, so gripping the whole time can't seek), **phase 3** `settling` (started **only on release**, `_seekSettleTimer` runs a 0.5s green fill, badge "UNLOCKING…", then `unlockSeekBar`). Once unlocked, `_armSeekRelock` re-locks 5s after the last interaction, and `updateState` calls `lockSeekBar()` whenever playback isn't active. Note touch keeps implicit pointer capture, so its `pointerleave` only fires after release (phase 3, no abort); mouse leave during phase 1/2 aborts.
+**Accidental-click lock.** The bar defaults to **LOCKED** ("HOLD TO UNLOCK" padlock badge; the track keeps its colour at a mild 75% opacity so playback progress stays readable, and the badge background is translucent so the progress line shows through it — the badge, not a greyed track, signals the lock); taps are ignored and the tooltip is suppressed. Unlocking is a guided three-phase gesture, all phases still locked (`_seekPhase` 0 idle / 1 holding / 2 ready / 3 settling): **phase 1** `holding` (0.5s press-and-hold via `_seekHoldTimer`, indigo `seekUnlockFill` grows; a too-short release or mouse-leave aborts via `_cancelArming`), **phase 2** `ready` (hold satisfied — badge turns green and pulses "RELEASE", then **waits for `pointerup` with no timer**, so gripping the whole time can't seek), **phase 3** `settling` (started **only on release**, `_seekSettleTimer` runs a 0.5s green fill, badge "UNLOCKING…", then `unlockSeekBar`). Once unlocked, `_armSeekRelock` re-locks 5s after the last interaction, and `updateState` calls `lockSeekBar()` whenever playback isn't active. Note touch keeps implicit pointer capture, so its `pointerleave` only fires after release (phase 3, no abort); mouse leave during phase 1/2 aborts.
 
 The whole lock is opt-out per device via **Settings → This Device → Locked Progress Bar** (`psSeekLock`, `toggleSeekLock`). The preference lives in `localStorage` (`streamlink_seeklock`, defaults ENABLED — only an explicit `"0"` disables) and is held in `_seekLockEnabled`. When disabled, `lockSeekBar()` keeps the bar permanently `unlocked` (single tap seeks, no gesture); `init`/`DOMContentLoaded` calls `lockSeekBar()` once so a page opened mid-playback honours a disabled lock immediately.
+
+### File labels — what a file is called (18.24.0)
+
+No surface shows a file's release name as its title. The server attaches `label`
+(`eplabel.py`) to every file on `/files` and `/series`; the page's helpers:
+
+- `fileLabel(fileOrPath, itemId)` → `{kind, show, code, name, line1, line2, short}`. The
+  file's own `label`, else `_fileLabels` (path → label, filled by the **fetch wrapper** from
+  every `/files` / `/series` response and by `_appLocalBundle` / the Downloads tab from each
+  bundle's `meta.label`), else `_composeLabel` over what the page can see (the path's
+  `SxxExx`, the library title, `_cleanStem`). Mirrors `eplabel.compose` / `clean_stem`.
+- Layouts: **two lines** (`line1` "Breaking Bad · S01E03", `line2` the name) for the player
+  header (`#lpTitle` + `#lpSubTitle`, via `_lpSetTitle`), the TV controls (`setFcTitle`,
+  fed `library_current_label` / `tv_local_label` by `_fcTitleArgs`) and the Downloads tab's
+  in-progress list; **one line** (`short`, "Breaking Bad · S01E03") for the footer
+  (`_nowPlayingText`), toasts, the session banner (`lp.name`) and the iOS TV remote;
+  **in-show** (`labelInShow`, "S01E03 · Name", no show) for episode tiles, the in-library
+  download list and the Downloads tab's grouped rows; **now playing**
+  (`labelNowPlaying` — name big, `Show · S01E03` small) for the lock screen, Live Activity
+  and the glasses remote.
+- `_bundleLabel(meta, filePath, itemId, fallbackName)` — a downloaded bundle's label: its
+  `meta.label`, else rebuilt from `series/season/episode/episode_name` (pre-18.24.0 bundles).
+- Kept as file names on purpose: the pre-download torrent picker, `download=` / zip entry
+  names, the movie page's grey release line. See [GOTCHAS.md](GOTCHAS.md) § A file's name
+  is not what it is called.
 
 ### Episode page (`#episodePage`, full-screen)
 
 Replaces the legacy `#episodeModal` (Milestone 12). `openEpisodePicker(itemId, title)` opens it; under the hood it now reveals a full-screen view. Key DOM:
 
-- `#epHero` — backdrop + poster + show title + meta line + 3–4-line overview. Backdrop uses TMDb `/w1280<backdrop_path>`; poster uses `/w342<poster_path>`. Painted by `renderEpHero`. The title carries a pencil button (`#epRenameBtn`, revealed once the hero paints) → `renameSeries()`: prompts for a new series name (or movie title for a one-off), `POST`s `/api/library/{id}/rename`, then repaints the hero with the corrected metadata and `loadLibrary()`s the grouping label. This is the fix for a badly-named download that auto-matched the wrong show — the name drives the TMDb query. Below the meta line sits the **On-Demand Only** toggle (`#epOndemandBtn`, painted by `_renderEpOndemandBtn` from `epOndemandOnly`/`epOndemandLocked`/`epHlsAvailable` set in `loadFiles`) → `toggleEpOndemandOnly()`: `POST`s `/api/library/{id}/ondemand-only {enabled}` so a viewer can flip on-demand-only themselves. Hidden when HLS isn't available (macOS); rendered disabled with a lock glyph when the admin has locked the item (`ondemand_only_locked`) — the server also 403s a locked change. Admin-side counterpart lives in `admin.html` (`toggleOndemandOnly` + `toggleOndemandLock`).
-- `#epSeasonTabs` — one button per detected season (hidden when 0 or 1 season). `epSwitchSeason(s)` updates `epCurrentSeason` and re-renders. `renderEpSeasonTabs` calls `_scrollActiveSeasonIntoView` (via `requestAnimationFrame`) to horizontally centre the active tab in the strip — so on a many-season show the season the viewer is on is on-screen, not scrolled off (only the strip's `scrollLeft` is touched, never the page).
+- `#epHero` — backdrop + poster + show title + meta line + 3–4-line overview. Backdrop uses TMDb `/w1280<backdrop_path>`; poster uses `/w342<poster_path>`. Backdrop/poster prefer custom metadata's absolute `backdrop_url`/`poster_url` over the TMDb paths (so hand-entered art renders with no key). Painted by `renderEpHero`. The title carries a pencil button (`#epRenameBtn`, revealed once the hero paints) → `renameSeries()`: prompts for a new series name (or movie title for a one-off), `POST`s `/api/library/{id}/rename`, then repaints the hero with the corrected metadata and `loadLibrary()`s the grouping label. This is the fix for a badly-named download that auto-matched the wrong show — the name drives the TMDb query. Next to it, a **Fix Metadata** button (`#epMetaFixBtn`) → `openMetaFix()` opens `#metaFixModal` for a finer correction: a **Pick a match** tab searches TMDb (`metaSearch()` → `GET …/metadata/search`) and lists candidates (`metaPick(id, kind)` → `POST …/metadata/set {mode:"tmdb"}`, pinned `source="manual"`); a **Custom** tab hand-enters title/year/rating/genres/overview + poster & backdrop image URLs (`metaSaveCustom()` → `POST …/metadata/set {mode:"custom"}`, pinned `source="custom"`, no TMDb key needed). Both share `_applyMetaResult()`, which repaints hero/season tabs/list and `loadLibrary()`s just like `renameSeries()`. Pinned metadata survives auto-refetch and rename. Below the meta line sits the **On-Demand Only** toggle (`#epOndemandBtn`, painted by `_renderEpOndemandBtn` from `epOndemandOnly`/`epOndemandLocked`/`epHlsAvailable` set in `loadFiles`) → `toggleEpOndemandOnly()`: `POST`s `/api/library/{id}/ondemand-only {enabled}` so a viewer can flip on-demand-only themselves. Hidden when HLS isn't available (macOS); rendered disabled with a lock glyph when the admin has locked the item (`ondemand_only_locked`) — the server also 403s a locked change. Admin-side counterpart lives in `admin.html` (`toggleOndemandOnly` + `toggleOndemandLock`).
+- `#epViewBar` (18.25.0) — the **View** picker above the season tabs: `Seasons` (the default) or one of the show's TMDb **episode groups** (story arcs, DVD order, production order…), a native `<select>` grouped by kind. `_epLoadViews()` runs once metadata is on the page (both `_epApplyMetadata` branches and `openSeriesPage`; not in a section other than `main`, not for a movie), fetches `/api/tmdb/tv/{id}/episode-groups`, shows the bar only when there are groups (never on TV, which just renders the chosen view), and applies the profile's saved choice. `epSetView(id)` switches and POSTs `/api/profiles/{id}/episode-view`. State: `epViews` (picker rows), `epView` (chosen id or null), `epViewData` (the normalized group), `epViewTab` (bucket index, `-1` = **Other**: unbucketed files no part holds). **A view only rearranges**, because every group entry is a real TMDb `(season, episode)`: `_epViewTabRows(i)` maps the bucket's entries onto unbucketed files by slot (`_epViewFilesBySlot`) in the group's order, with missing rows for real-season entries exactly as a season tab (a `skip` file shows its card **and** its "in a pack" row; season-0 entries never get a missing row, because an OAD folder's local numbers can't be matched). `_renderEpViewTabs` draws the parts with `have of total`. `_visibleSeasonFiles()` is view-aware, so the scheduling rows, `± Season` and the header's save button (`epDownloadViewTab`) act on the open part; `_epScopeLabel()` names it. The amber missing strip and "Get this season" stay Seasons-only (they are built around a TMDb season). `_tmdbEpisode` falls back to the group's own entry for a tile's name/still. **Play order is not the view's**: Play, next-up, TV Next/Prev and the phone all keep canonical order (see [GOTCHAS.md](GOTCHAS.md)). In the **Seasons** view, a special with `home` joins its season's tab (`_epTabOf`) after the episode it follows (`_epSeasonPos`). That is how Attack on Titan's finales close The Final Season.
+- `#epSeasonTabs` — one button per season (hidden when there are none). `epSwitchSeason(s)` updates `epCurrentSeason` and re-renders. `renderEpSeasonTabs` calls `_scrollActiveSeasonIntoView` (via `requestAnimationFrame`) to horizontally centre the active tab in the strip — so on a many-season show the season the viewer is on is on-screen, not scrolled off (only the strip's `scrollLeft` is touched, never the page). Since 11.18.0 the list is the **union** of seasons on disk and seasons TMDb says the show has (`_epRebuildSeasonList`), and a season that is not fully downloaded carries a second line — a square dot plus `8 of 12` (`_epSeasonCounts`, `.ep-season-count` / `.ep-season-dot`), amber via `.incomplete` or red via `.absent` when nothing of it is here.
 - `#epList` — scrollable episode list. Each card is a 16:9 still (TMDb `/w300<still_path>` or "S01·E02" placeholder), headline `S01·E02 · Episode Title`, 2-line overview, watch-progress bar overlaid on the still, plus inline Watched / Offline / Download buttons. Tapping the still calls `epPlayFrom(idx)`.
 
 It also serves **downloading** series (opened from the card's ☰ Episodes button) — `/files` returns in-flight per-episode `dl_pct`/`complete`/`mode`, and the per-season scheduling bar manages what downloads — and **single-file movies / one-episode series** in **movie mode** (see `renderEpList` above; `epIsMovie` + `_epApplyMovieChrome` + `_epMoviePanel`).
 
 **Bulk delete (free space, re-downloadable).** `#epBulkChips` has a red **🗑 Delete (N)** chip; `epDeleteSelected(btn)` → `epDeleteFiles([...epChecked], btn)` (the movie panel's Delete passes a single path). `epDeleteFiles` confirms, `POST`s `/api/library/{id}/delete-files`, then `refreshEpFiles()` + `loadLibrary()` and toasts the freed bytes (wrapped in `withInflight("ep_delete")`). The server marks the files Skip + removes the bytes, so the rows flip to "⊘ Not downloaded" with a ⬇ Download button. `updateEpCount` keeps `#epDeleteCount` synced with `#epSelectedCount`/`#epRecheckCount`.
 
+**Delete Watched (18.34.0).** A **Delete watched** button (`ic("trash")`) in the row above the episode list — the row Simple mode's "Watch … again" lives in; shown in both modes (never on TV) whenever the signed-in profile has finished any episode of the show. It is scoped to the **whole show** (every item in `_wpItemIds()`), not the visible season. `openDeleteWatched(btn)` posts `/api/library/watched-purge/preview` for `[profile.id]` and fills `#watchedPurgeModal` (`_wpRender`): the episodes that will go with each one's size, then a **Kept** list with the reason (`_WP_KEEP`; an in-progress keep names who). `confirmDeleteWatched` posts exactly the listed paths to `/api/library/watched-purge` and toasts deleted / freed / kept-since-preview / still-in-use, then `refreshEpFiles()` + `loadLibrary()`. Needs a PIN-verified profile, like every delete.
+
 State additions:
 - `epMetadata` — cached TMDb payload for the open item (or `null`).
-- `epMetaImgBase` — TMDb image base URL returned by the metadata endpoint.
-- `epCurrentSeason` — visible season number, set by `pickDefaultSeason()`: season of the currently-playing file → season of the **most-recently-watched** episode (latest `progress.updated_at`) → first season with unwatched episodes → first available. Landing on last-watched (not first-unwatched) means an early episode skipped/saved on purpose doesn't pull the picker back to an earlier season.
-- `epSeasonList` — sorted positive seasons present in `epFiles`.
-- `epIsMovie` — single-file item flag; switches the page to the movie panel + chrome.
+- `epMetaImgBase` — artwork base URL returned by the metadata endpoint (the host proxy `/api/metadata/img`).
+- `epHeroTitle` — fallback title for late metadata repaints (SSE `metadata_update` → `_epApplyMetadata`); `_epMetaRetryTimer` backs up a missed event while the server fetch is `pending`.
+- `epCurrentSeason` — visible season number, set by `pickDefaultSeason()`: season of the currently-playing file → season of **`_epNextUpPath(numbered seasons)`** — the episode the viewer is up to, anchored on the most-recently-watched one (`progress.updated_at`) and moving past it when it is finished → first season with unwatched episodes → **first season that actually holds files** (never open on a season owned nothing of — a wall of "not downloaded" is a poor way to open a show) → first available. Anchoring on last-watched (not first-unwatched) means an early episode skipped/saved on purpose doesn't pull the picker back to an earlier season; moving *past* a finished anchor is what hands a completed season over to the next one instead of re-opening on itself. Season 0 is excluded from step 2 — it sorts last, and "you've seen everything, here are the creditless openings" is not where a show should open. **`progress.updated_at` only started reaching the client in 17.13.0** (`_build_item_files`); before that, step 2 could never fire and the season pick always fell through to first-unwatched.
+- `_epAutoScrollArmed` / `_epScrollSettleUntil` / `_epNextUpNow` — **open on next-up (17.13.0).** Picking the season is only half the problem: a season you're ten episodes into still opened at episode 1. `_epNextUpPath(visibleFiles)` names the row the page should land on, mirroring the server's `_resume_from_files` rule — the playing file → the newest-touched episode if it was left part-way (`position_sec > 5`) → the first unwatched episode **at or after** it → the first unwatched one anywhere; `null` when the answer is row 0 anyway (untouched or finished season), so an untouched show neither scrolls nor gets a badge. `renderEpList` stores it in `_epNextUpNow` (read by `_epCardHtml` for the **Next up** / **Resume** badge) and ends with `_epApplyAutoScroll()`, which measures the row against `#epList` (`getBoundingClientRect`, not `offsetTop` — the rows sit in a two-column grid inside several wrappers) and scrolls it to the top less `EP_SCROLL_PEEK` (44px), so the previous episode still peeks in and the list can't read as if it starts at episode 11. It scrolls **twice** — immediately, then again after a double `requestAnimationFrame` — because a position measured in the paint's own tick is provisional: Hunter x Hunter's 5.7k-pixel list measures 8.8k mid-render, and the browser clamps whatever we set to the height it has at that instant. `_epAutoScrollArmed` is set by `openEpisodePicker`/`openSeriesPage` and cleared by `closeEpisodePage`, by `epSwitchSeason` (a season tapped by hand opens at its start), and by the viewer moving the list — one-time `wheel`/`touchstart`/`keydown` listeners (`_epHookListGestures`), plus `scroll` but **only** outside `_epScrollSettleUntil` (that clamp fires `scroll` with a 1300px delta, indistinguishable from a flick — a scroll-position comparison disarmed itself on every open). Staying armed across repaints is the point: every `renderEpList` (prep-status, metadata top-up, SSE) rebuilds `innerHTML`, and the first render happens before TMDb metadata lands, so the row's position moves under us.
+- `epSeasonList` — sorted seasons for the strip: positive seasons present in `epFiles`, **unioned with the show's TMDb seasons** when the missing-content diff is trustworthy, with `0` appended as a trailing bucket tab only when season-0 files exist. That tab is **named after its contents** (`_epSeason0Label`): one bucket ⇒ that folder's name (*Movies*, *OAD*, a spin-off's title); several ⇒ *Extras*; none ⇒ *Specials*. Rebuilt by `_epRebuildSeasonList()` on open, whenever metadata lands, and when the admin flips the policy.
+- `epIsMovie` — single-file item flag; switches the page to the movie panel + chrome. `_epReconsiderMovieMode()` un-sets it once metadata lands if the item is a TV entry with actual gaps — one episode of a twelve-episode season is not a movie, and the panel has nowhere to list the other eleven.
+- `missingContentEnabled` / `missingUnaired` — the admin missing-content policy, mirrored from `/api/state` and refreshed by every `state` SSE event (an open episode page repaints on change).
 
 Per-episode ▶: `epPlayFrom(globalIndex)` slices `epFiles` from the tapped index forward (using the original full-list index, *not* the per-season filtered index), respects resume position on the first file, plays as a playlist. This means "press play on episode 3" plays 3 → 4 → 5 …, not just 3.
 
+**Shuffle Play.** The bottom action bar's **Shuffle** button (`#epShuffleBtn`, hidden in movie mode via `_epApplyMovieChrome`) → `epShuffle()` opens `#shuffleScopeModal`, which asks **Unwatched only** vs **All episodes** (live counts; the unwatched option is `disabled` when nothing's unwatched). (**15.6.0:** `epShuffle` guards on `epItemId || epSeriesKey` — a merged-series page sets `epItemId` to `null` by design, so an item-only guard made the button silently do nothing on exactly the shows with the most to shuffle.) `startShuffle(scope)` builds the pool from `epFiles` (filtering `!progress.completed` for unwatched), Fisher–Yates shuffles the paths (`_shuffleInPlace`), and plays via `playLibraryWithChooser(itemId, paths, 0, label, /*shuffle*/true)` — always from the top (seek 0; shuffle is a fresh run, not a resume). The `shuffle` flag **and `scope`** thread through `pcCtx` → `playLibraryFiles`/`lpPlay` so the server records the random order (TV Next/Prev follow it); the on-device path shuffles for free since the shuffled `paths` become `lp.playlist` verbatim (multi-file lists are kept as-is), with `lp.shuffle` flagging the session.
+
+**Shuffle persists across a stop (the *preference*, not the order).** The live shuffle order is ephemeral (cleared on stop), but whether a play was Shuffle Play — and its `scope` — is recorded per (item, profile) in `library.json` and surfaced on the resume hint (`resume.shuffle` / `resume.shuffle_scope`). The VLC `/play` path persists it inline (`shuffle_scope` in the body); the device path and the leave-shuffle controls call `setShufflePref(itemId, shuffle, scope)` → `POST /api/library/{id}/shuffle-pref` (the device has no `/play` round-trip). When **Resume / Play All** (`resumeLibraryItemWithChooser`) is tapped on a show whose last session was shuffled, `#shuffleResumeModal` asks **Continue shuffle** (`startShuffleForItem` — fetches `/files`, rebuilds the pool by scope, `_shuffleInPlace`, re-routes through the chooser) vs **Normal order** (`_resumeNormal`, the original natural-order resume). **15.6.0 — merged series.** `playSeries(seriesKey, mode, section, opts)` now makes the same offer (the series resume hint carries `shuffle`/`shuffle_scope`); **Continue shuffle** routes to `startShuffleForSeries(ctx)`, which shuffles the item-tagged merged file list `playSeries` already fetched rather than re-fetching one item's `/files` — for a show held as per-episode torrents that is a pool of exactly one episode. **Normal order** re-enters `playSeries` with `{noShuffle:true}` so the prompt can't loop. Any normal play clears the flag. **Continue shuffle resumes the in-progress episode**: `startShuffleForItem` takes the resume hint (threaded from `_shuffleResumeCtx.resume` by `shuffleResumeContinue`) and, when it points at a mid-episode file (`pct > 3`, not all-completed), pins that file to the front of the shuffled pool and passes its `position_sec` as `seekTo` — so the current episode continues where it stopped (matching Normal order) with the rest still shuffled, rather than starting a fresh random run on a different episode. (playlist[0] is then the resume file, so the explicit `seek_first_to` seeks it correctly — no conflict with the backend hint-match guard in GOTCHAS § shuffle-seek.)
+
+**Enter / leave Shuffle mid-playback** (no rebuffer — only the upcoming queue changes). *TV:* the fullscreen header's **More** button (`#fcMoreBtn` → `fcToggleMore()`) opens the `#fcMorePanel` sheet housing **Night mode** (`#fcNightBtn`), **Clip** (`#fcClipRow`) and the shuffle pair. `renderPlayer` shows exactly one of them: **Shuffle** (`#fcShuffleBtn` → `fcEnterShuffle()` → `POST /api/library/shuffle`) while library playback is un-shuffled and `s.library_nav_count > 1`, else **Exit Shuffle** (`#fcExitShuffleBtn` → `fcExitShuffle()` → `POST /api/library/unshuffle`) while `s.library_shuffle`. `library_nav_count` is the only count that is truthful for a show held as one item per episode — `library_item_file_count` reports 1 for every episode of twenty. *Device:* the same pair as gear-menu rows, `#lpShuffleRow` → `lpEnterShuffle()` and `#lpExitShuffleRow` → `lpExitShuffle()`, toggled by `_lpRenderExitShuffle()` (in `lpToggleOpts`); both are pure `lp.playlist` reorders plus `setShufflePref(...)`, and both source their episode list from `_lpShowFiles()`, which widens to `/api/library/series/{key}` (via the `series_key` now on `/files`) when the queue spans items — before 15.6.0 leaving shuffle on a merged series collapsed the queue to the one episode on screen. A phone's tiles reach the kiosk player through `tv_command:shuffle` / `:unshuffle`.
+
 `closeEpisodeModal()` is kept as a back-compat alias for `closeEpisodePage()` so existing callers (refreshEpFiles, mark-watched, keyboard Escape handler) continue to work without changes.
+
+#### Missing content — seasons & episodes not on disk (11.18.0)
+
+The episode page diffs the show's TMDb season/episode inventory against what is actually on disk, so a season you own nothing from **and** a single-episode hole mid-season both show up as rows instead of the list quietly closing over them. Gated by the admin policy (`settings.missing_content`, see [ADMIN.md](ADMIN.md)).
+
+**Shared gap-set core.** The search picker asked the same question first, so the primitives live once and both sides call them: `_tmdbSeasonNumbers(meta)` (every season the show has — prefers the metadata's `all_seasons` inventory over the `seasons` map, which only covers seasons episodes were fetched for), `_tmdbSeasonEpisodes(meta, season)`, `_tmdbEpUnaired(te)`, `_tmdbAbsoluteNumbered(meta, seasonsSeen)`, and `_missingTmdbEpisodes(meta, season, have, includeUnaired)`. All that differs between the callers is what `have` means: `_ssMissingEpisodes` passes the episodes some search found a torrent for; `_epMissingEpisodes` passes the episodes with a file on disk.
+
+**Trust gate — `_epMissingBlockedReason()`** returns `""` when the diff may run, else why not:
+
+- `"off"` — the admin policy is disabled.
+- `"nometa"` — no metadata, not a TV entry, or no seasons known.
+- `"absolute"` — `_tmdbAbsoluteNumbered`: a long-running anime TMDb files as one 1000-episode "Season 1". Diffing it invents hundreds of phantom gaps.
+- `"unparsed"` — more than `EP_MISSING_MAX_UNATTRIBUTED` (25%) of the item's files have no parsed season/episode (`_epUnattributedFiles`). A file carrying a `bucket` does **not** count: the backend placed it outside the numbered run deliberately, and counting specials/extras as parse failures stood the diff down on exactly the well-organised batches it handles best. Those are real episodes hiding outside the season model, so every season would read as short. This was the GitHub #15 case before 11.19.0 taught the backend to read the season off the **folder** (see [LIBRARY_DATA.md](LIBRARY_DATA.md) § Season/episode attribution); it still guards genuinely unnumbered releases, and is surfaced as a visible note in the list rather than silence — silence there is indistinguishable from "nothing missing".
+
+Season 0 never participates in the diff (specials/OVAs/extras would leave nearly every anime show perpetually short). Unaired episodes (`air_date` in the future or absent) are dropped unless `missingUnaired`, in which case they get a third state — **Upcoming**, with no Find button.
+
+**Watched state (17.5.0).** Watched episodes stay in their place in the list — they used to be folded into a collapsed "Watched · N" section at the bottom (`epWatchedExpanded`, removed), where a finished episode vanishing from its slot read as it having gone missing. Instead `_epCardHtml` tags each card `.ep-unwatched` (untouched *or* part-way — a near-white inset bar on the left) or `.ep-watched` (a dark grey bar, greyed title/overview, desaturated still, darker progress fill); the playing row keeps its own `.playing` highlight and gets neither. The bar is an inset `box-shadow`, not a border, so neither state shifts the card's content — and it's near-white, not indigo, because indigo is the TV D-pad focus ring (`body.tv-mode :focus`) and an "unwatched" bar in that colour read as focus on the TV.
+
+**Rendering.** `renderEpList` builds `rows` as the union of **all** the season's files — watched ones included, in their place (17.5.0) — and `_epMissingEpisodes(epCurrentSeason)`, sorted by episode number (only re-sorted when there IS something to interleave, so a complete season keeps its existing order). A missing episode renders as `_epMissingCardHtml(season, te)` — the same `.ep-card` geometry with `.ep-missing` (dimmed, dashed still frame, greyscale still, square status dot, **no** play affordance). **17.2.0:** when the show's release grid disagrees with TMDb's, a missing row additionally names the pack it really ships in — `_animeForeignPack(meta, season, episode)` returns the pack only when its `grid_season` differs from the season being viewed, so "season 1's episode 12 is in the season 1 pack" is never said. The row's **Choose** button becomes **"Season 2 pack"** (`epGetPack`), which opens the search show page on the *release's* season with `section:"packs"` and `keepSeason:true` — that flag stops the page snapping the selector back when the release's season isn't one TMDb lists (【OSHI NO KO】 has one TMDb season and three release packs). The season-level strip says it once for the whole run ("4 episodes not downloaded · episodes 59-62 are in the season 2 pack") but **only when every gap in the season belongs to the same foreign pack** — a season missing both a mid-run episode and its tail falls back to the generic strip, while the rows still carry the detail. Above the grid a season-level strip shows either the `"unparsed"` note or "N episodes not downloaded" plus a **Find sources** button. A season with no files *and* no fetched episode list gets a dedicated empty state ("None of this season's 12 episodes are on this box") rather than "No episodes in this season". **The season-0 tab renders differently:** when its files come from more than one folder it is grouped, with a full-width `xl:col-span-2` heading per bucket (`_epSeason0Buckets` sets both the order and the headings), so *Extras* / *Movies* / *OAD* / a spin-off read as named runs instead of one undifferentiated scroll. No missing-row interleave there — a diff only ever runs on a real season.
+
+**Handoff — the library grows no hunting logic of its own.** `epFindEpisode(season, ep)` and `epFindSeason(season)` build a TMDb candidate from `epMetadata` (`_epSearchCandidate`) and call `openSearchShowFromTmdb(cand, opts)`, which now accepts `{season, episode, findMissing, episodes, section}`: it lands on that season's tab and fires the existing `ssSearchEpisode` / `ssFindMissing` / `ssSearchSeasonPacks` (a thin wrapper over `ssSearchSeason`). **The candidate's `title` must be `epMetadata.title`, not `epHeroTitle`** — the latter is the item's display name, which for an unrenamed pack is the raw release name, and it becomes every indexer query the show page makes (see [GOTCHAS.md](GOTCHAS.md) § a display name is not a search query). Since 12.7.1 `_ssQueryTitle()` is the single resolver for query titles and backstops this. `epFindSeason` passes the gap set **measured against disk** in `opts.episodes` (the show screen only knows which torrents it found, so left alone it would sweep every episode of the season, owned ones included), and picks `section:"packs"` when nothing of the season is owned — one season pack beats twelve episode downloads. `#searchShowPage` stacks over `#episodePage` (both `z-50`, it is later in the DOM), so its Back returns to the library page intact; `closeSearchShow` keeps the body scroll lock while the episode page is still open, and the Escape handler closes the stack top-down.
+
+**Metadata top-up.** `_epTopUpSeasons(stillOpen, title)` fetches every season's episode list from `/api/tmdb/lookup` (by `tmdb_id` when known, else by title) when the cache is short of them — measured against the TMDb **inventory**, not the parsed season count, since the parsed count is exactly what is unreliable. Used by both the single-item path (`_epApplyMetadata`) and the merged-series path (`openSeriesPage`), replacing the old merged-series-only title lookup. While it is in flight `_epTopUpBusy` holds its token (from `_epTopUpSeq`, so a call left over from a page you already closed can't clear the flag), and the empty state of a season you own nothing from adds **"Loading episode list…"**. If the response is still short of the inventory (a season fetch failed server-side), it retries once after 5 s.
+
+#### Library coverage — "do I already have this?" (11.22.0)
+
+Search had no way to ask the library anything, so the Death Note poster card and every one of its episode rows read identically whether all 37 episodes were downstairs or none were. **`GET /api/library/coverage`** (see [API.md](API.md)) is the join, and one small module in `index.html` owns the client side of it:
+
+- **`loadCoverage()`** fetches once and memoises on `_covPromise`; **`refreshCoverage()`** drops the cache and refetches. `loadLibrary` folds `refreshCoverage()` into its existing `Promise.all`, so the grid's chips paint with the **first** render rather than repainting after it. `doSearch` rides it alongside the `/api/tmdb/search` call; `openSearchShowFromTmdb` tops it up when a deep link or Explore reaches the show page before Search ever rendered.
+- Two indexes, because callers arrive from two directions: **`_covFor(kind, tmdbId)`** (`_covByKey`, `"tv:124101"`) for a TMDb candidate, **`_covForSeries(seriesKey)`** (`_covBySeries`) for a library tile.
+- Readers: `_covSeasonEps(row, season)` (a `Set` of owned episode numbers — `have` ∪ `pending`, since either answers "do I still need to fetch this?"), `_covHasEp`, `_covEpPending`, `_covEpisodeCount`, `_covSeasonRange` (`"S1-S5"`), `_covSummary` (`"37 episodes · S1"` / `"Downloaded"`), `_libNewSeasons(row)` (the server-computed `missing_seasons`).
+
+**Search results.** `_renderTmdbResults` paints a green **In Library** badge + a green left edge + an owned summary line on any card `_covFor` matches, and appends `"· N seasons to get"` when `missing_seasons` is non-empty. Explore's `_exBuildLibKeys` now unions `_covByKey`'s keys into `_exLibKeys` (and `_exEnsureLib` awaits `loadCoverage`), so a show whose newest episodes haven't resolved TMDb metadata still counts as owned for the badge and the Hide-owned filter.
+
+**Search show page.** `_ssOwned` holds the coverage row for the open show — set straight from the candidate id on the TMDb-first path, and only once metadata lands (`_ssResolveOwned`) on the Jackett-fallback path, which starts with nothing but a release title. Everything downstream reads it through `_ssOwnedEps(season)` / `_ssOwns(season, ep)`:
+
+- **`#ssTwinBanner`** in the hero (`_ssRenderTwinBanner`, painted from `_ssRenderHero`, reset on every open) — when `/api/tmdb/lookup` returns a `twin` (the same work under TMDb's other kind, matched by IMDb id), "TMDb also lists this as a series, with episodes" + **View episodes**, or "…as a film" + **Open film**; `ssOpenTwin` re-opens the page on the twin via `openSearchShowFromTmdb`. See [GOTCHAS.md](GOTCHAS.md) § TMDb files some works twice.
+- **`#ssLibraryBanner`** in the hero (`_ssRenderLibraryBanner`, painted from `_ssRenderHero`) — "Already in your library — 37 episodes · S1" + **Open in library** (`ssOpenInLibrary`: closes the page; when it was stacked over `#episodePage` by a library handoff, closing is all that's needed, else it switches to the Library tab and opens `openSeriesPage` / `openEpisodePicker`).
+- **Season tabs** carry `owned/total` (`seasons_total` from coverage, falling back to `_tmdbSeasonEpisodes`), green once complete.
+- **`_ssEpRowHtml`** adds `_ssOwnedBadge` (**Downloaded** / **Downloading**) and an emerald left edge.
+- **`_ssOwnedRowHtml`** replaces `_ssMissingRowHtml` for an owned episode no search found a source for. The old greyed "No source found" row was untrue in spirit and an invitation to fetch it again; the owned row offers a quiet **Replace** instead.
+- **`_ssMissingEpisodes`** folds owned episodes into its `have` set, so they are excluded from the "N missing a source" banner and from `ssFindMissing`'s sweep. **`_ssBulkScopeEpisodes`** skips them too — Auto would otherwise re-download a season you already hold every time it ran — and `_ssRenderBulkChoose` reports the skipped count and renders "Nothing left to download" instead of an empty scope.
+- **`_ssPackGroupHeader(label, count, owned)`** takes a third arg; `_ssRenderPacksGrouped` passes "Complete in your library" / "You have 8 of 10" per season heading.
+
+**Library grid.** `_libNewSeasonChip(row)` renders a green **"Season 5 available"** / **"2 new seasons"** chip whenever `missing_seasons` is non-empty (hidden in `TV_MODE`, and when the show has no `tmdb_id` to search with). It is wired in **three** places so no view loses it: `_libItemChrome` exposes it as `c.newSeasonChip` (covering both `_libItemListHtml` and `_libItemCardHtml` — a show downloaded as one season pack is a single item and never reaches the show-tile renderers), and `_libShowTileHtml` / `_libShowCardHtml` append it to their own `badges`. `libGetSeason(seriesKey, season)` builds a TMDb candidate straight from the coverage row and calls `openSearchShowFromTmdb(cand, {season, section:"packs"})` — Packs first, because one season pack beats ten episode downloads.
+
+#### Merged-series mode (one cohesive show)
+
+A show whose episodes were downloaded individually is many separate items sharing one `series`. In the library `renderLibrary` collapses such a group (`gItems.length>1 && gItems[0].series`) into **one show tile** (`_libShowTileHtml`, or `_libShowCardHtml` in card view) — Episodes → `openSeriesPage(seriesKey)`, ▶ Play/Resume → `playSeries(seriesKey, "resume")`, **always** `"resume"` (18.30.7): the series hint is already the next unwatched episode, or the first file when nothing or everything is watched, so there is no case where `"all"` is right. Only the button label varies, via `_showStarted(gItems, doneCount)`: started = any member `all_completed`, `last_watched_at` or `pct>3`, and not every member done. Never gate the play mode on per-item `pct>3`: a just-finished episode leaves the next one's hint at 0% and a finished pack reports `all_completed`, so Hunter x Hunter with S01 done restarted at S01E01. `_grpPlayRow` follows the same rule. Both show-tile renderers append a shared **`_libShowIconBtns(gItems)`** cluster (hide/restore eye + delete trash) so a whole show — **including one still downloading** — can be hidden or deleted, matching the single-item chrome. Since 18.22.0 every hide/unhide/delete (tile, card, single item, shelf bulk bar) goes through two optimistic helpers: **`_libSetHidden(ids, hidden)`** and **`_libDelete(ids)`** edit `window._libCache` and repaint via `_libApplyLocal` *first*, then send ONE request (`POST /api/library/visibility` / `POST /api/library/bulk-delete`) and `loadLibrary()` to reconcile (which also undoes the optimistic edit on failure). Never loop per-item requests again — see [GOTCHAS.md](GOTCHAS.md) § Hide is per SHOW. Hiding is per show server-side (`profile.hidden_series`), so every item in a show tile shares one visibility bucket (`renderLibrary` splits visible vs hidden *before* grouping) and `gItems[0].hidden` is authoritative for the eye's direction. (An `item:` key — a film — hides alone.) A failed background delete cleanup arrives as the `library_cleanup` SSE event and alerts only the deleting profile. The **Hidden/Visible toggle counts TILES, not downloads** (`_libTileCount(list, hiddenView)`, a mirror of the unit loop below it): a merged show is 1 and a shelf is 1, so the live box reads `18` rather than `84`. Both views draw the same merged show tiles. `openSeriesPage` reuses the *same* `#episodePage` renderers but sources `epFiles` (each carrying `item_id`) from `GET /api/library/series/{key}`, sets `epSeriesKey` + `epFileItem` (path→item_id), and enriches metadata via `/api/tmdb/lookup` (member items only cache their own seasons). Play actions (`epPlay`/`epPlayFrom`/`startShuffle`) compute a parallel `items[]` via `_epItemsForPaths` and pass it through `playLibraryWithChooser` → `playLibraryFiles`/`lpPlay` → the `/play` body's `items[]` (TV) or `lp.playlistItems` (device) so **both** players span item boundaries. Per-file/per-bulk management stays item-aware: `_epCardHtml` keys off `f.item_id`, `epToggleWatched` uses `_epItemFor(path)`, and `epMarkWatched`/`epDeleteFiles` fan out per item via `_epGroupByItem`. **Rename / Fix-Metadata / On-Demand-Only now work in merged mode too** — they fan across the whole series server-side: `renameSeries` hits the group-aware `/rename` (any member id) and re-opens the page under the new key; `metaPick`/`metaSaveCustom` route through `_epMetaSetUrl()` → `POST /api/library/series/{key}/metadata/set`; `toggleEpOndemandOnly` hits `POST /api/library/series/{key}/ondemand-only` and renders from the aggregate `ondemand_only`/`ondemand_only_locked` returned by `/series/{key}`. `_epTargetId()` picks a representative member for reads (metadata search) and `_epStillOpen(itemId, seriesKey)` guards against navigating away mid-request (single-item mode tracks `epItemId`, series mode tracks `epSeriesKey`). `renderEpHero` un-hides all three in both modes (On-Demand still hidden when `!hls_available`). Only the ZIP "Download selected" remains per-item-only (hidden in merged mode). The season header's *Save ZIP* is likewise **hidden in a browser** on a merged page (`renderEpList` gates it on `!isApp && epSeriesKey`): `epDownloadSeason` needs an `epItemId` and the host ZIP can't span items, so it could only be a dead button. **In the app** it is *Save Season* and works: `_appSaveFiles` saves each file under its own `item_id`, and `_appRefreshDlBtn` finds merged rows via `epFileItem`. **Device:** `lp.playlistItems` + `_lpLoadIndex` re-point `lp.itemId` to the current file's owner on every advance so prep/stream/progress target the right item (see [GOTCHAS.md](GOTCHAS.md) § cross-item series playback); only the app's *offline bundle* prefetch-ahead stays per-item.
+
+#### TMDb-first search + show detail (`#searchShowPage`)
+
+**Search is TMDb-first.** `doSearch(q)` first hits `GET /api/tmdb/search?query=…` (kind narrowed by the Categories picker via `_searchTmdbKind`) and renders the candidates as **poster cards** (`_renderTmdbResults`, stored in `_tmdbResultsById`) — the user picks a real show/movie *before* any indexer is touched. A card click → `openSearchShowFromTmdb(cand)`.
+
+**Smart / Classic toggle.** A **`#searchModeWrap`** segmented control sits beside the Sources/Categories selectors under the search box (`#searchModeSmart` / `#searchModeClassic`, painted by `_renderSearchModeToggle`). `searchMode` is a **device-local** preference (`localStorage.streamlink_search_mode`, `"smart"` default | `"classic"`), seeded at parse time, painted at DOMContentLoaded and re-painted from `loadSearchIndexers`. `setSearchMode(mode)` persists + repaints. When `searchMode==="classic"`, `doSearch` short-circuits to **`doClassicSearch`** — the **pre-9.0 flat indexer list** (before the `d68008e` show-grouping): it renders `/api/search`'s flat `results[]` as one card per raw torrent (title · size · seeders/peers/tracker) with **Save** (→ `openDownloadModal`) and **▶ Play** (→ `openStreamPicker`) buttons, no grouping and no TMDb. This is the user-facing escape hatch for TMDb mismatches / wrong grouping. Note this is distinct from `doJackettSearch` (the *grouped* legacy search) used by the automatic no-key / no-match fallback below, which is unchanged.
+
+- **No-key / no-match fallback.** When `/api/tmdb/search` returns `enabled:false` (no TMDb key) **or** zero results, `doSearch` falls back to `doJackettSearch(q, …)` — the **legacy Jackett-first grouped search** (`groups[]` from `/api/search` rendered as one card per show via `_ssGroupsById`; a movie-only single-torrent group taps straight to `openDownloadModal`, otherwise `openSearchShow(group)`). This path is unchanged, so nothing regresses without a key.
+
+`#searchShowPage` is a `#episodePage`-styled full-screen view with a TMDb hero and two sections — **Single Episodes** and **Packs**. It opens from **two entry points**:
+- **`openSearchShowFromTmdb(cand)`** (TMDb-first) — builds a synthetic `_ssGroup={title,year,results:[]}`, sets `_ssKind` (`"tv"`/`"movie"`), fetches the **exact** metadata by id (`/api/tmdb/lookup?tmdb_id=&kind=`), and renders the full season/episode skeleton with **no torrents yet**. Jackett runs only on explicit action (below).
+- **`openSearchShow(group)`** (Jackett fallback) — seeds `_ssEpisodes`/`_ssPacks` from the group's already-fetched results and looks up metadata by title. `_ssKind=""` here.
+
+**Trailers.** The metadata payload carries YouTube trailer keys (`metadata.trailer` + per-season `seasons[n].trailer` — see [API.md](API.md) `/api/tmdb/lookup`). The hero meta-line row holds a **Trailer** button (`#ssTrailerBtn`, shown/labelled by `_ssUpdateTrailerBtn` — called from `_ssRenderHero` *and* `_ssRenderBody` so it tracks season-tab switches): a movie plays its film trailer; a TV show follows the selected season (`_ssTrailerFor` — season trailer when TMDb has one, labelled "S*n* Trailer", else the show trailer; hidden when neither exists). `ssPlayTrailer` → `openTrailerModal(key, title)` opens `#trailerModal` (z-[60], `youtube-nocookie.com/embed` iframe, autoplay; `closeTrailerModal` blanks the iframe `src` — that's what stops the audio; backdrop click and the TV-remote Back both close it via the `*Modal` convention). Its **Watch on TV** button (`trailerToTv`) POSTs the bare video id to `/api/youtube` — the existing YouTube-on-TV kiosk path — and closes the embed. Works on both entry points (the Jackett-fallback page gets the same metadata shape by title).
+
+**Theater-only banner.** `_ssRenderHero` calls `_ssRenderTheaterBanner`, which shows `#ssTheaterBanner` (amber, "In cinemas since <theatrical_date>, not out on digital or disc yet — any download now is likely a camera recording", plus the `digital_date` when TMDb has one) whenever the movie metadata carries **`theatrical_only:true`** — a movie that opened in cinemas within the last year with no digital/physical/TV release yet, so only cam torrents exist (see [API.md](API.md) `/api/tmdb/lookup`; computed by `_movie_release_flags`). Hidden for TV and released movies; reset to hidden on every show open.
+
+**Where to watch.** `_ssRenderHero` also calls `_ssLoadWatch`, which fetches `/api/tmdb/watch` once per TMDb identity (`_ssWatch.key = kind:id`) with the browser's country (`_ssWatchRegion`) and `_ssRenderWatch` fills `#ssWatch` under the library banner: one tile per provider (logo via `img_base` `w92`, name, `Stream · Rent · Buy`), all linking to TMDb's regional watch page, plus the required "Data: JustWatch" credit. With no offers it says so in one line — "not on any service in XX — available in N other countries" or "not listed on any streaming, rental or purchase service", which for a small title is usually why no torrent turned up either. Links go through `ssOpenWatchLink`, which hands them to Safari via `BundleDownloader.openExternal` in the iOS app (a `target=_blank` link is a no-op in the WKWebView).
+
+**Hero collapse (18.31.0).** `#ssHero` sits *above* the scroll container `#ssBody`, not inside it, so a tall hero used to squeeze the list to zero height on a phone (a 13-provider where-to-watch list made a movie's downloads unreachable). Two classes on `#ssHero`, all styling in the `#ssHero…` CSS block near the `.line-clamp-*` helpers: **no `.ss-open` (default)** shows a 4rem poster, two lines of overview, and `#ssWatch` as one no-wrap row of logos (`[data-wname]`/`[data-wkind]`/`[data-wlabel]`/`[data-credit]` hidden; a provider with no logo keeps its name, because `data-wname` is only set when a logo stands in for it). **`.ss-open`** (the **More/Less** button `#ssMoreBtn` → `ssToggleHero`) is the full hero, capped at `max-height:60dvh` with its own scroll. **`.ss-scrolled`** hides `#ssHeroBody` (everything but the Back/title bar). `_ssOnBodyScroll` sets it once `#ssBody` is past 24px, and clears it at ≤4px. It only folds when the list would *still* be scrollable with the hero gone. Otherwise folding clamps `scrollTop` to 0, which unfolds the hero, and it flickers. Tapping `#ssHeaderTitle` (`ssHeroToTop`) scrolls the list back to the top. `_ssResetHero` runs on both `openSearchShow` and `openSearchShowFromTmdb`, so every open starts collapsed and unscrolled.
+
+**Explicit in-show Jackett search.** Opening from TMDb shows Search buttons instead of pre-loaded torrents:
+- **Search packs** (`#ssSearchPacksBtn` → `ssSearchPacks`) — the broad query, then a targeted `<title> S<NN>` sweep (`ssSearchSeason`) for every season still without a pack, because the broad show-title query misses later seasons routinely (see [GOTCHAS.md](GOTCHAS.md) § season packs). Since 12.7.0 the sweep runs **detached** in the background pill, so the button returns as soon as the broad pass lands, and the targeted query buckets that season's **episodes** as well as its packs — one request answers both tabs. The tab renders via `_ssRenderPacksGrouped` — one heading per season in ascending order (seasons with nothing found get a **Find** button), then multi-season/complete, then the unrelated `movie`-kind rows behind an "Other results" disclosure. `_ssPackRowHtml(p, i)` takes the index into `_ssPacks`, not the rendered position, since `ssDownloadPack`/`ssPlayPack` resolve by it. Movies and absolute-numbered anime keep the flat list.
+- **Search episodes** (`#ssSearchEpBtn` → `ssSearchShowEpisodes`) — one broad `/api/search?q=<title year>` query, buckets `kind==="episode"` into `_ssEpisodes` (merged/deduped by magnet) **and** the non-episode results into `_ssPacks` (the broad query is shared, so the Packs tab and the bulk sheet's pack recommendation are ready without a second tap).
+- **Search packs** (`#ssSearchPacksBtn` / the packs-section empty-state button → `ssSearchPacks`) — keeps the non-episode results (`kind ∈ season|multiseason|movie`) into `_ssPacks`. `_ssPacksSearched` distinguishes "not searched yet" (shows the Search-packs CTA) from "searched, none found".
+- Both buttons share **one cached** request via `_ssBroadSearch()` (result stashed in `_ssBroadResults`) so they never double-hit the indexers. `_ssRender` broadens tab/section visibility for the TMDb-seeded page (`_ssKind` set ⇒ show the sections even while empty); movies default to the Packs (**"Downloads"**) section with no episodes tab.
+
+**Audio-language preference.** Backend-enriched results carry `audio` (`dual`|`dub`|`sub`|`other`|`""`) + `audio_lang` (see [API.md](API.md), [GOTCHAS.md](GOTCHAS.md) § audio-language classification). An **Audio** chip row (`#ssAudioChips`, rendered by `_ssRenderAudioChips` from `_ssRenderBody`) appears **only when the loaded results mix audio variants** (`_ssHasAudioVariety` — any `dual`/`dub`/`other`; plain English shows never see it): **Any / English / Original + Subs**. The pick is device-local (`localStorage.streamlink_audio_pref`, `_ssAudioPref`) and steers everything: `_ssAudioMatch` (dual satisfies both non-Any modes; untagged/subbed count for English **iff** the show's TMDb `original_language` is `en` — `_ssOrigEnglish`, unknown ⇒ English — since plain English releases never say "English"; untagged always counts for Original), `_ssPreferredSource` (episode rows headline the best *matching* source with a square audio badge — `_ssAudioBadgeHtml` — plus a red "No Eng audio"/"Dub only" flag when nothing matches), `ssOpenSourceSheet` (matching sources first, non-matching dimmed, badges everywhere), `_ssPackCmp` (rel bucket → pref → rel → **availability bucket → tracks** → seeders) and the bulk Auto picker below. **17.3.0** adds a sibling field, `tracks` (0-3, see [API.md](API.md)): how many *ways to watch* a release carries, audio counted double. It is orthogonal to the preference above — the preference asks *which language*, `tracks` asks *how much choice* — and it is a tiebreak sorted below availability, never a language preference of its own (see `reltracks.track_rank`).
+
+Each row → `ssOpenSourceSheet` picks a torrent → `_ssDownloadOne`; **Bulk download** `ssOpenBulkSheet` → Auto (`ssBulkAuto`) or Choose-per-episode (`ssBulkManualStart`). Since 12.7.0 both **close the sheet immediately and run detached** (`_bgRun` → the `#globalFindBar` pill; see § Background source-finding below): `_bgEnsureSources` does a broad search if `_ssEpisodesSearched` is false, then **one targeted `<title> S<NN>` query per season in scope** (the pass that actually finds anything on a long-running show), then a per-episode `<title> SxxEyy` mop-up for whatever is still bare — and Auto goes straight on to `_bgStartDownloads`. Choose-per-episode reopens the sheet on the picker when the find lands (or toasts, if the user has navigated away). Scope is `_ssBulkScopeEpisodes()` — TMDb’s episode list unioned with found episodes, so an episode with **no** sources stays in scope and is reported rather than dropped (see [GOTCHAS.md](GOTCHAS.md) § bulk download counting); a pack → `ssDownloadPack` → the Add-to-Library modal. **Stream-now (11.1.0, persists since 11.2.0):** every episode row, source-sheet row, and pack/movie row also carries a ▶ **Play** button (`ssPlayEpisode` — preference-best source, tagged with `{series,season,episode}` — / `ssPlaySource` / `ssPlayPack`) that opens the stream file picker (`openStreamPicker(magnet,title,btn,ctx)` → `/api/stream/prepare`); `selectStreamFile` then POSTs **`/api/library/play-now`** (not the old transient `/api/stream`), so the play **persists to the library** and Stop no longer deletes it. A multi-file pack shows the picker so the user chooses the episode; the whole pack downloads and persists. Because the Explore tab opens this same show page, Explore gets persisting stream-now for free. **Streamability flags (11.3.0):** `_streamHealth(bytes, seeders)` scores how well a source plays *while it downloads* (seeders needed ≈ 8/GB, floor 6 → `good`/`fair`/`slow`/`dead`; `null` when seeders unknown), rendered as a square Metro badge (`_streamHealthBadge`) on classic-search cards, episode rows (`_ssEpRowHtml`), source-sheet rows (`ssOpenSourceSheet`) and every video row in the picker (`renderStreamPickerList`). All the stream-now callers thread `{seeders,size}` into `openStreamPicker` → `streamPrepData.seeders`, which gates two things: a **single-file torrent auto-plays only when `good`** (`_streamHealthAutoPlay`; `fair`/`slow`/`dead` keep the picker open with a `_streamHealthSubtitle` warning instead of instantly casting to the TV), and `selectStreamFile` **warns before streaming** a `slow`/`dead` file (`_streamHealthRisky` → `window.confirm`), scored on the **selected file's** size so packs are judged per-episode. See [GOTCHAS.md](GOTCHAS.md) § streamability scoring. The bulk choose sheet leads with a **"Season pack available" recommendation card** when a pack covers the selected scope (`_ssBestPackForScope`: season pack matching the scoped season, or a multiseason/Complete pack spanning it; `rel ≥ 0.7` required since `_ssPacks` carries every group from the broad search; audio-preference-matching packs win, then `_ssPackCmp`) — "Download the pack instead" (`ssBulkUsePack`) routes to the normal Add-to-Library modal. **Auto** honours the **Audio preference first** (`_ssAutoPick` runs its whole cascade inside the matching-source subset when one exists — language consistency beats seeders; episodes with no matching source fall back to best-seeded and are counted in `_bgStartDownloads`'s final toast via its `note` arg), then three optional limits set in the choose sheet (`_ssBulkFilters`, persisted across scope/re-render): **Min seeders**, **Min size (GB)**, **Max size (GB)**. `_ssAutoPickFrom` runs a three-tier cascade: (1) clears the seeder floor **and** fits the size window; (2) else clears the floor (size relaxed — **seeders win over size**); (3) else the whole pool. Within every tier it sorts by **`_pickCmp`** (17.3.0, hoisted to module scope so the race shortlist and the HQ target order the same way): Dolby-Vision risk last → **availability bucket** (`_availRank`, the Excellent/Good/Low ladder `_availLabel` has always rendered) → **track richness** → exact seeders. The bucket is the behaviour change, not richness: 31 and 400 seeders used to order 400-first and are now both "Excellent", which is what lets richness decide between them — so a 31-seeder dual-audio copy can beat a 400-seeder single-audio one, but richness can never promote a *Low* copy over a *Good* one. `_bgAutoPick` inherits all of this by delegating to `_ssAutoPickFrom`; there is no `_bg` twin. Limits apply to Auto only; Choose-per-episode is unaffected — but its per-episode `<select>`s default to Auto's (audio-aware) pick and prefix each option with its audio class (`[DUAL]`/`[DUB]`/`[SUB]`/`[<LANG>]`). Every episode/pack download is tagged `series = group.title` so it coheres into one library show (via `openDownloadModal(magnet,title,{series})`).
+
+**Missing-episode detection + follow-up search.** The Single Episodes list cross-references the show's TMDb episode list (`_ssMissingEpisodes(season)` — a thin wrapper over the shared `_missingTmdbEpisodes`, see § Missing content): episodes TMDb lists but no torrent was found for render as greyed **"No source found"** rows (`_ssMissingRowHtml`) with a **Find** button → `ssSearchEpisode(season,episode)`, which fires a targeted `/api/search?q=<show> SxxExx` (or `<show> <n>` for absolute-numbered anime — `season≤1 && episode≥100`). **17.1.0:** for a show the backend reports as `anime.absolute` (the Anime-Lists mapping table says TMDb's seasons subdivide one continuous run), the queries lead with the **series-absolute** number instead — `_animeAbsNo(meta, season, episode)`, the frontend mirror of `animemap.to_absolute`, walks the same cumulative `all_seasons` counts. The bare form (`59`) leads, the zero-padded one (`059`) follows, `SxxExx` is last, and the within-season number is not asked for at all because it names a different episode. That order is measured, not assumed: over 20 episodes of 5 absolute-numbered anime, counting only results that really are the episode asked for, **unpadded found 15/20 and padded 12/20**, and where both hit, unpadded's best row was never the worse of the two. Padded uniquely finds 2, so it stays as the fallback. The accept filter matches on the absolute number too (a bare-number release parses as season 1), or every real source would be rejected. The facts arrive as `anime: {mapped, absolute, total}` beside the metadata on both fetching endpoints and are kept in `_animeFactsById`, keyed on TMDb id rather than beside each of the seven `epMetadata`/`_ssMeta` assignments. Measured live on Hunter x Hunter S01E59: `S01E59` returns one 86 MB 1-seeder dubbed HDTV rip, `059` returns the 159-seeder Blu-ray batch. If that finds nothing it falls back through `_ssEpisodeQueries`: SxxExx under the top two alternative titles (`_ssAkaTitles`, minus any that are another title plus more words, i.e. a sequel's name), then the bare zero-padded number (`<title> 01`) under each title, stopping at the first hit. A fallback hit must be named for the title it searched: scored against that title alone (`aka=`, so the number in the query doesn't count), `rel ≥ 0.9` for SxxExx and `≥ 0.95` for a bare number. The form that worked goes first for the show's next episode (`_ssEpFormWin`, a `WeakMap` keyed on `_ssGroup`), so a Find-missing sweep pays for the misses once. Every result, from the first query as well as the fallbacks, must then pass `_ssEpisodeAccept`: `rel >= 0.95` against the single title that query searched (passed as `aka=`), no year in the release other than the requested season's or the show's first (±1), no country tag other than the show's `origin_country`, and no leading article the show hasn't got (`_ssArticleOk`). Sources of one episode are then ordered by `_ssSortSources`: confirmed (year, country tag or TMDb episode title agrees) above no-evidence above contradicted-episode-title, and seeders within a tier. It keeps only results whose parsed `(season,episode)` match, and merges them into `_ssEpisodes` (dedup by magnet, re-sorted by seeders). A season-level **Find sources** banner (`ssFindMissing(season, only?)`) walks every missing episode throttled, re-rendering as each lands; `only` narrows the sweep to an explicit set of episode numbers, which is how the library page hands over the gaps it measured against disk. The season tabs use `_ssAllSeasons()` (TMDb ∪ available) so an entirely-missing season still gets a tab. `_ssSearching` guards duplicate in-flight per-episode searches.
+
+#### Explore tab (`#exploreTab`)
+
+Query-less TMDb browsing — the third top-level tab (Search · **Explore** · Library, `#tabExplore` / `switchTab("explore")` → lazy `loadExplore()`, one-time init guarded by `_exLoaded`; a no-key result resets the guard so configuring a key later just needs a tab re-visit). Backed by `GET /api/tmdb/genres` + `GET /api/tmdb/explore` (see [API.md](API.md) § Search). Not VPN-gated — it's pure TMDb metadata; the torrent actions inside the show page keep their own gating.
+
+- **Rails view (default, `#exploreRails`)** — one horizontal poster row per curated list, from `_exRailDefs()`: with no kind filter → Trending Now (mixed), New Movies, New On TV, Popular Shows, Popular Movies, Top Rated Shows, Top Rated Movies; with a kind filter → the four lists for that kind. Rails load concurrently (`_exFillRail`, skeleton tiles via `_exSkeletonTiles` while pending; an empty/failed rail removes itself), each capped at 20 tiles with an **All ›** header button → the grid view for that list. Rows are `overflow-x-auto` (covered by the blanket `overscroll-behavior-x:contain` rule).
+- **Filters** — an **All / Shows / Movies** kind row (`exSetKind`) plus a scrollable **multi-select genre chip** row (`#exGenreChips`, from the merged `/api/tmdb/genres` list, filtered to chips valid for the active kind; `exToggleGenre` adds/removes from `_exSelGenres`, sent comma-joined = **AND** on the server). Switching kind re-renders chips and drops selected genres the new kind lacks. Below the kind row a **filter bar** (`_exRenderFilterBar`): **Sort** (`#exSort` → `exSetSort`: Popular / Top Rated / Newest), **min rating** (`#exMinRating` → `exSetMinRating`), **year/decade** (`#exYear`, built by `_exBuildYearOptions` relative to the current year → `exSetYear`, encodes a `min-max` range), and a **Hide owned** toggle (`#exHideOwned` → `exToggleHideOwned`). Any active genre/sort/year/rating filter (`_exFiltersActive`) switches to the grid view.
+- **Inline search** — `#exSearch` (top of the filter block) → `exSearchInput` (300 ms debounce) sets `_exSearchQ` and calls `_exApply`, which fetches **`/api/tmdb/search`** (kind-scoped) and renders the poster grid via `_exShowSearch` (own `_exSearchSeq` guard). `exClearSearch` / the ✕ button empties it. Search wins over filters in the `_exApply` dispatch order (search → filter grid → rails).
+- **Grid view (`#exploreGridWrap`)** — a paged poster grid. `_exOpenGrid(st)` takes the full param object `{kind, section, genres[], sort, yearMin, yearMax, minRating, title}`; `_exFetch(p, page)` builds the query from it; `exLoadMore` fetches page N+1 under `withInflight("ex_grid")`, `#exMoreBtn` hides at `total_pages`. Two entry points: a rail's **All ›** (`_exOpenGrid` with just kind+section) and the active filter set (`_exOpenFilterGrid`). The Sort control replaces the old per-genre section sub-chips (`#exGridSections` stays hidden). **‹ Back** (`exCloseGrid`) clears **all** filters + search and returns to rails. `_exSeq` invalidates in-flight fetches on any view/filter change.
+- **In-library / theater badges** — `_exBuildLibKeys` builds `_exLibKeys` (a `kind:tmdb_id` set) from `window._libCache` (the `/api/library` list, now carrying `tmdb_id`/`tmdb_kind`; `_exEnsureLib` fetches it once if absent). A tile whose candidate is in the set gets a green **In Library** badge (`_exInLib`); **Hide owned** filters those out of every rail/grid/search. A movie released within ~45 days (`_exInTheaters`, from the candidate's full `date`) gets an amber **In Theaters** badge — a heuristic the show page confirms precisely (see the theater-only banner below).
+- **Collection tiles (19.13.0)** — both search surfaces (`_exShowSearch` and the Search tab's `_renderTmdbResults`) pass the `/api/tmdb/search` payload through **`_collFold(d, owns)`**, which returns `{colls, items}`: one entry per matching collection, leading the list, and the results with that collection's films removed. A library shelf that absorbed the collection contributes its **name** and its hand-added **shows** (those TV results fold too, matched on `tmdb_id`); `owned` counts films via the surface's own test (`_exLibKeys` / `_covFor`). Drawn by `_exCollTile` (Explore grid) or inline in `_renderTmdbResults` (Search cards); a click is `_collOpen` → `openGroupPage({kind:"group", id:"coll:<id>", browse:true})`. **Hide owned** drops a tile only when every released film is owned. Rails and filter grids are untouched — TMDb's list rows don't say which collection a film is in.
+- **Tiles** (`_exTile(c, grid)`) — 2:3 poster (w185, native `loading="lazy"`) with the overlaid badges, title, TV/Movie chip, year, ★ rating; fixed-width in rails, fluid in the grid. A click calls **`openSearchShowFromTmdb(c)`** — the candidate shape matches `/api/tmdb/search`, so the whole show page (trailer, episode skeleton, torrent search, downloads) is shared with Search.
+- **Bookmarks (19.1.0)** — a per-profile watch-later list; rules server-side in `bookmarks.py` (see [LIBRARY_DATA.md § Bookmarks](LIBRARY_DATA.md)). State: `_bmList` (server display order), `_bmKeys` (`kind:id`), `_bmToday` (server UTC date the countdowns count from). `loadBookmarks()` runs on startup-with-profile, `_doSelectProfile`, every Explore tab visit and the `bookmarks_update` SSE event; `_bmRefreshViews` then repaints toggles in place (`_bmSyncToggles`, no tile rebuild) and the rail/grid. **Toggle**: every `_exTile` carries a corner `span[role=button][data-bm-key]` (`_bmToggleHtml` — a span, because the tile is itself a `<button>`; its handler stops propagation) → `toggleBookmark(c)` (optimistic, then reload), and the show page hero has `#ssBookmarkBtn` → `ssToggleBookmark` (candidate from the card that opened the page via `_ssBmCand`, else from `_ssMeta.tmdb_id`; hidden without a TMDb id or a profile). **Badges** (`_bmBadge`): rose `New · out now` while `new`; amber countdown while waiting — `Digital in N days`, `In theaters · digital TBA`, `Premieres in N days`, `Season N in N days`; a bookmark's badge replaces the list-tile `In Theaters` heuristic. **Where the list lives**: a **Your Bookmarks** rail first in the rails view (`_exRenderBmRail`, kind-filtered) and a **Bookmarks** button in the filter row (`#exBookmarksBtn`, count + `#exBmDot`) → `exOpenBookmarks()`, the grid view with `_bmView=true` (other views reset it). **Notification**: `#bmTabDot` on the Explore tab and `#exBmDot` show while any bookmark is `new`; opening the Bookmarks view POSTs `/bookmarks/seen` (all) but keeps the NEW badges for that visit (`_bmViewNew`); opening one NEW title from any tile clears just that one (`_bmSeenOne`).
+- **No TMDb key** — `#exploreDisabled` ("Explore needs a TMDb key") instead of filters/rails.
 
 #### TMDb metadata
 
-Loaded in parallel with `/files` inside `openEpisodePicker`. Returns `{enabled, img_base, metadata}`. When `enabled=false` (no TMDb API key configured) or no match was found, the page degrades gracefully:
+**Never gates the page.** `openEpisodePicker` kicks the `/metadata` fetch off in parallel with `/files` but renders hero/tabs/episodes as soon as `/files` returns; `_epApplyMetadata(itemId, title, respPromise)` applies the metadata response whenever it lands and repaints (`renderEpHero` + `renderEpSeasonTabs` + `renderEpList`). If the server answers `pending:true` (first-ever TMDb fetch still running against a slow/dead internet link), the page waits for the `metadata_update` SSE event (handler re-calls `_epApplyMetadata` with `epHeroTitle`) with an 8 s `_epMetaRetryTimer` re-pull as fallback. `img_base` is now the host's artwork proxy (`/api/metadata/img`), so posters/backdrops/stills keep working on the LAN with the internet down once cached (see [API.md](API.md)).
+
+Returns `{enabled, img_base, metadata, pending}`. When `enabled=false` (no TMDb API key configured) or no match was found, the page degrades gracefully:
 - No backdrop / poster / stills.
 - Episode headlines fall through to `parseEpisodeInfo` (filename parsing).
 - Season tabs still work because they're built from `f.season` parsed off disk, not from TMDb.
 
 Admin sets the key under **Admin → Indexers → TMDb Metadata** (`POST /api/admin/settings { tmdb_api_key }`).
 
+### Group page (`#groupPage`) and sections (15.0.0)
+
+One full-screen "shelf" serves two shapes: a **franchise** (`openGroupPage({kind:"group", id})`
+→ `/api/library/group/{id}`) and a **multi-section show** (`{kind:"show", seriesKey, itemId}`
+→ `/api/library/series/{key}`). Rows (`_grpRowHtml`) open the member's or section's own normal
+page (`_grpOpenRow`) or play it (`_grpPlayRow`); the shelf never renders episodes itself.
+Franchise-only chrome: Story/Release toggle (`setGroupOrder`, shown only when
+`has_story_order`), rename (`renameGroup`), "+ Add title" (`openGroupAdd` →
+`#groupEditModal`, `_grpEditMembers`), and **Select** (15.6.0 — `grpSelectMode`).
+
+**Bulk hide / delete (15.6.0).** The grid no longer shows a franchise's titles individually —
+the shelf stands in for them — so the shelf has to carry the per-tile actions. **Select** puts
+a checkbox on every owned row (`.grp-sel`; "not downloaded" rows are never selectable) and
+shows `#grpBulkBar`. Ticking is `grpSelToggle` on the whole row, not just the 16px box;
+`_grpSyncSelUI` repaints the ticks and the bar **in place** rather than re-rendering, because a
+full `renderGroupPage()` throws away the list's scroll position. `grpSel` holds member **keys**,
+resolved to item ids by `_grpSelItemIds` at action time (one title can be many per-episode
+items). `grpBulkHide` fans out to `POST /api/library/{id}/visibility` (label flips to **Unhide**
+when everything ticked is already hidden, read from `window._libCache`); `grpBulkDelete` fans
+out to `DELETE /api/library/{id}?delete_file=true` behind a `confirm()` naming the titles —
+PIN-gated server-side exactly as a tile's bin icon is. Deleting a shelf's last members
+dissolves the group, so the page closes instead of refreshing into a 404. **Show not downloaded** (15.1.0, `grpShowMissing`,
+localStorage `streamlink_grp_missing`, default on; shown only for a group with a
+`collection_id` while `missingContentEnabled`) fetches with `include_missing=1`;
+`_grpMissingRows` rows are merged with the owned rows by `_grpSortRows` (a JS mirror of
+`_member_sort_key`) and drawn by `_grpMissingRowHtml`. **Browse mode (19.13.0)** — a spec with `browse:true`
+(`_collOpen`, from a collection tile in Search or Explore; id `coll:<tmdb id>`) fetches with
+`browse=1`, always lists the missing films (no **Show not downloaded** toggle; the stored
+preference and `missingContentEnabled` are ignored), and when the payload is `virtual` hides
+**+ Add title**, **Select** and rename — there is no stored group to edit — while the order
+toggle becomes local (`grpCtx.order`, re-applied by `openGroupPage` after a repaint). **Get** → `grpGetFilm`: a detached
+movie search (`/api/search?q=title&year=`), top relevance tier only, `_ssAutoPick` with the
+bulk filters, `POST /api/library/download` with `tmdb_id`/`tmdb_kind:"movie"`, then pokes
+`/metadata` so it binds at once; `_grpFilmQueued` blocks a second press. **Choose** →
+`openSearchShowFromTmdb` (Full profiles only).
+
+Library grid: `loadLibrary` also calls `_libFetchGroups` (`libGroups`, `libGroupedKeys`);
+`renderLibrary` drops claimed tiles and emits `_libGroupTileHtml` per shelf. **Which shelves
+stand in on a given side of the visible/hidden split is `_libShelves(list, hiddenView)`**
+(18.21.0), and it has two rules: a shelf's server-side numbers describe the whole franchise,
+so one standing for five of six films is emitted as a **shallow copy** with `member_count` /
+`count` / `watched` recomputed from the members present (hiding one Star Wars film must not
+blow the collection apart into six tiles); and the **Hidden view gets no shelves at all** —
+its job is the eye icons, and a collection tile carries only *Open collection*, so folding
+hidden films into one would put the control that restores them behind a page. Tile routing goes through `_libOpenItem` / `_libOpenSeries`: **more than one section →
+shelf, otherwise the episode picker exactly as before** (Hacks, Futurama never see a shelf).
+
+Sections reuse the episode page unchanged. `openEpisodePicker(itemId, title, section, filePath)`
+and `openSeriesPage(key, title, section, filePath)` call `_applySection`, which narrows `epFiles`
+to the section (`_fileSection` mirrors `episodes.section_key`) and swaps `epMetadata` for the
+section binding (`_sectionMetaAsShow` mounts its episodes at season `"0"`, where `_tmdbEpisode`
+looks for them). A Movies section hangs each file's film binding on `f.film` and renders
+`_epFilmListHtml` poster rows; `_epOpenFilm` reopens the page narrowed to that one file, which
+makes it `epIsMovie`. **Guards:** `_epApplyMetadata` and `_epTopUpSeasons` must not overwrite
+`epMetadata` while `epSection` is set — see GOTCHAS.
+
+### Not-out-yet releases (15.2.0)
+
+`_airInfo(date, verb)` → `{out, label}` and `_releaseBadge(date)` (amber chip) mark unreleased
+episodes/films: `_ssEpRowHtml`, `_ssMissingRowHtml`, `_epMissingCardHtml`, collection missing
+films. **All** library downloads go through `postLibraryDownload(body, {silent})`: on a 409
+`unreleased` it shows `#unreleasedModal` via `_unreleasedPrompt(info)` (big Cancel; small
+"Download anyway" for every profile since 15.5.0) and resends with `allow_unreleased`. `info.can_override`
+(elevated) now only unlocks skipping the contents check: "Download without checking" when the
+check can't tell, or going ahead when there's no magnet to check. Others get "Check again" (and
+"Check other sources" when alternatives exist). Silent
+callers (background runs) get `{unreleased:true}` and report the skip. `_errDetail` renders an
+object `detail`. Stream-now rows ask via `_ssConfirmOut(season, episode, magnet)`.
+
+**Contents check (15.3.0).** When `info.magnet` is set (`postLibraryDownload` passes
+`body.magnet`; `_ssConfirmOut` passes the chosen source), "Download anyway" keeps the dialog
+open and calls `POST /api/torrent/inspect`, showing a checking note in `#unrelInspect`. Has a
+video → resolves true. No video → red note with the file list, the override button hidden,
+Cancel relabelled Close (resolves false). Unknown → amber note with the reason, and the button
+becomes "Download without checking" (the next press resolves true).
+
+**Keep checking other sources (15.4.0).** `_unreleasedPrompt` now resolves `false`, `true`, or
+a **source object** the user confirmed instead. Given `info.alternatives` (other sources for the
+same release), a no-video result offers **Keep checking other sources (N)** in `#unrelPrimary`:
+the alternatives (deduped by magnet, seeders desc) are inspected by up to 3 concurrent workers,
+with a live per-source log (video / no video / no answer) and Cancel. The first source with a
+video stops the scan and is shown (title, seeders, size, file list) with **Download this**
+(resolves that source) and **Keep checking** (skips it; results already in flight are kept).
+Nothing left → "No source has a video". Alternatives come from `_ssAlternativeSources(season,
+episode)` (episode sources / season packs / movie results) for `_ssDownloadOne` and stream-now,
+and from the candidate list for a collection film. `postLibraryDownload(body, {alternatives})`
+sends the confirmed source's `magnet`/`title` (dropping `torrent_hash`/`selected_file_indices`,
+which belonged to the original) and tags the response `r.source`. The search-tab download
+dialog passes no alternatives.
+
 ### Stream to Device
 
-All Play surfaces (`epPlay`, `epPlayFrom`, `continueLibraryItem`, the
-`lib-restart-btn` listener, the per-card "📱 On Device" button) route through
-`playLibraryWithChooser(itemId, files, seekTo, label)`. When the host is
+All Play surfaces (`epPlay`, `epPlayFrom`, the `lib-restart-btn` listener, and —
+as of 11.6.0 — the library card's primary **Play/Resume** for *both* multi-episode
+shows and single-file movies via `resumeLibraryItemWithChooser`) route through
+`playLibraryWithChooser(itemId, files, seekTo, label, shuffle?)`. Movies used to
+call `continueLibraryItem` (straight to VLC) with a separate green "On Device"
+button; that button is gone and the primary Play now opens the chooser like shows
+do. When the host is
 reachable it opens `#playChooserModal` — "On TV (VLC)" vs "On This Device".
 There is no offline-only fallback path; if `navigator.onLine === false` the
 function shows a toast and bails.
@@ -241,12 +561,24 @@ native HLS** (`<video>.src = master_url`). See [STREAMING.md](STREAMING.md) for
 the engine branch.
 
 `_lpRenderTrackRows` (run on `MANIFEST_PARSED` / `loadedmetadata`) populates the
-three `#lpTrackRow` selectors: **Res** (quality), **Aud**, **Sub** — each row
-hidden when it has ≤1 option. Quality is hls.js-only: the Res dropdown is built
+`#lpTrackRow` controls: **Res** (quality), **Aud**, **Sync**, **Sub** — the three
+selectors each hidden when they have ≤1 option. **Sync** is the manual audio-delay
+slider (`#lpSyncRow`, `lpSetAudioOffset`); it is deliberately **not** gated on track
+count (a single-audio file can be desynced too), only on the browser having
+a working mechanism for the current file (`_lpOffsetMode()`: a WebAudio DelayNode on Chromium/Firefox, an audio-SourceBuffer `timestampOffset` bias on macOS Safari, neither on iOS or when WebKit is playing on-demand — see [GOTCHAS.md](GOTCHAS.md)) — and its own state is rendered by `_lpRenderSyncRow` so a live drag doesn't
+rebuild every dropdown on the panel. Quality is hls.js-only: the Res dropdown is built
 from `lp.hls.levels` (sorted high→low) as `Auto` + each resolution, and
-`lpSetQuality(idx)` sets `lp.hls.currentLevel` (`-1` = Auto/ABR; session-only,
-not persisted). Safari's Res row stays hidden (no manual-level API). `lpSetAudio`
-/ `lpSetSubtitle` persist their picks via `/api/library/{id}/local-tracks`.
+`lpSetQuality(val)` sets `lp.hls.currentLevel` (`-1` = Auto/ABR; session-only,
+not persisted). Safari's Res row stays hidden (no manual-level API). **iOS app,
+device-copy playback** (`lp.source === "device"`): the Res dropdown is built from
+the downloaded bundle's `meta.json` ladder instead — `"— On device"` (value
+`dev`) + the other rungs as `"— Server"` (`srv:<height>` / `srv:auto`); those
+values make `lpSetQuality` switch the *source* (a per-file `lp._srvOverride` +
+full `_lpLoadIndex` reload at position). While overridden, the server menu adds
+the `dev` switch-back option. See [STREAMING.md](STREAMING.md). `lpSetAudio`
+/ `lpSetSubtitle` persist their picks via `/api/library/{id}/local-tracks`, as does
+`lpSetAudioOffset` (`audio_offset_ms`, per-file only — see
+[STREAMING.md § Manual audio offset](STREAMING.md)).
 
 Subtitle `<track>` elements are wired from the bundle's `subtitles[]` (each a
 `sub_<i>.vtt` in the cache dir) plus on-disk `subs[].url` sidecars (each points
@@ -254,6 +586,8 @@ at `/api/library/{id}/subtitle` — server converts SRT→VTT on the fly). Skip-
 is fetched in parallel from `/api/library/{id}/skip-data?file_path=…` and
 assigned to `lp.skipData` for the skip-intro / skip-credits logic in
 `lpEvaluateSkipOffer`.
+
+On the TV kiosk that offer is also **mirrored to every phone**: `_tvSkipOffer()` packages it (with the tile's literal text, so an auto-skip countdown reads the same on both) into the `/api/tv-local/state` heartbeat → `state.skip_offer`, and `POST` / `DELETE /api/skip-now` relay `skip_accept` / `skip_dismiss` back. `renderSkipOffer` prefers `offer.label` and no-ops in `TV_MODE` so the kiosk doesn't stack the phone banner over its own tile. See [STREAMING.md § Smart Skip on this surface](STREAMING.md).
 
 There is **one** `<video id="lpVideo">` inside `#localPlayer`, wrapped in
 `#lpStage`. In full mode the stage is `absolute inset:0` — **the video takes
@@ -277,21 +611,102 @@ desync that two synchronized videos would create. iOS-friendly: `playsinline`,
 fullscreen hijack), so a custom overlay guarantees the identical UI everywhere.
 Don't re-add the `controls` attribute. Pieces:
 - **Transport** — center cluster: ±10 s tiles (`lpSeekBy`) around a play/pause
-  tile (`lpTogglePlay`, icons synced by `_lpCtlSync`).
+  tile (`lpTogglePlay`, icons synced by `_lpCtlSync`). `lpSeekBy` **coalesces**
+  (18.12.3): an isolated press commits at once, but a continuous burst produces
+  exactly two `_lpCommitSeek` calls — the first press and the resting place —
+  so fifteen taps don't retarget the fragment loaders fifteen times. The bar
+  still follows every tap because `_npUiTime` reports the pending target
+  (`_lpSeekPendTarget`); keep that accessor on intent-side callers only, never
+  progress saving.
 - **Seek bar** (`#lpSeekBar`) — bottom strip; played fill + buffered fill +
-  square handle, updated by `_lpCtlTick` on `timeupdate`/`progress`. Pointer
+  square handle, updated by `_lpCtlTick` via `_lpClockTick`
+  (`timeupdate` **plus** the 500 ms `_lpClockPump` interval — iOS MMS gaps
+  `timeupdate` for seconds at a time while the clock advances, which used to
+  freeze the bar and the skip offers; see [GOTCHAS.md](GOTCHAS.md)) and on
+  `progress`/`durationchange`/`seeked`. Pointer
   scrub (`_lpSeekBarInit`): dragging previews via `_lpScrub.t` without touching
   `currentTime`; the seek commits **once on release** (matters in on-demand
   mode, where each cold seek restarts the JIT ffmpeg). Time labels use
-  `fmtTimeSecs`.
+  `fmtTimeSecs`. All user-intent seeks (±10 s, scrub commit, skip-intro) go
+  through `_lpCommitSeek`, which arms two independent checks and logs a `seek`
+  row for each press — never set `currentTime` directly for a user seek.
+  - `_lpVerifySeek` watches composited frames via `requestVideoFrameCallback`
+    and rebuilds the pipeline if the element accepted the seek but kept
+    presenting the old position (10.10.3). **Blind while paused** — rVFC does
+    not fire on a paused element — so its `no-frames` verdict proves nothing on
+    its own.
+  - `_lpWatchBufferFreeze` is the one that catches the failure that actually
+    happens (18.12.3): a seek whose target is outside the buffer must make
+    `buffered` change within 2.2 s, or the loaders are wedged →
+    `_lpKickLoader(target)`, then `_lpPipelineRebuild` if that doesn't take.
+    It never looks at frames, so it works while paused. **`readyState` cannot
+    substitute for this** — it answers "do I have data", not "do I have data
+    *here*", and reads 4 throughout the wedge.
+  - `_lpResumeIfParked` (19.13.1) runs first: if hls.js's stream controller is
+    `STOPPED` (the OS paused the loaders), it calls `resumeBuffering()` at the
+    press instead of leaving the watch to find out 2.2 s later.
+- **Buffer pressure** (19.13.1, iOS) — `_lpNotePressure` / `_lpUnderPressure` /
+  `_lpOnBufferedChange` / `_lpBufferGovern`. When the OS evicts media near the
+  playhead or an append hits the quota, the preroll override stands down and
+  hls.js's buffer targets shrink for 3 min; `_lpBufferGovern` (on the 3 s
+  `_lpStallWatch` tick) restores them and restarts parked loaders before a
+  playing buffer runs dry. `_lpNoteWaiting` / `_lpNoteHlsWarn` only log.
+
+  See [GOTCHAS.md](GOTCHAS.md) § ManagedMediaSource and
+  [DIAGNOSTICS.md](DIAGNOSTICS.md) § "the picture is frozen but the seek bar
+  moves".
 - **Options panel** — the **gear button** (`#lpOptsBtn`, `lpToggleOpts`)
   toggles `.lp-opts` on `#localPlayer`, showing `#lpTrackRow` (quality /
-  audio / subtitle selectors, AI button, Clip row) as an absolute panel
+  audio / subtitle selectors, the **Sync** audio-delay slider, AI button, the
+  **Sleep** timer (`#lpSleepSelect`, see [STREAMING.md § Sleep timer](STREAMING.md)),
+  Clip row) as an absolute panel
   anchored above the bottom strip — scrollable, ≤380px wide. The panel is
   **never** visible otherwise (`_lpRenderTrackRows` doesn't unhide it; the
   gear owns visibility). While open, the overlay won't auto-hide
   (`_lpCtlShow`/`_lpCtlIdle` guard on `_lpOptsOpen`); a tap on the video
   closes the panel first, and `lpStop`/`lpMinimize` clear `.lp-opts`.
+- **Haptics** (iOS app only, 19.5.0): `_hap(kind)` → `AppShell.haptic`, throttled to
+  one per 60 ms, a no-op in a browser. It fires only for a deliberate touch:
+  `lpTogglePlay`, `lpSeekBy`, the Skip Intro/Credits button, any `_holdStart` hold
+  button when it fires (Prev/Next episode, Stop, Clip…), and setting the sleep timer.
+  Never for something that just happened (an auto-skip, a timer running out). Download
+  completion buzzes natively (`Haptics.downloadFinished`, one per 3 s burst).
+- **Orientation lock** (`#lpRotBtn`, `lpToggleOrientLock` → `_lpOrientApply`): in the
+  iOS app (20.3.0) `AppShell.setOrientationLock({on})` turns the real interface and pins
+  one landscape side; `.lp-lock-native` on `#localPlayer` holds the CSS turn back. A
+  browser, or an older app (the call rejects), keeps the CSS turn, and only then is
+  `_lpRotated()` true. `_lpClearOrientLock` releases it on minimise and stop. See
+  [GOTCHAS.md](GOTCHAS.md) § The app's orientation lock is native.
+- **Home-screen quick actions** (iOS app only, 19.5.0): **Continue Watching / Downloads /
+  Search**, declared in `Info.plist` (`UIApplicationShortcutItems`) and delivered to
+  `SceneDelegate`. `AppShell.swift` holds the action across the connect-shell → host
+  navigation. `_appInitQuickActions` takes it at boot and on the `quickAction` event,
+  and taking clears it. `_appRunQuickAction` opens the Downloads tab, focuses
+  Search, or resumes the most recently watched library item that isn't all-watched
+  (`resumeLibraryItemWithChooser`). Search and Continue need a profile, so if the
+  picker is up they wait in `_qaPending` until `_qaFlush` (picker and boot restore).
+  Offline, only Downloads works.
+- **Out-of-date app notice** (iOS app only, 19.6.0): `_appCheckUpdate` (5 s after boot,
+  then on return to the foreground at most every 6 h) compares `/api/app/latest` with the
+  installed app. The installed version comes from `AppShell.info()` (19.6.0+). Older apps
+  fall back to `NativePlayback.extDiag().build`, which is `NP_BUILD`: a **lower bound**
+  on the version, good enough to know the app is behind but not to print. A `1.0` (Xcode
+  dev build) is never flagged. When the app is behind, the **App** menu button gets a
+  blue dot and an **Update app — x.y.z** entry that explains the SideStore step. A toast
+  shows once per new version, and again every 3 days until it's installed
+  (`sl_app_update_seen`), never while something is playing. The reference is the
+  published SideStore version, not the dashboard badge, because the badge also moves for
+  host-only changes. Since 20.1.0 that version comes from the source of the **server's
+  release channel** and is never newer than the server, and `_appUpdExplain` names the
+  source to add when the channel is not `main` (a phone on another channel's source is
+  never offered the version, and nothing on the phone says why).
+- **Out-of-date server notice** (iOS app only, 20.1.0): the opposite case, and it lives
+  in the shell (`ios-app/www/index.html`), not here, because an old server serves an old
+  dashboard. `openHost` checks the version the probe or scan reported against
+  `MIN_SERVER`; below it `showOldServer` replaces the connecting screen with the notice
+  and a **Connect anyway** button, remembered per `(address, server version, MIN_SERVER)`
+  in `streamlink_old_server_ok`. List rows get a "Needs a server update" line. No
+  version reported means no verdict. See [GOTCHAS.md § Release channels](GOTCHAS.md).
 - **Mute** (`lpToggleMute`) and **fullscreen** (`lpToggleFullscreen`) buttons.
   Fullscreen requests OS fullscreen on **the whole `#localPlayer` container**,
   never the bare `<video>` — so the header, transport, and track selectors stay
@@ -308,6 +723,23 @@ Don't re-add the `controls` attribute. Pieces:
 - **Buffering** — `.lp-buffering` (set on `waiting`, cleared on `playing`)
   shows the square Metro spinner `#lpBuffSpin`, independent of overlay
   visibility.
+- **Glasses remote** — `.lp-remote` on `#localPlayer` (set by `_npSyncRemoteUi`
+  at every `_npHolding` write) hides **`#lpControls` outright** and shows
+  `#lpRemote` in its place. The remote is not an overlay with the video
+  removed; it is a control panel in the same idiom as the TV's
+  `#fullscreenControls`, and its tiles reuse `.fc-tile` and that grid's own
+  class strings. Structure, top to bottom: `#lpRemoteBanner` (status strip),
+  `#lpRemoteNow` (series + title + `#lpRemoteClock`), `#lpRemoteSeek` and
+  `#lpRemoteSkip` (empty slots that `#lpSeekBar` and `#lpSkipOffer` are
+  **relocated into** — the real nodes, so every existing listener and painter
+  keeps working; the restore branch runs in the same function), then
+  `#lpRemoteGrid`: seek steps, a full-bleed `#lpRemotePlayBtn`,
+  `#lpRemoteEpRow` (hold-to-activate Prev/Next with the readiness dots, hidden
+  when the playlist has nowhere to go), and Stop / To TV. `#lpWhere` in the
+  header flips "On Device" → "On Glasses". **No volume row and no track row** —
+  `NativePlayback` has no volume method and track switching needs a native
+  reload, and a tile that can't do anything is worse than a missing one. See
+  [GOTCHAS.md](GOTCHAS.md) § "A remote is a control panel, not an overlay". The bottom row's **More** tile (`#lpRemoteMoreBtn` → `lpRemoteMore` → `#moreModal`, 19.9.0) holds everything the Options panel does, with what the route can't do greyed and explained; see [STREAMING.md § 2b](STREAMING.md).
 
 The header (`#lpHeader`, `.lp-chrome`, hidden in tiny mode; on phones ≤480px
 the Min / To TV text labels collapse to icons via `.lp-btn-label` so the bar
@@ -319,11 +751,14 @@ that episode is prepped. `_lpRenderNavButtons` (called from `_lpLoadIndex`)
 shows/hides each button for the current `lp.pi` and paints a square dot from
 `prepFileState` — green = ready, amber = prepping, gray = not prepped.
 `_lpWarmNextEp` (also from `_lpLoadIndex`) fires an interactive `/offline-prepare`
-for the next episode so auto-advance / a Next hold resumes instantly. See
+for the next episode so auto-advance / a Next hold resumes instantly — unless
+(iOS app) that episode is already downloaded to the device, in which case it just
+marks the row "ready" with no host prep. See
 [STREAMING.md § Auto-advance](STREAMING.md).
 
 `saveProgress(itemId, filePath, posSec, durSec)` is called every 15 s by
-`#lpVideo`'s `timeupdate` handler and POSTs `/api/library/{id}/progress`.
+`_lpClockTick` (`#lpVideo`'s `timeupdate` handler + the `_lpClockPump`
+interval) and POSTs `/api/library/{id}/progress`.
 **Writes with `posSec < 5` or `durSec ≤ 0` are dropped** — the server
 recomputes `completed` from `pct = position/duration`, so a t≈0 write would
 wipe a watched episode back to unwatched. The same guard lives in
@@ -334,12 +769,36 @@ window starts at load, giving the resume seek time to land before any save
 can fire. There is no offline outbox — a single best-effort POST is the
 entire write path.
 
+**iOS background playback (`_np*`, app only).** A block next to the other native
+glue pre-arms the `NativePlayback` plugin so playback survives a lock:
+`_appPlaybackPrefs()` reads the two Settings toggles (`streamlink_app_bgplay`,
+`streamlink_app_tvmode`; default on); `_npOk()` gates everything on the app + plugin
++ a `lp._nativeMaster` for the current file; `_npPayload()` builds the state (using
+the project's trusted-playhead rule — `currentTime > 2 ? currentTime : lp.lastKnownT`);
+`_npArm()` pushes it on load, play, pause, seeked, and every `_lpSaveLocalTracks`
+track pick; `_npTick()` refreshes position at 1 Hz from `_lpClockTick`; `_npDisarm()`
+runs in `lpUnloadCurrent`/`lpStop`. `lpUnloadCurrent` skips it while the page is a remote
+(`_npHolding`, 20.8.6): a disarm would end the cast, and the arm in `_lpLoadIndex` moves
+the episode in place instead. `_npHandBack()` reclaims the playhead on
+foreground — **the `visibilitychange`→visible branch now chains
+`_lpRecoverActiveSub` / `_lpRecoverMediaPipeline` after it** instead of racing them on
+independent timers, because those probes read the playhead and the frame-counting one
+would misfire against a mid-seek element. A paused return after 60 s or more away
+rebuilds the MediaSource instead of seeking, and every hand-back logs `handback` and
+`handback-frames` (`_npWatchFrames`); see STREAMING.md § 2b. `_npSyncAwake()` holds the phone
+awake (native `setAwake`) whenever the page itself is playing and no native handoff is
+running — all that remains of TV Mode, which 18.13.2 removed along with its screen
+dimming, its tap-swallowing veil, its double-tap exit and the countdown that engaged
+them during glasses playback. `_npOnDisplayChange()` is now purely a handoff decision.
+Both are inert in a browser. See
+[STREAMING.md § 2b](STREAMING.md) and [GOTCHAS.md](GOTCHAS.md).
+
 Per-file Prep state for the picker rows lives in `prepFileState:
 Map<offKey, "prepping"|"ready">`. `prepForStreaming(itemId, filePath, fileName)`
 first awaits `confirmStreamPrepWarning()` (the once-per-session lag warning),
 then POSTs `/offline-prepare` **with `bulk:true`** (so the job honors the global
 pause gate), polls `/offline-job/{id}` to completion, and flips the row to
-"Stream Ready". The map is also hydrated from `/api/library/{id}/prep-status`
+"Stream Ready". `_startPrepPolling(itemId)` polls every 3 s and, since 12.7.3, **knows how to give up**: 404/410 (item deleted) and 401/403 (no longer visible to this profile) are terminal and call `_stopPrepPolling`, while transient failures get a budget of `PREP_POLL_MAX_TRANSIENT` (20) rather than retrying forever — deleting an item used to leave every client that had it on screen polling a dead id every 3 s indefinitely (see [GOTCHAS.md](GOTCHAS.md) § a poll loop needs to know what "never" looks like). The map is also hydrated from `/api/library/{id}/prep-status`
 whenever the picker opens or `/prep-all` runs on the library card.
 
 `#globalPrepBar` (the persistent top-right indicator) is now interactive:
@@ -355,6 +814,70 @@ expands the full pill (bar, detail, Pause/Resume) and flips the chevron up. The
 `prepBarExpanded` flag survives `_renderGlobalPrep`'s re-renders (it only mutates
 `hidden`/`textContent`, never the `className`).
 
+### Background source-finding (12.7.0)
+
+Hunting sources for a season is a sequence of indexer round trips — one per season,
+then one per episode the season queries left bare — and on a long-running show that is
+minutes of work with nothing for the user to decide while it happens. It used to run
+inside the bulk sheet behind a progress bar, pinning the user to a modal for the
+duration. It now runs detached.
+
+- **`#globalFindBar`** — indigo pill, bottom-left, `z-[58]` (above the show page's `z-50`
+  and its sheets' `z-55`, below the download modal's `z-60`), with a label, progress bar,
+  detail line and a × that calls `bgFindStop()`. Bottom-left keeps it clear of
+  `#globalPrepBar` (top-right) and the footer nav.
+- **`_bgRun(label, fn, {quiet})`** — starts a run, or returns `false` if one is already in
+  flight (the indexers are shared and rate-limited; two concurrent sweeps halve both). An
+  explicit run **preempts** an automatic one: `ctl.auto` is set by `quiet`, and a
+  non-quiet caller cancels the running sweep and chains itself onto `ctl.done`.
+  Cancellation is cooperative — every loop checks `ctl.cancel` between queries.
+- **`_bgCtx()`** — the crux. `closeSearchShow()` clears `_ssGroup`, `_ssEpisodes`,
+  `_ssMeta` and `_ssOwned`, so a run that reads live page state dies the moment the user
+  walks away. A run therefore snapshots title/kind/meta/owned/locked/audio-pref/scope/
+  seasons/episodes/**packs** up front and works only against that; `_bgIngest` mirrors
+  results into the live page **only while `_bgLive(ctx)`** (same show still open), which is
+  also what makes the seasons fill in live for a user who stays put. `_bgScopeEpisodes` /
+  `_bgAudioMatch` / `_bgAutoPick` are the snapshot-taking twins of `_ssBulkScopeEpisodes` /
+  `_ssAudioMatch` / `_ssAutoPick`, and `_ssDownloadOne` takes `{series, locked}` overrides
+  so a detached run can queue for a show the page has since forgotten.
+- **`ctx.packs` + `ctx.swept` (17.3.0).** `_bgIngest` now keeps every non-episode result in
+  the run's own `ctx.packs`, deduped by magnet. It always fetched them — `_bgSeasonSearch`'s
+  `"<title> S02"` query returns packs and episodes together and its filter always passed
+  non-episodes through — but before 17.3.0 nothing except the live page ever read them, so a
+  run started from the **library** discarded the one download that answers a whole season.
+  `ctx.swept` records the seasons a run has already queried so the pack attempt and the gap
+  sweep can't ask the indexers for the same season twice.
+- **Aliases on background queries (17.4.2).** `_bgQuery(q, ctx)` sends `aka=ctx.akas`, built by
+  `_relevantAkas(meta, title)` — which keeps only aliases contributing a token the primary title
+  hasn't got. Both halves are measured: without aliases the relevance floor cut 50 correct
+  releases across ten anime; with *all* aliases it admitted 42 wrong-show ones on Hunter x Hunter.
+  See [GOTCHAS.md](GOTCHAS.md). `_relTokens` is a thin mirror of the server's `_rel_tokens`, used
+  only to filter the list — the server re-scores authoritatively.
+- **Fractional episode codes (17.4.2).** `_bgIngest` also skips `special` results (`S01E07.5`, a
+  recap). Flagged in `parse_torrent_title`, not un-matched — see GOTCHAS for why un-matching turns
+  a recap into a season pack.
+- **Relevance floor on ingested episodes (17.3.0).** `_bgIngest` drops episode results scoring
+  below `rel` 0.7 — the same floor `_packCoversScope` applies to packs. `_bgQuery` concatenates
+  **every group** the search returned, so without it a `Hunter x Hunter S01` query fed
+  `Interview With The Vampire S01E05` (rel 0.0, 94 seeders) straight into the picker, which took
+  it. Don't tighten this to `_ssEpisodeAccept`'s 0.95; see [GOTCHAS.md](GOTCHAS.md) for why 0.9 is
+  a real score here.
+- **Shared cores, not copies (17.3.0).** `_packCmp` / `_packCoversScope` / `_runtimeHint` are
+  the real implementations; `_ssPackCmp` / `_ssBestPackForScope` / `_ssRuntimeHint` and
+  `_bgPackCmp` / `_bgBestPackForScope` / `_bgRuntimeHint` are thin callers that inject page
+  state or snapshot state. This follows the `opts.pick`/`opts.match` seam `_ssAutoPickRace`
+  already established, *not* the hand-copied `_bgAudioMatch` pattern — two copies of a
+  comparator are two chances to disagree the first time one of them learns a new term, which
+  is exactly what 17.3.0 added to both. **`_ssRuntimeHint` returns `{}` when no show page is
+  open** (`_ssMeta` is null), which is why the library path needs `_bgRuntimeHint`: for a
+  pack the episode-count divisor *is* the whole bytes-per-minute cross-check.
+- **Three entry points:** `_ssSweepBareSeasons()` (after the broad "Search episodes" pass,
+  quiet), the pack sweep inside `ssSearchPacks` (quiet), and `_bgEnsureSources` (the bulk
+  run, explicit). `_ssSeasonHinted` is the shared "already asked for this season" set that
+  keeps the tab-level hint (`_ssEpisodeSeasonHint`) and the sweeps from duplicating work.
+- **`_bgStartDownloads`** only calls `closeSearchShow()`/`switchTab("library")` when
+  `_bgLive(ctx)` — a background run must never yank the screen out from under the user.
+
 #### Dev Mode HUD
 
 **Settings → This Device → Dev Mode** (`#psDevMode` → `toggleDevMode`; persisted
@@ -365,6 +888,9 @@ monospace overlay top-left under the header, repainted at 1 Hz by
 `_lpDevHudTick` (interval started by `_lpDevHudStart` in `lpPlay`, cleared by
 `_lpDevHudStop` in `lpStop`; toggling mid-playback applies live). Rows: engine +
 mode (hls.js/native · bundle/ondemand, `RECONNECTING` while `lp.netDown`),
+**stream source** (`on-device bundle · 127.0.0.1:<port> · 480p` when the iOS app
+plays a downloaded copy via the loopback `LocalMediaServer`, else
+`server · <host> · bundle|ondemand`),
 active quality rung (`lp.hls.levels[currentLevel]` height + bitrate, auto vs.
 pinned), the hls.js `bandwidthEstimate`, the decoded `videoWidth×videoHeight`,
 the last segment's transfer stats (`_lpDevNoteFrag`, recorded from `FRAG_LOADED`
@@ -451,7 +977,7 @@ audioIdx, btn)` POSTs `/api/library/{id}/clip`, then `_shareOrDownload(url,
 filename)` fetches the result and offers it via the OS share sheet
 (`navigator.canShare({files})` — iOS/Android) or a download (desktop).
 
-- **Fullscreen (TV):** `#fcClipRow` (Row D2). `fcClip(seconds, btn)` reads the
+- **Fullscreen (TV):** `#fcClipRow` (relocated into the **More** sheet `#fcMorePanel` in 7.10.0; was Row D2 in the main grid). `fcClip(seconds, btn)` reads the
   freshest position from a live `GET /api/vlc/tracks` and clips audio track 0.
   `renderPlayer` shows the row under the same `canHandoff` gate and greys the
   tiles until the file is prepped (`_handoffReadyState(s)===false`).
@@ -470,9 +996,297 @@ On `DOMContentLoaded`:
 3. Calls `/api/admin/status`; shows admin link if enabled.
 4. Reads `localStorage.streamlink_profile`. If valid profile is restored, connects SSE and goes straight to the dashboard. Otherwise shows the full-screen profile picker first.
 
+## iOS app shell: tab bar, Downloads, App (20.0.0)
+
+Everything here is app-only: `isApp` (Capacitor present) or `_appOffline` (the loopback
+offline page, which also runs in a plain browser for testing). `_appTabsInit` adds
+`html.has-apptabs`; a desktop or mobile browser never gets it and sees none of this.
+
+**The tab bar** (`<nav id="appTabs">`, Search / Explore / Library / Downloads / App)
+replaces the header's tab row in the app. It is an ordinary flex child of `<body>` after
+`<main>`, not a fixed layer, so every fixed overlay (episode page, modals, the player, the
+profile picker) covers it with no z-index work and `<main>` gives up the height on its own.
+The one fixed thing that must sit above it is the player `<footer>`, which takes its
+offset from `--apptab-h` (`_appTabsMeasure`; the bar is shorter in landscape).
+`_offerBottom` adds the same height. `switchTab` handles all five; offline, the three
+server tabs are greyed and a tap says the server isn't connected.
+
+Downloads and App are **tabs on the live page, never navigations**, so the SSE link and
+any download in its host round-trip survive opening them (see GOTCHAS). Only connecting
+to a different server leaves the page (`_appChangeServer` → the shell's Connect screen;
+`_appGoConnect(url)` for a specific one).
+
+**Which server, whose phone.** The header's wordmark slot shows the server's name and a
+square connection dot (`_appPaintIdent`, repainted on a 2 s tick because the connection
+state has no single place it changes). The registry behind it:
+
+```
+_dev = { v: 1, primary: "<server id>",
+         servers: { "<id>": { id, name, version, url, urls: [], seen,
+                              user: { id, name, color, has_pin, token, kept } } } }
+```
+
+- **`primary`**: the server the app opens at launch. The first one connected to. Changed
+  with "Make this my server" on the App tab.
+- **`servers[id].user`**: the account **pinned** to the phone for that server. The first
+  account signed in there (`_appAfterProfile`). Changed with "Make X this phone's account".
+- Stored natively (`OfflineStore.kvGet/kvSet`, key `device`) because the app runs on
+  three origins that share no `localStorage`: the connect shell, the host page, and the
+  loopback page that plays downloads. On a shell older than 20.0.0 it falls back to this
+  origin's `localStorage` (`sl_device`), which covers everything except the offline page.
+- `_srvId` comes from `GET /api/discovery`. A server this phone has used is recognised by
+  its address with no network (`_devServerFor`); only a first visit waits for the fetch
+  (`_appIdentBoot`, awaited before the profile restore). A host older than 19.14.0 has no
+  id and is keyed `url:<origin>` until it is updated, when the record is carried over.
+
+**What the pin covers.** Offline play is recorded for the pinned account whoever was
+signed in last (`_appSyncSetProfile` pushes the pinned id to `OfflineStore.setProfile`;
+`_appOfflineBoot` sets `profile` to it). Watched badges, Continue Watching, the progress
+a download is seeded with, `/api/sync/pull` and auto-manage all read `_appOfflinePid()`.
+Streaming while connected is recorded for the signed-in account, as everywhere else.
+Launch opens as the pinned account: the shell hands off with `?launch=1` and
+`_appAdoptPinned` writes the pinned profile (and its remembered PIN token) into the
+`localStorage` keys the ordinary restore reads. A page that only reloaded, or came back
+from the loopback, carries no mark and keeps whoever is signed in.
+
+**Downloads tab** (`#downloadsTab`, `_dlRender`). One server at a time (`_dlViewId`,
+default the connected one). Top to bottom: identity tile (server + state, pinned account,
+a notice when a different account is signed in, a switcher when the phone holds downloads
+from other servers); notices (offline plays waiting to sync with *Send now*, why the
+native gate is shut); Continue Watching (`_dlContinueHtml`: the episode in progress, else
+the first unwatched after the last finished, one tile per show); the queue; storage; the
+shows, one collapsed card each (`_dlOpen`; a film's card carries Play itself).
+Re-rendered every second while showing, every five when nothing is moving. Each section
+is only assigned when its HTML differs from what is there (`_dlSet`), so a progress tick
+does not rebuild posters, reset the Continue Watching scroll or swallow a tap.
+
+- A download's server is `meta.server_id` (written by `appDownloadBundle`). One saved
+  before 20.0.0 is placed by its `baseUrl` against the registry, else it is the primary's
+  (`_appBundleServer`).
+- **Queue rows** come from the durable queue plus `offlineBundles`. Each has a kind
+  (`downloading`, `prepping`, `queued`, `waiting`, `away`, `paused`, `failed`) and says
+  what it is waiting on. *Pause* cancels the native transfer and keeps the files
+  (`_dlPause`), *Resume*/*Retry* re-run `appDownloadBundle`, *Next* calls
+  `BundleDownloader.prioritize`. These need the 20.0.0 shell (`_appShell20`, learned by
+  calling `storage()` once); on an older one only Remove shows.
+- **Storage** uses `BundleDownloader.storage()` for the phone's free and total space and
+  offers *Remove watched* for episodes the pinned account has finished.
+- Looking at another server's downloads while connected is read-only plus Remove; Play
+  needs that server or no connection. Offline there is no connected server, so looking
+  at another one makes it current (`_dlView`): its pinned account becomes `profile` and
+  Reconnect tries its address.
+- **Offline, the page looks for the server on its own** (`_appOfflineReconnectInit`):
+  every 15 s, on `online`, and (20.2.2) on coming back to the foreground, at once and
+  again 2 s and 5 s later. Never while something is playing. The foreground one is the
+  path that matters: iOS runs one VPN at a time, so a phone that had SideStore's on
+  opens with Tailscale off, lands offline, and the person leaves to switch it. No
+  `online` event fires for a VPN, and the timer was frozen while the app was away.
+
+**App tab** (`#appTab`, built once by `_appTabBuild`, repainted by `_appTabShow`). This
+phone (server, pinned account, the buttons that change either, other servers the phone
+has used), When to download (the native gate policy, moved here from Downloads), Keep
+downloads up to date (auto-manage), Playback, Troubleshooting, About. Long explanations
+are help tips. Offline it shows only what works with no server. The auto-manage and
+Playback switches write through `_appPrefSet` and are restored from the native store at
+boot by `_appPrefsRestore` (20.6.4): `localStorage` is only their working copy. See
+docs/GOTCHAS.md § A web view's storage is not the app's.
+
+**The shell** (`ios-app/www/index.html`, `downloads.html`) uses the dashboard's palette
+by hand (no Tailwind there). The Connect screen reads the registry: it marks the phone's
+own server, says which account each opens as and how many downloads the phone holds from
+it, and launch goes to the primary's address.
+
+## Profile session token
+
+`POST /api/profiles/{id}/verify-pin` returns a **token** alongside the profile. It is the server's only proof that the PIN was actually entered — a bare `profile_id` proves nothing, since `GET /api/profiles` hands out every UUID unauthenticated. Two things need it: seeing admin-locked ("content lock") items, and the delete endpoints.
+
+- Held in `_profileToken`, mirrored to **both** `localStorage.streamlink_profile_token` and a host cookie of the same name, managed only through **`setProfileToken()`**. The cookie is what makes it work across schemes: `localStorage` is per-origin, so `http://<host>` and `https://<host>` do not share it — without the cookie, a PIN entered on HTTPS left HTTP logged in but unelevated, with the locked content silently missing.
+- **Device identity (19.0.0).** The same wrapper adds `X-Device-Id` (`_pbDeviceId()`) and `X-Device-Name` (URL-encoded `_pbDeviceName()`: `Headers` throws on the "·" in default names) to every same-origin `/api/` call, with or without a profile token. `_devIdSync()` runs at load (and again after the app's loopback hand-off seeds a `did`). It mirrors the id into the `streamlink_device_id` host cookie for requests fetch doesn't make (hls.js, EventSource, `<img>`), and a browser with no id adopts the cookie's before minting one. Feeds the admin Devices tab; see [DIAGNOSTICS.md § Devices](DIAGNOSTICS.md).
+- Attached as **`X-Profile-Token`** by a single `window.fetch` wrapper installed next to the `profile` declaration, scoped to same-origin `/api/` URLs so it can never leak to a third party. Individual call sites don't (and shouldn't) know about it — don't start adding the header by hand.
+- **Cleared** when a PIN-less profile is selected (`_doSelectProfile`), otherwise the last PIN entered would keep unlocking content for whoever picks a different profile afterwards.
+- **Remembered in the iOS app, for one account** (20.0.0). `submitPinPrompt` sends `remember: true` when the profile is the one pinned to the phone (`_appShouldRememberPin`), and the server answers with a 180-day sliding session instead of the 12 h one. `setProfileToken(tok, maxAge)` takes the cookie's life from `expires_in`. The token is also kept in the app's native registry (`_dev.servers[id].user.token`) so a launch at a new address, where this origin's storage is empty, still opens without asking. See § iOS app shell below.
+- **An account pinned while already signed in holds an ordinary session** (fixed 20.2.2). `remember` is only sent when a PIN is typed. The 20.0.0 upgrade pinned whoever was signed in, and "Make X this phone's account" pins the current account: neither types a PIN, so the pinned token was the 12 h kind and the phone asked again the next morning. `_appKeepPin` (called from `_appAfterProfile` and `_appPinUser`) posts `/api/profiles/{id}/keep-session` once, and marks the pinned record `kept: true` for that token. `kept` describes one token: a different token clears it. A token `verify-pin` reported as `remembered` is marked without a request (`_pinKeptTok`). A host older than 20.2.2 answers 404 and nothing changes.
+- **Revalidated** on every `fetchProfiles()`: the response carries `verified_profile_id`, and a token the server no longer recognises (expired 12 h TTL, deleted profile, wiped session file) is dropped so the next pick re-prompts. Without that, an expired session degrades into "some shows are missing and Delete fails with a 403" and nothing tells the user to re-enter their PIN.
+
+- **Re-prompted on boot** by `_maybePromptForPin()` when the restored profile `has_pin` but the server reports no verified session. The boot path restores a profile from `localStorage` *without* re-verifying, so a login carried across the 11.20.0 upgrade — or one whose 12 h token has expired — is signed in with no PIN proof behind it. Nothing used to ask; the locked shows were just gone. Dismissing the prompt leaves the user logged in, minus that content.
+
+Delete failures surface the server's `detail` rather than a generic message — a 403 here means "no PIN-verified profile", which is actionable in a way "could not delete" isn't.
+
+### One-press Get, from the library (14.1.0)
+
+The missing-episode rows and the "none of this season is here" banner used to offer **Find
+sources**, which opened the search show screen scoped to the gap — leaving the user to run
+a search and pick a release. They now offer **Get**, which finds *and* downloads in one
+press, without the search screen opening.
+
+- `_epOwnedRow()` builds a `{have, pending}` coverage row from `epFiles` (not the
+  `/coverage` snapshot — the episode page already holds the authoritative per-file truth,
+  and files still downloading must count as owned so a second press can't re-queue them).
+- `_epBgCtx(scope, only)` builds the detached-run context from the **library** item in the
+  same shape `_bgCtx` builds from the search screen, so `_bgEnsureSources` /
+  `_bgAutoPick` / `_bgStartDownloads` are reused unchanged. `searched: true` skips the
+  broad show-title query — no search page is open to inherit one, and the per-season
+  targeted query the sweep runs is the better one anyway (see `ssSearchSeason`).
+- `only` narrows a run to a single episode by marking that season's **other** episodes as
+  owned, rather than filtering afterwards: the gap set is what the sweep searches, so this
+  is the difference between one indexer query and one per episode in the season.
+- `epGetSeason` / `epGetEpisode` are the entry points; `epFindSeason` / `epFindEpisode`
+  (the old handoff) survive behind a **Choose** button rendered only for Full profiles.
+- **Pack-first (17.3.0).** `_epGetMissing` computes `packFirst = !only && sn>0 &&
+  _covSeasonEps(ctx.owned, sn).size===0` and, when true, runs `_bgSeasonSearch(ctx, sn)` and
+  offers `_bgBestPackForScope(ctx, sn)` to `_bgStartPack` before touching `_bgEnsureSources`.
+  One whole-season download beats N per-episode hunts — one group, one encode, consistent
+  audio — and it is the same rule `ssSimpleGetSeason` has applied on the search screen since
+  14.0.0. **Owning part of the season keeps the gap fill**, because a pack would re-fetch what
+  is already on the box; `_covSeasonEps` counts *pending* as owned, so a season already
+  mid-download can't trigger a second whole-pack grab. A pack that fails to start falls
+  through to the gap fill rather than leaving the user with nothing.
+- **Neighbouring-pack fetch (17.4.0).** `_bgForeignPackScope(ctx, sn, missing)` handles the
+  case where you own most of a season but its last few episodes ship inside another grid
+  season's pack (the 17.2.0 "episodes 59-62 are in the season 2 pack" note). It returns the
+  grid season to fetch **only when that pack duplicates nothing already on the box**, tested
+  as an overlap of **absolute** episode numbers — the one grid TMDb and the release groups
+  agree on. Do not re-express this per TMDb season: the pack spans two of them and Hunter x
+  Hunter's season 1 is 58/62 owned, so a season-level ownership test refuses a download that
+  duplicates nothing (pack = abs 59-136, owned = abs 1-58). It also returns the TMDb season
+  holding the **bulk** of the pack, counted rather than guessed, which is what the new item
+  is shaped as. `_covSeasonEps` counts pending, so a pack already on its way can't trigger a
+  second copy of itself.
+- **`_bgStartPack(ctx, ctl, report, pack, season, filt, foreign)`** is the one-download twin of
+  `_bgStartDownloads`, and it **races** where that one deliberately doesn't: `_bgStartDownloads`
+  abstains because ten episodes × three candidates is thirty torrents at once, which simply
+  doesn't apply to a single download. It sends `(pack, season, 0)` — the item is series-shaped
+  from creation whatever the release name says, and `_reattribute_item_files` + `animemap`'s
+  `remap_slots` decide where each *file* lands, so a pack whose season numbering disagrees with
+  TMDb's (every long-running anime) is safe to fetch. `silent:true` is **not optional**:
+  `_ssDownloadOne`'s loud path ends in `closeSearchShow()` + `switchTab("library")`, which would
+  yank the user off the episode page they're standing on.
+- **Auto-pick size limits apply to packs (17.4.0).** `_bestPackFrom(cand, match, cmp, filt)` is
+  the shared tail of `_ssBestPackForScope` / `_bgBestPackForScope`; `filt` is **optional** and
+  that is deliberate. The unattended one-press callers (`ssSimpleGetSeason`, `_epGetMissing`)
+  pass it — nobody is looking, so a household that capped downloads at 40 GB did not mean
+  "except when a whole season is on offer", and without it Hunter x Hunter's 144.7 GB Blu-Ray
+  pack beat a 13.2 GB WEB-DL with the same dual audio. The bulk sheet's recommendation card
+  does **not** pass it and shouldn't: its own copy has always said the limits are for Auto,
+  and it is a suggestion behind a confirm modal that shows the size. The cascade mirrors
+  `_ssAutoPickFrom` — fits the window, else ignore it — so a limit steers the pick but never
+  leaves you with no pack when one exists.
+- Absolute-numbered batches (`ep_from`/`ep_to`, e.g. `Episodes 1-148`) are **still rejected** by
+  `_packCoversScope`. Accepting them behind an animemap containment test was built and measured
+  with `tests/search_eval/pickdiff.py`: across eleven targets it found no pack the ordinary
+  season/multi-season rule hadn't already found, and a mis-parsed range costs tens of gigabytes.
+  See the GOTCHAS entry before reviving it.
+- **Play now (16.3.0, reworked 16.3.1).** A missing episode's card leads with **Play now**
+  (`epPlayEpisode(season, episode, btn)`; hidden in TV mode and on unaired episodes, like
+  the other buttons). The button shows "Finding…" while it runs an episode query
+  (`<title> SxxEyy`, or the bare number for absolute-numbered anime), then the season
+  query if that came back empty. It picks with `_bgAutoPick` (audio preference + Auto
+  limits, the same pick Get would make) and builds race alternates with
+  `_ssAutoPickRace(eps, filt, {pick, match})`. `opts.pick` / `opts.match` exist because
+  `_ssAudioMatch` reads the open show page's state, which isn't the library's. When no
+  single-episode copy turns up, the best three seeded season/multi-season **packs**
+  become the candidates instead. Then it closes the episode page, paints
+  `_optimisticBuffering(label)`, and POSTs `/api/library/stream-now`. That returns at once, and
+  the server does the rest (see [API.md](API.md)). **There is no picker:** 16.3.0 routed
+  this through `openStreamPicker`, whose modal sat on "Finding the fastest of N
+  sources…" for the whole race (20-60 s for cold magnets) and then asked which file to
+  play. Users closed it, which abandoned the race. The race's progress
+  ("Trying N sources — best at X%") arrives as `stream_status` messages, which the SSE
+  handler keeps on `app.stream_message`; `renderPlayer` shows it on the status line until
+  byte counts exist (16.3.2; before that, off the TV kiosk the line was blanked on every
+  buffering redraw, see CHANGELOG).
+
+### Live download readouts on library cards (14.1.0)
+
+Two gaps closed. `POST /api/library/download` now broadcasts `library_update` on creation
+— the grid is only repainted by that event, so a download started from the library page
+was previously invisible until `library_download_monitor`'s next tick. And a **merged
+show** tile never reported progress at all: a show fetched episode by episode is many
+items behind one card, while the `library_progress` handler only knew `dl-stat-<id>` on a
+single-item card.
+
+Both card shapes now tag their stat line and progress bar with `data-dl-items` (a
+space-separated id list). `_libDlAgg(ids)` rolls several items' stats into one — summed
+bytes and speed, the slowest ETA, "finding peers" only while *nothing* has a size yet —
+and `_libRefreshDlStats(itemId)` repaints every readout covering the item that moved. One
+pass serves both shapes.
+
+**Use `innerHTML`, not `textContent`, for `formatDlStat` output.** It embeds an icon for
+the "Finding peers…" and "waiting for idle window" states; the old handler assigned it as
+text and printed a literal `<svg …>` into the card on every update after the first paint.
+Every value in that string is ours (byte counts and fixed labels), never user input.
+
+## Simple mode (per-profile, 14.0.0)
+
+StreamLink's controls were built for someone who knows what a torrent is, and that
+assumption leaked into every screen. Simple mode is the interface for everyone else, and
+it is the **default**: `_profile_simple_ui` (main.py) returns `not elevated` unless the
+profile carries an explicit `simple_ui`. It is presentation only — never an authorisation
+check; the endpoints behind every hidden control keep their own auth.
+
+- **Plumbing.** `let SIMPLE` + `applySimpleUi()` (declared beside `TV_MODE`) read
+  `profile.simple_ui` and toggle a `simple-ui` body class. Called from `_doSelectProfile`
+  (so the PIN path and the picker are both covered) and from the boot restore. Nothing is
+  removed from the DOM, so flipping a profile needs no reload.
+- **Hiding.** Same pattern as `tv-mode`: a CSS block hides `.adv-only` plus the named
+  advanced regions — `#srcWrap`, `#catWrap`, `#searchModeWrap`, `#diskSpaceContainer`, the
+  storage gear, `#epBulkChips`, `#epDownloadSelBtn`, and the show page's
+  `#ssSectionToggle` / `#ssEpisodesTools` / `#ssPacksTools`. Render-time guards cover what
+  CSS can't: the episode page's scheduling bar (`if(epHasTorrent && !TV_MODE && !SIMPLE
+  …)`) and the per-episode selection checkbox (everything it feeds is hidden, so it would
+  tick and do nothing).
+- **Classic search is forced off.** `applySimpleUi()` calls `setSearchMode("smart")` when a
+  Simple profile has a stored `classic` — its toggle is hidden, so it would otherwise be a
+  one-way trap into the raw indexer list.
+- **The show page is replaced, not trimmed.** `_ssRenderBody()` routes to
+  `_ssRenderSimple()`, which renders the seasons and what you own of each, with **Get this
+  season** / **Get the rest** beside the ones you don't (or **Add to my library** for a
+  movie). No tabs, no search buttons, no release names, no seeder columns.
+- **`ssSimpleGetSeason(season, btn)`** does the work in the order a person would want it.
+  Owning none of the season it runs the targeted `ssSearchSeason(sn)` query and takes
+  `_ssBestPackForScope(sn)` — one whole-season copy, consistent audio and quality, which is
+  the advice the advanced UI already gave but made you find another tab to act on. Owning
+  part of it (or with no whole-season copy available) it falls through to
+  `ssBulkAuto(sn)`, the existing detached auto-picker, which fetches only the gaps.
+  `ssBulkAuto` and `_ssBestPackForScope` both gained an optional explicit scope for this;
+  everything else is reused unchanged.
+- **`epStartOver(btn)`** is Simple mode's only bulk control, rendered where the scheduling
+  bar would be. Resetting a show for a rewatch is "Select all" + "Unwatched" in the
+  advanced UI — both chips Simple hides — so without it someone would be un-ticking thirty
+  episodes by hand. Scoped to the visible season (or the whole show when it has none) so
+  resetting Season 2 doesn't wipe Season 1.
+- **Switching a profile** is a `Simple` / `Full` button per row in the profile management
+  sheet (`renderExistingProfilesList`) → `POST /api/profiles/{id}/simple-ui`. Gated
+  server-side like the deletes, and it refreshes the signed-in profile's `localStorage`
+  snapshot so the change lands without a reload.
+
+### Vocabulary (applies to BOTH modes)
+
+There is one vocabulary, not two. Raw seeder counts are gone from every result, pack and
+source row: `_availLabel(seeders)` / `_availHtml(seeders)` render **Excellent / Good / Low
+/ Unavailable** on the thresholds the colour coding always used, with the exact count in
+the tooltip. A bare number can't tell a reader whether something will play smoothly unless
+they already know what a good number looks like. Likewise "Season Packs" → **Whole
+Seasons**, "Search packs" → **Find whole seasons**, "Pick a torrent to download" → **Pick a
+copy to download**, and the seeder/indexer help tips were rewritten in plain words.
+
+## TV mode (`/?tv=1`)
+
+The same `index.html`, loaded by the backend's TV UI kiosk (a fullscreen Chrome on the host display, driven by the air-mouse remote — see [REMOTE.md](REMOTE.md)). Detected at boot via `const TV_MODE = new URLSearchParams(location.search).get("tv") === "1"` (declared next to `hlsAvailable`):
+
+- Sets `document.title = "StreamLink TV Dashboard"` — this is the **window-title marker** the backend's Windows focus code matches (`main.py _TVUI_WINDOW_MARKER`); keep the two strings in sync and never retitle the page in TV mode.
+- Adds `tv-mode` + `no-hls` body classes and forces `hlsAvailable = false` (also in the `/api/state` fetch callback, which would otherwise overwrite it). On the TV, VLC *is* "on device", so all Prep / On-Device / play-chooser affordances hide through the existing `no-hls` machinery and the play chooser collapses straight to VLC (the macOS no-HLS path).
+- `.tv-mode` CSS additionally hides the handoff buttons (`#handoffBtn`, `#fcHandoffBtn`), and the library-card download-to-device buttons are skipped in the renderer (`if(isReady && !TV_MODE)`).
+- **D-pad spatial navigation** (`_tvNavKey` + `_tvCandidates`/`_tvNavScope`, registered only in TV mode): arrows move focus to the nearest actionable element in the pressed direction (cone + distance scoring), Enter/OK activates (synthesized `click()` for `[onclick]` tiles, native for buttons/links/inputs). Scoped to the topmost open `[id$="Modal"]:not(.hidden)`; arrows that edit a control are ignored; unmatched arrows fall through to native scroll. The `.tv-mode :focus` rule draws the indigo ring (plain `:focus`, not `:focus-visible`, so programmatic focus always shows it).
+- **TV layout** (`.tv-mode` CSS block): hides the library toolbar (storage gear, Upload, `#libHiddenToggle`, Refresh — matched by `onclick` value), the per-card `⋯` drawers (`.lib-cardv-more`), `#fullscreenBtn` + `#fullscreenControls` (`openFullscreenControls()` also early-returns in TV mode), and the whole `footer` player bar — the remote is the transport on the TV. `zoom: 1.15` upscales for 10-foot readability (kiosk is Chrome-only) and `main`'s `pb-36` footer clearance is overridden back to `2rem`.
+- **TV card overlay** (`_libItemCardHtml` / `_libShowCardHtml`, rendered only when `TV_MODE`): a `.tv-card-ov` (`data-tv-group`) covering the poster with full-card `.tv-card-btn` actions — Play/Resume (`data-tv-default`) on top, Episodes below for multi-file items/shows — invisible (opacity) until `:hover`/`:focus-within`, replacing the centered `.lib-cardv-play` (CSS-hidden on TV). Buttons reuse the `lib-tile-open`/`lib-show-open`/`lib-show-play` delegation; inline handlers stop **Enter/Space** keydown + click propagation (poster has its own open handlers) but must let arrows bubble to `_tvNavKey`. Nav integration: `_tvCandidates` skips any candidate containing a `.tv-card-btn` (the poster defers to its buttons), and `_tvNavKey` redirects cross-group focus entry to the group's `data-tv-default`.
+- Everything else is the stock dashboard: the kiosk keeps its own Chrome profile (`.tvui_chrome_profile`), so the profile pick and device-local prefs persist across wakes.
+
 ## `static/admin.html` (990 lines)
 
 Password-protected at `/admin`. Token stored in `sessionStorage.admin_token` and sent via `Authorization: Bearer …`. The dashboard auto-redirects HTTP → HTTPS for `/admin*` ([main.py:1772](../main.py#L1772)).
+
+**Help tips (7.16.0).** Metro-flat `?` chips (`.help-tip`) plus a single shared popover (`#tipPop`) render any element's `data-tip` text on hover / keyboard focus / tap-to-pin (touch-friendly, unlike `title`). Settings loaders rewrite the key tips from the currently-saved config via `setTip(id, text)` so they describe the admin's actual setup. See [ADMIN.md § Help tips](ADMIN.md) for the full list of contextual hooks; prefer a contextual `setTip` in a loader over a static multi-mode description when adding settings.
 
 ### Tabs
 
@@ -491,3 +1305,164 @@ Password-protected at `/admin`. Token stored in `sessionStorage.admin_token` and
 - [BACKEND.md](BACKEND.md) — what each endpoint actually does
 - [API.md](API.md) — endpoint signatures
 - [ADMIN.md](ADMIN.md) — admin auth, indexer flow, content lock semantics
+
+## Cross-device playback sessions (17.8.0)
+
+The `#elsewhereBanner` strip and everything behind it. Backend contract and the
+design reasoning live in [STREAMING.md § 8](STREAMING.md); this is the client map.
+
+**Markup.** `#elsewhereBanner` lives **inside the navbar**, in the slot the
+`#navLogo` wordmark otherwise occupies (18.5.4); `renderElsewhere()` hides
+`#navLogo` for exactly as long as the banner is showing, so the header gains no
+permanent height. It is **empty in the document** — every row is written by
+`renderElsewhere()` — and keeps `pointer-events:auto` so the hold buttons work.
+
+It was previously its own sticky `z-[65]` strip above `<header>`. That made it
+the topmost element in the flow with no safe-area padding of its own, and
+`.safe-top` is owned by the header — two stacked top-of-flow elements cannot both
+claim that inset — so in the iOS app the status bar / Dynamic Island sat on top
+of its text and its **Play Here** button. Living in the header fixes that by
+construction. It also no longer needs the `body.fc-open` hide rule the other top
+banners have: the fullscreen overlay is a solid `fixed inset-0 z-50` sheet and the
+navbar is `z-40`, so it is already covered.
+
+**Row layout.** Each row is `flex flex-wrap`; the title column carries a real
+`min-width:7rem` rather than `min-w-0`, because a flex item allowed to shrink to
+zero never wraps — it just squashes. Past that floor the clock + **Play Here**
+block drops onto a second line, which is what happens on a phone once the nav's
+right-hand cluster has taken its share of the row. The clock is no longer hidden
+below 400px (the old `.xs\:block` shim is gone) — wrapping gives it somewhere to
+go. That block is itself `flex-wrap` and **not** `flex-shrink-0` (19.9.1): clock +
+button are ~165px, wider than the banner's 7.5rem floor, so a non-shrinking block
+ran Play Here out past the banner's border. Now the button wraps under the clock.
+
+**Phone-width navbar (19.9.1).** Below `sm`, the right-hand cluster shows only what
+needs attention: `#dlBadge` is always hidden, and `#vpnPill` / `#sseWrap` (the SSE
+dot + LIVE label) hide while they carry `.nav-ok`. `_navOk(id, ok)` sets that class
+from `renderVpn` (connected or kill switch off = ok) and every SSE state write (LIVE =
+ok; reconnecting/offline = not). While the banner is up, `#navProfileName` is hidden
+too (`header:has(#elsewhereBanner:not(.hidden))`). All of it is CSS in the one media
+rule next to `#elsewhereBanner`. The `.nav-ok` flag goes on a **wrapper** for the SSE
+pair because `sseDot`/`sseLabel` have their `className` rewritten wholesale.
+
+**Identity (device-local, `localStorage`).**
+
+| Function | Key | Notes |
+|---|---|---|
+| `_pbDeviceId()` | `streamlink_device_id` | Minted with `crypto.randomUUID()` on first use. The host keeps sessions in memory, so there is nothing to register and nothing to revoke |
+| `_pbDefaultDeviceName()` | — | Coarse UA read: `"iPhone · Safari"`, `"Windows PC · Chrome"`, `"iPhone app"` in the Capacitor shell, `"The TV"` under `TV_MODE` |
+| `_pbDeviceName()` / `saveDeviceName()` | `streamlink_device_name` | **Settings › This Device › Device Name** (`#psDeviceName`). The field shows only a name the user chose — the automatic one is the *placeholder*, so clearing the box visibly returns it to the default. Saving mid-playback beats immediately so other devices' banners don't keep the old name for the rest of the episode |
+
+Both are carried across the iOS **proxied** loopback origin (`did=` / `dnm=` in
+`_appTryLocalHandoff` ↔ `_appProxiedSeedStorage`) — that origin has its own
+`localStorage`, so without it the phone changes identity mid-episode.
+
+**Reporting this device.**
+
+- `_pbBeatStart()` / `_pbBeat()` are **no-ops under `TV_MODE`** (18.21.1). The kiosk
+  plays through the same `lpPlay`, but the TV is already in every list as the one
+  record the host synthesises (`id:"tv"`); a kiosk beat on top of it listed the
+  same screen twice — "Starting on The TV" over "Playing on The TV".
+- `_pbBeatStart()` — called from `lpPlay` at the **start** of a play, not the first
+  frame. A cold JIT start takes seconds, and a session nobody can see yet is a
+  session nobody can pull. Also repaints the banner, because `_pbIsHere()` has
+  just changed and the server rev won't move because *we* opened a player.
+- `_pbBeat()` — every `PB_BEAT_MS` (2 s). Sends position/state always; the
+  continuity block (`playlist`, `playlist_items`, `shuffle`, `shuffle_scope`) only
+  when `_pbSentSig` changes, and only once the beat carrying it was **accepted**.
+  Acts on `{yield:true}` in the response.
+- `_pbBeatStop(useBeacon)` — from `lpStop` (plain fetch) and from `pagehide`
+  (beacon, for the same reason `_lpFlushProgress` uses one there).
+- `_pbYieldNow(toName)` — flush the exact playhead to `…/yield`, then `lpStop()`.
+  Guarded by `_pbYielding`; exposed as `window._pbYieldNow` for the native bridge.
+
+**The banner.**
+
+- `_pbOnRev(rev)` from the `state` SSE handler → `_pbFetchSessions()` when the
+  counter moved. The TV's synthesised record moves it too: `stat_broadcaster`
+  bumps the rev whenever that record's item / file / playback / profile changes
+  (18.21.1) — before that, a banner fetched while the TV was buffering said
+  "Starting" with a frozen clock for the whole episode. Also re-fetched on a profile switch (`_doSelectProfile`), where
+  the list is wrong the instant the profile changes.
+- `renderElsewhere()` — one row per session: device icon (`i-monitor` for the TV,
+  `i-phone` otherwise), state word (`Playing` / `Paused` / `Starting` /
+  `Playing offline`), the owner's profile chip when it isn't yours (the TV can be
+  someone else's play), title, clock, and a **hold-to-activate** `Play Here`.
+  Filters out `_pbIsHere(s)` — a session whose file is already up on this screen.
+- `_pbTickClocks()` at 1 Hz repaints **only** the `[data-pb-clock]` cells, ageing
+  a playing session's position from `seen_at` (`_pbAgedPos`). A full re-render
+  would drop an in-progress hold.
+- **Nothing renders under `TV_MODE`.** The kiosk is the couch surface, driven by a
+  remote with no pointer, and it is itself one of the sessions being listed.
+
+**The takeover.** `_pbPullFromBtn` reads the session id from `data-pb-pull` rather
+than having it interpolated into the inline handler's JS — a device id is
+client-supplied, and nothing client-supplied belongs inside a string literal in
+generated markup. `pullPlayback` POSTs `/api/playback/pull`, drops the row
+optimistically, then `lpPlay(item, tail, position, title, shuffle, scope, items)`.
+It passes **no** `profileId`: playback continues under whoever is signed in here,
+matching the TV→device Handoff. Guarded by `withInflight("pb_pull")`.
+
+## Download racing (16.0.0)
+
+Racing is **server-side**; the frontend's only job is to offer an ordered shortlist
+of alternatives when — and only when — the user did not pick a release themselves.
+
+**`_ssAutoPickRace(sources, filt, opts)`** sits beside `_ssAutoPickFrom` and returns
+`{pick, candidates}`. `pick` is **identical** to what `_ssAutoPick` returns today:
+racing never changes *which* release is primary, it only offers alternates to run
+beside it. That is the property that makes the feature safe to switch on — with
+racing off, or with one source found, behaviour is byte-for-byte what it was. It
+de-duplicates by release identity (a JS mirror of the server's `_release_key`, so
+one release on two trackers can't eat two race slots) and caps the list at six; the
+server takes the first `settings.download_race.size`.
+
+Two thin helpers back it: **`_ssRelHeight(title)`** (a deliberately cheap mirror of
+`relquality.parse` — ordering only; the server re-scores authoritatively, including
+the TMDb-runtime cross-check) and **`_ssBestAtOrBelow(pool, ceiling, filt)`**, which
+finds the HQ track's target while respecting the Auto-pick size/seeder limits — a
+household that capped downloads at 8 GB did not mean "except while racing".
+
+**`_ssRuntimeHint(season, episode)`** reads `runtime_min` / `episode_count` off the
+open show page's `_ssMeta` for the bytes-per-minute cross-check. Worth sending even
+though the server has its own fallback: a brand-new item has no metadata yet, so at
+race-planning time the page is the only place this is known. Returns `{}` rather
+than guessing — for a pack the divisor is the whole calculation.
+
+**Which call sites race** (`opts.race` on `_ssDownloadOne`, default false):
+
+| Caller | Races? |
+|---|---|
+| `ssSimpleGetMovie`, `grpGetFilm`, `ssSimpleGetSeason`'s single-pack branch | yes |
+| `_bgStartPack` (`_epGetMissing`'s pack-first branch, 17.3.0) | yes — one download, so the arithmetic below doesn't apply |
+| `ssPlayEpisode` (auto-picked Stream Now) → `openStreamPicker(…, {candidates})` | yes |
+| `_bgStartDownloads` (`ssBulkAuto`, `_epGetMissing`'s **per-episode** branch) | **no** — ten episodes × three candidates would put thirty torrents in qBittorrent at once |
+| The download modal, `ssPickSource`, `ssPlaySource`, `ssPlayPack` | **no** — the user chose a specific release |
+
+Note `ssSimpleGetSeason` races in one branch and not the other: it falls through to
+`ssBulkAuto` when the user already owns part of the season.
+
+`postLibraryDownload`'s "different source" retry **strips `candidates`/`auto_picked`**
+— the user just picked a release by hand, which is the one case racing must not
+override.
+
+**`openStreamPicker`** branches to `POST /api/stream/race` when it was handed more
+than one candidate and `app.download_race` is on, then carries on with the winner in
+the ordinary `/api/stream/prepare` shape; any failure falls straight back to the
+single-source prepare. A raced winner **skips the `_streamHealthRisky` confirm** — it
+has already proved it delivers by beating two others to the buffer gate, so re-asking
+would be a scary modal about a problem the race just solved. An aborted fetch fires
+`DELETE /api/stream/race`, which ends the server loop within a second (16.3.1).
+Alternates reporting **0 seeders** are dropped from the race list when the pick itself
+has seeders (16.3.1): they can't win, and a race has only `download_race.size` slots.
+
+**Card chips** (`renderLibraryItem`): `RACING n` while candidates compete, an amber
+`HQ <label> <pct>%` while a better copy is still coming (shown **only once the
+two-track has actually engaged** — the common case is that the auto-pick already *is*
+the best copy, and promising an upgrade that never arrives is worse than saying
+nothing), and a green `UPGRADED` for 24 h after a swap (`_recent24h`). All fed by the
+server's derived `race` summary, never the raw sampler blob.
+
+⚠ **`_libDlAgg` sums every field across a merged show tile.** `race` is an object, so
+it is explicitly pass-through — the aggregate exposes only a boolean `racing`. Adding
+it up renders garbage on a two-episode tile.

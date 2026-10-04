@@ -451,6 +451,17 @@ async def refresh_service_wrapper() -> dict:
     """
     try:
         import daemon as _daemon  # type: ignore
+        # MUST reload: `service_is_installed()` imports daemon during the normal
+        # updater status poll (which the admin UI hits every few seconds), so by
+        # the time we get here `daemon` is almost always already in sys.modules
+        # — holding the PRE-update `_WRAPPER_CONTENT`. `import` would hand back
+        # that stale module and we'd compare the freshly-pulled wrapper against
+        # the old template, conclude "already up to date", and silently ship
+        # nothing. Observed live on 2026-09-13: a daemon.py change (enabling
+        # uvicorn's access log on the service path) reported success and did not
+        # land. Reloading re-reads the file the git apply just wrote.
+        import importlib
+        _daemon = importlib.reload(_daemon)
     except Exception as exc:
         log.error("Could not import daemon.py for wrapper refresh: %s", exc)
         return {"ok": False, "error": f"Could not import daemon.py: {exc}",

@@ -38,6 +38,7 @@ revisit this file.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from http.cookiejar import CookieJar
 
 import httpx
 from fastapi import FastAPI, Request
@@ -57,6 +58,47 @@ _DROP_REQ = _HOP_BY_HOP | {"content-length", "host"}
 _DROP_RESP = _HOP_BY_HOP
 
 
+class _NoCookieJar(CookieJar):
+    """A cookie jar that never stores or sends anything.
+
+    **This is a security control, not an optimisation.** `httpx.AsyncClient`
+    keeps a cookie jar by default, and this proxy shares ONE client across every
+    request from every device on the LAN. So the jar made the proxy a
+    session-laundering machine: the moment any response carried a `Set-Cookie`,
+    httpx stored it and then attached it to *every subsequent request from
+    everyone*.
+
+    `POST /api/profiles/{id}/verify-pin` sets `streamlink_profile_token` as a
+    cookie (deliberately not `Secure`, so one PIN entry covers the http and
+    https origins of the same host). One person entering their PIN over HTTPS
+    therefore silently elevated every other device on the network to that
+    profile — observed directly: an unauthenticated `GET /api/profiles` over
+    :443 came back with `verified_profile_id` set to the last profile that had
+    verified, while the same request to :80 correctly returned `null`. That
+    token is what gates **admin-locked content and the delete endpoints**, so
+    any LAN client could see locked items and delete library entries.
+
+    A proxy must be transparent about credentials: it forwards whatever the
+    client sent (the `Cookie` request header is passed through untouched below)
+    and remembers nothing of its own.
+
+    Subclassing `http.cookiejar.CookieJar` rather than `httpx.Cookies` is
+    load-bearing. `httpx.Cookies.__init__` REBUILDS its state from what you hand
+    it — a `Cookies` instance is copied cookie-by-cookie into a fresh jar, so a
+    `Cookies` subclass is silently discarded and the leak survives (verified: it
+    did). Only the `else` branch keeps the object verbatim (`self.jar = cookies`),
+    and that branch wants a raw `CookieJar`. Both `Cookies.set_cookie_header` and
+    `Cookies.extract_cookies` then delegate straight to `jar.add_cookie_header` /
+    `jar.extract_cookies`, which is why overriding exactly those two is enough.
+    """
+
+    def add_cookie_header(self, request) -> None:            # send nothing
+        return None
+
+    def extract_cookies(self, response, request) -> None:    # store nothing
+        return None
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     # `timeout=None` — SSE / long-poll keep the connection open indefinitely.
@@ -64,6 +106,7 @@ async def _lifespan(app: FastAPI):
         base_url=UPSTREAM,
         timeout=None,
         follow_redirects=False,
+        cookies=_NoCookieJar(),
     )
     try:
         yield
@@ -127,15 +170,18 @@ async def proxy(path: str, request: Request) -> Response:
             media_type="text/plain",
         )
 
-    resp_headers: dict[str, str] = {}
-    for raw_name, raw_value in upstream_resp.headers.raw:
-        name = raw_name.decode("latin-1")
-        if name.lower() in _DROP_RESP:
-            continue
-        # Dict overwrite is acceptable here — the only header that legally
-        # repeats on responses for this app is Set-Cookie, which the admin
-        # auth flow doesn't use (it carries the token in headers/body).
-        resp_headers[name] = raw_value.decode("latin-1")
+    # Kept as a LIST of raw pairs, not a dict. The previous comment here said
+    # Set-Cookie never repeats "because the admin auth flow carries its token in
+    # headers/body" — that stopped being true when `verify-pin` began setting
+    # `streamlink_profile_token` as a cookie, and a dict silently drops all but
+    # the last of any repeated header. One cookie per response survives either
+    # way, which is exactly why this would have gone unnoticed until the day a
+    # response set two.
+    resp_raw: list[tuple[bytes, bytes]] = [
+        (raw_name, raw_value)
+        for raw_name, raw_value in upstream_resp.headers.raw
+        if raw_name.decode("latin-1").lower() not in _DROP_RESP
+    ]
 
     async def body_iter():
         try:
@@ -144,8 +190,11 @@ async def proxy(path: str, request: Request) -> Response:
         finally:
             await upstream_resp.aclose()
 
-    return StreamingResponse(
+    resp = StreamingResponse(
         body_iter(),
         status_code=upstream_resp.status_code,
-        headers=resp_headers,
     )
+    # Starlette builds `raw_headers` from the `headers` dict, so assign after
+    # construction to keep duplicates intact.
+    resp.raw_headers = resp_raw
+    return resp

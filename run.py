@@ -23,6 +23,8 @@ import sys
 import time
 from pathlib import Path
 
+import vpncheck   # leaf module (stdlib + optional psutil) — safe pre-venv too
+
 HERE   = Path(__file__).parent
 VENV   = HERE / ".venv"
 SYSTEM = platform.system()
@@ -194,9 +196,11 @@ def is_running(name: str) -> bool:
     return False
 
 
-def launch_bg(args: list[str], env: dict | None = None) -> None:
+def launch_bg(args: list[str], env: dict | None = None, no_activate: bool = False) -> None:
     """Start a process detached from this terminal. `env` overrides the child's
-    environment (used by FlareSolverr to set HOST/PORT)."""
+    environment (used by FlareSolverr to set HOST/PORT). `no_activate` launches
+    the process minimized without stealing foreground focus (used for qBit so its
+    window never pops over the fullscreen VLC playback / background video)."""
     kw: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     if env is not None:
         kw["env"] = env
@@ -204,6 +208,14 @@ def launch_bg(args: list[str], env: dict | None = None) -> None:
         kw["creationflags"] = (
             subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
         )
+        if no_activate:
+            # SW_SHOWMINNOACTIVE (7): come up minimized and DON'T take focus, so
+            # launching qBit can't cover the TV playback. Mirrors watchdog.py's
+            # _launch_bg. See docs/GOTCHAS.md.
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 7
+            kw["startupinfo"] = si
     else:
         kw["start_new_session"] = True
     subprocess.Popen(args, **kw)
@@ -441,7 +453,7 @@ def start_qbittorrent() -> bool:
         return False
 
     info("Starting qBittorrent …")
-    launch_bg([qbit_bin])
+    launch_bg([qbit_bin], no_activate=True)   # minimized, never over the TV playback
     return wait_for_port(qbit_port, 30.0, "qBittorrent Web UI")
 
 
@@ -690,10 +702,39 @@ def _diagnose_jackett_service_state() -> None:
         vlog(f"  event log query failed: {exc}")
 
 
-def check_mullvad() -> bool:
+def check_vpn() -> bool:
+    """Startup VPN check, honouring settings.vpn_killswitch.mode (vpncheck.py):
+
+    - "off"     → kill-switch disabled; report ok (no gating).
+    - "generic" → any VPN tunnel interface up (provider-agnostic).
+    - "mullvad" → the Mullvad CLI must report Connected (default).
+
+    Returns True when streaming is allowed to proceed. On False the caller
+    prompts (interactive) or continues (service) — the watchdog gates qBit either
+    way, so proceeding is safe.
+    """
+    try:
+        mode = vpncheck.vpn_mode()
+    except Exception:
+        mode = "mullvad"
+
+    if mode == "off":
+        note("VPN kill-switch is OFF (settings.vpn_killswitch.mode=off) — not gating on a VPN.")
+        return True
+
+    if mode == "generic":
+        if vpncheck.generic_tunnel_up():
+            ok("VPN: tunnel interface detected (generic mode)")
+            return True
+        warn("VPN: no tunnel interface detected (generic mode)")
+        warn("Connect your VPN before streaming, or set the kill-switch mode to 'off' in Admin.")
+        return False
+
+    # Default: Mullvad.
     mullvad_bin = find_mullvad()
     if not mullvad_bin:
-        warn("Mullvad CLI not found — VPN kill-switch disabled")
+        warn("Mullvad CLI not found — VPN kill-switch inactive")
+        warn("Install/connect Mullvad, switch the kill-switch to 'generic', or set it to 'off' in Admin.")
         return False
     try:
         result = subprocess.run(
@@ -825,6 +866,135 @@ def setup_windows_firewall(port: int) -> None:
             warn(f"  netsh advfirewall firewall add rule name=\"{name}\" protocol={proto} dir=in localport={lport} action=allow")
 
 
+# ── Windows power / sleep buttons ─────────────────────────────────────────
+# A couch-press of the physical power (or sleep) button suspends the host mid-
+# stream, so StreamLink sets both to "Do nothing" (index 0, AC + DC) on the
+# active power scheme. powercfg /set*valueindex needs an elevated token; when
+# we don't have one, a one-shot Scheduled Task registered with the admin
+# credentials from .env (WINDOWS_ADMIN_USER / WINDOWS_ADMIN_PASSWORD) runs the
+# same commands elevated — batch logons with /RL HIGHEST get the full admin
+# token, no UAC prompt. Verification reads the registry (locale-independent;
+# powercfg's text output is localized and unparseable on non-English Windows).
+
+_WIN_SUB_BUTTONS   = "4f971e89-eebd-4455-a8de-9e59040e7347"  # SUB_BUTTONS
+_WIN_PBUTTONACTION = "7648efa3-dd9c-4e3e-b566-50f929386280"  # power button
+_WIN_SBUTTONACTION = "96996bc0-ad50-47ec-923b-6f41874dd9eb"  # sleep button
+_WIN_POWERCFG_TASK = "StreamLinkPowerCfg"
+_WIN_POWERCFG_BAT  = HERE / "_powercfg_apply.bat"
+
+_POWERCFG_CMDS = [
+    ["powercfg", "/setacvalueindex", "SCHEME_CURRENT", "SUB_BUTTONS", "PBUTTONACTION", "0"],
+    ["powercfg", "/setdcvalueindex", "SCHEME_CURRENT", "SUB_BUTTONS", "PBUTTONACTION", "0"],
+    ["powercfg", "/setacvalueindex", "SCHEME_CURRENT", "SUB_BUTTONS", "SBUTTONACTION", "0"],
+    ["powercfg", "/setdcvalueindex", "SCHEME_CURRENT", "SUB_BUTTONS", "SBUTTONACTION", "0"],
+    ["powercfg", "/setactive", "SCHEME_CURRENT"],
+]
+
+
+def windows_power_buttons_disabled() -> bool | None:
+    """True when power+sleep buttons are already "Do nothing" (AC and DC),
+    False when any index is set to sleep/shutdown or has no override recorded
+    (i.e. still on the Windows default), None when it can't be determined."""
+    if SYSTEM != "Windows":
+        return None
+    try:
+        import winreg
+        base = r"SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes"
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base) as k:
+            scheme, _ = winreg.QueryValueEx(k, "ActivePowerScheme")
+        for setting in (_WIN_PBUTTONACTION, _WIN_SBUTTONACTION):
+            try:
+                path = rf"{base}\{scheme}\{_WIN_SUB_BUTTONS}\{setting}"
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as k:
+                    for name in ("ACSettingIndex", "DCSettingIndex"):
+                        val, _ = winreg.QueryValueEx(k, name)
+                        if int(val) != 0:
+                            return False
+            except FileNotFoundError:
+                return False
+        return True
+    except Exception:
+        return None
+
+
+def _powercfg_run_direct() -> bool:
+    """Run the powercfg commands in-process. Succeeds only when elevated."""
+    for cmd in _POWERCFG_CMDS:
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        except Exception:
+            return False
+        if res.returncode != 0:
+            return False
+    return True
+
+
+def _powercfg_run_as_admin(admin_user: str, admin_password: str) -> bool:
+    """Run the powercfg commands elevated via a one-shot Scheduled Task
+    registered with the given admin credentials (batch logon + /RL HIGHEST
+    bypasses UAC token filtering). The task and its .bat are always removed."""
+    _WIN_POWERCFG_BAT.write_text(
+        "@echo off\r\n" + "\r\n".join(" ".join(c) for c in _POWERCFG_CMDS) + "\r\n",
+        encoding="ascii",
+    )
+    try:
+        create = subprocess.run(
+            ["schtasks", "/Create", "/F", "/TN", _WIN_POWERCFG_TASK,
+             "/TR", f'"{_WIN_POWERCFG_BAT}"', "/SC", "ONCE", "/ST", "00:00",
+             "/RU", admin_user, "/RP", admin_password, "/RL", "HIGHEST"],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30,
+        )
+        if create.returncode != 0:
+            warn(f"Could not register elevated powercfg task: {create.stderr.strip()}")
+            return False
+        subprocess.run(["schtasks", "/Run", "/TN", _WIN_POWERCFG_TASK],
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30)
+        # The task runs asynchronously — poll the registry for the result.
+        for _ in range(15):
+            if windows_power_buttons_disabled():
+                return True
+            time.sleep(1)
+        return bool(windows_power_buttons_disabled())
+    except Exception as exc:
+        warn(f"Elevated powercfg task failed: {exc}")
+        return False
+    finally:
+        subprocess.run(["schtasks", "/Delete", "/F", "/TN", _WIN_POWERCFG_TASK],
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        try:
+            _WIN_POWERCFG_BAT.unlink()
+        except OSError:
+            pass
+
+
+def apply_windows_power_settings(admin_user: str = "", admin_password: str = "") -> bool:
+    """Idempotently set the Windows power + sleep buttons to "Do nothing".
+
+    Order of attack: skip if already applied → run powercfg directly (works
+    when this process is elevated, e.g. the --install path) → fall back to the
+    credential-backed elevated task. Returns True when the buttons are
+    verified disabled (or this isn't Windows)."""
+    if SYSTEM != "Windows":
+        return True
+    if windows_power_buttons_disabled():
+        ok("Power/sleep buttons already set to Do Nothing")
+        return True
+    if _powercfg_run_direct() and windows_power_buttons_disabled() is not False:
+        ok("Power/sleep buttons set to Do Nothing")
+        return True
+    if admin_user and admin_password:
+        if _powercfg_run_as_admin(admin_user, admin_password):
+            ok("Power/sleep buttons set to Do Nothing (via elevated task)")
+            return True
+        warn("Could not disable power/sleep buttons — check WINDOWS_ADMIN_USER / "
+             "WINDOWS_ADMIN_PASSWORD in .env (admin panel → Updates → feature keys)")
+        return False
+    warn("Disabling the power/sleep buttons needs Administrator rights.")
+    warn("  Either run once from an Administrator shell, or set WINDOWS_ADMIN_USER")
+    warn("  and WINDOWS_ADMIN_PASSWORD in .env (admin panel → Updates → feature keys).")
+    return False
+
+
 # ── mDNS ──────────────────────────────────────────────────────────────────
 def start_mdns(lan_ip: str, http_port: int, https_port: int = 0):
     """Register remote.local via mDNS (HTTP, and optionally HTTPS) for LAN access."""
@@ -844,6 +1014,22 @@ def start_mdns(lan_ip: str, http_port: int, https_port: int = 0):
         )
         zc.register_service(http_info)
         ok(f"mDNS: http://remote.local registered")
+
+        # What the iOS app's server list browses for. Its own try: a box that
+        # can't register this must still answer to remote.local.
+        try:
+            import discovery
+            zc.register_service(ServiceInfo(
+                discovery.SERVICE_TYPE,
+                discovery.mdns_instance(),
+                addresses=addr,
+                port=http_port,
+                properties=discovery.mdns_txt(HERE, lan_ip, http_port),
+                server="remote.local.",
+            ), allow_name_change=True)
+            ok("mDNS: visible to the StreamLink app on this network")
+        except Exception as exc:
+            warn(f"mDNS app discovery not registered: {exc}")
 
         if https_port:
             https_info = ServiceInfo(
@@ -971,15 +1157,15 @@ def main():
     # ── Services ──────────────────────────────────────────────────────────
     print(f"{BOLD}  Services{RESET}")
     vlc_ok     = start_vlc()
-    mullvad_ok = check_mullvad()
+    vpn_ok     = check_vpn()
     _          = start_jackett()          # optional; don't block on failure
     _          = start_flaresolverr()     # optional Cloudflare proxy; no-op if not installed
 
-    if not mullvad_ok:
+    if not vpn_ok:
         # No-stdin context (system service / piped invocation) → continue
         # without prompting. The watchdog gates qBit on VPN status, so
         # silently proceeding is safe — qBit won't actually launch until
-        # Mullvad reconnects.
+        # the VPN reconnects.
         interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
         if interactive:
             print(f"  {YLW}Continue anyway? VPN kill-switch will be inactive. [y/N]{RESET} ", end="")
@@ -989,12 +1175,12 @@ def main():
                 answer = "n"
             if not answer.startswith("y"):
                 print()
-                info("Connect Mullvad and re-run.")
+                info("Connect your VPN and re-run (or set the kill-switch to 'off' in Admin).")
                 sys.exit(0)
             print()
         else:
-            info("Mullvad disconnected and stdin is non-interactive — continuing; watchdog will start qBit once VPN reconnects.")
-        info("qBittorrent will not start — watchdog will launch it once Mullvad connects")
+            info("VPN not verified and stdin is non-interactive — continuing; watchdog will start qBit once the VPN reconnects.")
+        info("qBittorrent will not start — watchdog will launch it once the VPN connects")
         qbit_ok = True   # intentionally skipped; watchdog gates it
     else:
         qbit_ok = start_qbittorrent()
@@ -1053,6 +1239,12 @@ def main():
             except AttributeError:
                 break
 
+    # The dashboard binds 0.0.0.0 and the main UI has no per-request auth by
+    # design (trusted-LAN appliance). Make that boundary explicit so nobody
+    # port-forwards it to the open internet without realising.
+    warn("The dashboard is open to anyone on your local network — keep StreamLink "
+         "on a home/trusted network and do NOT forward its ports to the internet.")
+
     info("Press Ctrl+C to stop")
     print()
 
@@ -1073,6 +1265,13 @@ def main():
             setup_windows_firewall(ADMIN_PORT)
         print()
 
+        # Disable the physical power/sleep buttons so a couch-press can't
+        # suspend the host mid-stream. Idempotent; uses the .env admin
+        # credentials when this process isn't elevated.
+        print(f"{BOLD}  Power buttons{RESET}")
+        apply_windows_power_settings(e("WINDOWS_ADMIN_USER"), e("WINDOWS_ADMIN_PASSWORD"))
+        print()
+
     # Register mDNS hostname (remote.local) for HTTP + HTTPS. Resilient: waits
     # for the LAN IP and re-registers if it changes, so it works even when
     # launched before Wi-Fi is up. See start_mdns_resilient.
@@ -1091,14 +1290,26 @@ def main():
     if str(HERE) not in sys.path:
         sys.path.insert(0, str(HERE))
 
-    _uv_log_cfg = {"version": 1, "disable_existing_loggers": False}
+    # Inbound request logging. The previous stub ({"version": 1,
+    # "disable_existing_loggers": False}) configured no handlers at all, and
+    # combined with log_level="warning" it suppressed uvicorn's access log
+    # entirely — so during the 2026-09-13 outage there was NO record of any
+    # request reaching port 80, the port the dashboard and TV UI use. The only
+    # inbound traffic visible anywhere was an accident: the :443 proxy forwards
+    # via httpx, whose own INFO logging caught those hops. Both servers now
+    # write to logs/access.log. See docs/DIAGNOSTICS.md.
+    import diagnostics as _diag
+    _uv_log_cfg = _diag.uvicorn_log_config(HERE / "logs")
+
+    # Let main.py's self-probe target the right port without hardcoding it.
+    os.environ["STREAMLINK_HTTP_PORT"] = str(PORT)
 
     async def _launch():
         http_cfg = _uvicorn.Config(
             "main:app",
             host="0.0.0.0",
             port=PORT,
-            log_level="warning",
+            log_level="info",      # access lines are INFO; "warning" hides them
             log_config=_uv_log_cfg,
         )
         http_srv = _uvicorn.Server(http_cfg)
@@ -1113,7 +1324,7 @@ def main():
                 port=ADMIN_PORT,
                 ssl_certfile=str(CERT),
                 ssl_keyfile=str(KEY),
-                log_level="warning",
+                log_level="info",  # access lines are INFO; "warning" hides them
                 log_config=_uv_log_cfg,
             )
             https_srv = _uvicorn.Server(https_cfg)

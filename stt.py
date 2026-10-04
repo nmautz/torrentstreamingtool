@@ -292,7 +292,12 @@ def _run_whisper(
         try:
             proc = subprocess.Popen(
                 _lp(cmd), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                text=True, **_LOWPRIO_KW,
+                # whisper.cpp streams the transcript itself on stderr, so its
+                # output is non-Latin by definition. Decoding it with the
+                # Windows ANSI code page raises mid-iteration and aborts the
+                # job. See GOTCHAS.md.
+                text=True, encoding="utf-8", errors="replace",
+                **_LOWPRIO_KW,
             )
         except OSError:
             return False, ""

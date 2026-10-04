@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<!--
+  StreamLink iOS — first-run / connect shell  (M2 · 6.0.0-preview.2.x.x)
+
+  Finds the host server and navigates the WKWebView to it, where the existing
+  dashboard (static/index.html) loads exactly as it does in a desktop browser.
+
+  19.14.0: the address is PICKED, not typed. The native ServerDiscovery plugin
+  lists every StreamLink server the phone can reach (Bonjour on Wi-Fi, a sweep
+  of the Wi-Fi subnet, a sweep of whatever subnets a VPN such as Tailscale
+  routes) and this page shows them as tiles. Typing an address still works and
+  is the only path in a plain browser, where the plugin does not exist.
+
+  Each server the app has used is remembered with its id and EVERY address it
+  reported (`streamlink_servers`). That is what lets a later scan find the same
+  box over Tailscale, and what lets launch follow a box whose address changed
+  instead of dropping to the offline player.
+
+  M2 offline routing: on launch with a saved host we PROBE its reachability
+  (hostReachable) before navigating. Reachable ⇒ go to the dashboard as before.
+  Unreachable (Airplane Mode / host down) ⇒ route to `downloads.html`, the bundled
+  offline library that plays downloaded bundles via LocalMediaServer with no
+  network. The remote dashboard can't load offline (it's served by the host), so
+  this local page is the offline entry point. A "View downloads (offline)" button
+  is always available too.
+
+  20.0.0: the phone has ONE server it opens at launch (the "primary") and one
+  account pinned to each server it uses. Both live in the native OfflineStore
+  (kvGet "device"), written by the dashboard, because this page, the host's
+  dashboard and the loopback offline player share no localStorage. This page
+  only reads it: launch goes to the primary's address (falling back to the last
+  address used, on a phone that has not been set up yet), the list marks which
+  server is the phone's own and whose account it opens as, and every hand-off
+  to a host carries ?launch=1, which is what tells the dashboard to open as the
+  pinned account. `?connect=<url>` (from the dashboard's "Connect" on another
+  server) connects straight to that address without changing the primary.
+  Styled to match the dashboard: same Metro palette, square, uppercase labels.
+
+  20.1.0: a server older than MIN_SERVER gets a notice before the app opens it.
+  It has to live HERE: an old server serves its old dashboard, which cannot
+  know about an app that did not exist when it was written. The app follows
+  the server's release channel now (one SideStore source per branch), so this
+  is the net under that, for a box moved back to an older branch or an app
+  installed from the wrong source. "Connect anyway" is remembered per server
+  version, so it asks once, and again only when something changes.
+
+  The Capacitor native bridge (window.Capacitor + native plugins such as
+  LocalMediaServer / BundleDownloader) is injected at the WebView level, so it
+  remains available on the remote host page after navigation — that is what lets
+  the dashboard's B5 glue call the offline plugins.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1, viewport-fit=cover,
+                 maximum-scale=1, user-scalable=no" />
+  <title>StreamLink</title>
+  <style>
+    :root {
+      /* The dashboard's palette (Tailwind gray-950/900/800, indigo-600). */
+      --bg:#030712; --panel:#111827; --line:#1f2937; --line2:#374151; --fg:#f3f4f6;
+      --muted:#6b7280; --accent:#4f46e5; --accent-press:#4338ca; --danger:#dc2626; --ok:#22c55e;
+    }
+    * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+    html,body { margin:0; height:100%; }
+    body {
+      background:var(--bg); color:var(--fg);
+      font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+      display:flex; flex-direction:column; min-height:100%;
+      padding:max(env(safe-area-inset-top),24px) 22px
+              max(env(safe-area-inset-bottom),24px);
+    }
+    .brand {
+      font-weight:900; letter-spacing:.06em; text-transform:uppercase;
+      font-size:18px; color:var(--fg); margin-bottom:22px;
+    }
+    .brand b { color:#6366f1; font-weight:900; }
+    .eyebrow { font-size:11px; font-weight:900; letter-spacing:.14em; text-transform:uppercase; color:var(--muted); }
+    h1 { font-size:26px; font-weight:900; letter-spacing:.03em; text-transform:uppercase; margin:0 0 6px; }
+    .sub { color:var(--muted); font-size:14px; margin:0 0 28px; line-height:1.45; }
+
+    label {
+      display:block; font-size:11px; font-weight:900; letter-spacing:.14em;
+      text-transform:uppercase; color:var(--muted); margin:18px 0 8px;
+    }
+    input {
+      width:100%; background:var(--panel); border:1px solid var(--line2);
+      color:var(--fg); font-size:17px; padding:15px 14px; border-radius:0;
+      outline:none; -webkit-appearance:none;
+    }
+    input:focus { border-color:var(--accent); }
+    .hint { font-size:12px; color:var(--muted); margin-top:7px; line-height:1.4; }
+
+    button {
+      -webkit-appearance:none; border:0; border-radius:0; width:100%;
+      font-size:14px; font-weight:900; letter-spacing:.06em; text-transform:uppercase;
+      padding:16px; margin-top:26px; cursor:pointer; color:#fff; background:var(--accent);
+    }
+    button:active { background:var(--accent-press); }
+    button.ghost { background:#1f2937; color:#d1d5db; border:1px solid var(--line2); margin-top:12px; }
+    button.ghost:active { background:#374151; }
+
+    .err {
+      display:none; background:rgba(127,29,29,.35); border:1px solid #7f1d1d;
+      color:#fca5a5; font-size:13px; padding:12px 14px; margin-top:18px; line-height:1.45;
+    }
+    .err.show { display:block; }
+
+    /* server list */
+    #found { display:none; }
+    #found.show { display:block; }
+    .lhead { display:flex; align-items:center; justify-content:space-between; margin:18px 0 8px; }
+    .lhead label { margin:0; }
+    .scanning { display:none; width:8px; height:8px; background:var(--accent); animation:pulse 1s ease-in-out infinite; }
+    .scanning.show { display:block; }
+    button.srv {
+      display:block; text-align:left; background:var(--panel); border:1px solid var(--line);
+      margin:0 0 8px; padding:14px; text-transform:none; letter-spacing:0;
+    }
+    button.srv:active { background:#1f2937; border-color:var(--accent); }
+    button.srv.mine { border-left:4px solid var(--accent); }
+    .srv .n { font-size:16px; font-weight:900; letter-spacing:.04em; text-transform:uppercase; color:var(--fg); word-break:break-word; }
+    .srv .a { font-size:12px; font-weight:500; color:var(--muted); margin-top:5px; word-break:break-all; }
+    .srv .u { font-size:12px; font-weight:600; color:#9ca3af; margin-top:4px; }
+    .srv .tag {
+      display:block; font-size:10px; font-weight:900; letter-spacing:.14em; text-transform:uppercase;
+      color:#818cf8; margin-bottom:4px;
+    }
+    .lstatus { font-size:12px; color:var(--muted); line-height:1.45; min-height:17px; }
+    button.small { padding:11px; font-size:12px; margin-top:10px; }
+
+    .spacer { flex:1 1 auto; }
+    .foot { color:var(--muted); font-size:11px; letter-spacing:.06em; text-align:center; margin-top:24px; }
+
+    /* connecting interstitial */
+    #connecting { display:none; flex:1 1 auto; flex-direction:column; justify-content:center; align-items:center; text-align:center; }
+    #connecting.show { display:flex; }
+    .dot {
+      width:12px; height:12px; background:var(--accent); margin-bottom:22px;
+      animation:pulse 1s ease-in-out infinite;
+    }
+    @keyframes pulse { 0%,100%{opacity:.3} 50%{opacity:1} }
+    .target { font-size:22px; font-weight:900; letter-spacing:.04em; text-transform:uppercase; color:var(--fg); word-break:break-word; margin:6px 0 4px; }
+    .who { font-size:13px; color:#9ca3af; min-height:17px; }
+    .who b { color:var(--fg); font-weight:900; text-transform:uppercase; letter-spacing:.04em; }
+    .caddr { font-size:12px; color:var(--muted); word-break:break-all; margin-top:6px; }
+    .cstatus { font-size:12px; color:var(--muted); min-height:16px; margin:14px 0 8px; }
+    /* server older than this app supports */
+    #oldServer { display:none; width:100%; max-width:280px; margin:14px 0 0; }
+    #connecting.old #oldServer { display:block; }
+    #connecting.old .dot { animation:none; background:#f59e0b; }
+    #connecting.old .cstatus { display:none; }
+    #oldServer p { font-size:13px; color:#d1d5db; line-height:1.5; margin:0 0 10px; text-align:left; }
+    #oldServer p.dim { color:var(--muted); font-size:12px; }
+    #oldServer button { margin-top:8px; }
+    .srv .old { font-size:11px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; color:#f59e0b; margin-top:5px; }
+  </style>
+  <!-- Capacitor web runtime (registerPlugin + Plugins proxy → native bridge).
+       Vendored from node_modules/@capacitor/core/dist/capacitor.js. -->
+  <script src="capacitor.js"></script>
+</head>
+<body>
+  <!-- ── Connecting interstitial (shown when a saved server exists) ── -->
+  <div id="connecting">
+    <div class="dot"></div>
+    <div class="eyebrow" id="connectEyebrow">Connecting to</div>
+    <div class="target" id="connectTarget"></div>
+    <div class="who" id="connectWho"></div>
+    <div class="caddr" id="connectAddr"></div>
+    <div class="cstatus" id="connectStatus"></div>
+    <div id="oldServer">
+      <p id="oldServerText"></p>
+      <p class="dim">Update the server from its Admin page, under Updates. If it says it is up to date, this app came from a different release channel: install it from the SideStore source that matches the server.</p>
+      <button id="anywayBtn">Connect anyway</button>
+    </div>
+    <button id="downloadsBtn2" style="max-width:280px">Open downloads</button>
+    <button class="ghost" id="changeBtn" style="max-width:280px">Choose a server</button>
+  </div>
+
+  <!-- ── First-run / change-server form ── -->
+  <div id="form" style="display:flex; flex-direction:column; flex:1 1 auto;">
+    <div class="brand"><b>Stream</b>Link</div>
+    <h1>Connect</h1>
+    <p class="sub" id="sub">Enter the address of your StreamLink host. You can find it in
+      the dashboard&rsquo;s footer or your <code>run.py</code> output
+      (e.g. <code>http://192.168.1.20</code>).</p>
+
+    <!-- Servers the phone can see. Shown only inside the app (ServerDiscovery). -->
+    <div id="found">
+      <div class="lhead"><label>Servers found</label><div class="scanning" id="scanDot"></div></div>
+      <div id="servers"></div>
+      <div class="lstatus" id="scanStatus"></div>
+      <button class="ghost small" id="rescan">Scan again</button>
+    </div>
+
+    <label for="server" id="serverLabel">Server address</label>
+    <input id="server" type="url" inputmode="url" autocapitalize="off"
+           autocorrect="off" spellcheck="false"
+           placeholder="http://192.168.1.20" />
+    <div class="hint">If you omit <code>http://</code> it is added automatically. Type <code>https://</code> yourself to use HTTPS.</div>
+
+    <div class="err" id="err"></div>
+
+    <button id="connect">Connect</button>
+    <button class="ghost" id="downloadsBtn">Open downloads</button>
+
+    <div class="spacer"></div>
+    <div class="foot">
+      StreamLink iOS<span id="appVer"></span>
+      <!-- Localhost HLS self-test link hidden. localtest.html is kept in the
+           bundle; re-add this link if the Gate 1b self-test is needed again:
+      <br/><a href="localtest.html" style="color:#8a8a92">Localhost HLS self-test (Gate 1b)</a>
+      -->
+    </div>
+  </div>
+
+  <script>
+    "use strict";
+    const KEY_URL   = "streamlink_server_url";
+    // Every server this app has used: [{id, name, url, urls: [...], seen}].
+    // `url` is the address last connected through; `urls` is every address the
+    // server has reported or been reached at. `id` is "" for a host older than
+    // 19.14.0, which can be listed but not recognised at a new address.
+    const KEY_SERVERS = "streamlink_servers";
+
+    // The oldest server this app is known to work with. Raise it ONLY for a
+    // real break, in the same patch that causes it, and say which in
+    // docs/GOTCHAS.md § Release channels. 19.8.0: older hosts still have device
+    // pairing, and one with REQUIRE_DEVICE_AUTH on refuses this app's downloads
+    // and sync, because the app can no longer pair.
+    const MIN_SERVER = "19.8.0";
+    const KEY_OLD_OK = "streamlink_old_server_ok";   // {url: {v, min}} acknowledged
+
+    const $ = (id) => document.getElementById(id);
+    const formEl = $("form"), connEl = $("connecting");
+    let redirectTimer = null;
+
+    function verCmp(a, b) {
+      const p = (v) => String(v || "").split(".").map((n) => parseInt(n, 10) || 0);
+      const x = p(a), y = p(b);
+      for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0);
+      return 0;
+    }
+    // Only a version the server actually reported can be too old. No version
+    // (a plain browser, a probe that could not read one) is never a verdict.
+    function serverTooOld(version) {
+      return /^\d+\.\d+\.\d+/.test(version || "") && verCmp(version, MIN_SERVER) < 0;
+    }
+    function oldAcked(url, version) {
+      try {
+        const a = (JSON.parse(localStorage.getItem(KEY_OLD_OK) || "{}") || {})[url];
+        return !!a && a.v === version && a.min === MIN_SERVER;
+      } catch (_) { return false; }
+    }
+    function ackOld(url, version) {
+      try {
+        const all = JSON.parse(localStorage.getItem(KEY_OLD_OK) || "{}") || {};
+        all[url] = { v: version, min: MIN_SERVER };
+        localStorage.setItem(KEY_OLD_OK, JSON.stringify(all));
+      } catch (_) {}
+    }
+
+    // The phone's servers and the account pinned to each, as the dashboard
+    // keeps them (see the header). Read-only here. Empty on a phone that has
+    // not been set up, and on a shell older than 20.0.0.
+    let REG = { primary: "", servers: {} };
+    const downloads = new Map();     // server id → how many downloads the phone holds from it
+    async function loadReg() {
+      const os = plugin("OfflineStore");
+      if (os) {
+        try {
+          const v = (await os.kvGet({ key: "device" })).value;
+          if (v && typeof v === "object" && v.servers && typeof v.servers === "object") {
+            REG = { primary: v.primary || "", servers: v.servers };
+          }
+        } catch (_) {}
+      }
+      const dl = plugin("BundleDownloader");
+      if (dl) {
+        try {
+          for (const it of ((await dl.list()).items || [])) {
+            if (it.itemId === "__player__" || !it.complete) continue;
+            const sid = (it.meta && it.meta.server_id) || REG.primary || "";
+            if (sid) downloads.set(sid, (downloads.get(sid) || 0) + 1);
+          }
+        } catch (_) {}
+      }
+    }
+    function regFor(url) {
+      for (const id in REG.servers) {
+        const r = REG.servers[id];
+        if (r && (r.url === url || (r.urls || []).includes(url))) return r;
+      }
+      return null;
+    }
+    function primaryRec() { return (REG.primary && REG.servers[REG.primary]) || null; }
+
+    // Native plugin accessor (Capacitor).
+    function plugin(name) {
+      const C = window.Capacitor;
+      if (!C) return null;
+      try {
+        return (typeof C.registerPlugin === "function") ? C.registerPlugin(name)
+             : (C.Plugins && C.Plugins[name]) || null;
+      } catch (_) { return null; }
+    }
+    // Normalise a user-typed address into an absolute origin URL.
+    // - prepends http:// when no scheme is present (the dashboard serves
+    //   plain HTTP on port 80; HTTPS is opt-in by typing the scheme)
+    // - strips a trailing slash so we control the path we navigate to
+    // Returns null when it cannot be parsed into an http(s) URL.
+    function normalizeUrl(raw) {
+      let v = (raw || "").trim();
+      if (!v) return null;
+      if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(v)) v = "http://" + v;
+      let u;
+      try { u = new URL(v); } catch { return null; }
+      if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+      // Re-serialise to a clean origin (+ any explicit path), no trailing slash.
+      let out = u.origin + u.pathname.replace(/\/+$/, "");
+      return out;
+    }
+
+    function showError(msg) {
+      const e = $("err");
+      e.textContent = msg; e.classList.add("show");
+    }
+
+    function showForm() {
+      if (redirectTimer) { clearTimeout(redirectTimer); redirectTimer = null; }
+      connEl.classList.remove("show", "old");
+      formEl.style.display = "flex";
+      // Pre-fill with whatever was last saved so a re-connect is one tap.
+      $("server").value = localStorage.getItem(KEY_URL) || "";
+      startDiscovery();
+    }
+
+    // ── Remembered servers ──
+    function loadServers() {
+      let list = [];
+      try {
+        const v = JSON.parse(localStorage.getItem(KEY_SERVERS) || "[]");
+        list = Array.isArray(v) ? v.filter((r) => r && Array.isArray(r.urls)) : [];
+      } catch (_) {}
+      // What the dashboard learned about each server (every address it reported)
+      // counts too: it is how a server first connected to by a typed address
+      // can still be followed when that address stops answering.
+      for (const id in REG.servers) {
+        const r = REG.servers[id];
+        if (!r || !r.url || id.indexOf("url:") === 0) continue;
+        let rec = list.find((x) => x.id === id);
+        if (!rec) { rec = { id, name: r.name || "", url: r.url, urls: [], seen: r.seen || 0 }; list.push(rec); }
+        for (const u of [r.url].concat(r.urls || [])) if (u && !rec.urls.includes(u)) rec.urls.push(u);
+      }
+      return list;
+    }
+
+    // Every address a probe result says the server answers at. `addrs` are bare
+    // IPs; they take the scheme and port of the URL that actually answered.
+    function serverUrls(s) {
+      const out = [s.url];
+      try {
+        const u = new URL(s.url);
+        for (const a of (s.addrs || [])) {
+          if (!/^\d+\.\d+\.\d+\.\d+$/.test(a)) continue;
+          const alt = u.protocol + "//" + a + (u.port ? ":" + u.port : "");
+          if (!out.includes(alt)) out.push(alt);
+        }
+      } catch (_) {}
+      return out;
+    }
+
+    // Record a server the app saw answer. `usedUrl` marks the address connected
+    // through. Matched by id; a server with no id is matched by address.
+    function remember(s, usedUrl) {
+      if (!s || !s.url) return;
+      const list = loadServers();
+      const urls = serverUrls(s);
+      let rec = s.id ? list.find((r) => r.id === s.id) : null;
+      if (!rec) rec = list.find((r) => !r.id && r.urls.some((u) => urls.includes(u)));
+      if (!rec) {
+        // An address-only row for this box, from before it had an id.
+        const i = list.findIndex((r) => !r.id && r.urls.includes(usedUrl || s.url));
+        if (i >= 0) list.splice(i, 1);
+        rec = { id: s.id || "", name: "", url: "", urls: [] };
+        list.push(rec);
+      }
+      if (s.id) rec.id = s.id;
+      if (s.name) rec.name = s.name;
+      for (const u of urls) if (!rec.urls.includes(u)) rec.urls.push(u);
+      if (usedUrl) { rec.url = usedUrl; if (!rec.urls.includes(usedUrl)) rec.urls.push(usedUrl); }
+      rec.seen = Date.now();
+      try { localStorage.setItem(KEY_SERVERS, JSON.stringify(list.slice(-12))); } catch (_) {}
+    }
+
+    function recordFor(url) {
+      return loadServers().find((r) => r.url === url || r.urls.includes(url)) || null;
+    }
+
+    function knownUrls() {
+      const out = [];
+      const saved = localStorage.getItem(KEY_URL);
+      if (saved) out.push(saved);
+      for (const r of loadServers()) for (const u of r.urls) if (!out.includes(u)) out.push(u);
+      return out;
+    }
+
+    // ── Server list ──
+    // One box usually answers at several addresses at once (its LAN address
+    // through a Tailscale subnet route AND its own 100.x address). It is one
+    // tile. The address offered is the one already in use if that still answers
+    // (same origin, so the dashboard keeps its login), else a LAN address ahead
+    // of a 100.x one, because the LAN address is the same at home and away.
+    const discovered = new Map();   // url → server
+    let scanRun = 0, autoScans = 0, rescanTimer = null, foundHooked = false;
+
+    function isTailnetHost(url) {
+      const m = /^https?:\/\/100\.(\d+)\./.exec(url);
+      return !!m && +m[1] >= 64 && +m[1] <= 127;
+    }
+    function urlRank(s, saved) {
+      if (s.url === saved) return 0;
+      if (s.via === "wifi") return 1;
+      return isTailnetHost(s.url) ? 3 : 2;
+    }
+    function groupServers() {
+      const saved = localStorage.getItem(KEY_URL) || "";
+      const groups = new Map();
+      for (const s of discovered.values()) {
+        const key = s.id || s.url;
+        const cur = groups.get(key);
+        if (!cur || urlRank(s, saved) < urlRank(cur, saved)) groups.set(key, s);
+      }
+      const savedId = (recordFor(saved) || {}).id || "";
+      const isLast = (s) => s.url === saved || (!!s.id && s.id === savedId);
+      const isMine = (s) => !!REG.primary && ((!!s.id && s.id === REG.primary) || (regFor(s.url) || {}).id === REG.primary);
+      return [...groups.values()]
+        .map((s) => ({ s, mine: isMine(s), last: !!saved && isLast(s) }))
+        .sort((a, b) => (b.mine - a.mine) || (b.last - a.last) || (a.s.name || a.s.url).localeCompare(b.s.name || b.s.url));
+    }
+    const VIA = { wifi: "Wi-Fi", tailscale: "Tailscale", vpn: "VPN" };
+
+    function renderServers() {
+      const box = $("servers");
+      box.textContent = "";
+      for (const { s, mine, last } of groupServers()) {
+        const b = document.createElement("button");
+        b.className = "srv" + (mine ? " mine" : "");
+        // Which server is this phone's own, and which was merely used last.
+        if (mine || last) {
+          const t = document.createElement("span");
+          t.className = "tag"; t.textContent = mine ? "This phone's server" : "Last used";
+          b.appendChild(t);
+        }
+        const n = document.createElement("div");
+        n.className = "n";
+        n.textContent = s.name || "StreamLink";
+        b.appendChild(n);
+        // Whose account it opens as, and what the phone already holds from it.
+        const rec = (s.id && REG.servers[s.id]) || regFor(s.url);
+        const who = rec && rec.user && rec.user.name;
+        const nDl = rec ? (downloads.get(rec.id) || 0) : 0;
+        if (who || nDl) {
+          const u = document.createElement("div");
+          u.className = "u";
+          u.textContent = [who ? "Opens as " + who : "", nDl ? nDl + " download" + (nDl === 1 ? "" : "s") + " on this phone" : ""]
+            .filter(Boolean).join("  ·  ");
+          b.appendChild(u);
+        }
+        const a = document.createElement("div");
+        a.className = "a";
+        a.textContent = [s.url.replace(/^http:\/\//, ""), VIA[s.via] || "", s.version ? "v" + s.version : ""]
+          .filter(Boolean).join("  ·  ");
+        b.appendChild(a);
+        if (serverTooOld(s.version)) {
+          const o = document.createElement("div");
+          o.className = "old"; o.textContent = "Needs a server update";
+          b.appendChild(o);
+        }
+        b.addEventListener("click", () => pickServer(s));
+        box.appendChild(b);
+      }
+    }
+
+    function pickServer(s) {
+      const sd = plugin("ServerDiscovery");
+      if (sd) { try { sd.stop(); } catch (_) {} }
+      scanRun++;
+      if (rescanTimer) { clearTimeout(rescanTimer); rescanTimer = null; }
+      // Fold in the other addresses this same box answered at, so they are
+      // remembered too.
+      for (const o of discovered.values()) if (s.id && o.id === s.id) remember(o);
+      remember(s, s.url);
+      localStorage.setItem(KEY_URL, s.url);
+      openHost(s.url, s.version);
+    }
+
+    // Every hand-off whose server version is known goes through here.
+    function openHost(url, version) {
+      if (serverTooOld(version) && !oldAcked(url, version)) { showOldServer(url, version); return; }
+      goToHost(url);
+    }
+
+    function showOldServer(url, version) {
+      formEl.style.display = "none";
+      paintTarget(url);
+      $("connectEyebrow").textContent = "Server out of date";
+      $("oldServerText").textContent = "This server is on " + version + ". This app expects " +
+        MIN_SERVER + " or newer, so some things may not work.";
+      connEl.classList.add("show", "old");
+      const view = ++scanRun;
+      $("anywayBtn").onclick = () => {
+        if (view !== scanRun) return;
+        ackOld(url, version);
+        goToHost(url);
+      };
+    }
+
+    function describeNets(nets) {
+      const kinds = [];
+      for (const n of (nets || [])) {
+        const k = VIA[n.kind];
+        if (k && !kinds.includes(k)) kinds.push(k);
+      }
+      return kinds.length ? kinds.join(" and ") : "this network";
+    }
+
+    async function runScan() {
+      const sd = plugin("ServerDiscovery");
+      if (!sd) return;
+      const run = ++scanRun;
+      if (rescanTimer) { clearTimeout(rescanTimer); rescanTimer = null; }
+      $("scanDot").classList.add("show");
+      $("rescan").style.display = "none";
+      if (!discovered.size) $("scanStatus").textContent = "Looking for servers…";
+      let res = null;
+      try { res = await sd.scan({ known: knownUrls(), sweep: true }); } catch (_) {}
+      if (run !== scanRun) return;
+      $("scanDot").classList.remove("show");
+      $("rescan").style.display = "";
+      for (const s of ((res && res.servers) || [])) discovered.set(s.url, s);
+      renderServers();
+      if (discovered.size) { $("scanStatus").textContent = ""; return; }
+      if (res && res.online === false) {
+        $("scanStatus").textContent = "This phone is not on a network.";
+        return;
+      }
+      $("scanStatus").textContent = "No servers found on " + describeNets(res && res.nets) +
+        ". Check that StreamLink is running and that this phone is on the same Wi-Fi, or connected to the same Tailscale network. If iOS asked to find devices on your local network, allow it.";
+      // The first scan usually runs UNDER the Local Network permission prompt
+      // and finds nothing because of it. Nothing tells the page when the
+      // prompt is answered, so look again a couple of times before giving up.
+      if (++autoScans < 3) rescanTimer = setTimeout(runScan, 3000);
+    }
+
+    function startDiscovery() {
+      const sd = plugin("ServerDiscovery");
+      if (!sd) return;       // plain browser: the address box is all there is
+      $("found").classList.add("show");
+      $("sub").textContent = "Pick your StreamLink server. It needs to be on the same Wi-Fi as this phone, or on the same Tailscale network.";
+      $("serverLabel").textContent = "Or enter the address";
+      if (!foundHooked) {
+        foundHooked = true;
+        try {
+          sd.addListener("found", (s) => {
+            if (!s || !s.url || formEl.style.display === "none") return;
+            discovered.set(s.url, s);
+            $("scanStatus").textContent = "";
+            renderServers();
+          });
+        } catch (_) {}
+      }
+      autoScans = 0;
+      runScan();
+    }
+
+    function goToHost(url) {
+      // Replace so the Back gesture doesn't return to this shell mid-session;
+      // the host-side glue re-enters setup explicitly via ?setup=1.
+      // ?launch=1 is the mark that this is the app opening the server, as
+      // opposed to the dashboard reloading itself: the dashboard opens as the
+      // account pinned to this phone when it sees it. A host older than 20.0.0
+      // ignores it.
+      window.location.replace(url.replace(/\/+$/, "") + "/?launch=1");
+    }
+
+    function goToDownloads() { window.location.replace("downloads.html"); }
+
+    // Offline cached player (docs/PLAYER_CACHE_PLAN.md): if a complete snapshot
+    // of the host dashboard is on the device, serve it from LocalMediaServer in
+    // player mode and open it — the SAME player UI the host serves, booted
+    // Downloads-only via ?offline=1 (the original host rides ?host= so the page
+    // can probe for reconnection; its loopback localStorage is empty).
+    // Returns false when there's no usable snapshot → caller falls back to the
+    // frozen downloads.html.
+    async function goToCachedPlayer(hostUrl) {
+      try {
+        const dl = plugin("BundleDownloader"), lms = plugin("LocalMediaServer");
+        if (!dl || !lms) return false;
+        const local = await dl.getLocal({ itemId: "__player__", filePath: "__player__" });
+        if (!(local && local.found && local.complete && local.dir)) return false;
+        const { url } = await lms.start({ playerRoot: local.dir });
+        const base = String(url || "").replace(/\/+$/, "");
+        if (!base) return false;
+        window.location.replace(base + "/index.html?offline=1&host=" + encodeURIComponent(hostUrl || ""));
+        return true;
+      } catch (_) { return false; }
+    }
+
+    // The offline entry point: cached dashboard first, downloads.html fallback.
+    async function goOffline(hostUrl) {
+      if (!(await goToCachedPlayer(hostUrl || (primaryRec() || {}).url || localStorage.getItem(KEY_URL) || ""))) goToDownloads();
+    }
+
+    // Is the saved host actually reachable? A no-cors probe that ALWAYS resolves
+    // within the timeout: a hard setTimeout wins the race even if the fetch never
+    // settles (a stuck TLS handshake in WKWebView may ignore AbortController), so
+    // we can never hang on the connecting screen. Any fetch success (even an
+    // opaque response) ⇒ reachable; timeout/throw ⇒ offline (or host down).
+    function hostReachable(url) {
+      return new Promise((resolve) => {
+        let done = false;
+        const finish = (v) => { if (!done) { done = true; resolve(v); } };
+        setTimeout(() => finish(false), 2200);
+        fetch(url + "/api/version", { mode: "no-cors", cache: "no-store" })
+          .then(() => finish(true))
+          .catch(() => finish(false));
+      });
+    }
+
+    // The same question asked natively, which can also read the answer: WHICH
+    // server is there. That is how an install that only ever had an address
+    // typed into it learns its server's id, with no extra step for the user.
+    // Falls back to the fetch probe in a plain browser.
+    function checkHost(url) {
+      const sd = plugin("ServerDiscovery");
+      if (!sd) return hostReachable(url).then((ok) => ({ reachable: ok }));
+      return new Promise((resolve) => {
+        let done = false;
+        const finish = (v) => { if (!done) { done = true; resolve(v); } };
+        setTimeout(() => finish({ reachable: false }), 4000);
+        sd.probe({ url, timeout: 2.2 })
+          .then((r) => finish({ reachable: !!(r && r.reachable), server: r && r.server }))
+          .catch(() => hostReachable(url).then((ok) => finish({ reachable: ok })));
+      });
+    }
+
+    // The saved address did not answer. If the app knows which server that was,
+    // look for the same one somewhere else: a new DHCP lease at home, or its
+    // Tailscale address when away. Resolves the server row, or null.
+    async function findMovedServer(url) {
+      const sd = plugin("ServerDiscovery");
+      const rec = recordFor(url);
+      if (!sd || !rec || !rec.id) return null;
+      try {
+        const res = await sd.scan({ known: knownUrls(), sweep: true, wantId: rec.id, deadline: 5 });
+        const hits = ((res && res.servers) || []).filter((s) => s.id === rec.id);
+        hits.sort((a, b) => urlRank(a, url) - urlRank(b, url));
+        return hits[0] || null;
+      } catch (_) { return null; }
+    }
+
+    // Name the server and the account it opens as; the address is the small print.
+    function paintTarget(url) {
+      const rec = regFor(url) || recordFor(url);
+      const who = rec && rec.user && rec.user.name;
+      $("connectTarget").textContent = (rec && rec.name) || url.replace(/^https?:\/\//, "");
+      $("connectWho").textContent = "";
+      if (who) {
+        const b = document.createElement("b");
+        b.textContent = who;
+        $("connectWho").append("as ", b);
+      }
+      $("connectAddr").textContent = (rec && rec.name) ? url.replace(/^http:\/\//, "") : "";
+    }
+
+    async function connectInterstitial(url) {
+      formEl.style.display = "none";
+      paintTarget(url);
+      $("connectEyebrow").textContent = "Connecting to";
+      $("connectStatus").textContent = "Checking connection…";
+      connEl.classList.remove("old");
+      connEl.classList.add("show");
+      const view = ++scanRun;
+      // Probe before navigating — an offline launch routes to Downloads. The
+      // "View offline downloads" button is tappable the whole time.
+      const r = await checkHost(url);
+      if (view !== scanRun) return;          // "Change server" was tapped meanwhile
+      if (r.reachable) {
+        if (r.server) remember(r.server, url);
+        openHost(url, r.server && r.server.version);
+        return;
+      }
+      $("connectStatus").textContent = "Can’t reach it at that address. Looking for it…";
+      const moved = await findMovedServer(url);
+      if (view !== scanRun) return;
+      if (moved) {
+        remember(moved, moved.url);
+        localStorage.setItem(KEY_URL, moved.url);
+        $("connectAddr").textContent = moved.url.replace(/^http:\/\//, "");
+        $("connectStatus").textContent = "Found it at a new address.";
+        openHost(moved.url, moved.version);
+        return;
+      }
+      $("connectStatus").textContent = "Can’t reach it. Opening what is saved on this phone…";
+      redirectTimer = setTimeout(() => { goOffline(url); }, 800);
+    }
+
+    $("changeBtn").addEventListener("click", () => { scanRun++; showForm(); });
+    $("downloadsBtn").addEventListener("click", () => goOffline());
+    $("downloadsBtn2").addEventListener("click", () => goOffline());
+
+    $("connect").addEventListener("click", () => {
+      const url = normalizeUrl($("server").value);
+      if (!url) { showError("That doesn't look like a valid address. Example: http://192.168.1.20"); return; }
+      localStorage.setItem(KEY_URL, url);
+      scanRun++;
+      goToHost(url);
+    });
+    $("rescan").addEventListener("click", () => {
+      discovered.clear(); renderServers();     // a manual rescan drops servers that have gone
+      autoScans = 0; runScan();
+    });
+
+    $("server").addEventListener("keydown", (e) => { if (e.key === "Enter") $("connect").click(); });
+
+    // ── Entry point ──
+    (async function init() {
+      try {
+        const shell = plugin("AppShell");
+        if (shell) shell.info().then((i) => {
+          if (i && i.version) $("appVer").textContent = " · v" + i.version;
+        }).catch(() => {});
+      } catch (_) {}
+      await loadReg();
+      const forceSetup = /[?&#]setup=1\b/.test(window.location.href);
+      // "Connect" on another server, from the dashboard: go straight there.
+      // The primary is not changed; only the App tab changes that.
+      let direct = "";
+      try { direct = normalizeUrl(new URLSearchParams(window.location.search).get("connect") || "") || ""; } catch (_) {}
+      if (direct) { localStorage.setItem(KEY_URL, direct); connectInterstitial(direct); return; }
+      // Launch opens the phone's own server. Before one is set (a first run, or
+      // a shell that has only ever been given an address) the last address used.
+      const mine = primaryRec();
+      const saved = (mine && mine.url) || localStorage.getItem(KEY_URL);
+      if (saved && !forceSetup) connectInterstitial(saved);
+      else showForm();
+    })();
+  </script>
+</body>
+</html>

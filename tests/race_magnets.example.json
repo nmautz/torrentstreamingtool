@@ -1,0 +1,44 @@
+{
+  "_README": [
+    "Copy this file to tests/race_magnets.json and fill it in. The real file is",
+    "gitignored; only this example is committed.",
+    "",
+    "healthy: three LARGE, permanently well-seeded, LEGAL torrents. Linux ISO",
+    "  magnets (Ubuntu, Debian, Fedora) are ideal - they are fast, they stay",
+    "  seeded for years, and nothing about the harness cares what is inside.",
+    "  Large matters: the race needs candidates that are still downloading",
+    "  after the 90 s grace period, or the scenario is over before any cull",
+    "  rule has been exercised.",
+    "",
+    "dead: three WELL-FORMED magnets with an info-hash nobody is seeding. Make",
+    "  them up - 40 random hex characters is a valid v1 info-hash. These must",
+    "  reach qBittorrent and park in metaDL, which is exactly the case the",
+    "  120 s no-metadata kill exists for. A malformed magnet is NOT a",
+    "  substitute: it fails at the add and never enters the race at all.",
+    "",
+    "size/seeders are what an indexer would have advertised. They only affect",
+    "the quality pre-score and the ordering of the shortlist, so rough is fine."
+  ],
+  "healthy": [
+    {"magnet": "magnet:?xt=urn:btih:<INFO_HASH>&dn=<NAME>&tr=<TRACKER>",
+     "title": "Harness.Healthy.One.2024.1080p.WEB-DL.x264-TEST",
+     "size": 4000000000, "seeders": 500},
+    {"magnet": "magnet:?xt=urn:btih:<INFO_HASH>&dn=<NAME>&tr=<TRACKER>",
+     "title": "Harness.Healthy.Two.2024.1080p.WEB-DL.x265-TEST",
+     "size": 2500000000, "seeders": 300},
+    {"magnet": "magnet:?xt=urn:btih:<INFO_HASH>&dn=<NAME>&tr=<TRACKER>",
+     "title": "Harness.Healthy.Three.2024.720p.WEB-DL.x264-TEST",
+     "size": 1200000000, "seeders": 120}
+  ],
+  "dead": [
+    {"magnet": "magnet:?xt=urn:btih:00000000000000000000000000000000deadbee1&dn=harness-dead-1",
+     "title": "Harness.Dead.One.2024.1080p.WEB-DL.x264-TEST",
+     "size": 3000000000, "seeders": 47},
+    {"magnet": "magnet:?xt=urn:btih:00000000000000000000000000000000deadbee2&dn=harness-dead-2",
+     "title": "Harness.Dead.Two.2024.1080p.WEBRip.x264-TEST",
+     "size": 2000000000, "seeders": 31},
+    {"magnet": "magnet:?xt=urn:btih:00000000000000000000000000000000deadbee3&dn=harness-dead-3",
+     "title": "Harness.Dead.Three.2024.720p.HDTV.x264-TEST",
+     "size": 900000000, "seeders": 12}
+  ]
+}

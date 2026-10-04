@@ -584,6 +584,13 @@ def _portable_install_whisper_windows() -> dict:
 
 
 # ── Auto-install whisper.cpp + model (auto-subtitle / STT dep) ─────────────
+# AI subtitles were retired in 17.0.0 — the transcripts were not good enough to
+# offer — so setup no longer downloads ~1.5 GB for a feature that ships
+# disabled. Everything below still works: set this False and unhide the admin
+# card to bring the feature back. See docs/STT.md.
+AI_SUBTITLES_RETIRED = True
+
+
 def install_stt_deps(tools: dict) -> dict:
     """Offer to install whisper.cpp + a multilingual GGML model for the
     auto-subtitle (speech-to-text) feature. No-op if both are already detected.
@@ -592,6 +599,8 @@ def install_stt_deps(tools: dict) -> dict:
     subtitle. It's optional — declining only disables auto/AI subtitles; every
     other feature works without it.
     """
+    if AI_SUBTITLES_RETIRED:
+        return tools
     if tools.get("whisper") and tools.get("whisper_model"):
         return tools
 
@@ -798,6 +807,10 @@ def install_core_deps(tools: dict) -> dict:
 
     header("Core Applications")
     warn(f"Missing: {', '.join(_CORE_LABELS[k] for k in missing)}")
+    if "mullvad" in missing:
+        note("Mullvad is optional: the VPN kill switch also supports a 'generic' mode "
+             "(any VPN) or 'off' — set it in Admin → VPN Kill Switch. Install it here "
+             "only if you use Mullvad.")
 
     if SYSTEM == "Windows":
         winget = find_exe("winget")
@@ -1368,6 +1381,17 @@ def configure_qbittorrent(cfg: dict) -> None:
         r"WebUI\LocalHostAuth":  "false",   # no auth needed from localhost
         r"WebUI\CSRFProtection": "false",   # allow API calls from our backend
         r"WebUI\SessionTimeout": "3600",
+        # Start silently in the system tray with no visible window. The TV runs
+        # VLC fullscreen (playback or the idle background video); qBit is driven
+        # entirely over the Web UI, so its GUI should never appear. This matters
+        # most on the watchdog restart path: an internet blip drops the VPN → we
+        # kill qBit → on reconnect we relaunch it, and without these keys its
+        # window pops in front of whatever's playing on the TV. Pairs with the
+        # SW_SHOWMINNOACTIVE launch in run.py / watchdog.py. See docs/GOTCHAS.md.
+        r"General\SystrayEnabled": "true",
+        r"General\StartMinimized": "true",
+        r"General\MinimizeToTray": "true",
+        r"General\CloseToTray":    "true",
     })
     sections["BitTorrent"][r"Session\DefaultSavePath"] = cfg["QBIT_DOWNLOAD_PATH"]
 
@@ -1400,10 +1424,6 @@ def generate_ssl_cert() -> bool:
     key  = HERE / "key.pem"
     ca   = HERE / "ca.pem"
 
-    if cert.exists() and key.exists() and ca.exists():
-        ok("SSL certs already exist — skipping generation")
-        return True
-
     try:
         import ipaddress as _ip
         from datetime import datetime as _dt, timedelta as _td, timezone as _tz
@@ -1415,6 +1435,33 @@ def generate_ssl_cert() -> bool:
         warn("cryptography package not found — cannot generate SSL cert.")
         warn("Run: pip install cryptography  (or re-run setup.py to install it)")
         return False
+
+    # SHA-256 fingerprint of the CA that was accidentally committed to the repo in
+    # early builds. Any checkout carrying it shares one publicly-known private key,
+    # so the "secure" HTTPS admin panel is trivially MITM-able. Force a regenerate
+    # for those installs even though the files exist. (New clones won't have the
+    # PEMs at all — they're now gitignored — so this only rescues old checkouts.)
+    _LEAKED_CA_FPR = "c9004b439071e3c336ccd89dd5177e1c4750068b385fbd022cc42ad47c1878c6"
+
+    def _is_leaked_ca() -> bool:
+        try:
+            _c = _x509.load_pem_x509_certificate(ca.read_bytes())
+            return _c.fingerprint(_hashes.SHA256()).hex() == _LEAKED_CA_FPR
+        except Exception:
+            return False
+
+    if cert.exists() and key.exists() and ca.exists():
+        if _is_leaked_ca():
+            warn("Detected the shared/committed demo certificate — regenerating a "
+                 "unique one for this machine (the old one's private key is public).")
+            for _p in (cert, key, ca):
+                try:
+                    _p.unlink()
+                except OSError:
+                    pass
+        else:
+            ok("SSL certs already exist — skipping generation")
+            return True
 
     note("Generating self-signed CA and server certificate…")
     now = _dt.now(_tz.utc)
@@ -1661,6 +1708,25 @@ def main():
         warn(f"Still needs manual install: {', '.join(missing)}")
     if not tools.get("mullvad"):
         note("VPN guard will be inactive until Mullvad CLI is in PATH.")
+
+    # These can't be automated — they need a login, a third-party UI, or a key you
+    # fetch by hand. The dashboard shows the same list (its first-run checklist),
+    # but call it out here too so the CLI hands off cleanly instead of leaving a
+    # working-looking dashboard that silently can't search.
+    print()
+    header("A few steps you still do by hand")
+    if tools.get("mullvad"):
+        note("1. Open Mullvad and LOG IN + connect — streaming is blocked until the VPN is up.")
+    else:
+        note("1. Install Mullvad, log in, and connect (streaming is VPN-gated).")
+    if not (cfg.get("INDEXER_API_KEY") or "").strip():
+        warn("2. Jackett: add an indexer, copy its API Key into INDEXER_API_KEY "
+             "(re-run setup.py or edit .env). REQUIRED — search does nothing without it.")
+    else:
+        note("2. Jackett: confirm you've added at least one indexer for your content.")
+    if not (cfg.get("TMDB_API_KEY") or "").strip():
+        note("3. Optional: add a free TMDb API key (posters + Explore + episode names) "
+             "in the admin panel → Indexers, or as TMDB_API_KEY in .env.")
 
     print()
     if service_installed:

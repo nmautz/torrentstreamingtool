@@ -3,8 +3,9 @@
 Uses ffmpeg (audio decode) + chromaprint/fpcalc (fingerprinting) to find audio
 segments that repeat across episodes of a series. The repeating segment near
 the start of each file is the intro; the one near the end (if present) is the
-credits/outro. Falls back to ffmpeg blackdetect + a 92% heuristic when
-chromaprint cannot find a clean repeating outro.
+credits/outro. There is NO fallback: credits come only from a confirmed
+cross-episode match, never from a black-frame detector or a percentage-of-runtime
+guess (both existed once and fabricated wrong outros - see docs/GOTCHAS.md).
 
 Blocking subprocess work (ffmpeg/fpcalc/ffprobe) runs off the loop on a
 DEDICATED thread pool (`_FP_EXECUTOR` via `_fp_thread`), not the shared default
@@ -24,6 +25,14 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+import refiner
+# Binary discovery + low-priority spawning live in mediabin so refiner can use them
+# without importing analyzer (analyzer imports refiner). Re-exported below so the ~38
+# `analyzer.ffmpeg_bin()` / `analyzer.fpcalc_bin()` call sites in main.py keep working.
+from mediabin import (  # noqa: F401  (re-exported for main.py)
+    _LOWPRIO_KW, _lp, _env_bin, ffmpeg_bin, ffprobe_bin, fpcalc_bin,
+)
+
 # numpy powers the vectorized matcher fast path (~50-100x the pure-Python
 # loop). Optional: a venv that predates the dependency still analyzes via the
 # pure-Python fallback, just slower.
@@ -34,7 +43,7 @@ except Exception:           # pragma: no cover - numpy missing
     _np = None
     _POP16 = None
 
-ANALYZER_VERSION = 4
+ANALYZER_VERSION = 10
 
 # Per-file failure codes recorded in skip_data[path].analysis when fingerprinting
 # could not produce usable skip points. The user-facing UI shows a "Skip
@@ -53,20 +62,38 @@ ERR_EXCEPTION    = "exception"      # raised inside analyze_series — message c
 # analysis would run at HIGH and lag the controls/UI — exactly what we're trying
 # to avoid. Windows: BELOW_NORMAL_PRIORITY_CLASS via creationflags. POSIX:
 # prepend `nice -n 10` (no-op when `nice` isn't on PATH). Mirrors main.py's prep.
-_LOWPRIO_KW: dict = {}
-if os.name == "nt":
-    _LOWPRIO_KW["creationflags"] = 0x00004000  # BELOW_NORMAL_PRIORITY_CLASS
+# (_LOWPRIO_KW and _lp now live in mediabin — imported above.)
 
+# Chromaprint's raw fingerprint emission rate. Each frame is one 32-bit integer.
+#
+# This was 7.8 for a long time and that was simply WRONG — the old comment claimed
+# "8192 samples @ 11025 Hz", which works out to 1.35 frames/s, so the number never
+# followed from its own arithmetic. The real pipeline resamples to 11025 Hz and hops
+# 4096/3 ≈ 1365.33 samples per chroma frame → 11025 / 1365.33 = 8.0775 frames/s.
+#
+# Measured directly against fpcalc 1.5.1 (the build setup.py installs) on synthetic
+# clips of exactly known length, 30 s → 360 s:
+#
+#     frames = 8.07677 * seconds - 21.43     (7 points, essentially exact)
+#
+# A 7.8 divisor therefore inflated EVERY reported timestamp by 8.0768/7.8 = +3.55% of
+# its own value. That is a scale error, not an offset, so it grew with the boundary:
+# an intro START at ~12 s was off by +0.4 s (invisible) while the intro END at ~105 s
+# was off by +3.7 s, and a credits offset 480 s into the tail window was off by +17 s.
+# That asymmetry — start looks right, end runs long — was the reported "Smart Skip
+# skips too far past the intro" bug. See docs/GOTCHAS.md.
+FP_FRAMES_PER_SEC = 8.0768
 
-def _lp(cmd: list[str]) -> list[str]:
-    """Prefix `nice -n 10` on POSIX (when available) so the child de-prioritizes."""
-    if os.name == "posix" and shutil.which("nice"):
-        return ["nice", "-n", "10", *cmd]
-    return cmd
+# Chromaprint's classifier needs a 16-chroma-frame window, and the first FFT frame
+# needs to fill, so a fingerprint is short of `rate * seconds` by a CONSTANT ~21.4
+# frames regardless of window length. Any self-calibration must be affine — a naive
+# `len(fp) / window_sec` reads 7.37 at a 30 s window and 8.02 at 360 s, and would
+# under-correct by 8.8% on short windows.
+FP_FRAME_LEADIN = 21.43
 
-# Chromaprint emits ~7.8 fingerprint frames per second (8192 samples @ 11025 Hz).
-# Each frame is one 32-bit integer.
-FP_FRAMES_PER_SEC = 7.8
+# Accept a self-calibrated rate only inside this band; anything else means the
+# fingerprint was truncated (partial file, decode error) and the constant is safer.
+FP_RATE_SANITY = (7.5, 8.6)
 
 # Search windows
 INTRO_SEARCH_SECS = 360       # look for intro in first 6 minutes
@@ -104,6 +131,18 @@ CLUSTER_OFFSET_TOL_FRAMES = int(8.0 * FP_FRAMES_PER_SEC)
 # are ~0.03% likely, so a long mostly-matching run is never a false positive.
 MATCH_GAP_FRAMES = int(4.0 * FP_FRAMES_PER_SEC)
 MATCH_MIN_RATIO  = 0.6
+
+# Terminal-segment trim (see _trim_weak_edges). Gap bridging stays exactly as tuned —
+# these only discard a run's OUTERMOST segment when it is both too short to be evidence
+# and separated by a real gap, which is the "silence then a brief coincidence" tail that
+# inflated intro ends.
+MATCH_EDGE_MIN_FRAMES = int(1.5 * FP_FRAMES_PER_SEC)
+MATCH_EDGE_GAP_FRAMES = int(2.0 * FP_FRAMES_PER_SEC)
+
+# Cluster consensus trim. Fraction of members ignored at EACH edge when computing the
+# agreed anchor window, so one short match can't truncate the whole season. int(n * q)
+# is 0 for n < 5, making small clusters identical to a hard intersection.
+CLUSTER_TRIM_Q = 0.2
 
 # Stationary-audio guard. Silence, drones, and sustained tones make chromaprint
 # emit runs of near-identical hash frames — degenerate regions that "match"
@@ -143,6 +182,17 @@ def _fp_executor() -> concurrent.futures.ThreadPoolExecutor:
     return _FP_EXECUTOR
 
 
+async def run_offloaded(fn, *args):
+    """Public entry to the analyzer's dedicated subprocess thread pool.
+
+    For callers OUTSIDE this module (the shot-scan worker in main.py) that need to run a
+    blocking media subprocess. It must not go through `asyncio.to_thread`: that is the
+    event loop's default pool, which `get_library()`/`put_library()` also ride, and a
+    multi-minute decode parked there stalls the whole dashboard. See docs/GOTCHAS.md.
+    """
+    return await _fp_thread(fn, *args)
+
+
 async def _fp_thread(fn, *args):
     """Run a blocking analyzer subprocess call off the loop on the analyzer's OWN
     thread pool — never the shared default pool get_library()/put_library() use.
@@ -164,77 +214,84 @@ _STAGE_SPAN = {
 }
 
 
-def _env_bin(env_key: str) -> Optional[str]:
-    """Read a binary path from the .env file. Falls back to PATH lookup."""
-    env_file = Path(__file__).parent / ".env"
-    if env_file.exists():
-        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if line.startswith(f"{env_key}="):
-                val = line.split("=", 1)[1].strip()
-                if val and Path(val).exists():
-                    return val
-    return shutil.which(env_key.replace("_BIN", "").replace("_", "").lower())
-
-
-def fpcalc_bin() -> Optional[str]:
-    return _env_bin("_FPCALC_BIN") or shutil.which("fpcalc")
-
-
-def ffmpeg_bin() -> Optional[str]:
-    return _env_bin("_FFMPEG_BIN") or shutil.which("ffmpeg")
-
-
 def is_available() -> bool:
     return bool(fpcalc_bin() and ffmpeg_bin())
 
 
 # ── Fingerprinting ───────────────────────────────────────────────────────────
 
-def _fpcalc_raw(file_path: str, length_sec: int, start_sec: int = 0) -> list[int]:
+def _fpcalc_raw(file_path: str, length_sec: int, start_sec: float = 0.0) -> list[int]:
     """Run fpcalc and return the raw fingerprint as a list of 32-bit ints.
 
-    Uses -raw to get the integer sequence directly. The first FP_FRAMES_PER_SEC
-    integers correspond to roughly the first second of audio.
+    Uses -raw to get the integer sequence directly. Roughly FP_FRAMES_PER_SEC integers
+    per second of audio — but the relation is affine, so convert with `_rate_for` /
+    `frames_to_seconds` rather than dividing by the constant.
+
+    `start_sec` is a FLOAT and is passed to ffmpeg at millisecond precision. Callers must
+    convert the resulting frame offsets back against the same value they passed in — a
+    re-derived base silently shifts every timestamp (that bug made credits_start late by
+    frac(duration) on every file).
 
     fpcalc has a -ts flag for seeking; for chunks that don't start at 0 we
     pre-decode with ffmpeg and pipe WAV to stdin (fpcalc accepts `-` as a
     pseudo-path on most builds, but piping via ffmpeg is more portable).
+
+    The head (start 0) reads the file with fpcalc directly, and falls back to the same
+    ffmpeg pipe when that yields nothing. The fallback is not optional: the static
+    fpcalc build setup.py installs carries only a handful of decoders and has NO DTS,
+    so on a DTS release it exits 2 ("Could not find any audio stream ... Decoder not
+    found") for every file. The tail never noticed, because ffmpeg decodes it — which
+    is how a whole series ended up with credits on every episode and an intro on none.
+    See docs/GOTCHAS.md.
     """
     binp = fpcalc_bin()
     if not binp:
         return []
     if start_sec <= 0:
-        proc = subprocess.run(
-            _lp([binp, "-raw", "-length", str(length_sec), file_path]),
-            capture_output=True, text=True, timeout=120, **_LOWPRIO_KW,
-        )
-    else:
-        ff = ffmpeg_bin()
-        if not ff:
-            return []
-        # Pipe a mono 11025 Hz WAV chunk through ffmpeg → fpcalc on stdin
-        ff_proc = subprocess.Popen(
-            _lp([ff, "-loglevel", "error", "-ss", str(start_sec), "-t", str(length_sec),
-                 "-i", file_path, "-ac", "1", "-ar", "11025", "-f", "wav", "pipe:1"]),
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **_LOWPRIO_KW,
-        )
-        proc = subprocess.run(
-            _lp([binp, "-raw", "-length", str(length_sec), "-"]),
-            input=ff_proc.stdout.read() if ff_proc.stdout else b"",
-            capture_output=True, timeout=120, **_LOWPRIO_KW,
-        )
-        ff_proc.wait(timeout=10)
-        proc = subprocess.CompletedProcess(
-            proc.args, proc.returncode,
-            stdout=proc.stdout.decode("utf-8", errors="replace") if proc.stdout else "",
-            stderr=proc.stderr.decode("utf-8", errors="replace") if proc.stderr else "",
-        )
+        fp = _fpcalc_direct(binp, file_path, length_sec)
+        if fp:
+            return fp
+    return _fpcalc_piped(binp, file_path, length_sec, max(0.0, start_sec))
 
+
+def _fpcalc_direct(binp: str, file_path: str, length_sec: int) -> list[int]:
+    """fpcalc decoding the file itself, from the start. [] when it can't."""
+    proc = subprocess.run(
+        _lp([binp, "-raw", "-length", str(length_sec), file_path]),
+        capture_output=True, text=True, timeout=120,
+        encoding="utf-8", errors="replace",   # never the locale code page (see GOTCHAS.md)
+        **_LOWPRIO_KW,
+    )
     if proc.returncode != 0:
         return []
+    return _parse_fingerprint(proc.stdout)
+
+
+def _fpcalc_piped(binp: str, file_path: str, length_sec: int, start_sec: float) -> list[int]:
+    """ffmpeg decodes, fpcalc fingerprints the WAV on stdin. [] when either can't."""
+    ff = ffmpeg_bin()
+    if not ff:
+        return []
+    # Pipe a mono 11025 Hz WAV chunk through ffmpeg → fpcalc on stdin
+    ff_proc = subprocess.Popen(
+        _lp([ff, "-loglevel", "error", "-ss", f"{start_sec:.3f}", "-t", str(length_sec),
+             "-i", file_path, "-ac", "1", "-ar", "11025", "-f", "wav", "pipe:1"]),
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **_LOWPRIO_KW,
+    )
+    proc = subprocess.run(
+        _lp([binp, "-raw", "-length", str(length_sec), "-"]),
+        input=ff_proc.stdout.read() if ff_proc.stdout else b"",
+        capture_output=True, timeout=120, **_LOWPRIO_KW,
+    )
+    ff_proc.wait(timeout=10)
+    if proc.returncode != 0:
+        return []
+    return _parse_fingerprint(proc.stdout.decode("utf-8", errors="replace") if proc.stdout else "")
+
+
+def _parse_fingerprint(stdout: str) -> list[int]:
     fp_line = ""
-    for line in proc.stdout.splitlines():
+    for line in stdout.splitlines():
         if line.startswith("FINGERPRINT="):
             fp_line = line[len("FINGERPRINT="):].strip()
             break
@@ -251,16 +308,21 @@ def _media_duration(file_path: str) -> Optional[float]:
     ff = ffmpeg_bin()
     if not ff:
         return None
-    ffprobe = ff.replace("ffmpeg", "ffprobe") if "ffmpeg" in ff else None
-    if not ffprobe or not Path(ffprobe).exists():
-        ffprobe = shutil.which("ffprobe")
+    # mediabin.ffprobe_bin() swaps only the FILENAME of the ffmpeg path. A blanket
+    # str.replace rewrites EVERY "ffmpeg" segment of the bundled Windows path
+    # ("tools/ffmpeg/ffmpeg-8.1.1-essentials_build/bin/ffmpeg.exe") and yields a path
+    # that never exists - which silently demoted every Windows host to the brittle
+    # stderr branch below, whose re.search then raised on a None stderr and crashed the
+    # whole series. See docs/GOTCHAS.md.
+    ffprobe = ffprobe_bin()
     if not ffprobe:
         # Fall back to parsing ffmpeg's stderr
         proc = subprocess.run(
             _lp([ff, "-i", file_path]), capture_output=True, text=True, timeout=15,
+            encoding="utf-8", errors="replace",   # ffmpeg echoes the path + stream titles
             **_LOWPRIO_KW,
         )
-        m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", proc.stderr)
+        m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", proc.stderr or "")
         if m:
             h, mn, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
             return h * 3600 + mn * 60 + s
@@ -268,7 +330,9 @@ def _media_duration(file_path: str) -> Optional[float]:
     proc = subprocess.run(
         _lp([ffprobe, "-v", "error", "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", file_path]),
-        capture_output=True, text=True, timeout=15, **_LOWPRIO_KW,
+        capture_output=True, text=True, timeout=15,
+        encoding="utf-8", errors="replace",   # never the locale code page (see GOTCHAS.md)
+        **_LOWPRIO_KW,
     )
     try:
         return float(proc.stdout.strip())
@@ -331,16 +395,51 @@ def _best_gap_run(match: "_np.ndarray", min_frames: int) -> Optional[tuple[int, 
         s, e = int(starts[k]), int(ends[k])
         matched = e - s
         j = k + 1
+        segs = [(s, e)]
         while j < n and int(starts[j]) - e <= MATCH_GAP_FRAMES:
             matched += int(ends[j]) - int(starts[j])
             e = int(ends[j])
+            segs.append((int(starts[j]), e))
             j += 1
+        s, e, matched = _trim_weak_edges(segs, matched)
         span = e - s
         if span >= min_frames and matched / span >= MATCH_MIN_RATIO:
             if best is None or span > best[1]:
                 best = (s, span)
         k = j
     return best
+
+
+def _trim_weak_edges(segs: list[tuple[int, int]], matched: int) -> tuple[int, int, int]:
+    """Drop flimsy terminal segments from a gap-bridged run.
+
+    Gap bridging is essential (see MATCH_GAP_FRAMES — a 1 s blip inside a theme corrupts
+    ~20 frames, and a strict matcher truncates real intros), but it cuts both ways at the
+    ENDS of a run: post-intro silence is correctly refused as match evidence by
+    _informative_mask, then bridged over anyway, and whatever coincidentally matches
+    within 4 s on the far side — a shared sting, a stock transition — drags the reported
+    boundary out with it. The run still legitimately "ends on a true match", so the
+    existing construction can't catch it.
+
+    So walk inward from each end and drop any TERMINAL segment that is both short and
+    separated by a real gap. Interior structure is untouched, which is what keeps a
+    "theme, 2 s voiceover, 30 s more theme" match intact.
+    """
+    while len(segs) > 1:
+        gap = segs[1][0] - segs[0][1]
+        if segs[0][1] - segs[0][0] < MATCH_EDGE_MIN_FRAMES and gap >= MATCH_EDGE_GAP_FRAMES:
+            matched -= segs[0][1] - segs[0][0]
+            segs.pop(0)
+            continue
+        break
+    while len(segs) > 1:
+        gap = segs[-1][0] - segs[-2][1]
+        if segs[-1][1] - segs[-1][0] < MATCH_EDGE_MIN_FRAMES and gap >= MATCH_EDGE_GAP_FRAMES:
+            matched -= segs[-1][1] - segs[-1][0]
+            segs.pop()
+            continue
+        break
+    return segs[0][0], segs[-1][1], matched
 
 
 def _informative_mask(fp: "_np.ndarray") -> "_np.ndarray":
@@ -494,38 +593,105 @@ async def _run_match(executor: Optional[concurrent.futures.ProcessPoolExecutor],
 
 def _intersect_match(matches: list[tuple[int, int, int]],
                      min_frames: int) -> Optional[tuple[int, int]]:
-    """Given per-pair matches with the same anchor file, return (start, length)
-    of the intersection. Each tuple is (offset_in_anchor, _, length)."""
+    """Anchor-side window agreed by the cluster. Each tuple is (offset_in_anchor, _, length).
+
+    A hard intersection (max of starts, min of ends) degrades badly as a cluster grows:
+    ONE member whose match runs 5 s short truncates the reported intro for all 24
+    episodes, and over a full season that's near-certain. So trim the worst
+    CLUSTER_TRIM_Q at each edge before intersecting.
+
+    For n < 5 this is EXACTLY the old hard intersection (k == 0), so small clusters —
+    the ones with the least evidence — behave bit-identically to before.
+    """
     if not matches:
         return None
-    starts = [m[0] for m in matches]
-    ends   = [m[0] + m[2] for m in matches]
-    s = max(starts)
-    e = min(ends)
+    starts = sorted(m[0] for m in matches)
+    ends   = sorted(m[0] + m[2] for m in matches)
+    n = len(starts)
+    k = int(n * CLUSTER_TRIM_Q)
+    s = starts[n - 1 - k]
+    e = ends[k]
     if e - s >= min_frames:
         return (s, e - s)
     return None
 
 
-def _resolve_offset_in_cluster(idx: int, cluster: dict) -> Optional[tuple[int, int]]:
+def _medoid_window(matches: dict) -> Optional[tuple[int, int]]:
+    """Fallback anchor window when the intersection collapses: the REAL member interval
+    with the greatest total overlap against all the others.
+
+    Replaces taking the median offset and the median length independently, which could
+    synthesise an (offset, length) pair that corresponds to no actual match at all and
+    whose end could run past the anchor's fingerprint.
+    """
+    ivs = [(m[0], m[0] + m[2]) for m in matches.values()]
+    if not ivs:
+        return None
+
+    def overlap(p, q):
+        return max(0, min(p[1], q[1]) - max(p[0], q[0]))
+
+    best = max(ivs, key=lambda p: sum(overlap(p, q) for q in ivs))
+    return (best[0], best[1] - best[0])
+
+
+def _project(anchor_win: tuple[int, int], m: tuple[int, int, int],
+             fp_len: int, min_frames: int) -> Optional[tuple[int, int]]:
+    """Map the anchor-side consensus window into one member's own frame coordinates.
+
+    A pair match is a constant shift: ep_frame = anchor_frame + (offset_in_ep -
+    offset_in_anchor). Without this, every NON-anchor episode kept its raw pairwise
+    length — so a single pair that bridged 4 s of silence into a following shared cue
+    became that episode's intro end directly, and episodes sharing one opening reported
+    wildly different durations (measured: a 77 s spread across 101 Attack on Titan
+    episodes for a fixed 90 s OP).
+
+    Clamped twice: to the member's own matched evidence, then to its fingerprint. Through
+    the intersection path both clamps are provably no-ops; they earn their keep on the
+    medoid path, which deliberately breaks that invariant.
+    """
+    a_s, a_len = anchor_win
+    a, b, length = m
+    d = b - a
+    s, e = a_s + d, a_s + a_len + d
+    s = max(s, b)
+    e = min(e, b + length)
+    s = max(0, s)
+    if fp_len:
+        e = min(e, fp_len)
+    if e - s < min_frames:
+        return None
+    return (s, e - s)
+
+
+def _resolve_offset_in_cluster(idx: int, cluster: dict,
+                               fp_lens: Optional[list[int]] = None) -> Optional[tuple[int, int]]:
     """Return (offset_frames, length_frames) of the shared segment in episode idx
-    within the given cluster, or None if idx isn't a member."""
+    within the given cluster, or None if idx isn't a member.
+
+    Every member — anchor included — is now expressed through the SAME consensus window,
+    so an intro detected across a cluster has one agreed duration instead of one per
+    pair. A member the projection can't place keeps its raw pairwise match rather than
+    losing its skip point: a missing "skip intro" button is a worse regression than a
+    slightly loose one.
+    """
+    anchor_win = cluster.get("anchor_range") or _medoid_window(cluster["matches"])
+    if anchor_win is None:
+        return None
+    fp_len = 0
+    if fp_lens and 0 <= idx < len(fp_lens):
+        fp_len = fp_lens[idx]
+
     if idx == cluster["anchor_idx"]:
-        rng = cluster.get("anchor_range")
-        if rng:
-            return rng
-        # Intersection collapsed — anchor still belongs to the cluster, so fall
-        # back to the median (offset_in_anchor, length) across pair matches.
-        pairs = list(cluster["matches"].values())
-        if not pairs:
-            return None
-        offsets_a = sorted(m[0] for m in pairs)
-        lengths   = sorted(m[2] for m in pairs)
-        return (offsets_a[len(offsets_a) // 2], lengths[len(lengths) // 2])
+        s, ln = anchor_win
+        if fp_len:
+            ln = min(ln, max(0, fp_len - s))
+        return (s, ln) if ln > 0 else None
+
     m = cluster["matches"].get(idx)
     if m is None:
         return None
-    return (m[1], m[2])
+    return _project(anchor_win, m, fp_len, MIN_MATCH_FRAMES) or (m[1], m[2])
 
 
 def _filter_cluster_consensus(cluster: dict) -> None:
@@ -562,11 +728,12 @@ def _filter_cluster_consensus(cluster: dict) -> None:
     )
 
 
-def _build_ep_offset_map(clusters: list[dict]) -> dict[int, tuple[int, int]]:
+def _build_ep_offset_map(clusters: list[dict],
+                         fp_lens: Optional[list[int]] = None) -> dict[int, tuple[int, int]]:
     out: dict[int, tuple[int, int]] = {}
     for cluster in clusters:
         for idx in (cluster["anchor_idx"], *cluster["matches"].keys()):
-            pos = _resolve_offset_in_cluster(idx, cluster)
+            pos = _resolve_offset_in_cluster(idx, cluster, fp_lens)
             if pos is not None:
                 out[idx] = pos
     return out
@@ -574,8 +741,34 @@ def _build_ep_offset_map(clusters: list[dict]) -> dict[int, tuple[int, int]]:
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
-def frames_to_seconds(frames: int) -> float:
-    return frames / FP_FRAMES_PER_SEC
+def _rate_for(fp_len: int, window_sec: Optional[float]) -> float:
+    """Frames-per-second for one fingerprint, calibrated against the window we asked for.
+
+    We know exactly how many seconds of audio fpcalc was given and how many frames came
+    back, so the rate is recoverable per file rather than assumed. The relation is
+    AFFINE (see FP_FRAME_LEADIN) — dividing frames by seconds under-corrects badly on
+    short windows. Falls back to the constant whenever the result is implausible, which
+    is the truncated-fingerprint case.
+
+    This exists so a chromaprint build with different internals can't silently reintroduce
+    the +3.55% scale error the hard-coded 7.8 caused.
+    """
+    if not fp_len or not window_sec or window_sec <= 30:
+        return FP_FRAMES_PER_SEC
+    rate = (fp_len + FP_FRAME_LEADIN) / window_sec
+    return rate if FP_RATE_SANITY[0] <= rate <= FP_RATE_SANITY[1] else FP_FRAMES_PER_SEC
+
+
+def frames_to_seconds(frames: int, rate: Optional[float] = None) -> float:
+    """Convert a fingerprint frame index to seconds from the start of that fingerprint.
+
+    A frame index is the START of its analysis window, not a point — frame k summarises
+    roughly [k/rate, k/rate + 2.23 s]. Do NOT add window compensation here: a frame only
+    matches cross-episode while its window is mostly shared audio, so the last matching
+    frame already sits ~1 s BEFORE the true boundary. Compensating would push boundaries
+    later, which is the wrong direction for the over-skip bug.
+    """
+    return frames / (rate or FP_FRAMES_PER_SEC)
 
 
 def _failed_entry(error_code: str, error: str) -> dict:
@@ -663,6 +856,112 @@ async def _build_clusters_async(
         remaining = unmatched
 
     return clusters
+
+
+# Boundary refinement radii. The fingerprint finds where episodes STOP SHARING audio,
+# which is several seconds short of where the intro actually ends — the matcher
+# legitimately refuses the theme's fade-out, where the mix differs per episode. Measured
+# on real episodes the residual is ~6 s, so the intro-end radius has to be wider than
+# that or the correct candidate falls outside the window and nothing snaps.
+#
+# NOTE the direction: before the FP_FRAMES_PER_SEC fix the fingerprint OVER-shot the
+# intro end; now it UNDER-shoots. The bias is forward for that reason, and it is a soft
+# preference rather than a one-sided window precisely because that sign has moved once.
+REFINE_INTRO_END_RADIUS   = 10.0
+REFINE_INTRO_START_RADIUS = 4.0
+REFINE_MIN_CONF           = 0.45
+
+
+def _refine_one(path: str, intro: Optional[dict], credits_start: Optional[float],
+                dur: Optional[float]) -> tuple[Optional[dict], Optional[float], str, Optional[dict]]:
+    """Pin a coarse fingerprint boundary to a chapter marker or a silence edge.
+
+    Returns (intro, credits_start, method, refine_block). Never raises and never returns
+    a boundary it did not find evidence for: with no chapters and no silence in range the
+    inputs come back unchanged with method "fingerprint".
+    """
+    audio_base = {
+        "intro_start":   intro["start"] if intro else None,
+        "intro_end":     intro["end"] if intro else None,
+        "credits_start": credits_start,
+    }
+    prov: dict = {}
+    method = "fingerprint"
+    try:
+        chapters = refiner.probe_chapters(path)
+    except Exception:
+        chapters = []
+
+    # 1. A named, plausible intro chapter is authoritative — it was written from the
+    #    master, not inferred. But it still loses to a confirmed audio match it flatly
+    #    contradicts: a disagreement that large means they are describing different
+    #    things, and the fingerprint is the one with cross-episode evidence behind it.
+    ch_intro = refiner.chapter_intro(chapters) if chapters else None
+    if ch_intro and intro and abs(ch_intro["end"] - intro["end"]) > refiner.CHAPTER_VETO_SEC:
+        ch_intro = None
+    if ch_intro:
+        intro = ch_intro
+        method = "chapters"
+        prov["intro_start"] = {"t": intro["start"], "conf": 1.0, "src": "chapter"}
+        prov["intro_end"]   = {"t": intro["end"],   "conf": 1.0, "src": "chapter"}
+    elif intro:
+        # 2. No usable chapter — snap the audio boundary onto the silence that separates
+        #    the theme from the first line of dialogue.
+        cuts = list(refiner.chapter_cuts(chapters)) if chapters else []
+        win_start = max(0.0, intro["start"] - 12.0)
+        win_len = (intro["end"] + REFINE_INTRO_END_RADIUS + 4.0) - win_start
+        runs = refiner.merge_silence(refiner.detect_silence(path, win_start, win_len))
+        if not runs:
+            runs = refiner.merge_silence(refiner.detect_silence(
+                path, win_start, win_len,
+                noise_db=refiner.SILENCE_DB_LOOSE, min_sec=refiner.SILENCE_MIN_SEC_LOOSE))
+        cuts += refiner.silence_cuts(runs)
+
+        # An intro END must never land on a silence START — that is the instant the theme
+        # stopped, not the instant content resumes, and snapping there parks the viewer
+        # in several seconds of dead air.
+        t, conf, src = refiner.snap_boundary(
+            intro["end"], cuts, radius=REFINE_INTRO_END_RADIUS, bias="fwd",
+            prefer=("chapter", "silence_end"), allow=("chapter", "silence_end"),
+            min_conf=REFINE_MIN_CONF,
+            floor=intro["start"] + MIN_INTRO_SEC, ceil=intro["end"] + REFINE_INTRO_END_RADIUS,
+        )
+        if conf > 0:
+            intro = dict(intro, end=round(t, 1))
+            prov["intro_end"] = {"t": round(t, 1), "conf": conf, "src": src}
+            method = "fingerprint+silence"
+
+        # The intro START moves symmetrically: the theme begins where the silence before
+        # it ends. Tighter radius and a higher bar, because a start error eats content.
+        t, conf, src = refiner.snap_boundary(
+            intro["start"], cuts, radius=REFINE_INTRO_START_RADIUS, bias="back",
+            prefer=("chapter", "silence_end"), allow=("chapter", "silence_end"),
+            min_conf=0.55, floor=0.0, ceil=intro["end"] - MIN_INTRO_SEC,
+        )
+        if conf > 0:
+            intro = dict(intro, start=round(t, 1))
+            prov["intro_start"] = {"t": round(t, 1), "conf": conf, "src": src}
+
+    # 3. Credits. A named chapter is used when present; otherwise the fingerprint value
+    #    stands untouched. Measured against chapter ground truth, the corrected
+    #    fingerprint already lands within ~0.1 s, so there is nothing to gain from
+    #    snapping it — and moving credits EARLY truncates real content, which is the
+    #    most user-hostile error available here.
+    if chapters and dur:
+        cc = refiner.chapter_credits(chapters, dur, MIN_CREDITS_PCT, OUTRO_END_MARGIN_SEC)
+        if cc is not None and (credits_start is None
+                               or abs(cc - credits_start) <= refiner.CHAPTER_VETO_SEC):
+            credits_start = cc
+            prov["credits_start"] = {"t": cc, "conf": 1.0, "src": "chapter"}
+            if method == "fingerprint":
+                method = "chapters"
+
+    if not prov:
+        return intro, credits_start, method, None
+    return intro, credits_start, method, {"version": REFINER_VERSION, "audio": audio_base, **prov}
+
+
+REFINER_VERSION = 1
 
 
 async def analyze_series(items: list[dict], progress_cb=None) -> dict:
@@ -783,18 +1082,28 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
     head_fps: list[list[int]] = []
     tail_fps: list[list[int]] = []
     durations: list[Optional[float]] = []
+    # Per-episode frame rate and tail time base. Both used to be implicit constants and
+    # both were wrong: the rate was a hard-coded 7.8 (see FP_FRAMES_PER_SEC) and the tail
+    # base was re-derived as a float AFTER seeking with an int, so credits_start was late
+    # by frac(duration) on top of the scale error.
+    head_rates: list[float] = []
+    tail_rates: list[float] = []
+    tail_starts: list[float] = []
     fp_errors: dict[int, tuple[str, str]] = {}   # ep idx → (code, message)
     total_eps = len(episodes)
     fp_sem = asyncio.Semaphore(FP_CONCURRENCY)
     fp_done = 0
 
-    async def _fingerprint_one(ep: dict) -> tuple[Optional[float], list[int], list[int]]:
+    async def _fingerprint_one(ep: dict):
         nonlocal fp_done
         async with fp_sem:
             dur = await _fp_thread(_media_duration, ep["path"])
             head = await _fp_thread(_fpcalc_raw, ep["path"], INTRO_SEARCH_SECS, 0)
+            # Seek and convert-back must share ONE time base. Keep the float and pass it
+            # through; never re-derive it at the other end.
+            tail_start = 0.0
             if dur and dur > OUTRO_SEARCH_SECS + 60:
-                tail_start = int(dur - OUTRO_SEARCH_SECS)
+                tail_start = float(dur - OUTRO_SEARCH_SECS)
                 tail = await _fp_thread(_fpcalc_raw, ep["path"], OUTRO_SEARCH_SECS, tail_start)
             else:
                 tail = []
@@ -802,15 +1111,23 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
         await _emit(stage="fingerprinting", current=fp_done, total=total_eps,
                     message=f"Fingerprinting episode {fp_done} of {total_eps}",
                     episode_name=Path(ep["path"]).name)
-        return dur, head, tail
+        # The head window is whatever fpcalc actually got: the -length cap, or the file
+        # if it is shorter. The tail window is exactly OUTRO_SEARCH_SECS by construction.
+        head_window = min(float(INTRO_SEARCH_SECS), dur) if dur else float(INTRO_SEARCH_SECS)
+        return (dur, head, tail, tail_start,
+                _rate_for(len(head), head_window),
+                _rate_for(len(tail), float(OUTRO_SEARCH_SECS)))
 
     await _emit(stage="fingerprinting", current=0, total=total_eps,
                 message=f"Fingerprinting {total_eps} episode(s)")
     fp_results = await asyncio.gather(*(_fingerprint_one(ep) for ep in episodes))
-    for idx, (dur, head, tail) in enumerate(fp_results):
+    for idx, (dur, head, tail, t_start, h_rate, t_rate) in enumerate(fp_results):
         durations.append(dur)
         head_fps.append(head)
         tail_fps.append(tail)
+        tail_starts.append(t_start)
+        head_rates.append(h_rate)
+        tail_rates.append(t_rate)
         if not head:
             fp_errors[idx] = (
                 ERR_FP_EMPTY,
@@ -843,7 +1160,7 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
         )
         for c in intro_clusters:
             _filter_cluster_consensus(c)
-        intro_by_ep = _build_ep_offset_map(intro_clusters)
+        intro_by_ep = _build_ep_offset_map(intro_clusters, [len(f) for f in head_fps])
 
         max_outro_frames = int(MAX_OUTRO_SEC * FP_FRAMES_PER_SEC)
         outro_clusters = await _build_clusters_async(
@@ -852,7 +1169,7 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
         )
         for c in outro_clusters:
             _filter_cluster_consensus(c)
-        outro_by_ep = _build_ep_offset_map(outro_clusters)
+        outro_by_ep = _build_ep_offset_map(outro_clusters, [len(f) for f in tail_fps])
     finally:
         if executor is not None:
             executor.shutdown(wait=False)
@@ -861,6 +1178,13 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
     # `result` already carries per-path failure entries for missing files. Now
     # add per-episode entries — success for files that produced intro/credits,
     # failure for files that produced nothing usable.
+    # Episodes the fingerprint could not give credits to. Some shows use a different
+    # song over every credit roll (Hacks, WandaVision, One Tree Hill S8), so the tail
+    # matcher correctly finds nothing and the whole series gets no credits skip. Those
+    # get a second, song-independent pass below.
+    no_credits: list[int] = []
+    got_credits = 0
+
     for idx, ep in enumerate(episodes):
         path = ep["path"]
         dur = durations[idx]
@@ -874,8 +1198,8 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
         if idx in intro_by_ep:
             s_fr, l_fr = intro_by_ep[idx]
             intro = {
-                "start": round(frames_to_seconds(s_fr), 1),
-                "end":   round(frames_to_seconds(s_fr + l_fr), 1),
+                "start": round(frames_to_seconds(s_fr, head_rates[idx]), 1),
+                "end":   round(frames_to_seconds(s_fr + l_fr, head_rates[idx]), 1),
             }
 
         # Credits time comes ONLY from a confirmed cross-episode fingerprint
@@ -887,18 +1211,34 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
         credits_start: Optional[float] = None
         if idx in outro_by_ep and dur:
             offset_fr, length_fr = outro_by_ep[idx]
-            tail_start = dur - OUTRO_SEARCH_SECS
-            cs = tail_start + frames_to_seconds(offset_fr)
-            ce = tail_start + frames_to_seconds(offset_fr + length_fr)
+            tail_start = tail_starts[idx]
+            cs = tail_start + frames_to_seconds(offset_fr, tail_rates[idx])
+            ce = tail_start + frames_to_seconds(offset_fr + length_fr, tail_rates[idx])
             if cs >= dur * MIN_CREDITS_PCT and ce >= dur - OUTRO_END_MARGIN_SEC:
                 credits_start = round(cs, 1)
+        if credits_start is None and dur:
+            no_credits.append(idx)
+        elif credits_start is not None:
+            got_credits += 1
+
+        # Pin the coarse boundaries to something physical (chapter marker / silence).
+        # Off-loop: this spawns ffprobe + ffmpeg. Never allowed to fail the episode.
+        method, refine_block = "fingerprint", None
+        if intro or credits_start is not None:
+            try:
+                intro, credits_start, method, refine_block = await _fp_thread(
+                    _refine_one, path, intro, credits_start, dur)
+            except Exception:
+                method, refine_block = "fingerprint", None
 
         if intro or credits_start is not None:
             result[path] = {
                 "intro": intro,
                 "credits_start": credits_start,
+                **({"refine": refine_block} if refine_block else {}),
                 "analysis": {
                     "version": ANALYZER_VERSION,
+                    "method":  method,
                     "source": "auto",
                 },
             }
@@ -920,6 +1260,67 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
                     "transition could be located in this file."
                 )
             result[path] = _failed_entry(code, msg)
+
+    # ── Subtitle credits pass ────────────────────────────────────────────────
+    # Only for episodes the fingerprint gave no credits. "Have the credits started?" is
+    # really "has the dialogue ended for good?", and a subtitle track answers that
+    # directly, for free, without decoding anything.
+    #
+    # This replaced an audio-only structural detector that could not work on the shows it
+    # was built for. Those shows run a song across the seam from the last scene into the
+    # credit roll, so there is NO acoustic event at the boundary: the detector took the
+    # last gap-free block of sound and landed deep inside real content — measured at 19 s
+    # on Hacks S05E05 and 69 s on S03E02. Its cross-episode consensus check endorsed the
+    # error rather than catching it, because every episode was wrong in the same
+    # direction, and agreement only ever proves precision, not accuracy.
+    #
+    # No consensus requirement here, deliberately. The signal is self-validating per
+    # episode (dialogue stops, only music or nothing follows), and requiring peers would
+    # reject exactly the files this is for — single-episode library items, which is how
+    # most of the rotating-theme content in the wild is filed.
+    if no_credits:
+        for n, idx in enumerate(no_credits, 1):
+            dur = durations[idx]
+            if not dur:
+                continue
+            path = episodes[idx]["path"]
+            # `no_credits` was built from the FINGERPRINT result, before refinement ran —
+            # and refinement can supply credits from a chapter marker, which is exact and
+            # outranks anything measured here. Re-check the entry rather than the list, or
+            # a chapter-derived time gets overwritten by a ~2 s estimate (observed moving
+            # one file 106.9 s).
+            if (result.get(path) or {}).get("credits_start") is not None:
+                continue
+            await _emit(stage="finalizing", current=total_eps, total=total_eps,
+                        message=f"Looking for credit rolls — {n} of {len(no_credits)}",
+                        episode_name=Path(path).name)
+            try:
+                found = await _fp_thread(refiner.credits_from_subtitles,
+                                         path, dur, MIN_CREDITS_PCT)
+            except Exception:
+                found = None
+            if not found:
+                continue
+            cs, src = found
+            entry = result.get(path) or {}
+            prev = entry.get("analysis") or {}
+            if prev.get("source") == "failed" and not entry.get("intro"):
+                # Nothing at all before: promote to a credits-only success rather than
+                # leaving the "Skip unavailable" chip up.
+                entry = {"intro": None, "analysis": {"version": ANALYZER_VERSION,
+                                                     "source": "auto"}}
+            entry["credits_start"] = cs
+            ana = entry.setdefault("analysis", {})
+            ana["version"] = ANALYZER_VERSION
+            ana["source"] = "auto"
+            base = ana.get("method") or "fingerprint"
+            ana["method"] = src if base == "fingerprint" else f"{base}+{src}"
+            ana.pop("error_code", None)
+            ana.pop("error", None)
+            ref = entry.setdefault("refine", {"version": REFINER_VERSION,
+                                              "audio": {"credits_start": None}})
+            ref["credits_start"] = {"t": cs, "conf": 0.8, "src": src}
+            result[path] = entry
 
     return result
 

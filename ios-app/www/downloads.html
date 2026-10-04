@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<!--
+  StreamLink iOS — offline Downloads library + player  (M2 · 6.0.0-preview.2.x.x)
+
+  ⚠ FEATURE-FROZEN FALLBACK (v8.0.0 — docs/PLAYER_CACHE_PLAN.md). The primary
+  offline surface is now the CACHED DASHBOARD: the shell serves a device
+  snapshot of the host's static/index.html from LocalMediaServer (player mode)
+  and boots it with ?offline=1. This page remains only for the cases where no
+  usable snapshot exists (first-ever offline launch, corrupt/incomplete cache).
+  Do NOT add player features here — they belong in static/index.html, where the
+  offline mode inherits them automatically.
+
+  This is the offline fallback entry point. The dashboard (static/index.html) is
+  served by the host, so it can't load when the host is unreachable (Airplane
+  Mode); this page is bundled into the app and works with no network. It lists
+  the bundles downloaded by `BundleDownloader` and plays a selected one from the
+  loopback `LocalMediaServer` (native HLS — audio + subtitle tracks appear in
+  the player's fullscreen menu). `www/index.html` routes here when the saved
+  host can't be reached AND no player snapshot exists.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
+  <title>StreamLink — Downloads</title>
+  <style>
+    /* The dashboard's palette (Tailwind gray-950/900/800, indigo-600), so this
+       fallback reads as the same app as the Downloads tab it stands in for. */
+    :root { --bg:#030712; --panel:#111827; --line:#1f2937; --fg:#f3f4f6; --muted:#6b7280; --accent:#4f46e5; --ok:#22c55e; --danger:#dc2626; }
+    * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+    html,body { margin:0; height:100%; }
+    body { background:var(--bg); color:var(--fg); font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+           padding:max(env(safe-area-inset-top),18px) 16px max(env(safe-area-inset-bottom),18px); }
+    header { display:flex; align-items:baseline; justify-content:space-between; gap:10px; margin-bottom:4px; }
+    h1 { font-size:22px; font-weight:900; letter-spacing:.04em; margin:0; text-transform:uppercase; }
+    /* Whose downloads these are: the server, and the account offline watching is kept for. */
+    .ident { border:1px solid var(--line); background:var(--panel); padding:12px; margin:10px 0 14px; }
+    .ident .k { font-size:10px; font-weight:900; letter-spacing:.14em; text-transform:uppercase; color:var(--muted); }
+    .ident .v { font-size:16px; font-weight:900; letter-spacing:.04em; text-transform:uppercase; margin-top:2px; word-break:break-word; }
+    .ident .row + .row { margin-top:10px; padding-top:10px; border-top:1px solid var(--line); }
+    .ident .st { font-size:10px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; color:#f59e0b; margin-top:3px; }
+    .srvtag { color:#818cf8; font-weight:800; }
+    .used { color:var(--muted); font-size:12px; }
+    .sub { color:var(--muted); font-size:13px; margin:0 0 16px; }
+    .bar { display:flex; gap:10px; margin-bottom:16px; }
+    button { -webkit-appearance:none; border:0; border-radius:0; font-size:12px; font-weight:900;
+             letter-spacing:.05em; text-transform:uppercase; padding:12px 14px; color:#fff; background:var(--accent); }
+    button.ghost { background:#1f2937; color:#d1d5db; border:1px solid #374151; }
+    button:active { opacity:.8; }
+    ul { list-style:none; margin:0; padding:0; }
+    .play { flex:0 0 auto; background:var(--accent); padding:11px 16px; }
+    .del  { flex:0 0 auto; background:transparent; color:var(--muted); border:1px solid var(--line); padding:11px 12px; }
+    .empty { color:var(--muted); font-size:14px; text-align:center; padding:40px 10px; line-height:1.5; }
+
+    /* Series / movie cards (metadata-rich offline picker) */
+    .card { border:1px solid var(--line); background:var(--panel); margin-bottom:14px; }
+    .chead { display:flex; gap:12px; padding:12px; }
+    .poster { flex:0 0 auto; width:60px; height:90px; background:#1f2937; object-fit:cover; }
+    .poster.fb { display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:22px; font-weight:800; }
+    .chead .info { flex:1 1 auto; min-width:0; }
+    .ctitle { font-size:15px; font-weight:900; letter-spacing:.04em; text-transform:uppercase; line-height:1.25; }
+    .cmeta { color:var(--muted); font-size:12px; margin-top:3px; }
+    .coverview { color:var(--muted); font-size:12px; margin-top:6px; line-height:1.4;
+                 display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
+    .eps { border-top:1px solid var(--line); }
+    .ep { display:flex; align-items:center; gap:10px; padding:11px 12px; border-bottom:1px solid var(--line); }
+    .ep:last-child { border-bottom:0; }
+    .ep .info { flex:1 1 auto; min-width:0; }
+    .ep .line { font-size:14px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .ep .num { color:#818cf8; font-size:12px; font-weight:900; margin-right:6px; }
+    .ep .size { color:var(--muted); font-size:11px; margin-top:2px; }
+    .prog { height:3px; background:#1f2937; margin-top:6px; }
+    .prog > i { display:block; height:100%; background:var(--accent); }
+    .prog.done > i { background:var(--ok); }
+    .watched { color:var(--ok); }
+    .pbtn { flex:0 0 auto; background:var(--accent); padding:9px 14px; }
+    .dbtn { flex:0 0 auto; background:transparent; color:var(--muted); border:1px solid var(--line); padding:9px 11px; }
+    #playerWrap { position:fixed; inset:0; background:#000; display:none; flex-direction:column; z-index:50; }
+    #playerWrap.show { display:flex; }
+    #playerWrap video { flex:1 1 auto; width:100%; background:#000; }
+    #playerBar { display:flex; gap:10px; padding:12px max(env(safe-area-inset-left),12px) max(env(safe-area-inset-bottom),12px); background:#030712; }
+    #playerBar button { flex:1; }
+    .nowTitle { color:var(--fg); font-size:13px; padding:max(env(safe-area-inset-top),10px) 12px 8px; background:#030712; word-break:break-all; }
+    pre { color:var(--danger); font-size:12px; white-space:pre-wrap; }
+  </style>
+  <script src="capacitor.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Downloads</h1>
+    <span class="used" id="used"></span>
+  </header>
+  <div class="ident" id="ident" style="display:none">
+    <div class="row"><div class="k">Server</div><div class="v" id="identSrv"></div><div class="st">Not connected</div></div>
+    <div class="row"><div class="k">Account on this phone</div><div class="v" id="identWho"></div></div>
+  </div>
+  <p class="sub">Saved on this phone. Plays with no connection; what you watch is sent to the server when it is next reached.</p>
+
+  <div class="bar">
+    <button id="connectBtn">Connect to server</button>
+    <button class="ghost" id="settingsBtn">Choose a server</button>
+    <button class="ghost" id="refreshBtn">Refresh</button>
+  </div>
+
+  <ul id="list"></ul>
+  <div class="empty" id="empty" style="display:none">
+    No downloads yet.<br />Connect to your server, open a show, and tap
+    <strong>Download</strong> on an episode to save it here for offline viewing.
+  </div>
+  <pre id="err"></pre>
+
+  <!-- Fullscreen-ish native player -->
+  <div id="playerWrap">
+    <div class="nowTitle" id="nowTitle"></div>
+    <!-- crossorigin: the media + sidecar VTT/ASS come from the loopback
+         LocalMediaServer (a different origin than this capacitor:// page). The
+         server sends `Access-Control-Allow-Origin: *`; without crossorigin the
+         browser blocks the out-of-band <track> text fetch. -->
+    <video id="v" controls playsinline crossorigin="anonymous"></video>
+    <div id="playerBar">
+      <button class="ghost" id="closePlayer">Close</button>
+      <select id="subSelect" class="ghost" style="display:none" aria-label="Subtitles"></select>
+    </div>
+  </div>
+
+  <script>
+    "use strict";
+    const $ = (id) => document.getElementById(id);
+    const KEY_URL = "streamlink_server_url";
+
+    function plugin(name) {
+      const C = window.Capacitor;
+      if (!C) throw new Error("Not running inside the app.");
+      const p = (typeof C.registerPlugin === "function") ? C.registerPlugin(name)
+                                                         : (C.Plugins && C.Plugins[name]);
+      if (!p) throw new Error(name + " plugin unavailable.");
+      return p;
+    }
+    function fmtBytes(b) {
+      b = Number(b) || 0;
+      if (b < 1024) return b + " B";
+      const u = ["KB","MB","GB","TB"]; let i = -1;
+      do { b /= 1024; i++; } while (b >= 1024 && i < u.length - 1);
+      return b.toFixed(b < 10 ? 1 : 0) + " " + u[i];
+    }
+    function showErr(e) { $("err").textContent = e ? ("⚠ " + (e.message || e)) : ""; }
+
+    // ── Offline subtitles ──────────────────────────────────────────────────
+    // Bundle subs live beside the media in the LocalMediaServer dir. Plain subs
+    // (SRT/VTT) render as native <track> children; styled ASS/SSA subs render
+    // with the libass-wasm (SubtitlesOctopus) overlay from the raw sub_<i>.ass +
+    // the bundle's extracted fonts — mirrors the host dashboard's on-device
+    // player (static/index.html). See docs/STREAMING.md / GOTCHAS.md.
+    let _octopus = null, _octopusSub = null;
+    let _octopusSeq = 0;   // attempt token — see _applyStyledOfflineSub
+    let _octopusBlobUrls = null;   // blob: font URLs for the live overlay (revoked on teardown)
+    let _subBase = null, _subs = [], _fonts = [], _subTracks = [];
+    let _libassPromise = null;
+
+    // Lazy-load SubtitlesOctopus (~3 MB, bundled in the app) — only the first
+    // time a styled sub is actually selected. Assets are relative to this page.
+    function _ensureLibass() {
+      if (window.SubtitlesOctopus) return Promise.resolve(window.SubtitlesOctopus);
+      if (_libassPromise) return _libassPromise;
+      _libassPromise = new Promise((resolve, reject) => {
+        const sc = document.createElement("script");
+        sc.src = "subtitles-octopus.js"; sc.async = true;
+        sc.onload  = () => window.SubtitlesOctopus
+          ? resolve(window.SubtitlesOctopus) : reject(new Error("SubtitlesOctopus missing"));
+        sc.onerror = () => { _libassPromise = null; reject(new Error("libass load failed")); };
+        document.head.appendChild(sc);
+      });
+      return _libassPromise;
+    }
+
+    function _teardownOctopus() {
+      _octopusSeq++;       // invalidate any in-flight _applyStyledOfflineSub attempt
+      _octopusSub = null;
+      if (_octopus) { try { _octopus.dispose(); } catch (_) {} _octopus = null; }
+      // Release blob: font URLs (the worker loaded them into its FS at init).
+      (_octopusBlobUrls || []).forEach((u) => { try { URL.revokeObjectURL(u); } catch (_) {} });
+      _octopusBlobUrls = null;
+      // Sweep stray overlay canvases — a leaked one renders ghost ASS forever.
+      document.querySelectorAll("#playerWrap .libassjs-canvas-parent")
+        .forEach((n) => { try { n.remove(); } catch (_) {} });
+    }
+
+    // Drop the overlay, remove every <track>, reset the picker. Called on play
+    // (fresh bundle) and closePlayer.
+    function _teardownOfflineSubs() {
+      _teardownOctopus();
+      (_subTracks || []).forEach((tr) => { try { tr.el.remove(); } catch (_) {} });
+      _subTracks = []; _subs = []; _fonts = []; _subBase = null;
+      const sel = $("subSelect");
+      if (sel) { sel.innerHTML = ""; sel.style.display = "none"; }
+    }
+
+    // Fetch the bundle's meta.json and build the subtitle picker. A <track> is
+    // created for EVERY bundle sub (styled ones keep their flattened VTT as a
+    // fallback, exactly like the host player); styled subs additionally offer
+    // the libass overlay. Best-effort — no meta / no subs just hides the picker.
+    async function _setupOfflineSubs(base) {
+      _teardownOfflineSubs();
+      _subBase = base;
+      let meta = {};
+      try { meta = await (await fetch(base + "meta.json")).json(); } catch (_) {}
+      _subs = meta.subtitles || [];
+      _fonts = meta.fonts || [];
+      const sel = $("subSelect"), v = $("v");
+      if (!_subs.length) return;
+      const off = document.createElement("option");
+      off.value = "-1"; off.textContent = "Subtitles: Off";
+      sel.appendChild(off);
+      _subs.forEach((s, i) => {
+        const o = document.createElement("option");
+        o.value = String(i);
+        o.textContent = (s.label || ("Subtitles " + (i + 1))) + (s.styled ? " ✦" : "");
+        sel.appendChild(o);
+        const t = document.createElement("track");
+        t.kind = "subtitles";
+        t.src = base + (s.file || ("sub_" + i + ".vtt"));   // flattened VTT (fallback for styled)
+        t.srclang = s.language || "und";
+        t.label = s.label || ("Subtitles " + (i + 1));
+        v.appendChild(t);
+        _subTracks.push({ el: t, key: String(i) });
+      });
+      sel.value = "-1";
+      sel.style.display = "";
+    }
+
+    // Show a plain <track> for `key`, or the libass overlay for a styled sub.
+    function _applyOfflineSub(key) {
+      key = String(key);
+      const s = (/^\d+$/.test(key)) ? _subs[Number(key)] : null;
+      if (s && s.styled && s.ass_file) {
+        (_subTracks || []).forEach((tr) => { try { tr.el.track.mode = "disabled"; } catch (_) {} });
+        _applyStyledOfflineSub(s, key);
+        return;
+      }
+      _teardownOctopus();
+      (_subTracks || []).forEach((tr) => {
+        try { tr.el.track.mode = (tr.key === key) ? "showing" : "disabled"; } catch (_) {}
+      });
+    }
+
+    // Token race guard (mirrors the host player's _lpApplyStyledSub): while the
+    // first pick is still awaiting the ~3 MB libass load, a toggle dance
+    // (ass → off → ass) re-enters here with the SAME subUrl and _octopus still
+    // null — a URL-based guard let every attempt construct its own instance,
+    // each overwriting _octopus and leaking the previous one (canvas + worker
+    // kept rendering ASS under whatever track was shown next). _octopusSeq is
+    // bumped by every apply and teardown; only the newest attempt may construct
+    // or touch <track> modes.
+    async function _applyStyledOfflineSub(s, key) {
+      const v = $("v");
+      const subUrl = _subBase + s.ass_file;
+      if (_octopusSub === subUrl) return;   // already showing OR mid-build
+      _teardownOctopus();
+      _octopusSub = subUrl;
+      const attempt = ++_octopusSeq;
+      const showVttFallback = () => {                      // libass failed → flattened VTT
+        if (attempt !== _octopusSeq) return;               // superseded — don't double-draw
+        _teardownOctopus();
+        (_subTracks || []).forEach((tr) => {
+          try { tr.el.track.mode = (tr.key === key) ? "showing" : "disabled"; } catch (_) {}
+        });
+      };
+      let SO;
+      try { SO = await _ensureLibass(); }
+      catch (_) { showVttFallback(); return; }
+      if (attempt !== _octopusSeq) return;                 // raced with a newer pick / close
+      // The ass + fonts live on the loopback LocalMediaServer, but the octopus
+      // WORKER (a capacitor-origin script) fetches them itself with sync XHR —
+      // a cross-origin worker fetch WKWebView won't reliably allow. This page's
+      // own loopback fetches provably work (meta.json above), so prefetch here
+      // and hand the worker inline content + same-origin blob: URLs instead.
+      // Mirrors the host player's _lpApplyStyledSub; see docs/GOTCHAS.md.
+      let subContent, fontUrls;
+      try {
+        const fontBlobs = await Promise.all([
+          fetch(subUrl).then((r) => { if (!r.ok) throw new Error(); return r.text(); }),
+          ...(_fonts || []).map((f) =>
+            fetch(_subBase + f).then((r) => { if (!r.ok) throw new Error(); return r.blob(); })),
+        ]);
+        if (attempt !== _octopusSeq) return;               // raced during the prefetch
+        subContent = fontBlobs.shift();
+        fontUrls = fontBlobs.map((b) => URL.createObjectURL(b));
+        _octopusBlobUrls = fontUrls;                       // revoked by _teardownOctopus
+      } catch (_) { showVttFallback(); return; }           // LMS unreadable → flattened VTT
+      try {
+        _octopus = new SO({
+          video: v, subContent, fonts: fontUrls,
+          fallbackFont: "libass-fallback-font.ttf",
+          workerUrl: "subtitles-octopus-worker.js",
+          // Worker death (it disposes itself right after this): fall back to the
+          // flattened VTT instead of silently losing subs.
+          onError: () => { if (attempt === _octopusSeq) { _octopus = null; showVttFallback(); } },
+        });
+        _octopusNudge();   // size + paint now if the video is already dimensioned
+      } catch (_) { _octopus = null; showVttFallback(); }
+    }
+
+    // Re-size (→ re-paint) the live overlay. The vendored lib only re-checks the
+    // video's intrinsic dimensions on ONE loadedmetadata and on layout resizes;
+    // an overlay constructed while videoWidth is still 0 (native HLS exposes
+    // dimensions a beat late) keeps a hidden 0×0 canvas forever. The <video>
+    // fires `resize` when intrinsic dimensions change — nudge from there (plus
+    // loadeddata/playing backstops, wired in the listener block below).
+    function _octopusNudge() {
+      if (!_octopus) return;
+      try { _octopus.resizeWithTimeout(); } catch (_) {}
+    }
+
+    let _serverActive = false;
+    async function stopServer() {
+      if (!_serverActive) return;
+      try { await plugin("LocalMediaServer").stop(); } catch (_) {}
+      _serverActive = false;
+    }
+
+    // ── Offline progress (M3) ──────────────────────────────────────────────
+    // The host dashboard can't load offline, so watch progress captured here is
+    // the only offline history. We write it to the native OfflineStore; when the
+    // device reconnects, the dashboard's sync glue drains it to the host.
+    let _nowPlaying = null;            // the item currently in the player
+    let _lastSaveAt = 0;
+    let _suppressSave = false;         // true until a pending resume-seek has landed
+
+    function offlineStore() { try { return plugin("OfflineStore"); } catch (_) { return null; } }
+
+    // The phone's servers and the account pinned to each (20.0.0; written by the
+    // dashboard into the native store, see www/index.html). A download belongs
+    // to one server, and watching it offline is recorded for that server's
+    // pinned account. Empty on a shell or a phone that predates it: everything
+    // then goes to the last account the app was told, as before.
+    let REG = { primary: "", servers: {} };
+    async function loadReg() {
+      const os = offlineStore();
+      if (!os) return;
+      try {
+        const v = (await os.kvGet({ key: "device" })).value;
+        if (v && typeof v === "object" && v.servers && typeof v.servers === "object") {
+          REG = { primary: v.primary || "", servers: v.servers };
+        }
+      } catch (_) {}
+    }
+    function serverOf(item) { return (item && item.meta && item.meta.server_id) || REG.primary || ""; }
+    function userOf(item) {
+      const r = REG.servers[serverOf(item)];
+      return (r && r.user && r.user.id) ? r.user : null;
+    }
+
+    async function saveOfflineProgress() {
+      const v = $("v"), item = _nowPlaying, os = offlineStore();
+      if (!os || !item || !item.itemId || !item.filePath) return;
+      // Don't overwrite the saved position with the pre-seek t≈0 while a resume is pending.
+      if (_suppressSave) return;
+      const pos = v.currentTime || 0, dur = v.duration || 0;
+      if (!(dur > 0) || pos < 5) return;   // server ignores near-zero writes
+      try {
+        const u = userOf(item), sid = serverOf(item);
+        await os.saveProgress({ itemId: item.itemId, filePath: item.filePath,
+                                positionSec: pos, durationSec: dur,
+                                ...(u ? { profileId: u.id } : {}), ...(sid ? { serverId: sid } : {}) });
+      } catch (_) {}
+    }
+    function throttledSave() {
+      const now = Date.now();
+      if (now - _lastSaveAt < 5000) return;
+      _lastSaveAt = now;
+      saveOfflineProgress();
+    }
+
+    async function play(item) {
+      showErr("");
+      try {
+        const lms = plugin("LocalMediaServer");
+        await stopServer();
+        const { url } = await lms.start({ path: item.dir });
+        _serverActive = true;
+        _nowPlaying = item;
+        const base = url.replace(/\/+$/, "") + "/";
+        const v = $("v");
+        const m = item.meta || {};
+        const num = (m.season && m.episode) ? `S${pad2(m.season)}E${pad2(m.episode)} · ` : "";
+        $("nowTitle").textContent = (m.series ? m.series + " — " : "") + num + (m.episode_name || item.name || "");
+
+        // Resolve the saved offline resume position BEFORE assigning v.src — setting
+        // src starts loading immediately, so the seek listeners must already be
+        // attached or a fast load fires loadedmetadata before we get here.
+        let resumeTo = 0;
+        const os = offlineStore();
+        if (os && item.itemId && item.filePath) {
+          try {
+            const p = await os.getProgress({ itemId: item.itemId, filePath: item.filePath });
+            if (p && p.found && !p.completed && (p.positionSec || 0) > 5) resumeTo = p.positionSec;
+          } catch (_) {}
+        }
+
+        // Seek once the player knows the duration. iOS native HLS may not honor a
+        // seek at the first loadedmetadata, so retry across the early ready events
+        // and clear the suppression flag only after the seek lands.
+        _suppressSave = resumeTo > 0;
+        if (resumeTo > 0) {
+          const seekOnce = () => {
+            if (!_suppressSave) return;                 // already sought
+            if (!(isFinite(v.duration) && v.duration > 0)) return;
+            try { v.currentTime = Math.min(resumeTo, v.duration - 1); } catch (_) {}
+            _suppressSave = false;
+            v.removeEventListener("loadedmetadata", seekOnce);
+            v.removeEventListener("durationchange", seekOnce);
+            v.removeEventListener("canplay", seekOnce);
+          };
+          v.addEventListener("loadedmetadata", seekOnce);
+          v.addEventListener("durationchange", seekOnce);
+          v.addEventListener("canplay", seekOnce);
+        }
+
+        v.src = base + "master.m3u8";
+        _setupOfflineSubs(base).catch(() => {});   // build the sub picker (non-blocking)
+        $("playerWrap").classList.add("show");
+        await v.play().catch(() => {});
+      } catch (e) { showErr(e); }
+    }
+
+    async function closePlayer() {
+      const v = $("v");
+      _suppressSave = false;          // pending resume (if any) is moot now — allow the final save
+      await saveOfflineProgress();
+      _teardownOfflineSubs();         // drop the libass overlay + <track>s before the src changes
+      try { v.pause(); v.removeAttribute("src"); v.load(); } catch (_) {}
+      $("playerWrap").classList.remove("show");
+      _nowPlaying = null;
+      await stopServer();
+      refresh();   // reflect the just-watched progress in the list
+    }
+
+    async function removeItem(item) {
+      if (!window.confirm("Remove “" + (item.name || "this download") + "” from the device?")) return;
+      try { await plugin("BundleDownloader").remove({ sha: item.sha }); } catch (e) { showErr(e); }
+      refresh();
+    }
+
+    const pad2 = (n) => String(n).padStart(2, "0");
+
+    // Watch-progress map keyed "itemId filePath" → { positionSec, durationSec, completed }
+    async function progressMap() {
+      const os = offlineStore();
+      if (!os) return new Map();
+      const m = new Map();
+      try {
+        const { events } = await os.all();
+        // Each server's pinned account only: the badges are that person's.
+        const mine = new Set(Object.values(REG.servers).map((r) => r && r.user && r.user.id).filter(Boolean));
+        for (const e of (events || [])) {
+          if (mine.size && e.profileId && !mine.has(e.profileId)) continue;
+          m.set(e.itemId + " " + e.filePath, e);
+        }
+      } catch (_) {}
+      return m;
+    }
+
+    function posterEl(meta) {
+      const url = meta && meta.poster_data_url;
+      if (url) { const img = document.createElement("img"); img.className = "poster"; img.src = url; return img; }
+      const fb = document.createElement("div"); fb.className = "poster fb";
+      fb.textContent = ((meta && (meta.series || meta.title)) || "?").trim().charAt(0).toUpperCase() || "?";
+      return fb;
+    }
+
+    // A small progress bar + label from a saved-progress record (or null).
+    function progressBits(p) {
+      const wrap = document.createElement("div");
+      if (!p || !(p.durationSec > 0)) return wrap;
+      const pct = Math.min(100, Math.max(0, (p.positionSec / p.durationSec) * 100));
+      const bar = document.createElement("div");
+      bar.className = "prog" + (p.completed ? " done" : "");
+      const fill = document.createElement("i"); fill.style.width = (p.completed ? 100 : pct) + "%";
+      bar.appendChild(fill); wrap.appendChild(bar);
+      return wrap;
+    }
+
+    function episodeRow(item, p) {
+      const meta = item.meta || {};
+      const row = document.createElement("div"); row.className = "ep";
+      const info = document.createElement("div"); info.className = "info";
+      const line = document.createElement("div"); line.className = "line";
+      const num = (meta.season && meta.episode) ? `S${pad2(meta.season)}·E${pad2(meta.episode)}`
+                : (meta.episode ? `E${pad2(meta.episode)}` : "");
+      if (num) { const s = document.createElement("span"); s.className = "num"; s.textContent = num; line.appendChild(s); }
+      const nameTxt = meta.episode_name || item.name || item.sha;
+      line.appendChild(document.createTextNode(nameTxt));
+      const sz = document.createElement("div"); sz.className = "size";
+      sz.textContent = fmtBytes(item.bytesTotal || item.bytesDone || 0)
+                     + (p && p.completed ? " · " : (p && p.durationSec > 0 ? " · " : ""));
+      if (p && p.completed) { const w = document.createElement("span"); w.className = "watched"; w.textContent = "Watched"; sz.appendChild(w); }
+      else if (p && p.durationSec > 0 && p.positionSec > 5) sz.appendChild(document.createTextNode("Resume " + fmtTime(p.positionSec)));
+      info.appendChild(line); info.appendChild(sz); info.appendChild(progressBits(p));
+      const playBtn = document.createElement("button"); playBtn.className = "pbtn"; playBtn.textContent = "Play";
+      playBtn.addEventListener("click", () => play(item));
+      const delBtn = document.createElement("button"); delBtn.className = "dbtn"; delBtn.textContent = "✕";
+      delBtn.addEventListener("click", () => removeItem(item));
+      row.appendChild(info); row.appendChild(playBtn); row.appendChild(delBtn);
+      return row;
+    }
+
+    function fmtTime(sec) {
+      sec = Math.floor(sec || 0);
+      const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+      return (h ? h + ":" + pad2(m) : m) + ":" + pad2(s);
+    }
+
+    async function refresh() {
+      showErr("");
+      const list = $("list");
+      list.innerHTML = "";
+      let items = [], used = 0;
+      try {
+        const dl = plugin("BundleDownloader");
+        const res = await dl.list();
+        // "__player__" is the cached-dashboard snapshot (PLAYER_CACHE_PLAN.md),
+        // not content — never list it.
+        items = (res.items || []).filter((i) => i.complete && i.itemId !== "__player__");
+        try { used = (await dl.bytesUsed()).bytes; } catch (_) {}
+      } catch (e) { showErr(e); }
+      $("used").textContent = used ? fmtBytes(used) + " used" : "";
+      // Name the phone's server and account. With downloads from more than one
+      // server, each card says which it came from.
+      const sids = new Set(items.map(serverOf).filter(Boolean));
+      const multi = sids.size > 1;
+      const main = REG.servers[REG.primary];
+      if (main) {
+        $("identSrv").textContent = main.name || main.url || "";
+        $("identWho").textContent = (main.user && main.user.name) || "Not set";
+        $("ident").style.display = "block";
+      }
+      $("empty").style.display = items.length ? "none" : "block";
+
+      const prog = await progressMap();
+
+      // Group by series (meta.series), preserving discovery order. Items with no
+      // metadata fall back to their own name as a one-off group.
+      const groups = new Map();   // key → { meta, items:[] }
+      for (const item of items) {
+        const meta = item.meta || {};
+        const key = (meta.series || meta.title || item.name || item.sha).trim().toLowerCase();
+        if (!groups.has(key)) groups.set(key, { meta, items: [] });
+        groups.get(key).items.push(item);
+      }
+
+      for (const { meta, items: eps } of groups.values()) {
+        // Sort episodes by season then episode (one-offs keep insertion order).
+        eps.sort((a, b) => {
+          const am = a.meta || {}, bm = b.meta || {};
+          return ((am.season || 0) - (bm.season || 0)) || ((am.episode || 0) - (bm.episode || 0));
+        });
+        const card = document.createElement("div"); card.className = "card";
+        const head = document.createElement("div"); head.className = "chead";
+        head.appendChild(posterEl(meta));
+        const info = document.createElement("div"); info.className = "info";
+        const title = document.createElement("div"); title.className = "ctitle";
+        title.textContent = meta.series || meta.title || eps[0].name || "Download";
+        info.appendChild(title);
+        const isSeries = eps.length > 1 || (meta.season && meta.episode);
+        const cmeta = document.createElement("div"); cmeta.className = "cmeta";
+        cmeta.textContent = isSeries
+          ? `${eps.length} episode${eps.length === 1 ? "" : "s"} · ${fmtBytes(eps.reduce((t, e) => t + (e.bytesTotal || 0), 0))}`
+          : fmtBytes(eps[0].bytesTotal || eps[0].bytesDone || 0);
+        if (multi) {
+          const r = REG.servers[serverOf(eps[0])];
+          const tag = document.createElement("span"); tag.className = "srvtag";
+          tag.textContent = " · " + ((r && r.name) || (eps[0].meta || {}).server_name || "Another server");
+          cmeta.appendChild(tag);
+        }
+        info.appendChild(cmeta);
+        if (meta.overview) { const ov = document.createElement("div"); ov.className = "coverview"; ov.textContent = meta.overview; info.appendChild(ov); }
+        head.appendChild(info);
+
+        if (isSeries) {
+          // Series: header is informational; episodes listed below with their own controls.
+          card.appendChild(head);
+          const epsWrap = document.createElement("div"); epsWrap.className = "eps";
+          for (const ep of eps) epsWrap.appendChild(episodeRow(ep, prog.get(ep.itemId + " " + ep.filePath)));
+          card.appendChild(epsWrap);
+        } else {
+          // Single movie / one-off: play + delete live in the header, progress under the meta.
+          const only = eps[0], p = prog.get(only.itemId + " " + only.filePath);
+          if (p && p.completed) { const w = document.createElement("span"); w.className = "watched"; w.textContent = " · Watched"; cmeta.appendChild(w); }
+          else if (p && p.durationSec > 0 && p.positionSec > 5) cmeta.appendChild(document.createTextNode(" · Resume " + fmtTime(p.positionSec)));
+          info.appendChild(progressBits(p));
+          const playBtn = document.createElement("button"); playBtn.className = "pbtn"; playBtn.textContent = "Play";
+          playBtn.addEventListener("click", () => play(only));
+          const delBtn = document.createElement("button"); delBtn.className = "dbtn"; delBtn.textContent = "✕";
+          delBtn.addEventListener("click", () => removeItem(only));
+          const btns = document.createElement("div"); btns.style.cssText = "display:flex;flex-direction:column;gap:8px;justify-content:center";
+          btns.appendChild(playBtn); btns.appendChild(delBtn);
+          head.appendChild(btns);
+          card.appendChild(head);
+        }
+        list.appendChild(card);
+      }
+    }
+
+    // Capture offline progress on the same events the dashboard player uses.
+    const _vid = $("v");
+    _vid.addEventListener("timeupdate", throttledSave);
+    _vid.addEventListener("pause", saveOfflineProgress);
+    _vid.addEventListener("seeked", saveOfflineProgress);
+    _vid.addEventListener("ended", () => {
+      _suppressSave = false;   // reached the end — the resume seek is irrelevant now
+      // Force a completed write (position == duration ⇒ pct > 0.92).
+      if (_nowPlaying) { try { _vid.currentTime = _vid.duration || _vid.currentTime; } catch (_) {} }
+      saveOfflineProgress();
+    });
+    window.addEventListener("pagehide", saveOfflineProgress);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") saveOfflineProgress();
+    });
+    // Keep the libass overlay sized (`resize` = intrinsic-dimension change, the
+    // case the vendored lib misses) and keep every <track> disabled while the
+    // overlay is up or building — iOS's native player UI / automatic track
+    // selection can flip one to "showing" and double-draw the flattened VTT
+    // under the styled overlay. No-ops when no overlay is involved.
+    _vid.addEventListener("resize",     _octopusNudge);
+    _vid.addEventListener("loadeddata", _octopusNudge);
+    _vid.addEventListener("playing",    _octopusNudge);
+    _vid.textTracks.addEventListener("change", () => {
+      if (!_octopus && !_octopusSub) return;
+      for (const tt of _vid.textTracks) {
+        if (tt.mode !== "disabled") { try { tt.mode = "disabled"; } catch (_) {} }
+      }
+    });
+
+    $("refreshBtn").addEventListener("click", refresh);
+    $("closePlayer").addEventListener("click", closePlayer);
+    $("subSelect").addEventListener("change", (e) => _applyOfflineSub(e.target.value));
+    $("connectBtn").addEventListener("click", () => {
+      // Back to the connect screen, which re-probes the saved host.
+      window.location.replace("index.html");
+    });
+    // Settings: force the connect form (change server / re-pair) instead of an
+    // auto-reconnect, so the user can edit the address or pair while offline.
+    $("settingsBtn").addEventListener("click", () => {
+      window.location.replace("index.html?setup=1");
+    });
+
+    // Reflect the saved host in the Connect button label if present.
+    const saved = localStorage.getItem(KEY_URL);
+    if (saved) $("connectBtn").textContent = "Connect";
+
+    loadReg().then(refresh, refresh);
+  </script>
+</body>
+</html>

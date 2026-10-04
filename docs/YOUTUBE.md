@@ -240,6 +240,13 @@ OS mixer is the sole amp.
 - **tv-state heartbeat ignores the player's `volume` field** while
   `youtube_active` — reading `player.getVolume()` would just stomp the
   authoritative OS-volume value with `100` every second.
+- **Exception — the air-mouse remote**: the remote's Vol± buttons must never
+  touch the host OS mixer (see [REMOTE.md](REMOTE.md)), so
+  `_remote_key_action` broadcasts a `player_volume_step` yt_command (value =
+  ±percent) and `tv.html` steps the IFrame player's own gain instead. The
+  onReady lock still resets the player to 100 on each new video, and the
+  dashboard slider keeps its OS-volume behaviour — the two paths are
+  independent attenuators (combined loudness = slider × remote).
 
 ### Pre-set on Start (the "starting volume")
 
@@ -279,6 +286,27 @@ The restore runs inside `_stop_cleanup`, **after polling for the kiosk process
 to actually exit** (`TV_CHROME_PROFILE` match, 4 s deadline). If we restored
 sooner we'd be turning the still-playing video's volume up or down underneath
 the user.
+
+### Inline trailers on the TV kiosk (same duck, no separate kiosk)
+
+The **trailer modal** (`openTrailerModal` in `static/index.html`) is a plain
+YouTube IFrame, *not* the `/tv` kiosk. When the dashboard itself is the host's
+fullscreen kiosk (`?tv=1`, `TV_MODE`), that IFrame's audio rides the host OS
+mixer — so without help a trailer blasts the room even though the whole
+YouTube-on-TV path above is careful about it. So the trailer reuses the same
+duck:
+
+- `openTrailerModal` (only when `TV_MODE`) → `POST /api/trailer/host-audio/duck`
+  → snapshots the OS volume into `state.system_volume_before_trailer` and drops
+  the mixer to `_youtube_start_volume()` (same knob, default 30).
+- `closeTrailerModal` (only when `TV_MODE`) → `POST /api/trailer/host-audio/restore`
+  → puts the snapshot back and clears it.
+
+**Watch-on-TV handoff:** if the user hands the inline trailer off to the real
+kiosk mid-watch, `youtube_play` **adopts `state.system_volume_before_trailer`**
+as its own `system_volume_before_yt` (and clears it) instead of snapshotting the
+already-ducked mixer — so Stop restores the user's real level, not the ducked
+one, and the trailing `closeTrailerModal` restore no-ops.
 
 ## Limitations / notes
 

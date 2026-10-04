@@ -2,12 +2,17 @@
 
 `/admin` — served by `static/admin.html` ([main.py:3167](../main.py#L3167)). Disabled if `ADMIN_PASSWORD` is empty in `.env`.
 
+## Trust boundary (deliberate)
+
+Only `/admin` and admin API routes are gated (`_check_admin`). **The main dashboard has no per-request auth** and uvicorn binds `0.0.0.0`, so anyone on the LAN can drive search/stream/play. This is intentional: StreamLink is a trusted-home-network appliance, and gating every phone/TV client would break the zero-config connect flow. The mitigation is *network*, not app-level: keep it on a home LAN, never port-forward it. Adding real dashboard auth is deliberately **out of scope** — revisit only if the deployment model changes (e.g. exposing it to the internet). The TLS cert (`cert.pem`/`key.pem`/`ca.pem`) is generated per-machine by `setup.py` and git-ignored; `setup.py` detects and regenerates the old accidentally-committed shared cert.
+
 ## Auth flow
 
 1. `GET /api/admin/status` returns `{enabled: bool}`. If false, the login overlay shows "Admin disabled" and the dashboard hides the admin link
 2. `POST /api/admin/login {password}` → returns `{token}` (32 hex chars, `secrets.token_hex(32)`)
 3. Token stored client-side in `sessionStorage.admin_token`. Sent on every request via `Authorization: Bearer <token>`
 4. Server-side store: `_admin_sessions: dict[str, float]` — token → Unix-timestamp expiry. TTL is 24 h ([main.py:3184](../main.py#L3184))
+5. **Expiry is handled once, at the transport** (12.7.3). Every tab here is a 1.5–4 s poller sending `authHeader()`, and each treated a non-OK reply as "try again later" — so a dead token turned the whole dashboard into a 401 generator with nothing on screen saying so (`/api/admin/updater` answered 401 every minute for ~8 h in the logs). `checkAuth()` only ever ran at page load. `admin.html` now wraps `window.fetch`: any **401 from an `/api/admin/` URL** calls `_onSessionExpired()`, which clears the token, stops every registered interval (`_adminTimers`, populated by a `setInterval` wrapper) and restores the login overlay with "Session expired — sign in again." It no-ops when `adminToken` is empty, so a first visit never claims a session expired.
 5. `_check_admin(request)` accepts token from `Authorization: Bearer`, `X-Admin-Token` header, or `?admin_token=` query param. The query-param form is needed for SSE because EventSource can't set headers
 
 ## HTTPS redirect ([main.py:1772](../main.py#L1772))
@@ -19,7 +24,19 @@ Browsers will show a warning until `ca.pem` is added to the system trust store. 
 - Linux: `sudo cp ca.pem /usr/local/share/ca-certificates/streamlink-ca.crt && sudo update-ca-certificates`
 - Windows: `Import-Certificate -FilePath ca.pem -CertStoreLocation Cert:\\LocalMachine\\Root`
 
+## Help tips (7.16.0)
+
+Flat Metro-styled `?` chips (`.help-tip`) sit next to headings/controls on every tab; each element's `data-tip` attribute renders in a single shared popover (`#tipPop`, created lazily, `z-80`, viewport-clamped, flips below near the top edge). Hover or keyboard focus shows a tip transiently; **tapping a chip pins it** (tap again / tap elsewhere dismisses) so tips work on touch, where `title` attributes never showed. Any element may also carry `data-tip` for a hover-only tip (e.g. Test All, the Force-Prep Stop pair, the Validate-on-Prep mode buttons, Reset Hard, the encoder badge).
+
+The important tips are **contextual**: settings loaders rewrite them from the currently-saved config via `setTip(id, text)` (which live-refreshes an open popover) — `loadScheduledReboot` → `#srTip` (exact time/tz/idle window), `_updateAutoPrepTip` → `#autoPrepTip` (selected mode + live idle-minutes + soft/hard stop + the idle-download-window side effect), `_renderVpnKs` (button tip per mode), `_renderQbRatio` → `#qbRatioTip`, `_updateApurgeTip` → `#apurgeTip`, `_updateSubLangTip` → `#subLangTip` (whisper translate-to-English caveat for non-English picks), `loadAutoupdate` → `#auTip`, and the per-profile Restricted Content / Search Sources buttons in `loadProfilePins`. When adding a new setting, prefer a contextual `setTip` in its loader over a static description of every mode.
+
 ## Tabs
+
+### Devices (19.0.0)
+
+**Right Now** lists every device that is active (a request in the last 2 min, or the dashboard open) or recent (30 min). Each row shows its name, profile, what it is doing, and for a phone that is playing, a position bar and whether it streams from the box or plays its own downloaded copy. The TV gets its own row while VLC is playing. **All Devices** is every device that ever connected: name, how it was recognised (Browser / App / Inferred / Anonymous; "App token" on rows from before 19.8.0), the iOS app version, first and last seen, request count, and a filter. Refreshes every 5 s while the tab is open.
+
+Click a device for its history: **Simple** (what it did, one row per run of the same activity, with time span, request count and failures) or **Raw** (every request, searchable by path or kind, paged with Load older). **Rename** sets an admin-side name; **Forget** deletes the device and its whole history. Mechanics, identity rules and retention: [DIAGNOSTICS.md § Devices](DIAGNOSTICS.md).
 
 ### 0. Activity (default landing tab)
 
@@ -41,21 +58,22 @@ A **summary strip** shows the active count, the **Lost On Restart** count, Host 
 
 ### Automatic Maintenance (System tab)
 
-Two idle-gated background workers that drain the Outstanding Work backlog so it doesn't sit waiting on a manual trigger (`settings.auto_maintenance`, both **default ON**), driven by `background_maintenance_loop` (every 30 s):
+Three idle-gated background workers that drain the Outstanding Work backlog so it doesn't sit waiting on a manual trigger (`settings.auto_maintenance`, all **default ON**), driven by `background_maintenance_loop` (every 30 s):
 
 - **Auto-Fingerprint** — runs Smart Skip analysis for any eligible series that's never been fingerprinted, one series at a time (`_find_unfingerprinted_series` → `_run_series_analysis`). The periodic counterpart to the on-ready / post-prep hook, which only fires for newly-added content. Failed/manual entries are sticky (not auto-retried in a loop).
 - **Auto-Validate** — deep-decodes source files that have never been validated (or whose file changed), one at a time (`_run_auto_validation`), and **persists each verdict** into `library.json → files[].validation`. So it skips already-checked files and **resumes after a restart** instead of starting over — the resumable counterpart to the in-memory admin scan. Manual admin scans now persist verdicts too, so both drain the same backlog.
+- **Audit Stream Bundles** — structurally checks prepped HLS bundles for the frozen-picture-over-silence damage a half-downloaded source produces, and **purges + re-preps** the ones that fail (`_run_bundle_audit`). Verdicts persist into `library.json → files[].bundle_check`, so it resumes across restarts and never re-scans a settled bundle. It runs **first** on a tick, because it is segment-size arithmetic rather than a decode (a whole library takes seconds, against minutes per file for validation) and because a bundle nobody can watch is more urgent than a skip marker nobody has missed. Repair never holds the encode slot — it queues an ordinary bulk prep job. A **Scan Now** button re-checks everything regardless of stored verdicts. The mechanism, and why a dead video rung alone is not enough to condemn a bundle, are in [STREAMING.md § Bundle integrity](STREAMING.md) and [GOTCHAS.md](GOTCHAS.md).
 
-Both run **only while the host is idle** (`_machine_in_use(300)` — deliberately *not* `for_prep=True`, so an admin watching the Activity tab doesn't block the very work it shows) and at below-normal OS priority, and bail the instant the box is used. They're serialized so the two heavy passes never run at once, and auto-validate yields to a manual scan.
+All three run **only while the host is idle** (`_machine_in_use(300)` — deliberately *not* `for_prep=True`, so an admin watching the Activity tab doesn't block the very work it shows) and at below-normal OS priority, and bail the instant the box is used. The two *heavy* passes (fingerprint, validate) are serialized so they never run at once, and auto-validate yields to a manual scan; the bundle audit is cheap enough to run alongside them.
 
-- `GET /api/admin/auto-maintenance` → `{fingerprint, validate, analyzer_available, ffmpeg_available, fingerprint_backlog, validate_backlog, validate_running, analysis_running}`.
+- `GET /api/admin/auto-maintenance` → `{fingerprint, validate, bundles, analyzer_available, ffmpeg_available, fingerprint_backlog, validate_backlog, validate_running, analysis_running, bundle_audit}`.
 - `POST /api/admin/auto-maintenance` → `{fingerprint, validate}` saves the toggles; turning validate off also halts an in-flight auto-validation pass.
 
 ### 1. Indexers ([static/admin.html:95](../static/admin.html#L95))
 
 #### Indexer Health
 
-A card above the configured-indexers list that surfaces **resilience to a partly-broken Jackett**. Jackett's aggregate `/indexers/all/results` endpoint returns results from the indexers that *did* respond and flags the ones that errored, so a single broken indexer never sinks a search — `_record_indexer_health` (called from `/api/search`) records the per-indexer status and raises a **non-specific** `indexers_degraded` flag when some fail while others succeed. The flag drives a quiet amber banner on the **user** dashboard ("Some search sources aren't responding — results may be incomplete.") that deliberately **never names which** indexers are down; the names + failure reasons live only here, for the admin.
+A card above the configured-indexers list that surfaces **resilience to a partly-broken Jackett**. Jackett's aggregate `/indexers/all/results` endpoint returns results from the indexers that *did* respond and flags the ones that errored, so a single broken indexer never sinks a search — `_record_indexer_health` (called from `/api/search`) records the per-indexer status and raises a **non-specific** `indexers_degraded` flag when some fail while others succeed. As of 7.4.1 this flag no longer surfaces a banner on the **user** dashboard (it was noise — search stays usable when only some indexers fail); the flag still flows on the `state` SSE and drives the admin-only `#indexerHealthBanner` here, where the names + failure reasons live. The all-indexers-failing case is still a hard error to the user (502 → toast).
 
 The card shows:
 - A degraded/all-OK summary banner (`X of Y indexers are failing` / `All Y indexers responding`).
@@ -96,11 +114,28 @@ If `JACKETT_PASSWORD` is set in `.env`, `_jackett_admin()` ([main.py:200](../mai
 
 ### 2. Content Lock ([static/admin.html:142](../static/admin.html#L142))
 
-Lists all library items with an "Admin only" toggle. Calls `POST /api/library/{id}/admin-lock {admin_only}`. When `admin_only=true`:
-- `GET /api/library` excludes the item unless the requester is admin OR the requesting `profile_id` has `elevated=true`
-- Other endpoints (`/files`, `/play`, `/download`, etc.) currently do not check `admin_only`; the gate is at list-time only
+Lists all library items, each with an **Admin only** toggle and a **📁 Move** action. The toggle calls `POST /api/library/{id}/admin-lock {admin_only}`.
 
-To grant a profile elevated access without making them an admin, use the Profile PINs tab.
+The lock can also be applied **at download time** (11.21.0) without visiting this tab — see *Locking at download time* below. When `admin_only=true`:
+- `GET /api/library` excludes the item unless the requester is admin OR holds a **PIN-verified profile session token** (`X-Profile-Token`) for a profile flagged `elevated=true` — see `_is_elevated`. Claiming an elevated `profile_id` is **not** sufficient: those UUIDs come from the unauthenticated `GET /api/profiles`, so before 11.20.0 quoting one was enough to unlock the whole lock with no PIN entered. A profile with **no PIN can never be elevated** — no PIN means no token is ever issued for it.
+- **No download/prep evidence leaks to a viewer who can't see the item.** A viewer who isn't admin/elevated must see *no trace* that the hidden content is on the box:
+  - `GET /api/offline-active` (the global "Prepping…" bar) **fully excludes** an admin-locked item's prep jobs for such a viewer — not redacted. If hidden jobs are the only active work, they get `active:false`, i.e. the bar stays hidden exactly as when idle. Privileged (admin/elevated) requesters still see everything, with real titles.
+  - The `state` SSE `downloading_count` (the nav `↓ Downloading` badge) reports a **visible** count (`state.downloading_count_visible`) that excludes admin-locked downloads. The true `state.downloading_count` — which still counts them — drives only the internal host-busy/idle gating (`_machine_in_use`, scheduled reboot). The dashboard also skips its optimistic badge decrement for a `library_update` on an item not in the viewer's (already-filtered) library.
+- **The per-item read routes are gated too** (11.20.0). `GET /api/library/{id}/files` and `/metadata` call `_assert_item_visible` and return **404** — not 403, which would confirm the item exists — for a requester who isn't admin or verified-elevated. Previously they checked nothing at all: the lock filtered only the *listing*, so anyone who knew (or was handed) a hidden item's id could read its full file list and metadata with no `profile_id` and no auth whatsoever. Filtering a list is not access control when the ids are addressable.
+- The remaining per-item **action** routes (`/play`, `/download`, …) are still ungated; the lock is about who can *see* the content, and playback is a shared-household surface. Treat it as a visibility boundary with a real check on the read paths, not a per-action permission system (see [LIBRARY_DATA.md](LIBRARY_DATA.md) on soft PINs).
+
+**Move (relocate a series' files).** The **📁 Move** button opens a modal (`openMoveModal` → `submitMove`) that calls `POST /api/library/{id}/move {dest_dir}` (admin-gated). The modal pre-populates one-tap destination chips from `GET /api/settings/library-paths` (plus free-text entry). The endpoint relocates the **whole series group** (or the lone movie/one-off): torrent-backed items move via qBittorrent's `setLocation` (`qbit_set_location`) so they **keep seeding** from the new path, non-torrent files move directly, and each file's **co-located** `.streamlink_cache/<key>` HLS bundle rides along (the key is move-stable, so on-device playback keeps working with no re-prep — see [STREAMING.md](STREAMING.md)). **The move is asynchronous:** qBit's content relocation can take a while (large packs, cross-drive), so the endpoint returns `status:"moving"` immediately and a background task (`_settle_series_move`) commits the new `item.files[*].path` **only once the files physically exist at the destination** (paths come from qBit's real file list, not string math) — the library never points at files mid-move. The modal polls `GET /api/library/{id}/move-status` and reports **"complete"** or **"didn't finish — check qBittorrent, then retry."** Re-running the move to the same destination is the recovery path for a torrent qBit left mid-move. See [GOTCHAS.md](GOTCHAS.md).
+
+**Locking at download time (11.21.0).** Waiting to flip this toggle leaves restricted material sitting in the open library for however long the download takes, so the dashboard offers the lock up front. A small lock/unlock icon appears in the header of the Add-to-Library modal and of the show view's source and bulk sheets; toggling it sends `admin_only:true` on `POST /api/library/download` (or `/api/stream/save-to-library`), and the item is created locked.
+
+- The icon is **hidden unless `canLockContent()`** — the selected profile is `elevated` *and* `verified_profile_id` from `GET /api/profiles` matches it. That is a drawing decision only: the endpoints re-check with `_is_elevated` and return **403**, so hand-posting `admin_only:true` gains nothing.
+- It is deliberately a bare icon with no label. A prominent "lock this" control in every household member's download modal would advertise that there is restricted content to go looking for, which is the thing the lock exists to avoid. The modal adds one amber line while the lock is on, because a bare icon is cryptic and `title=` tooltips never render on touch.
+- The show view's toggle is **one shared choice** across its source and bulk sheets and resets when a show is opened; the modal's resets each time it opens. A lock is never carried silently into the next download.
+- A **duplicate** download (same info-hash, dedup path) only ever tightens: it applies the lock to the existing item if asked, and never removes one if not. Unlocking stays this tab's job.
+
+To grant a profile elevated access without making them an admin, use the Profile PINs tab — set a PIN on it as well, or the elevation has nothing to verify against.
+
+**Deleting is gated by the same token.** `DELETE /api/library/{id}` (which defaults to deleting the media off disk), `/delete-files`, `DELETE /api/profiles/{id}` and `DELETE /api/settings/library-paths` require an admin session **or** a PIN-verified profile — they were entirely unauthenticated before 11.20.0. A consequence worth knowing: **a household profile with no PIN can no longer delete anything.** Give the profiles that should be able to a PIN.
 
 ### 3. Smart Skip ([static/admin.html:155](../static/admin.html#L155))
 
@@ -109,12 +144,13 @@ For each item:
 - If an analysis job is running for the series, shows a live progress bar (driven by `analysis_status` SSE events)
 - **Analyze** button → `POST /api/admin/library/{id}/analyze` — force re-run for the entire series
 - **Edit** button → opens inline editor with three numeric fields per file (intro start, intro end, credits start). Empty → clear. Save calls `PATCH /api/admin/library/{id}/skip-data`. Manual edits set `analysis.source="manual"` so they survive future analyzer runs
+- **Boundary evidence block** (12.4.1) — under each file, the pre-refinement fingerprint value beside the final one plus how the final one was chosen: `chapter` (a marker in the file), `silence_end` (the gap between theme and dialogue), `structural` (a measured credit roll), or `chapter+silence_end` when two independent kinds of evidence agreed, with the confidence. Rendered by `_skipProvenance()` from the endpoint's `method` + `refine` fields; absent for files that were never refined. **A manual edit clears it** — the stored provenance described the automatic value, not the hand-entered one. See [ANALYZER.md](ANALYZER.md)
 
 Admin SSE: `ensureAdminSSE()` opens `/api/events?admin_token=…` so the progress bars live-update.
 
 ### 4. Offline Cache ([static/admin.html#panelOffline](../static/admin.html))
 
-Inventory + cleanup for `.offline_cache/<sha>.mp4` (the remuxed/transcoded outputs produced by `/prep-all` and Save Offline). The directory has no automatic eviction, so this tab is the only built-in way to reclaim space.
+Inventory + cleanup for the HLS prep bundles produced by `/prep-all` and Save Offline. **As of v8 each bundle lives beside its media** (`<file_dir>/.streamlink_cache/<key>/`), not in the old central `.offline_cache/` — see [STREAMING.md § Where bundles live](STREAMING.md). The inventory walks every library file's `.streamlink_cache/` (+ the legacy central dir for un-migrated stragglers); each entry carries a `root` (its containing cache dir) so deletes hit the right place. Bundles have no automatic eviction, so this tab is the only built-in way to reclaim space.
 
 Each per-file entry carries one of five statuses, surfaced as a coloured badge in the UI:
 
@@ -125,6 +161,7 @@ Each per-file entry carries one of five statuses, surfaced as a coloured badge i
 | `pending`       | Queued behind `OFFLINE_JOB_CONCURRENCY` semaphore; ffmpeg hasn't started yet |
 | `error`         | Most recent prep job failed; the ffmpeg stderr tail is rendered inline |
 | `partial_stale` | A `<key>.part.mp4` is on disk with no live job (server crashed mid-encode) — safe to delete |
+| `damaged`       | The bundle is on disk and complete, but the integrity audit found a long dead stretch in it — it plays as a frozen picture over silence. Carries a `damage` line (`15:32 of 31:35 dead (49%) — picture frozen over silence; worst video 1:23-7:38`). Not `cached`: it is there and unwatchable, which is worse than missing. The audit purges and re-preps these automatically — see [STREAMING.md § Bundle integrity](STREAMING.md) |
 
 - **Top row** — total bytes on disk (sum of completed `.mp4` and `.part.mp4`), plus the cache directory path.
 - **Per-item rows** — every library item that has any kind of state (not just completed encodes). The summary row has small chips for the count of each status. Click the title to expand the per-file list. The header row's **Delete All** removes every completed/partial file and clears every error-state job entry for that item; active jobs are skipped (cancel them from the library card if you really want to abandon them).
@@ -146,6 +183,40 @@ Endpoints:
 - `GET /api/admin/cache-autopurge` → `{enabled, max_gb, last}` (`last` = `{at, deleted, bytes_freed, total_bytes_before}` or `null`)
 - `POST /api/admin/cache-autopurge` → `{enabled, max_gb}`; `max_gb` clamped 1–10000
 
+### Cleanup (qBittorrent + download folder)
+
+> **Since 18.23.0 a delete cleans up after itself** (the reaper; see [GOTCHAS.md](GOTCHAS.md) § qBit "delete with files" is not a delete). Strays that remain are ones StreamLink can't prove are its own, such as files placed by hand, or a file still locked after ~2 days of retries. Dead `.<hash>.parts` files are swept automatically at startup.
+
+A dedicated tab that **cross-references three sources** — qBittorrent's torrent list, the library, and the download folder on disk — and surfaces the ways they drift apart, each with a guided **Recover** (where possible) and a **confirm-gated Delete**. Distinct from the **File Validator** (decodes *existing* library source files) and **Offline Cache** (manages `.offline_cache/` HLS bundles only): this is the only view of broken/orphan **torrents** and download-folder **clutter**.
+
+Backed by `_build_cleanup_inventory` ([main.py](../main.py)), which reuses the Offline Cache tab's snapshot discipline: it loads the library + `qbit_info_all()`, runs the (blocking) stray-file disk walk in `_cleanup_inventory_sync` via `asyncio.to_thread`, and caches the result (`_cleanup_inv_snapshot`, guarded by `_cleanup_inv_lock`). `GET /api/admin/cleanup` serves the snapshot instantly with an **"As of …"** line; the **Refresh** button calls `?refresh=1`. Every mutation calls `_invalidate_cleanup_inventory()`. When qBittorrent is unreachable the payload carries `qbit_ok:false` (UI shows a **qBittorrent offline** chip) rather than mislabelling every library torrent as broken/orphan.
+
+Four category cards:
+
+| Category | Detected when | Recover | Delete |
+|----------|---------------|---------|--------|
+| **Broken torrents** | qBit `state ∈ {error, missingFiles}`, or the torrent's `content_path` no longer exists on disk | `qbit_recheck` + `qbit_resume` (re-verify, re-fetch missing pieces) | remove the torrent (+files), and drop a library item it backs |
+| **Orphan torrents** | a qBit torrent whose hash no library item references (and not the live stream) | **Adopt** — `_adopt_torrent_to_library` builds a library item from the torrent (no new magnet needed) | remove the torrent (+files) |
+| **Library items — missing files** | item `status ≠ downloading` with a non-`skip` file absent on disk | when a torrent still backs it: recheck + resume + flip to `downloading` + `_apply_item_schedule`; otherwise none | reuse the library-item delete (item + torrent + files) |
+| **Stray files** | a top-level entry under **any** configured download/library folder owned by no torrent (`content_path` / `save_path`+name) and no library file path | — (delete-only) | `unlink` / `rmtree` the single path |
+
+**Multiple download paths.** The stray-file scan walks **every** configured root from `_all_library_paths()` (`settings.qbit_download_path` + `library_path_2/3/4` + UI-added `settings.library_paths`), not just the primary download folder — so clutter in a secondary library drive is reconciled too. The response carries `download_paths[]` (the UI lists them all). Two guards keep it safe: StreamLink's own dirs (`.streamlink_cache`, `.offline_cache`, `.ondemand_cache` — `_STREAMLINK_RESERVED_DIRS`) are **never** flagged stray (important now that the HLS cache lives *inside* media folders), and a configured root nested inside another configured root isn't flagged when the parent is scanned.
+
+**Bulk delete.** Each category card header carries a **Delete All** button (`cbDeleteAll`/`coDeleteAll`/`cmDeleteAll`/`csDeleteAll` → `_cleanBulk` in [static/admin.html](../static/admin.html)). It is confirm-gated with a live count and simply fans the **existing per-row `DELETE` endpoints** out sequentially (no dedicated bulk endpoint) — a mid-batch failure such as a 409 In-Use skips that item instead of aborting the rest, and a summary toast reports deleted-vs-skipped before a single `loadCleanup(true)` refresh. Broken-torrents bulk delete filters **In Use** rows out client-side up front (they'd 409 anyway), so the in-use invariant below holds for bulk exactly as it does per-row.
+
+**In-use protection.** `_cleanup_in_use_hashes(lib)` collects the live stream/prepare torrent (`state.active_hash`, `state.prepare_hash`) and every `status=="downloading"` item's torrent. Those are excluded from the orphan list, flagged **In use** on a broken row, and their recover/delete endpoints return **409**. Stray-file deletion is **path-guarded**: the target must resolve strictly inside `settings.qbit_download_path` (no traversal, never the folder itself) and must not be owned by a current torrent (a trailing `.!qB` incomplete marker is stripped before the ownership test so an in-progress download is never seen as stray).
+
+Endpoints (all `_require_admin`):
+- `GET /api/admin/cleanup` → `{generated_at, qbit_ok, download_path, download_paths[], broken_torrents:[…], orphan_torrents:[…], missing_items:[…], stray_files:[…], totals}`; `?refresh=1` forces a fresh qBit query + disk walk.
+- `POST /api/admin/cleanup/torrent/{hash}/recover` → recheck + resume (409 if in use, 404 if gone).
+- `DELETE /api/admin/cleanup/torrent/{hash}?delete_files=` → `qbit_delete` + drop a linked library item (409 if in use).
+- `POST /api/admin/cleanup/orphan/{hash}/adopt` → `{ok, item_id}` (404 if gone / no video files).
+- `POST /api/admin/cleanup/item/{id}/recover` → recheck + resume + status → `downloading` (404 if no backing torrent — delete instead).
+- `DELETE /api/admin/cleanup/item/{id}?delete_files=` → remove the library item (+torrent +files).
+- `DELETE /api/admin/cleanup/stray?path=…` → `{deleted, bytes_freed}` (400 traversal/outside **any** configured root or a root itself, 404 missing, 409 owned by a torrent).
+
+There is **no one-click bulk purge** — every action is per-row and confirm-gated by design.
+
 ### 5. Background Video
 
 Single-file uploader for an idle background video that plays on the TV in VLC whenever nothing else is. Stored at `.background/<filename>` (the directory is wiped on every upload so only one file ever exists). Settings live under `library.json → settings.background_video` and survive restarts.
@@ -163,12 +234,12 @@ Loop mechanics: `background_video_loop` polls every 3 s. If the video file exist
 For each profile:
 - **Set PIN** — admin overrides the usual current-PIN check
 - **Clear PIN** — same
-- **Elevated** toggle → `POST /api/profiles/{id}/set-elevated {elevated}` — grants view of `admin_only` items
+- **Elevated** toggle → `POST /api/profiles/{id}/set-elevated {elevated}` — grants view of `admin_only` items. **Only takes effect once the profile has a PIN**: elevation is proved by the session token `verify-pin` issues, so an elevated profile with no PIN stays locked out of hidden content (and can't delete). Set the PIN and the Elevated toggle together.
 - **Search Sources** (All / Limited) → opens a modal listing every configured indexer (`GET /api/admin/indexers/catalog`, with caps-derived content-type chips). Saving a strict subset writes `profile.allowed_indexers`; saving with all (or none) ticked clears it (unrestricted) via `POST /api/profiles/{id}/set-indexers {allowed}`. The allowlist is enforced at search time — `/api/search` intersects it with the user's own Sources picker (see [API.md § Search](API.md)), so a profile can never search an indexer the admin didn't allow. An empty/absent list = all configured indexers.
 
 ### 7. System
 
-Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Automatic Stream Prep**, **Auto-Prep on Play**, **Force Stream Prep**, **Validate & Repair on Prep**, **File Validator**, **Storage & Compression**, **Network Adapter**, **VPN Kill Switch**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
+Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Automatic Stream Prep**, **Auto-Prep on Play**, **Show Missing Content**, **Force Stream Prep**, **Validate & Repair on Prep**, **File Validator**, **Storage & Compression**, **Network Adapter**, **VPN Kill Switch**, **Race Download Sources**, **Prefer Season Packs**, **Priority While Watching**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
 
 #### System Health
 
@@ -208,12 +279,69 @@ See [RUNTIME.md § LAN detection](RUNTIME.md) and [GOTCHAS.md](GOTCHAS.md).
 Chooses how far the Mullvad kill switch reaches when the VPN drops. A single toggle, persisted under `library.json → settings.vpn_killswitch` (`block_ui`, default `true`), mirrored into `state.vpn_block_ui` and surfaced in the `state` + `vpn_status` SSE events so every dashboard reacts live.
 
 - **Block UI** (`block_ui: true`, the historical behaviour) — a VPN drop locks the whole dashboard behind the full-screen "VPN DISCONNECTED" overlay until the VPN returns.
-- **qBit Only** (`block_ui: false`) — only qBittorrent is killed; the overlay is suppressed (the VPN pill still turns red) so a viewer can keep using the dashboard, e.g. to watch already-prepped on-device content.
+- **qBit Only** (`block_ui: false`) — only qBittorrent is killed; the overlay is suppressed (the VPN pill still turns red) so a viewer can keep using the dashboard, e.g. to watch already-prepped on-device content. In this mode the controls that *do* need qBittorrent are greyed out + click-blocked with an explanatory tooltip (`applyVpnGate` / `body.vpn-down` / `.vpn-gated`; see [FRONTEND.md](FRONTEND.md)) rather than failing silently: Search, the Save/Play buttons on results, "Recheck hashes", and the in-progress download badge ("⚠ VPN down — paused").
 
 **qBittorrent is killed on a VPN drop regardless of this setting** — that invariant is enforced unconditionally by `vpn_guard` (in-process) and `watchdog.py` (process level), and the P2P stream/download endpoints stay 403'd in both modes. `block_ui` governs the UI lockout only. See [GOTCHAS.md § VPN](GOTCHAS.md#vpn) and [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md).
 
 - `GET /api/admin/vpn-killswitch` → `{block_ui}`.
 - `POST /api/admin/vpn-killswitch` → `{block_ui}`; broadcasts a `state` snapshot so the overlay appears/clears immediately.
+
+#### Race Download Sources
+
+**One thing runs regardless of this switch (19.12.0):** a download that has *stalled part-way* is rescued by racing other releases beside it (`_rescue_stalled_download`) — that is a repair, not a speed-up, and it still honours **Max items**. See [GOTCHAS.md](GOTCHAS.md) § A download that stops part-way.
+
+**Ships disabled.** When on, a download the user started **without choosing a torrent** runs several candidate releases at once and progressively drops the slow ones, so a dead or crawling pick costs seconds rather than the ten minutes the serial dead-swarm retry takes to notice. Scope is deliberately narrow: one-press **Get** (a film, a season pack) and **Stream Now** on an auto-picked source. Picking a specific release from the source list always downloads exactly that one, and bulk season downloads never race — ten episodes x three candidates would put thirty torrents in qBittorrent at once.
+
+The help text says the cost out loud and should keep doing so: **for the length of a race every candidate downloads in full**, so with the defaults (3 candidates, 2 concurrent races) six torrents share one connection and each is individually slower. Racing improves time-to-first-byte and immunity to a bad pick; it does not improve aggregate throughput.
+
+- **Enabled** — the master switch. Off ⇒ every path behaves exactly as 15.6.3, and no `race` field is ever written to `library.json`.
+- **Sources Per Race** — 2 / 3 / 4 (default 3).
+- **Races At Once** — 1 / 2 / 3 (default 2), box-wide. Downloads over the cap start normally and are unaffected; the item records `race.state:"skipped", reason:"cap"`.
+- **Keep A Better Copy** — the HQ two-track. When the fastest release is a low-quality one, also keep the best copy at or under the quality limit. It is **paused while anyone is watching that item** (a file being streamed before it finishes needs the whole link) and resumed on stop. When it completes it swaps itself in automatically: the item repoints, watch progress and track preferences migrate to the new paths, the old copy and its HLS bundles are deleted, and playback — if it was live — picks up where it left off.
+- **Quality Limit** — 720p / 1080p / 4K (default 1080p), the highest tier the better copy may aim at. Disabled while *Keep A Better Copy* is off.
+
+Quality is read from the release name (`2160p`, `WEB-DL`, `x265`, `REMUX`…) and sanity-checked against the file size versus the TMDb runtime, so a release that merely *claims* 4K is judged on what it actually contains. The cross-check only ever **demotes**; an unknown runtime costs nothing. Note that with a 1080p limit most races produce no two-track at all, because the auto-pick usually already *is* the best 1080p — that is correct, and the card only shows an upgrade chip once a two-track genuinely engages.
+
+Enums are validated server-side, not coerced: an unrecognised size / cap / ceiling is a **400**, so the panel can never show a value the server didn't agree to. Both settings live in `library.json → settings.download_race` and are mirrored onto `state`, so flipping them reaches every open dashboard in the next `state` SSE event without a reload.
+
+- `GET /api/admin/download-race` → `{enabled, size, max_items, quality_ceiling, hq_upgrade}`
+- `POST /api/admin/download-race` → same shape.
+
+See [BACKEND.md § Parallel download racing](BACKEND.md), [LIBRARY_DATA.md](LIBRARY_DATA.md) § `race`, and [GOTCHAS.md](GOTCHAS.md).
+
+#### Prefer Season Packs
+
+**Ships on (17.9.0).** Whether a request for **one** episode may be answered with a whole-season torrent, sliced down to it. Applies only where nobody picked a release — the library's one-press **Get** and **Play now**, the per-season gap fill, and the search page's per-episode **Auto**. Choosing a specific copy yourself is never overridden.
+
+Why a pack wins even for one episode: you get that group's encode, its audio layout and the quality the rest of your library is, instead of whatever single-episode rip happened to be seeded that day — and because the torrent then stays registered, **every other episode of that season is a priority write away** rather than another indexer hunt (the *Fetch from pack* buttons, `POST /api/library/pack-fetch`). Only the requested episode downloads; the rest of the pack is set to "do not download" until asked for.
+
+- **Use A Season Pack For One Episode** (default on). Turning it off affects only the **next** request — a pack already in the library keeps its slice and its Fetch buttons. Releasing existing slices instead would hand the user twelve episodes they never asked for, which is the opposite of what turning this off means.
+- **Biggest Pack To Use** (default **200 GB**) — a hard refusal on the whole torrent. The Auto picker's download-size limits are applied to the **per-episode share** (`pack_size ÷ episode_count`), because that is all that actually downloads: judging a 144.7 GB Hunter x Hunter pack whole against a 40 GB cap would refuse the very case this exists for. That leaves nothing else stopping a complete-franchise torrent being adopted for one episode, which is what this ceiling is for — qBittorrent holds its file list and a queue slot for as long as it stays in the library. **For a whole-season request answered by a multi-season pack (19.12.1) the limit is judged on the season's share, not the torrent**: a 500 GB S01–S13 pack whose Season 1 is 30 GB passes a 200 GB limit, because only Season 1 is ever set to download. The single-episode rule above is unchanged.
+
+Two things it is worth knowing it does **not** do. A sliced pack's other episodes show in the library as **missing** (badged *in a pack you have*), not owned — they are not on disk and priority 0 means they never will be unaided. And a pack that turns out not to name its episodes in any resolvable way is abandoned by the server on its own after five minutes: the torrent is dropped (nothing of it downloaded — an unresolved slice holds every file at priority 0) and the single-episode release the picker had in reserve takes its place, with the library row keeping its identity throughout.
+
+Both settings live in `library.json → settings.pack_first` and are mirrored onto `state` so the dashboard's own picker knows the policy without a round trip.
+
+- `GET /api/admin/pack-first` → `{enabled, max_bytes}`
+- `POST /api/admin/pack-first` → same shape. A non-positive `max_bytes` is a **400**.
+
+See [LIBRARY_DATA.md](LIBRARY_DATA.md) § `pack_slice`, [API.md](API.md) § `/api/library/pack-fetch`, and [GOTCHAS.md](GOTCHAS.md).
+
+#### Priority While Watching
+
+**Ships on.** Applies only while someone is watching a file that has **not finished downloading** — the Play button on an in-progress item, and Stream Now before the download completes. Once the file is on disk everything returns to normal by itself, and so it does on Stop, on a superseding play, and on a restart.
+
+- **Fetch The Episode You Are Watching First** (default on) — in a season pack, one download holds every episode. Pressing play on episode four used to fetch episode **one** first: the stream turns the torrent sequential, and sequential download walks the pack in order over everything still selected. Marking one file "maximal" doesn't reorder that — only taking the others out of the selection does. With this on, the other unfinished episodes are paused for the duration and resume the moment yours has finished. Turning it off releases any focus already in flight, so a pack in progress goes back to normal ordering immediately rather than at the end of what is being watched.
+- **Slow Other Downloads Down** — Off / 256 KB/s / 512 KB/s / 1 MB/s / 2 MB/s (default 512 KB/s). A **total** shared by every *other* downloading torrent, so ten queued episodes cost the same as one. Implemented as a per-torrent rate limit rather than a pause, because the download scheduler owns pause/resume and the two would fight every 15 s; each torrent's previous limit is recorded and restored exactly, and a tighter limit the user set themselves is left alone. Racing challengers are exempt — a challenger's measured rate is what the race's cull decides on, and throttling one would get it dropped for looking slow.
+
+An **Active** badge on the card header shows when a focus is engaged, with how many torrents are currently held back — everything this card does is otherwise invisible.
+
+`sibling_kbps` is validated server-side, not coerced: anything outside the five choices is a **400**. Both settings live in `library.json → settings.stream_focus` and are mirrored onto `state`.
+
+- `GET /api/admin/stream-focus` → `{pack_focus, sibling_kbps, active, throttled}`
+- `POST /api/admin/stream-focus` → `{pack_focus, sibling_kbps}`.
+
+See [LIBRARY_DATA.md](LIBRARY_DATA.md) § `stream_focus` and [GOTCHAS.md](GOTCHAS.md).
 
 #### Seeding & Bandwidth
 
@@ -251,25 +379,34 @@ Inventory + download for the host's rotating log files in `logs/` (`streamlink_a
 
 - **Refresh** re-reads the directory.
 - **Per-file Download** is a plain `<a download>` link to `/api/admin/logs/{name}?admin_token=…`. The token rides as a query param because anchor downloads can't set headers. The server serves a **snapshot copy** (temp file, cleaned up after send) rather than the live file — `streamlink_service.log` is written by the separate service-wrapper process and grows continuously, so streaming the live file was unreliable; the copy gives a stable download.
-- **Download All (.zip)** hits `/api/admin/logs/_bundle?admin_token=…` and downloads a ZIP of every file in `LOG_DIR`. Filename includes a host-local timestamp so multiple snapshots don't collide. The ZIP is built into a **seekable temp file**, not streamed through a pipe — a pipe-streamed ZIP forces data descriptors that **Windows Explorer can't extract** (see [GOTCHAS.md](GOTCHAS.md)). Members are read via their own handles so actively-written logs are captured too.
+- **Prior logs are kept distinct from the current run.** Each server update archives the previous version's logs into `logs_old_<timestamp>.zip` (`_archive_old_logs`, run at startup — see [main.py](../main.py)). The `GET /api/admin/logs` listing tags each entry with `prior` (true iff the name starts with `logs_old_`). The UI renders only the current-run files as rows; **all prior archives collapse into a single expandable "Prior Logs" line** (count + total size, `togglePriorLogs`) so they don't bury the live logs.
+- **Download All (.zip)** hits `/api/admin/logs/_bundle?admin_token=…` and downloads a ZIP of the **current run's** files in `LOG_DIR` — prior archives are **excluded** (they're already zips and bundled separately). Filename includes a host-local timestamp so multiple snapshots don't collide. The ZIP is built into a **seekable temp file** by the shared `_build_logs_zip`, not streamed through a pipe — a pipe-streamed ZIP forces data descriptors that **Windows Explorer can't extract** (see [GOTCHAS.md](GOTCHAS.md)). Members are read via their own handles so actively-written logs are captured too.
+- **Download All Prior Logs** is a dedicated button on the expandable Prior Logs line. It hits `/api/admin/logs/_prior-bundle?admin_token=…`, which zips every `logs_old_*.zip` (404 if there are none) via the same `_build_logs_zip` helper. The route is registered before the `{name}` catch-all so the literal `_prior-bundle` path wins.
 - **Clear All** (`DELETE /api/admin/logs`, confirm-gated) truncates the active rotating handlers in-place (`streamlink_app.log`, `hls.log`) and deletes the non-active siblings (rotated `.1`/`.2`/`.3`, plus `streamlink.err` written by the system service). Truncation rather than delete on the live files is deliberate: on Windows you can't `unlink` a file the running process has open for writing, and on POSIX a delete would leave logging's FD valid but disconnected — subsequent writes would vanish until restart. Falls back to a write-mode truncate if `unlink` fails (e.g. the service still holds an exclusive Windows handle on `streamlink.err`).
 
 Path traversal is blocked server-side: `_safe_log_path` resolves the requested name against `LOG_DIR` and refuses any name containing a slash, `..`, an absolute path, or a resolved location that escapes the directory.
 
+Beyond the app/HLS logs, `LOG_DIR` also carries the diagnostics files — `access.log` (every inbound request, both ports), `uvicorn.log` (server startup/bind errors), `vitals.log` (a 30 s health sample), `stall_<ts>.txt` (asyncio + thread stack dumps taken during a stall) and `faulthandler.log`. They're listed, downloadable and bundled like any other log. **Start here when the server was unreachable** — see [DIAGNOSTICS.md § Reading an incident](DIAGNOSTICS.md).
+
+**Clear Logs** truncates every *live* rotating handler in place (`streamlink_app.log`, `hls.log`, `vitals.log`, `access.log`, `uvicorn.log`) rather than unlinking them — on Windows you can't delete a file the process holds open for writing. Anything else in `LOG_DIR` is unlinked, falling back to truncate.
+
 #### Scheduled Restart
 
-A daily, idle-gated reboot. Config persists under `library.json → settings.scheduled_reboot` (`enabled`, `time` HH:MM, `timezone` IANA name, `idle_minutes`, plus an internal `last_fired` date). Driven by the `scheduled_reboot_loop` background task ([main.py](../main.py), registered in `lifespan`):
+A daily, idle-gated reboot with a bounded catch-up window. Config persists under `library.json → settings.scheduled_reboot` (`enabled`, `time` HH:MM, `timezone` IANA name, `idle_minutes`, `catch_up_hours`, plus an internal `last_fired` date). Driven by the `scheduled_reboot_loop` background task ([main.py](../main.py), registered in `lifespan`):
 
-1. At/after the configured local time (computed via `_now_in_tz`), if it hasn't already fired today, check `_machine_in_use(idle_minutes * 60)` **and** `_prep_in_progress()`.
+1. At/after the configured local time (computed via `_now_in_tz`), if it hasn't already fired today **and** `now < time + catch_up_hours`, check `_machine_in_use(idle_minutes * 60)` **and** `_prep_in_progress()`.
 2. **Idle** → write `last_fired = today` (loop guard), then `_reboot_machine()`.
-3. **In use / prep running** → wait `idle_minutes` and re-check, repeating until idle.
+3. **In use / prep running** → wait `idle_minutes` and re-check, repeating until idle or the window closes.
+4. **Past the window** → stand down until tomorrow's slot.
+
+⚠️ **The catch-up window is what keeps an overnight reboot overnight.** Before it existed the job stayed armed for the rest of the day once its time passed, so a box that was busy (or powered off) at 02:00 would reboot at the *first* idle moment afterwards — potentially mid-afternoon, which is indistinguishable from a crash. See [GOTCHAS.md](GOTCHAS.md).
 
 "In use" = live VLC playback/pause of non-background content, an active stream (`stream_status ∈ buffering|playing`), a running download (`downloading_count > 0`), or a user interaction within the window. User interactions are stamped onto `state.last_activity` by the `track_activity` middleware (mutating verbs + `/api/search`; routine GET polling is ignored). **In-progress stream prep also defers the reboot** via `_prep_in_progress()` — any HLS-prep or STT job actively encoding (any queue), or a user/admin-priority prep queued to start. This matters because idle prep runs exactly when the box looks idle, and HLS prep can't checkpoint, so a reboot mid-encode would discard the work. Jobs parked at the pause gate (`paused`) don't count; a soft-paused file still finishing its current encode does (it's `processing`).
 
 The persisted `last_fired` date is what stops a just-rebooted machine from re-arming and looping (it comes back up past the scheduled time, sees `last_fired == today`, and stands down until tomorrow). Saving new config clears `last_fired` so a freshly-set time can arm the same day.
 
 - `GET /api/admin/scheduled-reboot` → config + `now` (host time in the configured tz, for display).
-- `POST /api/admin/scheduled-reboot` → `{enabled, time, timezone, idle_minutes}`. Validates HH:MM, clamps `idle_minutes` to 1–720, resets `last_fired`.
+- `POST /api/admin/scheduled-reboot` → `{enabled, time, timezone, idle_minutes, catch_up_hours}`. Validates HH:MM, clamps `idle_minutes` to 1–720 and `catch_up_hours` to 1–24, resets `last_fired`. Resetting `last_fired` can't cause an immediate reboot on a late save — the window still bounds it.
 
 #### Automatic Stream Prep
 
@@ -298,6 +435,20 @@ Panel control: a single enable/disable toggle (saves immediately on click).
 
 - `GET /api/admin/play-prep` → `{enabled}`.
 - `POST /api/admin/play-prep` → `{enabled}`.
+
+#### Show Missing Content
+
+Whether a show's page lists the seasons and episodes TMDb says it has but this box has not downloaded — dimmed rows in episode order, so a season you own nothing from and a single-episode hole mid-season are both visible instead of the list silently closing over them. Each row offers to go and find sources for itself, handing off to the normal Search show screen scoped to that season/episode. Config persists under `library.json -> settings.missing_content` (`_missing_content_cfg`), mirrored onto `state.missing_content_enabled` / `state.missing_content_unaired` so it rides in every `state` SSE event and an already-open dashboard repaints without a reload.
+
+Two toggles:
+
+- **Enabled** (default **on**) — the whole diff. Off means the library shows only what is on disk, exactly as before 11.18.0.
+- **Include Unaired Episodes** (default **off**) — what happens to a TMDb episode whose air date is in the future or absent. Off hides them, so a currently-airing show does not read as permanently incomplete; on gives them their own third state, **Upcoming**, visible but with nothing to download. Disabled in the panel while the feature itself is off.
+
+The diff is computed entirely **client-side** off metadata the page already holds, so neither toggle costs the server anything per request. It stands down on its own where it cannot be trusted — no TMDb match, a show TMDb files as one giant absolute-numbered season, or an item whose files mostly parse to no season/episode at all; the last case says so in the episode list rather than quietly showing nothing. Specials (season 0) never participate. See [FRONTEND.md § Missing content](FRONTEND.md) and [GOTCHAS.md](GOTCHAS.md).
+
+- `GET /api/admin/missing-content` -> `{enabled, show_unaired}`.
+- `POST /api/admin/missing-content` -> `{enabled, show_unaired}`.
 
 #### Validate & Repair on Prep
 
@@ -371,11 +522,15 @@ A candidate is run back through the deep decode; the original is **atomically re
 
 ### Storage & Compression (its own tab)
 
-A dedicated top-level admin tab (between **Offline Cache** and **Background**) — one card, three space-saving tools — two that shrink the **source files** and the **on-device (HLS) bundles** they generate, and one that picks the bundle quality ladder going forward. See [STREAMING.md § Configurable ABR ladder](STREAMING.md) for the encode-side detail.
+A dedicated top-level admin tab (between **Offline Cache** and **Background**) — one card, three space-saving tools — two that shrink the **source files** and the **on-device (HLS) bundles** they generate, and one that picks the bundle quality ladder going forward. See [STREAMING.md § Configurable ABR ladder](STREAMING.md) for the encode-side detail. The tab opens with a read-only **Storage By Series** overview (below) so the operator can see *what's actually using disk* before reaching for these tools.
+
+**0. Storage By Series.** A read-only overview at the top of the tab listing every library item sorted by total bytes on disk, each with a proportion bar (relative to the largest show) and a `source · bundle · subs` summary. Clicking a row expands a per-episode breakdown showing each file's total and which component is consuming it — **source** media, its **on-device HLS bundle**, or same-stem **sidecar** subtitles/.nfo/posters. Backed by `GET /api/admin/storage-breakdown`: per-file **bundle** bytes are reused from the offline-cache inventory's existing cached recursive walk (so no second bundle walk), while source + sidecar `stat()`s run in a worker thread to keep the event loop free on a large library. The summary line also surfaces `orphan_bytes` — bundle space no longer attached to any library file, purgeable from the **Offline Cache / Cleanup** tab. Purely informational; it has no mutating actions of its own (use tools 2–4 below or the per-item delete to actually reclaim).
 
 **1. Default On-Device Resolutions.** Checkboxes choosing which adaptive-bitrate **down-rungs** new stream preps build (the source-resolution rung is always emitted, so it's shown as a disabled "Source (always)"). Options are `1080 / 720 / 480 / 360`; the default (unchanged) is `720 + 480`. The selection persists to `library.json → settings.admin_overrides.hls_ladder` (an empty/default pick removes the override) and is read by `_hls_ladder_heights` → `_hls_video_variants`, so it shapes the `-var_stream_map` of every subsequent prep. **Affects future preps only** — existing bundles keep their rungs (use *Drop HLS Resolutions* to slim those). `OFFLINE_CACHE_VERSION` is deliberately **not** bumped, so changing the default doesn't force a global rebuild. Saved via the shared `POST /api/admin/settings {hls_ladder}` (also returned by `GET`, alongside `hls_ladder_options`).
 
 **2. Compress Source Files.** In-place lossy re-encode to reclaim disk, modelled on the File-Repair re-encode (`_compress_one_file` reuses the repair pattern: re-encode video, **copy** audio + every embedded sub/attachment, deep-decode the candidate, then `os.replace` + purge the stale HLS bundle). Controls: **Scope** (whole library or one item), **Codec** (`h264` / `hevc`, with an inline tradeoff note — HEVC ~40% smaller but slower and forces on-device prep to transcode), and **Strength** (Light / Balanced / Maximum presets → codec-appropriate CRF + an optional down-scale cap, or an **Advanced** checkbox exposing a raw CRF 18–32 slider). A file is replaced **only** when the re-encode decodes clean **and** comes out smaller (an already-efficient source reports `skipped`, original untouched). Runs one file at a time at below-normal priority, NVENC-accelerated when present; live `scanned/total` + bytes-freed poll, per-file results, and a **Stop** that halts between files and kills the in-flight ffmpeg. The run also appears live on the **Activity** tab (category `Compression`, flagged *Lost on restart*). Same caveats as Repair: **lossy/irreversible**, and rewriting a **torrent-backed** file stops it seeding (flagged per-row). Disabled when ffmpeg is missing (not macOS-gated — a plain decode, like the validator).
+>
+> **A compressed file becomes local-only.** On success the file entry is marked `compressed: true` in `library.json`, which tells the rest of the app the file is **no longer torrent-backed**: it won't seed and it **can't be re-downloaded**. Consequently the dashboard shows a **⤓ Compressed** badge on the library card and per-episode rows, and the qBit-dependent maintenance actions **refuse** it to avoid overwriting the smaller copy — **Recheck**, **Cleanup → Recover**, and **Delete (free space)** all return a clear error/`blocked` message for compressed files. To delete one on purpose, remove the whole item. Playback, on-device prep, on-demand streaming, Smart Skip, and subtitles are unaffected (they read the file straight from disk). See [GOTCHAS.md](GOTCHAS.md) and [LIBRARY_DATA.md](LIBRARY_DATA.md § File).
 
 > **Playback lock (Windows-safe in-place replace).** The in-place `os.replace` fails on Windows while *anything* holds the source open (`WinError 5`). So while a file is being compressed it's added to `state.compressing_paths` and **every** playback/read entry point refuses it (`_assert_not_compressing` → HTTP 423): VLC play (`/play`), on-device prep (`/offline-prepare`), on-demand JIT (`/stream-ondemand`), and clip (`/clip`). At the moment a file's compression starts, `_free_file_for_compression` also **stops any in-flight playback of it** — `stop()`s VLC if it's the current file, tears down on-demand sessions reading it, and terminates any HLS prep encoding it (which then re-queues and waits out the lock via the `_is_compressing` check at the top of `_run_offline_job`). The replace itself retries across the brief handle-release latency. The lock is always released in a `finally`, so an errored/cancelled encode never leaves a file unplayable.
 
@@ -384,9 +539,19 @@ A dedicated top-level admin tab (between **Offline Cache** and **Background**) �
 - `POST /api/admin/compress-files` → `{scope?, level?, codec?, crf?}`; 409 if running, 503 if no ffmpeg, 400 on bad level/codec.
 - `POST /api/admin/compress-files/stop` → halts between files + kills the in-flight encode.
 
+**4. Reclaim Source Files (18.0.0).** A prepped episode sits on disk twice; the bundle is what phones, browsers and the TV kiosk play, so the source is ~37% of the pair that only VLC (5.1 / HDR / image subs / frame-accurate seek), repair, re-prep, JIT and fingerprinting still need. The card writes `settings.source_eviction` via `GET/POST /api/admin/source-eviction` — `idle_days` (days since a **series** was last played by anyone, default 15), `never_played_days` (days since download for a series nobody ever opened, default 7), and the `floor_gb` / `target_gb` pair that decides whether a sweep runs at all. **Age decides what is eligible; free space decides what is taken.**
+
+**Dry Run** (`POST /api/admin/source-eviction/dry-run`) deletes nothing and always works, even while the policy is off. It reports free space now, the whole eligible pool, what a sweep would take this instant, and a per-reason breakdown of what is holding every other file back (`not aged`, `bundle not audited yet`, `someone is part-way through it`, `it's someone's next episode`, and so on). **Reclaim Now** (`POST /api/admin/source-eviction/run`, 18.1.0) **does delete**: it shows the plan, then asks for confirmation naming the file count, the bytes and exactly what those episodes lose. It refuses while the policy is off or free space is above the floor. Otherwise `source_eviction_loop` fires on its own once the disk drops below `floor_gb`, and only while the box is idle. An evicted file is badged **Bundle Only** in the episode list and flagged `source_evicted` on `/files`, the offline-cache inventory and the storage breakdown. See [STREAMING.md § Source eviction](../docs/STREAMING.md).
+
+**Pick Releases** (18.33.0) lists every release with a source on disk, showing what it would free, what it would **override** (show touched recently, someone's next episode, someone part-way through) and what it would **keep** (bundle missing, unaudited, damaged or incomplete, torrent unverified, in use). Check releases and press **Reclaim Selected**: after a confirm naming the files, bytes and releases, it deletes those sources now, with the policy off and whatever the free space is (`POST /api/admin/source-eviction/reclaim`). It never overrides a playability gate. See [STREAMING.md § Manual reclaim by release](../docs/STREAMING.md).
+
+**5. Delete Watched (18.34.0).** Unlike Reclaim, this deletes the **source and the bundle** of what the chosen profiles have finished. Tick one or more profiles under **Watched by**, choose whether **all** of them or **any** of them must have finished a file, and press **Preview** (`POST /api/library/watched-purge/preview`). Only `completed` files count — a started episode never does — and anything **any** profile is part-way through, anything playing or being prepped, and any compressed file is kept. The result is one row per show or film, all checked, with its size, a count of kept files and a **Show files** expander listing every file that would go and every kept one with its reason. Untick shows to exclude them. To target only a few, press **None**, type in the filter, then press **All**: All/None act only on the rows the filter shows. **Delete Selected** confirms, then posts each show's exact paths to `POST /api/library/watched-purge` one at a time ("Deleting 3 of 12: …"). The server re-checks each file and keeps anything started or put into use since the preview. The preview then refreshes. Rows stay in the library, still watched and re-downloadable. Phones' saved copies are untouched. Rules: `watchpurge.py`.
+
 **3. Drop HLS Resolutions.** Trims surplus down-rungs out of **already-prepped** bundles to reclaim space *now*, without re-encoding. Keep-checkboxes (source always kept) plus a **Scope** dropdown (whole library or one item) feed `POST /api/admin/hls-trim {heights, dry_run, scope}`: for each `.offline_cache/<sha>/` bundle (skipping any with an active prep job, and — when scoped — any whose meta.json `src` isn't one of the item's files), it deletes the dropped rungs' playlist + init + segments, rewrites `master.m3u8` (dropping each `#EXT-X-STREAM-INF` + its URI line), and updates `meta.json videos[]`. `dry_run:true` returns the bytes that **would** be freed (powers the **Estimate** button) without touching anything; a real run returns `{bundles, bytes_freed}` and invalidates the offline-cache inventory snapshot.
 
-**4. On-Demand Stream Only (per show).** A list of every library item with two per-item controls: an **on/off** toggle (`POST /api/admin/ondemand-only {item_id, enabled}`) and a **Lock/Unlock** toggle (`POST /api/admin/ondemand-only-lock {item_id, locked}`); `GET /api/admin/ondemand-only` lists both flags. When a show is on-demand-only, on-device (browser) playback **always** uses the just-in-time pipeline and **no permanent HLS bundle is ever built** — so it costs ~no disk (the `.ondemand_cache/` segments are reaped after ~90 s idle / on close). The flag persists as `item["ondemand_only"]` and is mirrored into `state.ondemand_only_items` (seeded at lifespan, rebuilt on toggle); it gates **every** prep-creation chokepoint — `_maybe_start_prep_job` (auto-prep, play-prep, the JIT background prep, prep-all), `_start_admin_prep_job` (force-prep), the inline job in `/offline-prepare` (which instead returns `{ready:false, ondemand_only:true}` so the client falls straight to JIT), plus a backstop at the top of `_run_offline_job`. **Enabling also cancels any in-flight prep for the item (inline) and purges its existing bundles** to reclaim space. The on/off effect is shared with the user endpoint via `_apply_ondemand_only`: the flag flip + job cancel are fast and run inline so the toggle is live the instant the request returns; the bundle purge needs a heavy full-cache inventory walk, so it's run in a **detached background task** (`_purge_ondemand_bundles`) rather than inline — doing it inline made the request hold the event loop long enough to stall page loads/actions for other users. Space is reclaimed shortly after the response. **VLC (TV) playback is unaffected** — it reads the source file directly and never touches HLS. The source file itself is **kept** (JIT and VLC both need it); only the derived permanent bundle is dropped. **Embedded subtitles still work** on the JIT path — `stream-ondemand` now extracts the source's in-MKV text subs to WebVTT lazily (see [STREAMING.md § On-Demand](STREAMING.md)), so an on-demand-only show isn't subtitle-less.
+**3b. Detect & Repair Audio Sync.** Finds **already-prepped** bundles whose audio is out of sync with the video and rebuilds them with the timing fix. A **Scope** dropdown (whole library or one item) feeds `POST /api/admin/hls-resync {dry_run, scope}`. Detection runs **two** checks and flags on either: (1) **drift** — `_bundle_audio_sync_delta` sums each bundle's `#EXTINF` durations for the video vs every audio rendition (cheap, no decode) and flags when the worst `|audio − video|` divergence exceeds `max(1.0s, 1% of duration)`; (2) **constant offset** — `_bundle_introduced_av_offset` ffprobes the audio-vs-video first-pts **gap** of **every** audio rendition (one ffprobe each, so Scan costs more on multi-audio bundles; it short-circuits on the first rendition over threshold) and flags the worst (>`0.12s`, or >`0.35s` when meta `video_reencoded` — a re-encoded rung carries an irreducible frame-reorder residual, a stream-copied one doesn't). Probing only the nominal *default* rendition missed per-track dub delays entirely — and since source disposition flags are copied verbatim, often *every* track claims default, so that scan could only ever read the first one (issue #13). Check #2 catches the steady early/late offset that #1 is structurally blind to (both renditions are the same length) — the case the duration-only first cut missed. It flags the **raw gap**, not a diff against the source's intended offset: the bundle player (Safari / iOS AVPlayer / hls.js on separate fmp4 renditions) ignores a cross-rendition `baseMediaDecodeTime` gap, so a faithfully-reproduced source audio delay is itself the desync (proven with `av_probe.py`). `dry_run:true` only **counts** the flagged bundles (powers the **Scan** button). On **Repair Now**, each flagged bundle is purged (`_delete_cache_artifacts`) and re-prepped — **cheap first**: an offset-only flag on a bundle that was never pinned gets a plain `_maybe_start_prep_job(…)`, which since 11.12.0 silence-pads each audio rendition to the video rung's first PTS on the **stream-copy** path too, so the rebuild collapses the gap at *remux* speed. Only drift, or an offset that survived a pin (`audio_padded_to_video_start`), escalates to `force_reencode_video=True` (full re-encode of the original rung). Re-preps run in the background at the usual bulk concurrency / pause semantics; the log line says which mode ran. Bundles with an active prep job, or whose source file is gone, are skipped. Returns `{ok, bundles, repaired, dry_run}`. See [STREAMING.md § Repairing audio-misaligned bundles](STREAMING.md).
+
+**4. On-Demand Stream Only (per show).** A list of shows **grouped by series** (`_series_key`) — a show downloaded as separate single-episode items collapses into **one row** so the admin toggles/locks the whole show at once, not episode-by-episode; a season pack or untagged item is its own single-member row. Each row has an **on/off** toggle and a **Lock/Unlock** toggle, both of which fan across every member: on/off reuses `POST /api/library/series/{series_key}/ondemand-only {enabled}` (admin bypasses per-episode locks), and Lock/Unlock calls `POST /api/admin/series/{series_key}/ondemand-only-lock {locked}` (sets `ondemand_only_locked` on all members). `GET /api/admin/ondemand-only` returns the grouped rows (`series_key`, `item_ids[]`, aggregate `ondemand_only`/`ondemand_only_locked` = true only when *every* member is on/locked, plus `*_mixed` flags marking a partial state the row shows as **Mixed/Partial**; the toggle then applies to all members). The legacy per-item `POST /api/admin/ondemand-only {item_id, enabled}` / `POST /api/admin/ondemand-only-lock {item_id, locked}` endpoints remain for single-item callers. When a show is on-demand-only, on-device (browser) playback **always** uses the just-in-time pipeline and **no permanent HLS bundle is ever built** — so it costs ~no disk (the `.ondemand_cache/` segments are reaped after ~90 s idle / on close). The flag persists as `item["ondemand_only"]` and is mirrored into `state.ondemand_only_items` (seeded at lifespan, rebuilt on toggle); it gates **every** prep-creation chokepoint — `_maybe_start_prep_job` (auto-prep, play-prep, the JIT background prep, prep-all), `_start_admin_prep_job` (force-prep), the inline job in `/offline-prepare` (which instead returns `{ready:false, ondemand_only:true}` so the client falls straight to JIT), plus a backstop at the top of `_run_offline_job`. **Enabling also cancels any in-flight prep for the item (inline) and purges its existing bundles** to reclaim space. The on/off effect is shared with the user endpoint via `_apply_ondemand_only`: the flag flip + job cancel are fast and run inline so the toggle is live the instant the request returns; the bundle purge needs a heavy full-cache inventory walk, so it's run in a **detached background task** (`_purge_ondemand_bundles`) rather than inline — doing it inline made the request hold the event loop long enough to stall page loads/actions for other users. Space is reclaimed shortly after the response. **VLC (TV) playback is unaffected** — it reads the source file directly and never touches HLS. The source file itself is **kept** (JIT and VLC both need it); only the derived permanent bundle is dropped. **Embedded subtitles still work** on the JIT path — `stream-ondemand` now extracts the source's in-MKV text subs to WebVTT lazily (see [STREAMING.md § On-Demand](STREAMING.md)), so an on-demand-only show isn't subtitle-less.
 
 > **User-settable + admin lock.** Regular dashboard users can flip on-demand-only themselves from the episode page (`POST /api/library/{id}/ondemand-only {enabled}` — same `_apply_ondemand_only` effect). The admin **Lock** control sets `item["ondemand_only_locked"]`: while locked, the user endpoint **refuses non-admin changes with HTTP 403** and the dashboard renders its toggle disabled (lock glyph + tooltip). The admin's own on/off toggle always works regardless of the lock.
 
@@ -396,9 +561,11 @@ The unified subtitle policy. Controls: **Default Subtitle Language** (the *one* 
 
 #### Auto-Generated Subtitles
 
-STT (whisper.cpp) config — enable toggle, English-translation toggle, and an unavailable banner when whisper isn't installed. The **target language is the unified one set in the Subtitles card** (no separate picker here anymore). See [STT.md](STT.md). `GET`/`POST /api/admin/stt`.
+**Retired in 17.0.0 — this card is hidden** (see [STT.md](STT.md)). STT (whisper.cpp) config — enable toggle, English-translation toggle, and an unavailable banner when whisper isn't installed. The **target language is the unified one set in the Subtitles card** (no separate picker here anymore). See [STT.md](STT.md). `GET`/`POST /api/admin/stt`.
 
 ### 8. Updates
+
+**The branch is also the release channel for the iOS app (20.1.0).** `main`, `beta` and `alpha` each have their own SideStore source, and `/api/app/latest` reads the one for the branch this box is on, so a phone is never pointed at an app newer than its server. Builds reach `beta` and `main` only through `promote.py`. See [GOTCHAS.md § Release channels](GOTCHAS.md).
 
 Auto-updater for the dashboard itself + post-update env-key fill-in. The
 underlying git/setup plumbing lives in [updater.py](../updater.py); the loop
@@ -450,6 +617,8 @@ Renders the `ENV_KEY_FEATURES` registry from `main.py`. Each row shows:
 Saving writes through `POST /api/admin/env-keys`, which merges the changes into `.env` (preserves existing comments + key order) and re-instantiates the `Settings` object in-process. Changes take effect immediately; no restart needed for most keys.
 
 The same registry feeds `state_snapshot()` → `missing_env_keys`, which drives the sticky banner in [static/index.html](../static/index.html) (`renderServerAttention`). Required-key gaps banner everyone; optional gaps only show up on this admin card.
+
+On **Windows** the registry also carries `WINDOWS_ADMIN_USER` / `WINDOWS_ADMIN_PASSWORD` (optional) — host-admin credentials for elevated OS tweaks, currently disabling the physical power/sleep buttons (`powercfg` needs an admin token the un-elevated service task doesn't have). Saving them triggers an immediate apply attempt (`_neuter_power_buttons`), and once the tweak is registry-verified applied the two keys drop out of `missing_env_keys` — they're only nagged for while unapplied. Never surfaced on macOS/Linux. See [RUNTIME.md § Windows power / sleep buttons](RUNTIME.md).
 
 ## Server endpoints (admin)
 

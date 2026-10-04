@@ -10,6 +10,13 @@ build/
 # Environment / secrets
 .env
 
+# Self-signed TLS certs — regenerated per-machine by setup.py. NEVER commit these:
+# a shared private key means every install has the same (public) key → the HTTPS
+# admin panel is trivially MITM-able. setup.py regenerates a unique CA+cert locally.
+cert.pem
+key.pem
+ca.pem
+
 # Downloaded media (configured via QBIT_DOWNLOAD_PATH)
 Downloads/
 .offline_cache/
@@ -19,14 +26,42 @@ Downloads/
 # Ephemeral share clips (auto-purged after 2h; see /api/library/{id}/clip)
 .clips/
 
+# Permanent on-disk cache of TMDb artwork (served via /api/metadata/img)
+.tmdb_img_cache/
+
+# On-disk cache of TMDb API responses (tmdbcache.py)
+.tmdb_cache/
+
+# Cached Anime-Lists season-mapping table (see animemap.py); refetched weekly
+.anime_map/
+
+# This install's identity for app discovery (discovery.py); unique per machine
+.server_id
+
 # User library database (profiles + watch history)
 library.json
+library_backups/
+library.corrupt-*.json
+
+# iOS client app pairing tokens (M5) — secrets, host-local
+device_tokens.json
+profile_sessions.json
 
 # Runtime scratch: countdown text VLC reads for the on-TV skip popup
 .vlc_marquee.txt
 
+# Runtime scratch: one-shot elevated powercfg script (Windows power buttons)
+_powercfg_apply.bat
+
 # Dedicated Chrome profile for the YouTube-on-TV kiosk window
 .tv_chrome_profile/
+
+# Dedicated Chrome profile for the Firestick-style TV UI kiosk (main.py
+# TVUI_CHROME_PROFILE) — must stay separate from the YouTube one above
+.tvui_chrome_profile/
+
+# Runtime scratch: one-shot helper script rewritten per elevated (UAC) call
+.elevate/
 
 # macOS
 .DS_Store
@@ -38,7 +73,11 @@ library.json
 *.swp
 *.swo
 
-# Logs
+# Logs — the whole directory is runtime output: the app/hls/uvicorn logs, the
+# service's streamlink.err / .out, and the logs_old_<timestamp>.zip archives the
+# updater rotates on each version bump. Every writer mkdirs it (main.py,
+# daemon.py), so a fresh clone needs nothing committed here.
+logs/
 *.log
 uvicorn*.log
 
@@ -47,3 +86,12 @@ tools/
 
 
 streamlink_service.py
+# Integration-harness magnets. The example is committed; the real one is not
+# (it names specific torrents and is per-machine).
+tests/race_magnets.json
+
+# Subtitle-search eval kit: downloaded reference + candidate subtitles (copyrighted text)
+tests/subs_eval/.cache/
+
+# Subtitle download budget (main.py _os_quota_*) — host-local runtime state
+.opensubs_quota.json

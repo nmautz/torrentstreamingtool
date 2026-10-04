@@ -1,4 +1,23 @@
-# Auto-Generated Subtitles (Speech-to-Text)
+# Auto-Generated Subtitles (Speech-to-Text) — RETIRED
+
+> **Retired in 17.0.0.** The transcripts were not good enough to put in front of
+> viewers, so the feature is **off by default and hidden**: the admin card is
+> `hidden`, `setup.py` no longer downloads whisper.cpp (`AI_SUBTITLES_RETIRED`),
+> and a one-time cleanup (`_retire_ai_subtitles` in `main.py`) deletes the
+> generated `*.ai.*.srt` sidecars and `tools/whisper` on first start after the
+> update, guarded by a `.ai_subs_retired` marker file.
+>
+> The `stt_available` flag on the `state` SSE is forced off by `AI_SUBTITLES_RETIRED`
+> in `main.py`, so the player's Generate-with-AI buttons stay hidden even on a
+> host that still has whisper on PATH.
+>
+> **Nothing was deleted from the tree** — `stt.py`, the job machinery, the
+> endpoints and the UI actions all still work. To bring it back: set
+> `AI_SUBTITLES_RETIRED = False` in **both** `main.py` and `setup.py`, re-run setup (or install whisper
+> from the admin Components card after restoring its rows in `static/admin.html`),
+> un-hide the "Auto-Generated Subtitles (AI)" card in `static/admin.html`, and
+> turn the setting on (`POST /api/admin/stt {"enabled": true}`). The rest of this
+> document describes the feature as built, and stays accurate.
 
 How StreamLink transcribes audio into subtitles for sources that ship none
 usable. Lives across `stt.py` (the whisper.cpp wrapper), `main.py` (trigger +
@@ -208,6 +227,13 @@ children would otherwise inherit it and lag the UI. See [STREAMING.md](STREAMING
 > retry is **suppressed when cancelled** so a kill doesn't relaunch whisper. Without
 > this, whisper kept saturating the CPU/GPU long after HLS prep "paused" — the box
 > stayed laggy until it finished (or a reboot). See [GOTCHAS.md](GOTCHAS.md).
+
+> **whisper's stderr is read as UTF-8, explicitly.** `_run_whisper` scrapes the
+> detected-language line out of whisper.cpp's stderr, which also carries the
+> transcript itself — non-Latin by definition. `subprocess.Popen(text=True)` would
+> decode it with the Windows ANSI code page in strict mode and raise mid-iteration,
+> aborting the job on exactly the episodes STT exists for. The Popen passes
+> `encoding="utf-8", errors="replace"`; never drop it. See [GOTCHAS.md](GOTCHAS.md).
 
 > **STT is slower than the HLS transcode.** A 45-minute episode is minutes of
 > CPU even on `base`. That's why the default path is preprocess (overnight),

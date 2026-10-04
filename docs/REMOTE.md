@@ -1,0 +1,433 @@
+# Wireless remote (air-mouse) support + TV UI
+
+How a cheap "Air Fly Mouse"-style wireless remote drives the host TV box —
+both direct playback control (media keys → VLC/YouTube) and the
+**Firestick-style TV UI** (the dashboard itself in a fullscreen kiosk, woken
+by any button, handed back to the idle background video when unused).
+
+Code: [remote_input.py](../remote_input.py) (global input listener) + three
+areas of `main.py`: the `_remote_should_handle` / `_remote_key_action` pair
+(gate + dispatcher, after the `/api/vlc/seek/to` route), the TV UI block
+(`_TVUI_WINDOW_MARKER` … `tv_ui_loop`, before the `/tv` route), and the
+`?tv=1` handling in `static/index.html`.
+
+## How these remotes work
+
+Air-mouse remotes (Air Fly Mouse, MX3, W1/W2, Rii i8, G7 and the countless
+rebrands) pair a 2.4 GHz USB dongle (or Bluetooth) with the host and enumerate
+as a **standard HID keyboard + mouse** — no driver, no SDK. Their buttons emit
+ordinary consumer key codes:
+
+| Remote button | HID / Windows VK code | Mapped action |
+|---|---|---|
+| ⏯ Play/Pause | `VK_MEDIA_PLAY_PAUSE` (0xB3) | Toggle pause |
+| Vol + / Vol − | `VK_VOLUME_UP` / `VK_VOLUME_DOWN` (0xAF/0xAE) | Volume ±`REMOTE_VOLUME_STEP` (5) per press; auto-repeats while held. **Never the host OS mixer** — VLC's amp (capped), or the YouTube player's own gain |
+| ⏭ Next track | `VK_MEDIA_NEXT_TRACK` (0xB0) | Skip **forward** `REMOTE_SEEK_STEP_SECS` (10 s) |
+| ⏮ Prev track | `VK_MEDIA_PREV_TRACK` (0xB1) | Skip **back** 10 s |
+| 🏠 Home | `VK_BROWSER_HOME` (0xAC) | **Stop playback + show the TV UI** (unsuppressed this key launches the default browser — Edge — which is why it must be claimed) |
+| ← Back | `VK_BROWSER_BACK` (0xA6) | Firestick semantics: during playback **exit the player back to the TV UI** (stop + kiosk, same path as Home); with the TV UI up **step back inside the dashboard** — close the topmost open overlay (modal, episode page, search show page, or bottom-sheet — one layer per press), else drop focus (relayed as the `tv_command` SSE event; unsuppressed the kiosk Chrome would history-back away from `?tv=1`). Idle it passes through and wakes the TV UI like any button. Remotes whose Back emits **Escape/Backspace** instead work too — those reach the kiosk directly and `_tvNavKey` routes them to the same `_tvBack()` |
+| OK | `VK_RETURN` (0x0D) — or a left **click** in pointer mode | During playback: ⏯ toggle (both forms). With the TV UI up: activates the focused element (D-pad navigation) |
+| ⏻ Power | HID **System Control** "System Sleep" usage (Generic Desktop page 0x01, usage-0x80 collection); some remotes emit keyboard `VK_SLEEP` (0x5F) instead / as well | **Standby toggle between the idle surfaces** — background video showing → show the TV UI; TV UI showing → hand back to the background video (kept up if none is configured); during playback → stop, back to the background video (no kiosk — Home/Back is the path that shows the UI). Unhandled, Windows **locks + sleeps/hibernates the box** and wakes to the lock screen (autologin only runs at boot). The System Control usage never enters the keyboard stack, so it needs the dedicated two-part interception — see "⏻ Power interception" below |
+| Arrows / mouse ring | normal keys + pointer | Not intercepted — arrows **navigate the TV UI** (spatial focus, see below); the pointer stays a mouse. Any of them wakes the UI when idle |
+
+The next/prev *track* keys are mapped to ±10 s seeks (not playlist next/prev)
+because that's what the buttons mean on a streaming remote.
+
+## Claim rules (which presses we act on + suppress)
+
+`_remote_should_handle(action)` — called synchronously on the hook thread,
+plain attribute reads only:
+
+- **"Use My Computer" pause active** (`window_mgmt_paused()`): nothing is
+  claimed. A real keyboard's volume keys must drive the OS mixer and Home may
+  open the user's browser — it's their desktop.
+- **`home`**: claimed whenever the TV UI is enabled OR playback is up.
+- **`back`**: claimed during playback (exit to the TV UI) and while the kiosk
+  holds the screen (`tv_ui_active` — Chrome must not treat the key as
+  history-back). Idle it passes through as generic input (wakes the TV UI).
+  Windows-only, like `home` — pynput exposes no browser keys off-Windows.
+- **`volume_up` / `volume_down`**: **always claimed** — the remote's volume
+  must never reach the host OS mixer (no Windows overlay, no changed system
+  volume after a session). Idle presses adjust VLC's amp (they apply to the
+  background video / next playback); during YouTube they step the IFrame
+  player's own gain via the `player_volume_step` yt_command (tv.html), NOT
+  `set_system_volume`. The dashboard *slider* keeps its documented OS-volume
+  behaviour during YouTube — this rule is remote-only.
+
+  Enforcement is **hook-only by default** — claim + suppress + route, the
+  behaviour verified on the reference remote since v9.13.0. For a remote
+  whose volume provably bypasses the keyboard hook (HID consumer-control
+  usages the hook can't suppress: system volume changes even with remote
+  support running), there is an **opt-in** backstop: `REMOTE_VOLUME_GUARD=1`
+  enables `remote_volume_guard` (`main.py`, Windows-only, ~3 Hz
+  endpoint-volume poll via the winvol helper) — every legitimate OS-volume
+  writer records itself via `set_system_volume`
+  (`state.host_volume_expected`); any other change is reverted and its delta
+  re-routed to VLC / the player gain, with a ~1.2 s dedupe window
+  (`_remote_vol_key_ts`) so remotes emitting *both* forms don't double-step.
+  It is off by default because an always-on guard **fights quantizing audio
+  endpoints** and drip-steps VLC's volume — see
+  [GOTCHAS.md](GOTCHAS.md#and-the-os-mixer-volume-guard-is-opt-in--an-always-on-guard-fights-quantizing-audio-endpoints).
+- **`power`** (⏻): **always claimed** — unhandled it sleeps or hibernates the
+  media box, never desirable from the couch. Windows-only, like `home`/`back`
+  (pynput exposes no sleep key off-Windows). This gate is shared by both
+  arrival paths (the keyboard hook's `VK_SLEEP` and the Raw Input listener —
+  see "⏻ Power interception" below), so during "Use My Computer" a press does
+  nothing (the OS actions are neutered machine-wide by
+  `_neuter_power_buttons`, so it can't fall through to sleep either).
+- **`ok`** (Enter): claimed during real playback while the TV UI is not up →
+  acts as ⏯. Otherwise it passes through so it activates the focused element
+  in the kiosk. **On-device TV playback is the explicit exception**: there the
+  kiosk *is* the player, so `tv_ui_active` stays true throughout and OK must
+  mean ⏯ again — hence the `state.tv_local_active or (playing and not
+  state.tv_ui_active)` shape rather than a plain `not tv_ui_active` test. Its pointer-mode twin (left click) is handled off the
+  activity feed: a click during VLC playback (the kiosk is behind fullscreen
+  VLC, so every click lands on the video) fires ⏯ too, 0.4 s debounced;
+  YouTube is excluded because the IFrame player already toggles on clicks.
+- **Remaining media keys**: claimed only while real playback is up (VLC
+  stream/library play incl. paused, YouTube-on-TV, **or the kiosk's own
+  `<video>`** — `state.tv_local_active`). When idle — incl. the idle
+  background video — they pass through untouched (and count as generic input,
+  so they wake the TV UI like any other button).
+- **Arrow keys are never claimed**, and that is load-bearing for on-device
+  playback. They reach the focused kiosk as ordinary DOM keyevents, so
+  `_tvNavKey` routes them itself: D-pad focus while browsing, and while the
+  local player is up ←/→ seek ±10 s and ↑/↓ step the player's volume. No
+  backend relay is involved.
+
+### The three playback surfaces
+
+`_remote_should_handle` and `_remote_key_action` triage between three surfaces.
+They are mutually exclusive; `_tv_anything_playing()` is the shared "something
+is on the TV" predicate the Home / Back / ⏻ gates use.
+
+| Surface | Flag | Transport goes to | Volume goes to |
+|---|---|---|---|
+| VLC | `stream_status in (playing, buffering)` | `vlc()` HTTP commands | VLC's amp (capped by `settings.max_volume`) |
+| YouTube-on-TV | `state.youtube_active` | `youtube_control(...)` | IFrame player gain (`yt_command player_volume_step`) |
+| **On-device (kiosk `<video>`)** | `state.tv_local_active` | `tv_command` SSE relay to `?tv=1` | media-element gain (`tv_command player_volume_step`) |
+
+The host **suppresses** the media keys on all three, so the relay is the only
+way a press reaches the kiosk page — it must never also arrive at Chrome as a
+media key and be handled twice. The on-device branch is checked **before**
+YouTube so a stale `youtube_active` during a handoff can't steal the key.
+
+`tv_local_active` is a **separate axis from `tv_ui_active`, not a replacement**:
+the kiosk keeps holding the screen while its player runs, because `tv_ui_active`
+is the only thing that makes `vlc_focus_and_fullscreen` and
+`background_video_loop` stand down. See
+[GOTCHAS.md](GOTCHAS.md) for what happens if you clear it.
+
+## Dispatch
+
+```
+remote button ──HID──▶ host input events
+                          │  pynput global listeners (remote_input.py, own threads)
+                          │  gate: _remote_should_handle(action)
+            ┌─────────────┴───────────────────────────┐
+            ▼ handled keys                            ▼ everything else
+  _remote_key_action(action)                _tv_input_event(kind)  (activity feed)
+  media → VLC / YouTube control paths       key/click wake the TV UI when idle;
+  home  → _tv_ui_show + /api/stop           move/media only refresh its idle timer
+```
+
+- Media dispatch reuses the exact endpoint code paths, so the admin volume
+  cap, the YouTube OS-mixer volume rule, and SSE state sync all apply; a
+  `state` snapshot is broadcast after each action so open dashboards reflect
+  the press without waiting for the 2 s `stat_broadcaster` tick.
+- `home` shows the TV UI **first** (so `tv_ui_active` gates the focus churn),
+  then calls the `/api/stop` handler if anything was playing.
+- `back` during playback takes the same show-UI-then-stop path as `home`;
+  with the kiosk up (nothing playing) it broadcasts `tv_command
+  {action:"back"}` instead — the `?tv=1` page's `_tvBack()` closes the
+  topmost open overlay, one layer per press: modals **and** the full-screen
+  pages/sheets whose ids don't end in `Modal` (`#episodePage`,
+  `#searchShowPage`, `#ssSourceSheet`, `#ssBulkSheet` — enumerated in
+  `_TV_PAGE_CLOSERS` with their own close functions so state cleanup runs;
+  modals still close via their `close*` button). "Topmost" = highest
+  z-index, DOM order breaking ties, so a modal stacked over the episode
+  page closes first and the page on the next press. With nothing open it
+  blurs the focused element (dismisses a card overlay).
+- `power` toggles the idle surfaces: during playback it just calls the
+  `/api/stop` handler and lets `background_video_loop` restart the idle video
+  (≤ 3 s — starting it directly would race stop()'s async `pl_stop`/`pl_empty`
+  teardown); with the kiosk up it `_tv_ui_hide`s back to the background video
+  (only if `_bg_video_ready()` — otherwise the UI stays, same rule as the
+  idle hand-back); with the background video showing it `_tv_ui_show`s; fully
+  idle it tries `_play_background_video()` first, kiosk as fallback.
+- **On-device TV playback** (`state.tv_local_active`) relays every transport
+  key to the kiosk page over `tv_command` instead of driving VLC:
+  `{action:"playpause"}`, `{action:"seek", value:±10}`,
+  `{action:"player_volume_step", value:±5}`, `{action:"stop"}`. The page runs
+  the same `lpTogglePlay` / `lpSeekBy` / `lpVolumeStep` / `lpStop` functions its
+  on-screen controls call, so the two surfaces can't drift. `Home` / `Back` /
+  `⏻` behave exactly as on the other surfaces — `_tv_anything_playing()`
+  includes this one, so they end playback and return to the grid.
+  `{action:"open", item_id, file_path, profile_id, seek}` is the one command the
+  remote never sends: it is the VLC → on-device switch, pushed by
+  `POST /api/tv-local/open`.
+- **Debounce** (`_MIN_INTERVAL`): play/pause and the seeks fire once per press
+  (0.30–0.35 s), Back 0.4 s, Home and Power once per second; volume repeats while held but is
+  throttled to ~10 Hz. The activity feed has its own throttle
+  (`_ACTIVITY_MIN_INTERVAL`, mouse moves ≤ 1/s).
+
+## ⏻ Power interception (Windows)
+
+The power button is the one remote key that (on most remotes) **never enters
+the keyboard stack**: it's sent as a HID *System Control* usage (Generic
+Desktop page 0x01, usage-0x80 collection — "System Sleep"), which the HID
+class driver hands straight to the Windows power manager. A low-level
+keyboard hook cannot see or suppress it — the box locks ("Locking…") and
+sleeps/hibernates, then wakes to the lock screen (autologin only runs at a
+real boot). Interception is therefore split in two (both parts run at
+startup when `REMOTE_CONTROL=1` on Windows):
+
+1. **Neuter the OS actions** — `_neuter_power_buttons()` (`main.py`) sets the
+   active power plan's **sleep-button AND power-button** actions to *Do
+   nothing* (AC + DC: `powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS
+   SBUTTONACTION 0`, same for `PBUTTONACTION`, each also `/setdcvalueindex`,
+   then `/setactive SCHEME_CURRENT`). Both, because Windows maps "System
+   Sleep" (0x82) to the sleep button but "System Power Down" (0x81) — what
+   the reference remote actually sends — to the **power** button; neutering
+   only `SBUTTONACTION` left the box still sleeping. This is a **persistent,
+   machine-wide power-plan change** — deliberate: a media box must never be
+   slept by a stray remote press, even while StreamLink isn't running. Side
+   effect (accepted): a short press of the physical chassis power button
+   also does nothing now — shut down from the Start menu or the admin panel
+   (a 4 s hold still hard-cuts at firmware level). `powercfg` needs
+   elevation — `_neuter_power_buttons` delegates to the shared
+   `run.apply_windows_power_settings()` (idempotent, registry-verified),
+   which tries powercfg directly and falls back to a one-shot elevated
+   Scheduled Task using `WINDOWS_ADMIN_USER` / `WINDOWS_ADMIN_PASSWORD`
+   from `.env` (settable in the admin panel → Updates → feature keys). The
+   elevated `run.py --install` path and every `run.py` launch apply the same
+   tweak, so on most boxes it's already in place before the server starts.
+   See [RUNTIME.md § Windows power / sleep buttons](RUNTIME.md). Only if
+   every path fails does a warning log the manual commands story.
+2. **Observe the press via Raw Input** — `PowerButtonListener`
+   (`remote_input.py`) registers a hidden window for Raw Input from the
+   System Control usage page (`RIDEV_INPUTSINK`, so delivery doesn't depend
+   on focus) and dispatches `power` into `_remote_key_action` on each press
+   (release reports are all-zero past the report ID and skipped). Raw Input
+   is observation-only — it can't block the power manager; that's what step 1
+   is for.
+
+The keyboard hook additionally maps `VK_SLEEP` (0x5F) → `power` for remotes
+that emit the keyboard form. A remote emitting **both** forms per press is
+deduped by the power branch's 1 s cross-path debounce in `_remote_key_action`
+(`_remote_power_ts`).
+
+## TV UI (Firestick-style dashboard kiosk)
+
+The dashboard itself, opened by the backend in a fullscreen Chrome kiosk at
+**`http://127.0.0.1/?tv=1`**, driven from the couch with the remote's pointer
+and buttons. The host display cycles between three surfaces:
+
+```
+idle background video ──any remote button/click──▶ TV UI (dashboard kiosk)
+TV UI ── no input for TV_UI_IDLE_SECS (120 s) ───▶ background video
+TV UI ── user plays something ───────────────────▶ on-device player (default),
+                                                   VLC / YouTube fullscreen
+playback ── 🏠 Home or ← Back ───────────────────▶ stop + TV UI
+playback ── ⏻ Power ─────────────────────────────▶ stop + background video
+background video ⇄ TV UI ────── ⏻ Power ────────▶ toggle between the two
+```
+
+Since **13.0.0** a library play on the TV opens by default in the kiosk's **own**
+`<video>` (`settings.tv_playback_mode = "device"`), not VLC — the kiosk never
+leaves the screen, it just starts playing. VLC remains the fallback (automatic on
+failure, or chosen). See [STREAMING.md](STREAMING.md) § On-device as the TV
+surface.
+
+Mechanics (`main.py`):
+
+- **`state.tv_ui_active`** = "the kiosk should hold the screen". While set,
+  every VLC focus assertion stands down: `vlc_focus_and_fullscreen` bails
+  (same as it does for `youtube_active`), `background_video_loop` won't
+  (re)start the idle video underneath the kiosk, and `_play_background_video`
+  skips its focus call. It is **released** the moment real content plays —
+  the `vlc("in_play")` branch and `youtube_play` both clear it — so those
+  paths regain the screen; `tv_ui_loop` also clears it as a janitor, but only
+  when the last input is >10 s old (a just-pressed Home must not be robbed of
+  the screen it claimed while `stop()` is still tearing down).
+- **`state.tv_local_active`** = "the kiosk's own `<video>` is the active TV
+  playback". Set by the page's `/api/tv-local/state` heartbeat (~2 s), cleared
+  by `/api/stop`, by `vlc("in_play")` (VLC taking the screen also tells the page
+  to close its player), and by `tv_ui_loop` when the heartbeat goes stale for
+  `TV_LOCAL_STALE_SECS` (15 s — a crashed or reloaded kiosk). While it is set,
+  `tv_ui_loop` **skips the idle hand-back entirely**: a film gets no keypresses,
+  so the 120 s timer would otherwise drop the background video over it. The
+  heartbeat also refreshes `tv_input_last` for the same reason.
+- **Wake** (`_tv_input_event`, called from the hook threads): every input
+  stamps `state.tv_input_last`; only a **key or click** wakes the UI, and only
+  while nothing is playing. Pointer **motion never wakes** (gyro drift would
+  light the TV at night) and neither do handled media keys (a volume press
+  during playback is not a request for the dashboard). During playback the
+  deliberate way to the UI is 🏠 Home. On Windows, **injected keys**
+  (`LLKHF_INJECTED`) never count as wake activity — the focus cocktail's own
+  synthetic ALT press (`_vlc_focus_windows`) would otherwise re-wake the UI
+  ~1.5 s after every idle hand-back, flashing the background video and
+  stealing the screen right back (see docs/GOTCHAS.md). Injected **action
+  keys are still claimed and handled**, though: Windows' HID input service
+  translates consumer-page usages (AC Home/Back, sleep, media) into VK
+  keystrokes via `SendInput`, so on many remotes 🏠/←/⏻ (VK_SLEEP form)
+  arrive with the injected flag set — skipping every injected event sent
+  Home to the default browser and made Back/⏻ dead during playback (10.7.4).
+- **Show** (`_tv_ui_show`): pauses the background video (`pl_forcepause` —
+  keeps its position; `background_playing` stays True so the loop stays out),
+  launches the kiosk if its Chrome isn't running (matched by
+  `--user-data-dir`), then `_bring_tvui_to_front` (minimize VLC + the same
+  Windows force-foreground cocktail as the YouTube kiosk, marker
+  `_TVUI_WINDOW_MARKER` = "StreamLink TV Dashboard", set via `document.title`
+  by `?tv=1`). The kiosk is **left running** when hidden, so later wakes are
+  instant.
+- **Hide** (`tv_ui_loop`, every 5 s): after `TV_UI_IDLE_SECS` with no input
+  and nothing playing, `pl_forceresume` the background video +
+  `vlc_focus_and_fullscreen`. If **no background video is configured**, the
+  UI simply stays up (a black VLC window is worse than the dashboard).
+- **"Use My Computer" pause** (`window_mgmt_paused()`): the pause endpoint
+  clears `tv_ui_active` and **minimizes the kiosk Chrome window**
+  (`_minimize_tv_browser_windows`) along with VLC — a hidden kiosk sits
+  fullscreen *behind* VLC, so minimizing VLC alone would just reveal the
+  dashboard instead of the desktop. While paused, nothing can bring the UI
+  back: `_tv_ui_show` and the `_tv_input_event` wake path bail, and
+  `_bring_tvui_to_front`'s reinforcement loop aborts (minimizing any
+  late-launching kiosk window it was about to front). A **timed** pause never
+  hard-expires under an actively-used desktop — `window_mgmt_paused()` slides
+  the deadline while HID input is recent (`WINDOW_MGMT_EXPIRY_GRACE_SECS`,
+  120 s), so the pause really ends ~2 min after the last keystroke/mouse move
+  and the kiosk/background video can't pop over the user's work. On the TV
+  kiosk itself the pause is reachable via the TV-only **Use My PC** nav button
+  (`#tvUseComputerBtn` — confirm → 2 h timed pause, "Resume TV" while paused);
+  the settings panel that hosts the pause tile is hidden on TV.
+- **Separate Chrome profile** (`.tvui_chrome_profile`): must differ from the
+  YouTube kiosk's `.tv_chrome_profile` — YouTube's Stop kills its kiosk by
+  matching the profile path in the cmdline and would otherwise take the
+  dashboard down too. The dir also persists the kiosk's own localStorage
+  (profile pick, UI prefs).
+
+### `?tv=1` frontend mode (`static/index.html`)
+
+- Sets `document.title = "StreamLink TV Dashboard"` (the window marker — keep
+  in sync with `_TVUI_WINDOW_MARKER`) and adds the `tv-mode` body class.
+  `no-hls` is **no longer** forced here — since 13.0.0 it reflects the host's
+  real capability, because the kiosk plays on its own `<video>` by default.
+- **D-pad spatial navigation** (`_tvNavKey`, TV mode only): arrow keys move
+  focus to the geometrically nearest actionable element in that direction
+  (distance + off-axis-penalty scoring inside a forgiving cone; the target is
+  scrolled to center and marked by the `.tv-mode :focus` indigo ring), OK /
+  Enter activates it (native click for buttons/links, synthesized `click()`
+  for `[onclick]` tiles). With **nothing focused yet**, OK lands on the first
+  candidate that is actually **on screen**, falling back to the first in the
+  DOM (17.13.0): an episode page opens scrolled to the episode you're up to
+  (`_epApplyAutoScroll`), and DOM order used to send that first press back to
+  episode 1, above the fold. Arrow keys were always safe here — with no focus
+  they score from the viewport centre, so they already followed the scroll. Navigation is scoped inside the topmost open
+  overlay (`_tvOpenOverlays`: `*Modal`s plus the episode/search pages and
+  bottom-sheets, ranked by z-index then DOM order) so focus can't wander
+  behind a dialog or the episode page; arrows that edit a control
+  (←/→ in text inputs, ↑/↓ in selects) are left alone, and with no candidate
+  in a direction the key falls through to native scrolling. Hold-to-activate
+  buttons (Stop, handoff) still need the pointer — Enter fires a plain click,
+  not a pointer hold. **Back** (`_tvBack()`, fired by the `tv_command` SSE
+  event or a direct Escape/Backspace keypress — Backspace still deletes in
+  text fields) closes the topmost open overlay, one layer per press (see
+  Dispatch above), else blurs the focused element; the desktop
+  close-everything Escape handler is skipped in TV mode so a single press
+  can't blow through the whole stack.
+- **TV card overlay**: hovering or D-pad-focusing a library/show poster card
+  reveals a full-card overlay split horizontally — **▶ Play/Resume top,
+  Episodes bottom** (Episodes only for multi-file items/shows); the centered
+  ▶ button is hidden on TV. Entering a card with the D-pad always lands on
+  Play/Resume: the Play button carries `data-tv-default`, the overlay is a
+  `data-tv-group`, and `_tvNavKey` redirects any cross-group entry to the
+  group's default (movement *within* the group — Play ↔ Episodes — is left
+  alone); `_tvCandidates` excludes the poster itself whenever it contains
+  `.tv-card-btn`s so the buttons don't compete with their container. The
+  buttons are invisible-but-focusable (opacity 0, revealed by
+  `:hover`/`:focus-within`) and reuse the card delegation classes
+  (`lib-tile-open`/`lib-show-open`/`lib-show-play`); their inline handlers
+  stop Enter/Space + click propagation so OK on Play can't also fire the
+  poster's open handler — **Enter/Space only**, an unconditional keydown
+  stop would swallow the arrows and freeze navigation on the buttons.
+- **Plays on its own player by default.** `hlsAvailable` now reflects the host
+  (`/api/state.hls_available`) instead of being forced false. The play chooser
+  is still never *shown* on the TV — both of its options are the TV — so
+  `_resumeNormal` / `playLibraryWithChooser` route straight to one surface:
+  `pcChoose(tvPlaybackMode === "vlc" ? "vlc" : "local")`. `tvPlaybackMode`
+  mirrors `settings.tv_playback_mode` off the SSE `state` stream. A host that
+  can't prep (`hls_available: false`, macOS) still collapses to VLC.
+- **While its player is up** the page heartbeats `POST /api/tv-local/state`
+  every 2 s (claiming the TV playback surface so the remote's keys are relayed
+  to it) and acts on `tv_command` `playpause` / `seek` / `player_volume_step` /
+  `stop` / `open`. `_tvLocalLive()` guards every one, so a stale command can't
+  poke a torn-down player. On-device failures hand the file to VLC via
+  `tvFallbackToVlc` — one shot per file, so it can't ping-pong.
+- Additionally hides the hand-off-to-this-device buttons (`#handoffBtn`,
+  `#fcHandoffBtn`) via `.tv-mode` CSS and the download-to-device buttons via a
+  `TV_MODE` guard in the library-card renderer.
+- **TV layout** (`.tv-mode` CSS): the desktop/phone chrome the remote can't
+  use well is stripped — the library toolbar (storage gear, Upload, Hidden,
+  Refresh), the per-card ⋯ action drawers (`.lib-cardv-more`), the
+  fullscreen-controls overlay + its opener (`#fullscreenControls` /
+  `#fullscreenBtn`; `openFullscreenControls()` also early-returns in TV mode
+  so nothing can open it), and the **entire player footer** — on the TV the
+  remote is the transport. The page is upscaled (`zoom: 1.15`, safe in the
+  Chrome-only kiosk) for 10-foot readability, and `main`'s footer-clearance
+  padding is reclaimed. Fewer focus stops also makes the D-pad navigation
+  predictable.
+- **Play-press loading overlay** (10.6.0): with the footer gone, a ▶ Play
+  press had no visible feedback until VLC took the screen. `renderPlayer`
+  mirrors `stream_status === "buffering"` into a fullscreen `#tvLoading`
+  overlay (square Metro spinner + title + the footer's "Starting playback…" /
+  MB-progress line). It appears instantly on the press — `_optimisticBuffering`
+  renders before the `/play` request is sent — and clears when the SSE state
+  event flips to playing/idle (or `_revertOptimistic` on a failed request).
+  `pointer-events: none` so a stuck buffer never traps the D-pad; z-index above
+  modals so it shows over the episode picker too.
+- **TV is browse + play only — management/detail chrome is hidden** (10.5.0),
+  left to any phone/desktop browser. The same `.tv-mode` CSS block hides the
+  profile-settings gear (`#navSettingsBtn`), the profile picker's Manage
+  profiles / Admin links, and the search Sources/Categories pickers
+  (`#srcWrap`/`#catWrap`); on the **episode page** it hides the rename /
+  fix-metadata / on-demand-only hero buttons, the bulk-select chips
+  (`#epBulkChips`), and the selection-driven Download (N) / Play bottom
+  buttons (`#epDownloadSelBtn`/`#epPlaySelBtn` — selection doesn't exist on
+  TV, so they'd be dead). `TV_MODE` guards in the renderers additionally drop
+  the per-episode checkboxes + inline action row (watched toggle, prep,
+  fetch-now, download-to-device) and priority rows (`_epCardHtml`), the
+  download/prep/recheck scheduling bar + Save ZIP (`renderEpList`), and the
+  movie panel's secondary actions/scheduling (`_epMoviePanel` — status + the
+  sticky ▶ Play only). Episodes play by activating their stills; Shuffle and
+  Close stay in the bottom bar. The library is **forced to poster-card view**
+  (`libViewMode="card"`) regardless of the kiosk's stored preference — list
+  view's dense rows and action strips are touchscreen chrome.
+- Everything else is the stock dashboard — profiles, search, library.
+
+## Platform behaviour (Windows first)
+
+| Platform | Listener | Suppression | TV UI |
+|---|---|---|---|
+| **Windows** | pynput low-level keyboard + mouse hooks, plus the Raw Input power-button window (`PowerButtonListener`) | **Yes, selective** — `win32_event_filter` + `suppress_event()` swallow only the handled keys, only when claimed. Required: without it the OS mixer also changes volume, a focused VLC also toggles pause, and Home opens Edge. Dispatch happens *inside* the filter (a suppressed event never reaches `on_press`); both key-down and key-up are swallowed. The ⏻ power usage isn't suppressible at all — its OS action is disabled via powercfg instead (see "⏻ Power interception"). | Full (kiosk focus cocktail) |
+| **Linux (X11)** | pynput X listeners (need `DISPLAY`) | No selective suppression — the DE may also act on volume keys. No Home action (pynput exposes no browser-home key off-Windows). | Wake/hide work; kiosk raise via `wmctrl` if installed |
+| **macOS** | pynput CGEventTap | No suppression; requires the **Input Monitoring** permission (TCC) — without it the listeners receive nothing (so the TV UI never wakes). Dev convenience only. | Launch only; no reliable re-raise of an existing kiosk |
+
+Failure to start is always non-fatal: `start_listener` logs one warning and
+returns `None`; the dashboard runs without remote support. A **session-0
+Windows service receives no input** (hooks are per-desktop) — the installed
+Task Scheduler service runs in the interactive user session, so this only
+bites truly headless setups. The mouse listener is best-effort on top of the
+keyboard hook; if it fails, buttons still work but pointer motion won't
+refresh the idle timer.
+
+## Configuration
+
+| `.env` key | Default | Meaning |
+|---|---|---|
+| `REMOTE_CONTROL` | `1` | Master switch for the input listener (media keys, Home, TV UI wake signal) |
+| `TV_UI` | `1` | The Firestick-style dashboard kiosk (needs `REMOTE_CONTROL` for its wake signal) |
+| `TV_UI_IDLE_SECS` | `120` | No-input window before the UI hands the screen back to the background video (floor 15 s) |
+
+Step sizes are the `REMOTE_SEEK_STEP_SECS` / `REMOTE_VOLUME_STEP` constants in
+`main.py` (10 s / 5 %), matching the dashboard footer's small-skip and
+volume-± buttons.
