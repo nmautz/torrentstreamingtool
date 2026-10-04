@@ -152,6 +152,22 @@ final class CastSession {
     /// the receiver answered INVALID_MEDIA_SESSION_ID — measured 2026-09-25 as
     /// "the Chromecast didn't advance to the next episode".
     private var replacedMediaSessionId: Int?
+    /// WHICH MEDIA SESSION IS OURS (20.8.8). The Default Media Receiver is one
+    /// app shared by every sender on the Wi-Fi: a second phone that casts joins
+    /// the SAME transport, and its LOAD replaces ours. The receiver then tells
+    /// every joined sender about the new session. Adopting whatever arrived
+    /// made the first phone follow the second phone's episode as its own: it
+    /// posted that playhead as its own progress, and when the episode FINISHED
+    /// it advanced, loading its own next episode over the other viewer.
+    /// Measured 2026-10-04 03:44 and 04:19 (This Is Us replacing SpongeBob,
+    /// `load_cancelled` on the phone that lost). A session is ours when its
+    /// status answers our LOAD (`requestId`) or carries the URL we loaded
+    /// (the receiver echoes `contentId` verbatim, and a door URL holds this
+    /// phone's address and token). Anything else on the TV is someone else's.
+    private var loadRequestId: Int?
+    private var loadedContentId: String?
+    private var loadSentAt = Date.distantPast
+    private var lastOwnStatus = Date()
     private var pendingLoad: Load?
     private var launched = false
     private var joining = false
@@ -295,6 +311,10 @@ final class CastSession {
             if self.tick % 5 == 0 { self.send(NS.heartbeat, to: "receiver-0", ["type": "PING"]) }
             if let tr = self.transportId, let ms = self.mediaSessionId {
                 self.send(NS.media, to: tr, ["type": "GET_STATUS", "mediaSessionId": ms])
+            } else if let tr = self.transportId, self.loadedContentId != nil {
+                // Our LOAD is not answered yet. An id-less GET_STATUS returns
+                // whatever is on the TV with its URL, which says whose it is.
+                self.send(NS.media, to: tr, ["type": "GET_STATUS"])
             }
             if Date().timeIntervalSince(self.lastRx) > 20 { self.dropped("silent") }
         }
@@ -347,11 +367,17 @@ final class CastSession {
             // A request the receiver could not act on is not the end of the
             // session. A stale media session id is the known one: forget it and
             // ask for whatever is current.
+            // The id is KEPT: what comes back is judged against it, and a
+            // session that is not ours is never adopted (see loadRequestId).
             let reason = obj["reason"] as? String ?? ""
             DiagLog.shared.write("cast-invalid-request", ["reason": reason,
                                                           "msid": mediaSessionId ?? -1], cat: "cast")
-            if reason == "INVALID_MEDIA_SESSION_ID", let tr = transportId {
-                mediaSessionId = nil
+            if reason == "INVALID_MEDIA_SESSION_ID", let tr = transportId, mediaSessionId != nil {
+                // Ours is gone and nothing took its place (an empty status
+                // list is no answer at all): the TV is no longer playing it.
+                // Ten seconds, because a busy receiver answers a queue of old
+                // polls in one burst.
+                if Date().timeIntervalSince(lastOwnStatus) > 10 { failed("media-session-gone"); return }
                 send(NS.media, to: tr, ["type": "GET_STATUS"])
             }
         case (NS.media, "LOAD_FAILED"), (NS.media, "LOAD_CANCELLED"), (NS.media, "ERROR"):
@@ -384,8 +410,16 @@ final class CastSession {
             return
         }
         guard transportId != tr else { return }
+        // The receiver app was relaunched under us: a different app session is
+        // another sender's, even though it has the same app id. Its media
+        // session ids start again at 1, so they cannot tell the two apart.
+        let sid = app["sessionId"] as? String
+        if transportId != nil || (joining && appSessionId != nil && sid != appSessionId) {
+            failed("taken-over")
+            return
+        }
         transportId = tr
-        appSessionId = app["sessionId"] as? String
+        appSessionId = sid
         send(NS.connection, to: tr, ["type": "CONNECT"])
         if let load = pendingLoad {
             pendingLoad = nil
@@ -396,11 +430,29 @@ final class CastSession {
     }
 
     private func mediaStatus(_ obj: [String: Any]) {
-        guard let s = (obj["status"] as? [[String: Any]])?.first else { return }
-        var st = CastMediaStatus()
-        st.mediaSessionId = s["mediaSessionId"] as? Int
+        guard let s = (obj["status"] as? [[String: Any]])?.first,
+              let id = s["mediaSessionId"] as? Int else { return }
         // A late status from the session the last LOAD replaced: not ours any more.
-        if let id = st.mediaSessionId, id == replacedMediaSessionId { return }
+        if id == replacedMediaSessionId { return }
+        let content = (s["media"] as? [String: Any])?["contentId"] as? String
+        let foreign = content != nil && content != loadedContentId
+        if let own = mediaSessionId {
+            // Another sender loaded over us. Stand down and leave the TV alone.
+            if id != own || foreign { failed("taken-over"); return }
+        } else {
+            let rid = (obj["requestId"] as? NSNumber)?.intValue ?? 0
+            let ours = !foreign && ((rid != 0 && rid == loadRequestId) || content != nil)
+            guard ours else {
+                // Just after our LOAD this is the session it interrupted saying
+                // goodbye. Long after, it is someone else's and ours never began.
+                if foreign, Date().timeIntervalSince(loadSentAt) > 30 { failed("taken-over") }
+                return
+            }
+            mediaSessionId = id
+        }
+        lastOwnStatus = Date()
+        var st = CastMediaStatus()
+        st.mediaSessionId = id
         st.playerState = s["playerState"] as? String ?? ""
         st.idleReason = s["idleReason"] as? String ?? ""
         st.currentTime = (s["currentTime"] as? NSNumber)?.doubleValue ?? 0
@@ -409,7 +461,6 @@ final class CastSession {
             st.tracks = media["tracks"] as? [[String: Any]] ?? []
         }
         st.activeTrackIds = s["activeTrackIds"] as? [Int] ?? []
-        if let id = st.mediaSessionId { mediaSessionId = id }
         DispatchQueue.main.async { self.onStatus?(st) }
     }
 
@@ -446,6 +497,10 @@ final class CastSession {
         var body: [String: Any] = ["type": "LOAD", "media": media,
                                    "autoplay": l.autoplay, "currentTime": l.position]
         if l.activeSub >= 0, l.activeSub < l.subs.count { body["activeTrackIds"] = [l.activeSub + 1] }
+        loadRequestId = requestId         // the id send() is about to stamp on it
+        loadedContentId = l.url.absoluteString
+        loadSentAt = Date()
+        lastOwnStatus = Date()
         send(NS.media, to: tr, body)
         DiagLog.shared.write("cast-load", ["at": l.position, "autoplay": l.autoplay,
                                            "title": l.title, "subs": l.subs.count,

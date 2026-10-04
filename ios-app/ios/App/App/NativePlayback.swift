@@ -77,7 +77,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "20.8.7"
+let NP_BUILD = "20.8.8"
 
 // MARK: - Armed state
 
@@ -3889,6 +3889,9 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         sessionActivated = false          // the keep-alive re-categorised it
         DiagLog.shared.write("cast-end", ["why": why, "live": castLive, "pos": armed.position,
                                           "device": c.device.name], cat: "cast")
+        // Someone else is watching the TV now: the episode comes back to this
+        // phone where it stood, and waits. Playing it aloud here is not wanted.
+        if why == "taken-over" { armed.paused = true }
         if castLive {
             castLive = false
             emit("castEnded", ["reason": why, "position": armed.position, "live": true])

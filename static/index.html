@@ -21971,12 +21971,17 @@ function _npBindEvents() {
     _cap.np.addListener("castEnded", (e) => {
       _npLog("cast-ended", { reason: (e && e.reason) || "", live: !!(e && e.live),
                              at: (e && e.position) || 0, holding: _npHolding }, "cast");
+      // Another phone cast to the same TV. Native stood down without touching
+      // the TV and comes back paused, so nothing starts playing on this phone.
+      const taken = !!(e && e.reason === "taken-over");
       if (e && e.live) {
         if (_npHolding) _npHandBack().catch(() => {});
-        showAlert("Casting ended — playing on this phone.", "info");
+        showAlert(taken ? "Another device took over the TV — paused on this phone."
+                        : "Casting ended — playing on this phone.", "info");
       } else {
         _npArm();
-        showAlert("Couldn’t cast: " + ((e && e.reason) || "the TV refused the stream") + ".", "error");
+        showAlert(taken ? "Another device took over the TV."
+                        : "Couldn’t cast: " + ((e && e.reason) || "the TV refused the stream") + ".", "error");
       }
     });
     _cap.np.addListener("displayChanged", (e) => {
@@ -32730,6 +32735,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.8.7</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.8.8</div>
 </body>
 </html>

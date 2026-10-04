@@ -1,5 +1,25 @@
 # Changelog
 
+## [20.8.8] — 2026-10-03
+### Two phones, one Chromecast
+
+- **Fixed (built, not yet confirmed on a TV): a phone that had cast earlier kept
+  putting its own show back on the TV.** Every phone casts through the same receiver
+  app on the Chromecast, and a phone that is cast over is still joined to it. It took
+  the other phone's episode for its own: when that episode finished, it loaded its own
+  next episode over it. In the 2026-10-04 log SpongeBob was replaced by This Is Us at
+  03:44:52 and again at 04:19:09, each time at the end of a SpongeBob episode, and the
+  phone that lost logged `cast-end why:"load_cancelled"`. A phone now follows only the
+  episode it loaded itself. When another phone loads over it, it stops driving the TV,
+  leaves the TV alone, and comes back paused with "Another device took over the TV"
+  (`cast-end why:"taken-over"`).
+- **Both phones need this build.** A phone still on 20.8.7 or older will go on taking
+  the TV back from one that has it.
+- **The first phone's place was overwritten too.** While it followed the other
+  episode it posted that playhead as its own: This Is Us S02E04 went from 1067 s to
+  SpongeBob's positions (647 s, then 5 s up to 714 s) between 03:33 and 03:44. That
+  stops with the same fix. The positions already written are not repaired.
+
 ## [20.8.7] — 2026-10-03
 ### A cast that stopped a second after the picture arrived
 

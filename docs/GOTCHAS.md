@@ -3111,6 +3111,20 @@ reached through Tailscale is on no network the TV can see. So AirPlay always goe
   `_lpLoadIndex` moves the episode in place, as Next does), and `_lpLoadIndex` checks
   `state().native` before trusting a TV / PiP hold (`hold-stale`). Any new path that
   disarms while holding has to end the hold itself.
+- **The receiver is shared: not every status is yours (20.8.8).** The Default Media
+  Receiver is ONE app for every sender on the Wi-Fi. A second phone that casts joins
+  the same transport and its LOAD replaces the first phone's media session, and the
+  receiver reports the new session to every joined sender. Adopting it made the first
+  phone follow the second phone's episode: it posted that playhead as its own progress
+  and, on `FINISHED`, loaded its own next episode over the other viewer (`cast-end
+  why:"load_cancelled"` on the phone that lost, 2026-10-04). `CastSession` adopts a
+  media session only when the status answers its own LOAD (`requestId`; replies carry
+  it, broadcasts carry 0) or carries the URL it loaded (`contentId` is echoed verbatim,
+  and a door URL holds this phone's address and token). Any other session, or the same
+  app id under a different `sessionId`, is `failed("taken-over")`. `failed` closes the
+  session, so the later `stop(stopApp: true)` sends nothing: a phone that was taken
+  over must never STOP the receiver. Never adopt an id from an unproven status, and
+  never clear the id on `INVALID_MEDIA_SESSION_ID` to "ask what is current".
 - **No Google Cast SDK, on purpose** (`CastSession.swift`). If you change the protobuf,
   change it in both `encode` and `decode`. There are six fields, and the field numbers
   and wire types are the protocol.
@@ -3123,7 +3137,8 @@ reached through Tailscale is on no network the TV can see. So AirPlay always goe
   next poll ask about a dead session, and the receiver answers `INVALID_REQUEST
   INVALID_MEDIA_SESSION_ID`. That killed the first Chromecast advance on device.
   `replacedMediaSessionId` filters those statuses, and INVALID_REQUEST is recoverable
-  (forget the id, `GET_STATUS`), never fatal.
+  (keep the id, `GET_STATUS`), and fatal only when our session has said nothing for
+  10 s (`media-session-gone`).
 - **While native holds the picture, EVERY page reader of the playhead is stale.**
   The page's `<video>` is parked at the handoff position. `lpStop` used `_npNativePos`
   from the start, but the cross-device beat and yield (`_pbBeatOnce` / `_pbYieldNow`)
