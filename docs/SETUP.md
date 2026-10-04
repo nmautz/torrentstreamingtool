@@ -70,6 +70,8 @@ Lets the non-elevated StreamLink watchdog recover a hung Jackett **without a reb
 - When not admin, applies both in a single elevated `cmd /c … & …` (one UAC prompt). If elevation is declined, it prints the exact `sc sdset` / `sc failure` commands to run manually in an elevated PowerShell.
 - No-op if Jackett runs as a tray/user process (the watchdog can kill+relaunch that directly). See [GOTCHAS.md](GOTCHAS.md#controlling-the-localsystem-jackett-service-needs-admin).
 
+**`write_env()` keeps what it doesn't prompt for** (20.8.12). Any key in the existing `.env` that `gather_config()` doesn't ask about and that isn't a detected tool path (`TMDB_API_KEY`, `WINDOWS_ADMIN_*`, hand-added keys) is written back under "Kept from the previous .env". Before, declining the reuse prompt dropped them.
+
 ## Interactive configuration ([setup.py:930](../setup.py#L930))
 
 `gather_config(existing)` prompts for the user-facing `.env` keys (Jackett URL/API key/password/categories, qBit URL/user/password/download path, VLC URL/password, buffer thresholds, admin password).

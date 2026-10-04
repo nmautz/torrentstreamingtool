@@ -1,5 +1,19 @@
 # Changelog
 
+## [20.8.12] — 2026-10-04
+### Two setup and startup fixes
+
+- **Fixed: `python run.py` crashed at startup with the VPN kill switch set to Off.**
+  `check_vpn()` called a function `run.py` doesn't have, so the Off branch raised
+  `NameError` before anything started. Checked by calling `check_vpn()` with the mode
+  forced to Off; not run on a box.
+- **Fixed: re-running `setup.py` and answering "no" to "reuse existing .env?" dropped
+  every key setup doesn't ask about**, including `TMDB_API_KEY` and
+  `WINDOWS_ADMIN_USER` / `_PASSWORD`. They are now written back. Checked by driving
+  `gather_config` + `write_env` against a stored `.env`.
+
+**Backend:** [run.py](run.py), [setup.py](setup.py). **Docs:** [docs/SETUP.md](docs/SETUP.md).
+
 ## [20.8.11] — 2026-10-04
 ### While casting, the volume buttons drive the TV only while the app is open
 

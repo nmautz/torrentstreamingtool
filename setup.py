@@ -1494,7 +1494,7 @@ def generate_ssl_cert() -> bool:
 
 
 # ── Step 6: Write .env ────────────────────────────────────────────────────
-def write_env(cfg: dict, tools: dict) -> None:
+def write_env(cfg: dict, tools: dict, existing: dict | None = None) -> None:
     header("Writing .env")
 
     lines = [
@@ -1504,12 +1504,22 @@ def write_env(cfg: dict, tools: dict) -> None:
     for k, v in cfg.items():
         lines.append(f"{k}={v}")
 
-    lines += ["", "# Auto-detected binary paths (used by run.py)"]
     mapping = {"vlc": "_VLC_BIN", "qbit": "_QBIT_BIN",
                "jackett": "_JACKETT_BIN", "mullvad": "_MULLVAD_BIN",
                "ffmpeg": "_FFMPEG_BIN", "fpcalc": "_FPCALC_BIN",
                "whisper": "_WHISPER_BIN", "whisper_model": "_WHISPER_MODEL",
                "flaresolverr": "_FLARESOLVERR_BIN"}
+
+    # Keys setup doesn't prompt for (TMDB_API_KEY, WINDOWS_ADMIN_*, anything
+    # added by hand or from the admin panel) survive a rewrite.
+    kept = {k: v for k, v in (existing or {}).items()
+            if k not in cfg and k not in mapping.values()}
+    if kept:
+        lines += ["", "# Kept from the previous .env"]
+        for k, v in kept.items():
+            lines.append(f"{k}={v}")
+
+    lines += ["", "# Auto-detected binary paths (used by run.py)"]
     for key, env_key in mapping.items():
         if tools.get(key):
             lines.append(f"{env_key}={tools[key]}")
@@ -1646,7 +1656,7 @@ def main():
     else:
         cfg = gather_config(existing)
         configure_qbittorrent(cfg)
-        write_env(cfg, tools)
+        write_env(cfg, tools, existing)
 
     if cfg.get("QBIT_DOWNLOAD_PATH"):
         ensure_download_dir(cfg)
