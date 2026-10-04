@@ -1,5 +1,23 @@
 # Changelog
 
+## [20.8.10] — 2026-10-04
+### The app stays usable while it downloads, and the download activity goes away when the bytes stop
+
+- **Fixed (built, not yet run on a device): the app lagged and stopped answering
+  touches during a fast download.** Every network write sent a progress message to the
+  page. On the 2026-10-04 run the link carried about 20 MB/s (437 MB in 22 s) and the
+  page was flooded; the log shows the app relaunched four times in 53 seconds. Progress
+  is now reported at most twice a second per download.
+- **The download Live Activity now shows only while a download is running.** It is
+  removed when downloads pause (battery, Low Power Mode, charger-only, cellular), when
+  nothing has arrived for 30 seconds, when a download fails, and when the app goes to
+  the background without the system's own progress panel. Before, a paused or
+  backgrounded download left it on the lock screen at its last percentage.
+- **Stacked progress panels: a possible cause addressed, not confirmed.** On launch the
+  app now cancels background-task requests left by an earlier run of the app
+  (`cpt-leftover` in the client log when there were any). Whether those were the eight
+  panels seen is not known.
+
 ## [20.8.9] — 2026-10-03
 ### The next episode comes from the phone when it is on the phone
 

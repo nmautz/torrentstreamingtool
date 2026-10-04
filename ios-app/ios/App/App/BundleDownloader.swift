@@ -181,6 +181,19 @@ public class BundleDownloader: CAPPlugin, CAPBridgedPlugin {
         // previous process died on. NativePlayback does the same for the
         // playback one; this side had no equivalent.
         DownloadLiveActivity.shared.reapStrays()
+        // The same for the SYSTEM's panels. Every grant we ask for carries a new
+        // identifier, and 21 of the 117 grants in the 2026-10-04 transcript ended
+        // with the process and no `cpt-done` / `cpt-expired` behind them. Whether
+        // the system clears such a panel on its own is not something we have
+        // measured; nothing of ours is submitted yet in this process, so asking
+        // it to drop every earlier request costs nothing. `pending` is the
+        // evidence: non-zero means a previous process left something behind.
+        BGTaskScheduler.shared.getPendingTaskRequests { reqs in
+            if !reqs.isEmpty {
+                DiagLog.shared.write("cpt-leftover", ["pending": reqs.count], cat: "offline")
+            }
+            BGTaskScheduler.shared.cancelAllTaskRequests()
+        }
     }
 
     @objc func download(_ call: CAPPluginCall) {
@@ -898,6 +911,9 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             // the whole download) keeps us alive long enough to re-enqueue.
             let moved = self.migrateTasks(to: self.session)
             self.logTransition("dl-bg", moved: moved, readBudget: true)
+            // No grant, so this process is about to be suspended and cannot keep
+            // an activity truthful. Take it down while we still can.
+            DownloadLiveActivity.shared.suppress("background")
             // TEST BUILD ONLY — see `killTest`. Everything is now on the
             // out-of-process session, so exiting leaves the transfers running and
             // the system should relaunch us to deliver their events. exit(0) is
@@ -1077,6 +1093,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         var backoff: Set<String> = []           // files waiting on a retry timer — the pump must not jump them
         var cancels: [String: Int] = [:]        // fileName -> cancels seen, ever (see didCompleteWithError)
         var cancelGen: [String: Int] = [:]      // fileName -> migration generation of its last cancel
+        var lastEmit = Date.distantPast         // last progress report sent out (see emitProgress)
         init(itemId: String, filePath: String, name: String, baseUrl: String, deviceId: String?, files: [BundleFile]) {
             self.itemId = itemId; self.filePath = filePath; self.name = name
             self.baseUrl = baseUrl; self.deviceId = deviceId; self.files = files
@@ -1720,7 +1737,21 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         }
     }
 
+    /// AT MOST TWICE A SECOND PER BUNDLE. This runs from every `didWriteData`,
+    /// and each call used to cost a hop to the main thread, a message into the
+    /// web view, a DOM repaint there, and several sums over a ~1,100-entry
+    /// dictionary here. At the ~3 MB/s this was written against, nobody noticed.
+    /// Measured 2026-10-04 on a faster path: 437 MB in 22 s (~20 MB/s) across 24
+    /// tasks, the page stopped answering touches, and the app was relaunched four
+    /// times in a minute. The bytes are still counted on every callback
+    /// (`liveBytes`); only the telling is paced. Nothing waits on a trailing
+    /// report: the end of a bundle is `bundleComplete`, not a last tick.
+    private static let progressInterval: TimeInterval = 0.5
+
     private func emitProgress(sha: String, job: Job) {
+        let now = Date()
+        guard now.timeIntervalSince(job.lastEmit) >= Self.progressInterval else { return }
+        job.lastEmit = now
         updateContinuedProgress()
         let confirmed = job.doneBytes.values.reduce(0, +)
         let live = job.liveBytes.values.reduce(0, +)
@@ -1906,17 +1937,32 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             DownloadLiveActivity.shared.suppress("cpt")
             return
         }
-        // A GATED RUN MUST NOT LOOK LIKE A RUNNING ONE. Under a grant the system
-        // draws its own progress UI and ours stands down — but a gate closing
-        // ends the grant, so from here on ours is the only thing on the phone
-        // that can explain why the bytes stopped.
+        // ONLY WHILE BYTES ARE MOVING AND WE CAN SAY SO (20.8.10). A paused run
+        // used to keep its activity up with the reason on it, and a backgrounded
+        // one kept whatever percentage it had when the process was suspended:
+        // 2026-10-04, requested 14:35:20, suspended 14:35:52, still reading 2% at
+        // 15:19. An activity nobody can update is a stale one. The page announces
+        // a gate closing (`bundleGated`); the lock screen does not need to.
+        if gate != .go {
+            DownloadLiveActivity.shared.suppress("gated")
+            return
+        }
+        // Background without a grant means suspension within seconds, and a
+        // request from there is refused (`visibility`) anyway.
+        if !appActive {
+            DownloadLiveActivity.shared.suppress("background")
+            return
+        }
         DownloadLiveActivity.shared.sync(title: title, bytesDone: done, bytesTotal: total,
                                          fraction: frac, filesDone: filesDone,
-                                         fileCount: fileCount, paused: gate.text,
-                                         force: force)
+                                         fileCount: fileCount, force: force)
     }
 
     private var beatScheduled = false
+    /// `sess` + in-flight bytes at the previous heartbeat. Equal twice running
+    /// means 30 s in which nothing arrived (every file in retry backoff, a dead
+    /// link), and the activity comes down until bytes flow again.
+    private var lastBeatBytes: Int64 = -1
     /// Confirmed bytes landed since this PROCESS started. `disk` (and `done`) are
     /// sums over the jobs that are *currently live*, so both FALL when a bundle
     /// finishes and leaves the set — which makes them useless across exactly the
@@ -1977,6 +2023,9 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         var disk: Int64 = 0
         for (_, j) in jobs { disk += j.doneBytes.values.reduce(0, +) }
         let live = inFlight
+        let moved = sessionBytes + (done - disk)
+        if moved == lastBeatBytes { DownloadLiveActivity.shared.suppress("stalled") }
+        lastBeatBytes = moved
         // Bytes this process may still allocate before jetsam. The flood
         // hypothesis for the overnight kill is testable only against this number,
         // and nothing else in the transcript carries it.

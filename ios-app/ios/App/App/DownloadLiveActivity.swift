@@ -6,8 +6,11 @@
 //  A single aggregate activity represents whatever is downloading right now (the
 //  title is the active bundle, or "N downloads" when several run at once). It is
 //  started on the first active job, updated as bytes/files land (throttled), and
-//  ended — briefly showing a terminal "complete"/"failed" state — when the last
-//  job finishes. ActivityKit needs iOS 16.2 for the content API; below that every
+//  ended — briefly showing a terminal "complete" state — when the last job
+//  finishes. It is up ONLY while bytes are moving and this process can update it:
+//  a pause, a stall, a failure or a backgrounding without a grant takes it down
+//  at once (BundleDownloadManager.updateLiveActivity decides; `suppress` acts).
+//  ActivityKit needs iOS 16.2 for the content API; below that every
 //  call here is a no-op and downloads still run (just without the lock-screen UI).
 //
 
@@ -76,7 +79,8 @@ final class DownloadLiveActivity {
         lock.lock(); requestBlocked = false; lock.unlock()
     }
 
-    /// Stand down: something else is drawing this download's progress. On iOS 26+
+    /// Stand down: something else is drawing this download's progress, or nothing
+    /// truthful can be drawn (`why`: cpt / gated / background / stalled). On iOS 26+
     /// a granted `BGContinuedProcessingTask` comes with the system's OWN progress
     /// UI, with a cancel button, and ours sat next to it saying the same thing
     /// twice — observed on the 18.15.2 verification run. Ends immediately with no
@@ -97,7 +101,7 @@ final class DownloadLiveActivity {
     /// `force` bypasses the throttle (use on per-file completion / terminal states).
     func sync(title: String, bytesDone: Int64, bytesTotal: Int64, fraction: Double,
               filesDone: Int, fileCount: Int, finished: Bool = false,
-              failed: Bool = false, paused: String = "", force: Bool = false) {
+              failed: Bool = false, force: Bool = false) {
         guard #available(iOS 16.2, *) else { return }
         guard ActivityAuthorizationInfo().areActivitiesEnabled else {
             lock.lock(); let first = !loggedDisabled; loggedDisabled = true; lock.unlock()
@@ -124,7 +128,7 @@ final class DownloadLiveActivity {
         let state = DownloadActivityAttributes.ContentState(
             title: title, bytesDone: bytesDone, bytesTotal: bytesTotal,
             fraction: fraction, filesDone: filesDone, fileCount: fileCount,
-            finished: finished, failed: failed, paused: paused)
+            finished: finished, failed: failed)
 
         if let act = existing {
             Task { await act.update(ActivityContent(state: state, staleDate: nil)) }
@@ -162,7 +166,8 @@ final class DownloadLiveActivity {
         }
     }
 
-    /// End the activity, leaving a short-lived terminal frame on screen.
+    /// End the activity. A finished run leaves a short-lived terminal frame on
+    /// screen; a failed one is removed at once.
     func end(title: String, finished: Bool, failed: Bool,
              filesDone: Int, fileCount: Int, bytesTotal: Int64) {
         guard #available(iOS 16.2, *) else { return }
@@ -178,7 +183,7 @@ final class DownloadLiveActivity {
             finished: finished, failed: failed)
         Task {
             await act.end(ActivityContent(state: state, staleDate: nil),
-                          dismissalPolicy: .after(.now + 4))
+                          dismissalPolicy: failed ? .immediate : .after(.now + 4))
         }
     }
 }

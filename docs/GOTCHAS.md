@@ -4605,6 +4605,30 @@ Consequences worth holding on to:
 - It is also the reason our own download Live Activity is suppressed under a grant
   (18.16.0): the system's UI is already there and its button actually works.
 
+### A per-callback progress event is a flood on a fast link (fixed 20.8.10)
+`didWriteData` fires per chunk per task. `emitProgress` answered each one with a hop to
+the main thread, a `bundleProgress` message into the web view (which repaints a button
+and the tab badge), and several sums over the job's ~1,100-entry byte dictionaries. At
+the ~3 MB/s every earlier run was measured on, that was invisible. On 2026-10-04 the
+path did **437 MB in 22 s (~20 MB/s)** over 24 tasks, the page stopped answering
+touches, and the transcript shows four launches in 53 seconds. Low Power Mode "fixed"
+it only by closing the gate. `emitProgress` is now paced at 0.5 s per bundle; the byte
+counts are still updated on every callback. **Anything driven by a transfer callback
+must be paced by a clock, not by the bytes**: throughput is a property of the path and
+it will change.
+
+### A Live Activity nobody can update is a stale one (20.8.10)
+An activity outlives the moment its owner stops being able to push to it. The download
+activity was requested at 14:35:20, the app was backgrounded without a grant and
+suspended at 14:35:52, and it still read 2% at 15:19. The rule now: it exists only
+while bytes move **and** this process can say so. `la-suppressed why:` names which
+condition took it down (`cpt` / `gated` / `background` / `stalled`). Do not bring back
+a "paused" frame: a pause can last hours and the app is not awake to remove it.
+Not covered: a process killed outright while the activity is up leaves it until the
+next launch (`la-reap`). The system's own continued-processing panels are a separate
+thing; launch now cancels earlier task requests and logs `cpt-leftover` when any
+existed, which is **unmeasured** as a cure for stacked panels.
+
 ### The progress you report to a continued-processing task is what keeps it alive (fixed 18.19.0)
 `BGTask.h` is explicit: *"Tasks that appear stalled may be forcibly expired by the
 scheduler to preserve system resources"*, with WWDC25 putting the threshold around

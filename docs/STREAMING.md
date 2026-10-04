@@ -1403,8 +1403,21 @@ unreachable — which rules out anything fetched over the network.
 
 **Closing a gate** cancels every in-flight transfer (keeping the jobs, so `pump`
 resumes them from disk), hands back the continued-processing grant, emits
-`dl-gated`, fires the `bundleGated` JS event and repaints the Live Activity into
-its **paused** state — orange, `pause.circle.fill`, with the reason in words.
+`dl-gated`, fires the `bundleGated` JS event and **takes the download Live Activity
+down** (`la-suppressed why:"gated"`, 20.8.10; before that it stayed up in an orange
+paused state). The page's banner is what says why.
+
+**The download Live Activity is up only while bytes are moving and the process can
+update it** (20.8.10). `updateLiveActivity` ends it under a grant (`cpt`: the system
+draws its own panel), behind a shut gate (`gated`), in the background without a grant
+(`background`: the process is about to be suspended) and after a 30 s heartbeat in
+which no byte arrived (`stalled`). A failed run is removed at once; only a completed
+one leaves a 4 s terminal frame. In practice the system's panel is the lock-screen
+progress, and ours covers the foreground stretch before a grant arrives.
+
+**Progress reports are paced** (20.8.10): `emitProgress` runs at most every 0.5 s per
+bundle, so `bundleProgress`, the Live Activity sync and the grant's progress number
+no longer fire on every `didWriteData`.
 
 **The limitation.** A grant can only be requested while the app is foreground, so a
 gate that reopens while backgrounded falls to the slow out-of-process session until
@@ -1417,7 +1430,7 @@ the dashboard, see [PLAYER_CACHE_PLAN.md](PLAYER_CACHE_PLAN.md)) ignores every g
 cellular included, **while the app is in the foreground** (`bypassesGate`). It goes to
 the **front** of `jobOrder`, and closing a gate does not cancel it. It never requests
 the continued-processing grant, and it has no Live Activity or haptic. Content behind a
-shut gate stays paused, and the banner and Live Activity still say so. If the app is
+shut gate stays paused, and the banner still says so. If the app is
 backgrounded behind a shut gate, the snapshot's tasks are cancelled rather than
 migrated (`dl-player-bg`), and `pump` restarts them on the next foreground.
 
