@@ -1821,6 +1821,15 @@ rewritten. Offline bundles and box streams share the one path. While a session i
 also stays on the door. The door only answers GET/HEAD, and only with the token. It
 closes in `stopNative`. The loopback server stays loopback-only.
 
+**Which copy the next episode comes from (20.8.9).** `_lpArmNextNative` asks the phone
+first: on the loopback page (`_appOffline` / `_appProxied`) a fully downloaded next
+episode is armed as `/StreamLinkBundles/<sha>/master-native.m3u8` (`next-armed
+via:"device"`), so an advance on a TV, the glasses or a locked phone plays the device
+copy and works with no host at all. Only an episode that is not on the phone goes to
+the box's `/offline-prepare`. From the plain host page the box is always asked: the
+door proxies one upstream origin, and there it is the box. Before 20.8.9 the box was
+the only source, and offline nothing was armed. **Built, not yet run on a device.**
+
 Subtitles reach the TV through `master-native.m3u8`'s subtitle group (text subtitles
 only; ASS styling and image subtitles don't). Audio and subtitles are chosen when the item
 loads, from the armed selection. As with the glasses, the remote cannot switch them

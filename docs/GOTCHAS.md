@@ -3156,6 +3156,15 @@ reached through Tailscale is on no network the TV can see. So AirPlay always goe
   is behind" flag: set by the listener, cleared by `_lpLoadIndex`, and the hand-back
   reloads when it is set (`handback-reload` row). Never decide what the element holds
   from `lp.filePath`.
+- **After a native advance, `lp._nativeMaster` must move with the file (20.8.9).** The
+  `nativeAdvanced` listener re-arms, and until 20.8.9 that arm carried the PREVIOUS
+  episode's master under the new file path. Native keeps playing, but a quality pick or
+  an AirPlay audio change reloads `armed.url`. The listener now takes the URL and the
+  `source` (`device` / `server`) from the `lp._nextNative` it armed.
+- **A next episode armed from the phone must be a loopback-page URL.** `AirPlayDoor`
+  proxies ONE upstream origin. `_lpLocalNextNative` therefore only answers on the
+  loopback page (offline or proxied); a `/StreamLinkBundles/` URL armed from the host
+  page would fail `lanURL(for:)` and hand the TV a `127.0.0.1` address.
 - **FINISHED is polled, not pushed once.** Status is read at 1 Hz, so an IDLE/FINISHED
   arrives repeatedly. `castReady` is the latch, and without it one episode end would
   advance several times.

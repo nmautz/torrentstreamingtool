@@ -21918,6 +21918,16 @@ function _npBindEvents() {
           lp.filePath = e.filePath;
           lp.itemId = (lp.playlistItems || [])[i] || lp.itemId;
           _lpSetTitle();
+          // What native is now playing is what we armed as next. Keep the
+          // master and its source in step, or the re-arm below hands native the
+          // PREVIOUS episode's URL under this one's file path (a quality or
+          // AirPlay audio change reloads `armed.url`), and a device copy reports
+          // itself as a server stream.
+          const nx = lp._nextNative;
+          if (nx && nx.filePath === e.filePath && nx.url) {
+            lp._nativeMaster = nx.url;
+            if (nx.source) lp.source = nx.source;
+          }
           lp._nextNative = null;
           // The skip windows we hold belong to the episode that just finished.
           // Native promoted the ones we armed alongside nextUrl and is already
@@ -31186,14 +31196,40 @@ function _lpRenderNavButtons() {
 // player, so it can advance in place instead of being torn down and rebuilt.
 //
 // `/offline-prepare` is idempotent and answers immediately for a bundle that
-// exists, so this is one cheap round-trip rather than a second prep. Offline or
-// on a host that can't prep, there is nothing to arm — the advance falls back to
-// the teardown path, which is the old behaviour and is logged as such.
+// exists, so this is one cheap round-trip rather than a second prep. On a host
+// that can't prep, an episode that isn't on the phone has nothing to arm — the
+// advance falls back to the teardown path, which is the old behaviour and is
+// logged as such.
+//
+// THE PHONE'S OWN COPY COMES FIRST (20.8.9). Until then only the host was ever
+// asked, so a native advance (a cast, AirPlay, the glasses, a locked phone)
+// went to the box's bundle for an episode that was sitting on the device, and
+// offline, where there is no host, nothing was armed at all. Only from the
+// loopback page (_appOffline / _appProxied): that is where every bundle is
+// mounted under /StreamLinkBundles/, and AirPlayDoor proxies ONE upstream
+// origin, so a loopback URL armed from the host page could not reach a TV.
+async function _lpLocalNextNative(itemId, nextPath) {
+  if (!isApp || !(_appOffline || _appProxied)) return null;
+  const local = await _appLocalBundle(itemId, nextPath);
+  if (!(local && local.complete && local.dir && local.sha)) return null;
+  return window.location.origin + "/StreamLinkBundles/" + local.sha + "/master-native.m3u8";
+}
 function _lpArmNextNative(itemId, nextPath) {
-  if (!isApp || !hlsAvailable || _appOffline) return;
+  if (!isApp) return;
   if (lp._nextNative && lp._nextNative.filePath === nextPath) return;   // already armed
   (async () => {
     try {
+      const localUrl = await _lpLocalNextNative(itemId, nextPath);
+      if (lp.playlist[lp.pi + 1] !== nextPath) return;
+      if (localUrl) {
+        lp._nextNative = { url: localUrl, filePath: nextPath, itemId, source: "device",
+                           ..._lpNextTitle(nextPath, itemId), skip: null };
+        _npArm();
+        _lpAttachNextSkip(itemId, nextPath);
+        _npLog("next-armed", { file: nextPath, via: "device" }, "play");
+        return;
+      }
+      if (!hlsAvailable || _appOffline) return;   // no host to ask
       const r = await fetch(`/api/library/${itemId}/offline-prepare`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ file_path: nextPath, profile_id: _lpProfileId() }),
@@ -31208,7 +31244,7 @@ function _lpArmNextNative(itemId, nextPath) {
                                      hasMaster: !!prep.native_master_url }, "play");
         return;
       }
-      lp._nextNative = { url: prep.native_master_url, filePath: nextPath, itemId,
+      lp._nextNative = { url: prep.native_master_url, filePath: nextPath, itemId, source: "server",
                          ..._lpNextTitle(nextPath, itemId), skip: null };
       _npArm();
       _lpAttachNextSkip(itemId, nextPath);
@@ -31263,6 +31299,8 @@ function _lpWarmNextEp() {
         prepFileState.set(k, "ready");
         _lpRenderNavButtons();
         if (epItemId === itemId) { try { renderEpList(); } catch (_) {} }
+        // Ready is not armed (see above): hand the device copy to native too.
+        if (_appOffline || _appProxied) _lpArmNextNative(itemId, nextPath);
         return;
       }
     }
@@ -31296,7 +31334,7 @@ function _lpWarmNextEp() {
       // Next button, so arming costs nothing extra. Guard on the playlist not
       // having moved under us while we awaited.
       if (ready.native_master_url && lp.playlist[lp.pi + 1] === nextPath) {
-        lp._nextNative = { url: ready.native_master_url, filePath: nextPath, itemId,
+        lp._nextNative = { url: ready.native_master_url, filePath: nextPath, itemId, source: "server",
                            ..._lpNextTitle(nextPath, itemId), skip: null };
         _npArm();
         _lpAttachNextSkip(itemId, nextPath);
@@ -32735,6 +32773,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.8.8</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.8.9</div>
 </body>
 </html>

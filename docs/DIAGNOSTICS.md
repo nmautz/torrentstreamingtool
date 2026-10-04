@@ -164,7 +164,7 @@ JS-written rows carry `src: "js"`.
 | `unasked-pause` | the element paused with the page visible and no transport press behind it (19.13.1) — something other than the viewer paused it |
 | `auto-skip` | the **native** player fired a Smart Skip while it held the display (18.12.0) — `type` (`intro`/`credits`), `from`, and for an intro `to`. This is the only skip actor during a handoff; the page draws the tile but never fires |
 | `native-skipped` | the page's record of the same event, written when native's `nativeSkipped` reaches it. Its absence under an `auto-skip` means the page was asleep at the time — normal, and the flag is reconciled on the next arm |
-| `next-armed` | the next episode was handed to native (`via`: `already-ready` / `warmed`). From 18.12.0 the arm also carries that episode's skip windows |
+| `next-armed` | the next episode was handed to native (`via`: `device` = the phone's own downloaded copy, 20.8.9; `already-ready` / `warmed` = the box's bundle). From 18.12.0 the arm also carries that episode's skip windows |
 | `hold-start` | native took the display; `elementWasPlaying` says whether a second engine was running |
 | `display-handoff` | a display arrived **mid-episode** and the native player took it over on the spot (18.11.0). Follows a `sceneConnect` snap and its `earlyClaim`/`earlyHandoff` pair. Its absence after a `sceneConnect` with `native=false` is the pre-18.11.0 bug: window claimed, no player in it, glasses black |
 | `display-lost-handback` | the display went away while native held it, so the page took playback back into its own element (18.11.0). Foreground only — unplugging while locked deliberately leaves the native player alone |

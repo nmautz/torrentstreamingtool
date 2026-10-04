@@ -1,5 +1,23 @@
 # Changelog
 
+## [20.8.9] — 2026-10-03
+### The next episode comes from the phone when it is on the phone
+
+- **Fixed (built, not yet run on a device): a cast or AirPlay that advanced to the next
+  episode streamed it from the box even when that episode was downloaded.** The next
+  episode was only ever looked up on the box. It is now taken from the phone's own copy
+  when the episode is fully downloaded and the play is running from the device, and
+  from the box only when it is not on the phone. The same applies to the glasses and to
+  a locked phone (`next-armed via:"device"` in the client log).
+- **Offline, the next episode now advances in place.** With no host there was nothing
+  to look up, so the player was torn down and rebuilt at every episode end, which drops
+  a cast or an external screen. A downloaded next episode is now handed over directly.
+- **Fixed: after an in-place advance, a quality or AirPlay audio change could reload the
+  previous episode.** The page kept the earlier episode's stream address after the
+  advance. Found by reading the code, not seen on a device.
+- **The phone picks this up from its downloaded player**, not from an app build: the
+  player snapshot has to refresh from the box after the box is updated.
+
 ## [20.8.8] — 2026-10-03
 ### Two phones, one Chromecast
 
