@@ -54,13 +54,21 @@ AUTOUPDATE = os.environ.get("STREAMLINK_AUTOUPDATE", "").strip() == "1"
 # (install.bat → installer.py). The wizard launches setup.py with no usable
 # stdin, so ask()/ask_bool() already fall back to their defaults; on top of
 # that the wizard:
-#   - pre-seeds each .env value via SL_<KEY> env vars (read in gather_config)
+#   - pre-seeds each .env value via SL_<KEY> env vars (read in gather_config).
+#     A variable that is SET wins, even when empty; one that is absent leaves
+#     the stored/factory value alone.
 #   - always (re)writes .env + qBittorrent.ini so the chosen values take
-#     effect even when a stale .env exists (never silently "reuse")
-#   - toggles the two optional installs via STREAMLINK_INSTALL_STT /
-#     STREAMLINK_INSTALL_SERVICE ("0" = skip, anything else = default)
+#     effect even when a .env exists (keys it doesn't prompt for are kept)
+#   - names the VPN kill-switch mode via STREAMLINK_VPN_MODE (mullvad /
+#     generic / off): Mullvad is only installed for "mullvad", and the mode is
+#     seeded into library.json so the first start already enforces it
+#   - sets STREAMLINK_INSTALL_SERVICE=0, because it registers the service
+#     itself, LAST, once the steps that need a person are done
 # See docs/INSTALLER.md.
 WIZARD = os.environ.get("STREAMLINK_WIZARD", "").strip() == "1"
+VPN_MODE = os.environ.get("STREAMLINK_VPN_MODE", "").strip().lower()
+if VPN_MODE not in ("mullvad", "generic", "off"):
+    VPN_MODE = ""
 
 
 def _env_skip(name: str) -> bool:
@@ -604,12 +612,6 @@ def install_stt_deps(tools: dict) -> dict:
     if tools.get("whisper") and tools.get("whisper_model"):
         return tools
 
-    # Graphical wizard left the "AI auto-subtitles" box unchecked → skip.
-    if _env_skip("STREAMLINK_INSTALL_STT"):
-        header("Auto-Subtitle Dependencies (whisper.cpp + model)")
-        note("Skipped (disabled in the installer). Enable later by re-running setup.")
-        return tools
-
     header("Auto-Subtitle Dependencies (whisper.cpp + model)")
     note("Used to transcribe audio into subtitles when a file has none. Optional.")
     missing = []
@@ -801,6 +803,9 @@ def install_core_deps(tools: dict) -> dict:
     tools dict with refreshed paths for anything that got installed.
     """
     core_keys = ["vlc", "qbit", "jackett", "mullvad"]
+    if VPN_MODE in ("generic", "off"):
+        # The installer was told another VPN (or none) is in use.
+        core_keys.remove("mullvad")
     missing = [k for k in core_keys if not tools.get(k)]
     if not missing:
         return tools
@@ -1132,9 +1137,10 @@ def offer_service_install() -> bool:
     note("Register StreamLink as a system service so it starts automatically on")
     note("boot/login. The service runs the watchdog — which starts VLC, Jackett,")
     note("and the dashboard, and starts qBittorrent only once Mullvad VPN connects.")
-    # Graphical wizard left the "start on boot" box unchecked → skip.
+    # The graphical installer registers the service itself, after its own
+    # steps, so the server never starts before its config is complete.
     if _env_skip("STREAMLINK_INSTALL_SERVICE"):
-        note("Skipped (disabled in the installer). Install later with: python3 run.py --install")
+        note("Skipped here (STREAMLINK_INSTALL_SERVICE=0).")
         return False
     default = SYSTEM == "Windows"
     if not ask_bool("Install StreamLink as a system service now?", default=default):
@@ -1282,17 +1288,22 @@ def gather_config(existing: dict | None = None) -> dict:
 
     cfg: dict[str, str] = {}
 
-    # Plain field: default to the stored value, falling back to the factory
-    # default. The graphical wizard pre-seeds choices via SL_<KEY> env vars,
-    # which take priority over the stored value (and win automatically since
-    # the wizard runs setup.py with no stdin → ask() returns the default).
+    # The stored value, falling back to the factory default. The graphical
+    # wizard pre-seeds choices via SL_<KEY> env vars; one that is set wins
+    # (even empty, so a field can be blanked), and it becomes the answer
+    # because the wizard runs setup.py with no stdin → ask() returns the default.
+    def current(key, factory):
+        if "SL_" + key in os.environ:
+            return os.environ["SL_" + key].strip()
+        return prev.get(key, factory)
+
     def ask_field(label, key, factory=""):
-        return ask(label, os.environ.get("SL_" + key) or prev.get(key, factory))
+        return ask(label, current(key, factory))
 
     # Secret field: same defaulting, but never echo the stored value to the
     # terminal — show a masked placeholder so re-running setup can't leak it.
     def ask_secret(label, key, factory=""):
-        cur = os.environ.get("SL_" + key) or prev.get(key, factory)
+        cur = current(key, factory)
         if key in prev:
             shown = "•••••• (Enter = keep)" if cur else "(currently blank)"
         else:
@@ -1524,7 +1535,7 @@ def generate_ssl_cert() -> bool:
 
 
 # ── Step 6: Write .env ────────────────────────────────────────────────────
-def write_env(cfg: dict, tools: dict) -> None:
+def write_env(cfg: dict, tools: dict, existing: dict | None = None) -> None:
     header("Writing .env")
 
     lines = [
@@ -1534,12 +1545,22 @@ def write_env(cfg: dict, tools: dict) -> None:
     for k, v in cfg.items():
         lines.append(f"{k}={v}")
 
-    lines += ["", "# Auto-detected binary paths (used by run.py)"]
     mapping = {"vlc": "_VLC_BIN", "qbit": "_QBIT_BIN",
                "jackett": "_JACKETT_BIN", "mullvad": "_MULLVAD_BIN",
                "ffmpeg": "_FFMPEG_BIN", "fpcalc": "_FPCALC_BIN",
                "whisper": "_WHISPER_BIN", "whisper_model": "_WHISPER_MODEL",
                "flaresolverr": "_FLARESOLVERR_BIN"}
+
+    # Keys setup doesn't prompt for (TMDB_API_KEY, WINDOWS_ADMIN_*, anything
+    # added by hand or from the admin panel) survive a rewrite.
+    kept = {k: v for k, v in (existing or {}).items()
+            if k not in cfg and k not in mapping.values()}
+    if kept:
+        lines += ["", "# Kept from the previous .env"]
+        for k, v in kept.items():
+            lines.append(f"{k}={v}")
+
+    lines += ["", "# Auto-detected binary paths (used by run.py)"]
     for key, env_key in mapping.items():
         if tools.get(key):
             lines.append(f"{env_key}={tools[key]}")
@@ -1553,6 +1574,47 @@ def ensure_download_dir(cfg: dict) -> None:
     p = Path(cfg["QBIT_DOWNLOAD_PATH"])
     p.mkdir(parents=True, exist_ok=True)
     ok(f"Download folder ready → {p}")
+
+
+# ── VPN kill-switch mode chosen in the graphical installer ────────────────
+def seed_vpn_mode(mode: str) -> None:
+    """Write settings.vpn_killswitch.mode into library.json before first start.
+
+    The mode lives in library.json (see vpncheck.py), which the running server
+    owns. So this only writes when no server can be holding it: on a fresh
+    install the file doesn't exist yet. If StreamLink is already serving, the
+    mode is left alone and the admin panel is the place to change it.
+    """
+    import json
+    import socket
+    header("VPN kill switch")
+    lib = HERE / "library.json"
+    data: dict = {"profiles": [], "items": []}
+    if lib.exists():
+        try:
+            data = json.loads(lib.read_text(encoding="utf-8"))
+        except Exception as exc:
+            warn(f"Could not read library.json ({exc}) — leaving the kill-switch mode alone.")
+            return
+    ks = data.setdefault("settings", {}).setdefault("vpn_killswitch", {})
+    if str(ks.get("mode", "mullvad")).lower() == mode:
+        ok(f"Kill-switch mode: {mode}")
+        return
+    if lib.exists():
+        try:
+            with socket.create_connection(("127.0.0.1", 80), timeout=0.8):
+                serving = True
+        except OSError:
+            serving = False
+        if serving:
+            warn("StreamLink looks like it is running — not changing the kill-switch mode.")
+            note("Change it in Admin → VPN Kill Switch.")
+            return
+    ks["mode"] = mode
+    tmp = lib.with_name(lib.name + ".setup-tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, lib)
+    ok(f"Kill-switch mode set to: {mode}")
 
 
 # ── .env parsing for reuse path ───────────────────────────────────────────
@@ -1683,10 +1745,12 @@ def main():
     else:
         cfg = gather_config(existing)
         configure_qbittorrent(cfg)
-        write_env(cfg, tools)
+        write_env(cfg, tools, existing)
 
     if cfg.get("QBIT_DOWNLOAD_PATH"):
         ensure_download_dir(cfg)
+    if VPN_MODE:
+        seed_vpn_mode(VPN_MODE)
     generate_ssl_cert()
 
     if AUTOUPDATE:
@@ -1708,6 +1772,10 @@ def main():
         warn(f"Still needs manual install: {', '.join(missing)}")
     if not tools.get("mullvad"):
         note("VPN guard will be inactive until Mullvad CLI is in PATH.")
+
+    if WIZARD:
+        # The installer walks through these itself, and starts things after.
+        return
 
     # These can't be automated — they need a login, a third-party UI, or a key you
     # fetch by hand. The dashboard shows the same list (its first-run checklist),

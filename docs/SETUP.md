@@ -72,23 +72,30 @@ Lets the non-elevated StreamLink watchdog recover a hung Jackett **without a reb
 
 ## Non-interactive "wizard" mode (graphical installer)
 
-The graphical first-install wizard ([docs/INSTALLER.md](INSTALLER.md)) drives this
-same `setup.py` without a terminal. It runs setup with `stdin` closed — so every
-`ask()`/`ask_bool()` already returns its default — and steers the result with env
-vars:
+The graphical installer ([docs/INSTALLER.md](INSTALLER.md)) drives this same
+`setup.py` without a terminal. It runs setup with `stdin` closed, so every
+`ask()`/`ask_bool()` returns its default, and steers the result with env vars:
 
-- `STREAMLINK_WIZARD=1` (`WIZARD` flag) — when an existing `.env` is found, forces
-  `reuse_env=False` so the wizard's choices are written and `qBittorrent.ini` is
-  regenerated, instead of the normal "reuse existing `.env`?" path.
-- `SL_<ENV_KEY>` — pre-seeds each config value. `gather_config()`'s `ask_field` /
-  `ask_secret` prefer `os.environ.get("SL_"+key)` over the stored/factory default
-  (empty values fall back, so blanks use the factory default).
-- `STREAMLINK_INSTALL_STT=0` / `STREAMLINK_INSTALL_SERVICE=0` — checked via
-  `_env_skip()`; `"0"` skips the whisper.cpp download / the boot-service install
-  respectively. Any other value leaves the default behaviour unchanged.
+- `STREAMLINK_WIZARD=1` (`WIZARD`): when a `.env` exists, re-gather and rewrite it
+  (and `qBittorrent.ini`) instead of the "reuse existing `.env`?" path. Also skips
+  the closing "steps you still do by hand" list, which the installer walks through.
+- `SL_<ENV_KEY>`: the value for that key, read by `gather_config()`'s `current()`.
+  A variable that is **set** wins, even when empty; one that is absent leaves the
+  stored/factory value alone.
+- `STREAMLINK_VPN_MODE` (`VPN_MODE`): `mullvad` / `generic` / `off`. For the last
+  two `install_core_deps()` does not install Mullvad. `seed_vpn_mode()` writes the
+  mode to `library.json` → `settings.vpn_killswitch.mode`, but only when no server
+  can be holding that file (it doesn't exist yet, or nothing listens on port 80).
+- `STREAMLINK_INSTALL_SERVICE=0`: skip `offer_service_install()`. The installer
+  registers the service itself, last.
 
-This is distinct from `STREAMLINK_AUTOUPDATE=1` (`AUTOUPDATE`), which instead
-*reuses* the existing `.env` and skips OS-level installs.
+This is distinct from `STREAMLINK_AUTOUPDATE=1` (`AUTOUPDATE`), which *reuses* the
+existing `.env` and skips OS-level installs.
+
+**`write_env()` keeps what it doesn't prompt for.** Any key in the existing `.env`
+that `gather_config()` doesn't ask about and that isn't a detected tool path
+(`TMDB_API_KEY`, `WINDOWS_ADMIN_*`, hand-added keys) is written back under
+"Kept from the previous .env". Before 20.9.0, declining the reuse prompt dropped them.
 
 ## Interactive configuration ([setup.py:930](../setup.py#L930))
 

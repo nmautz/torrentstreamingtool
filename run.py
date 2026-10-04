@@ -719,7 +719,7 @@ def check_vpn() -> bool:
         mode = "mullvad"
 
     if mode == "off":
-        note("VPN kill-switch is OFF (settings.vpn_killswitch.mode=off) — not gating on a VPN.")
+        info("VPN kill-switch is OFF (settings.vpn_killswitch.mode=off) — not gating on a VPN.")
         return True
 
     if mode == "generic":

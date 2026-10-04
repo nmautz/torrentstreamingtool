@@ -1,5 +1,44 @@
 # Changelog
 
+## [20.9.0] — 2026-10-04
+### A graphical installer for Windows: download the ZIP, double-click `install.bat`
+
+**Built, not yet run on Windows.** The decision logic has 120 unit tests and every page
+was laid out headlessly on a Mac; `install.bat`, UAC, winget, Task Scheduler and the Tk
+window itself have never executed. `docs/INSTALLER.md` lists what is unchecked.
+
+- **New: `install.bat` + a setup window.** It elevates, installs a Python the background
+  service can use if there isn't one, and opens a wizard: download folder, an admin
+  password you must choose (no default), which VPN you use (Mullvad / another VPN /
+  none), then the install, then one page per thing that needs a person.
+- **Each step checks first and only explains when the check fails.** VPN connected;
+  qBittorrent's remote control answers and accepts the login; VLC's first-run question
+  answered; Jackett's API key works and has at least one search site; an optional TMDb
+  key. Any step can be skipped.
+- **Jackett's API key is read from Jackett**, not copied out of a web page by hand.
+- **A ZIP download becomes a git clone**, so Admin → Updates works. Git is installed if
+  missing. The branch comes from the folder name GitHub gave the ZIP.
+- **StreamLink is started last**, after its keys are written, so the server's first
+  start already has them.
+- **Changed: re-running setup no longer drops `.env` keys it doesn't ask about.**
+  Answering "no" to "reuse existing .env?" used to lose `TMDB_API_KEY` and
+  `WINDOWS_ADMIN_*`. They are kept now.
+- **Fixed: `python run.py` crashed at startup with the kill switch set to Off**
+  (`check_vpn()` called a function `run.py` doesn't have).
+
+This replaces a first attempt at the installer that was never run. Read against today's
+code it would have hung on its install page (it decoded `setup.py`'s UTF-8 output as
+cp1252), refused the most common existing Python, called a `run.py` function that no
+longer exists, started the server before the Jackett key was written, started
+qBittorrent with no VPN check, and reset an existing install's passwords to defaults.
+
+**New:** [installsteps.py](installsteps.py), [tests/test_installsteps.py](tests/test_installsteps.py),
+[.gitattributes](.gitattributes). **Rewritten:** [installer.py](installer.py),
+[install.bat](install.bat). **Backend:** [setup.py](setup.py) (`WIZARD`, `VPN_MODE`,
+`seed_vpn_mode`, `SL_*` in `gather_config`, `write_env` keeps unknown keys),
+[run.py](run.py). **Docs:** [docs/INSTALLER.md](docs/INSTALLER.md), [README.md](README.md),
+[docs/SETUP.md](docs/SETUP.md), [docs/GOTCHAS.md](docs/GOTCHAS.md), [CLAUDE.md](CLAUDE.md).
+
 ## [20.8.11] — 2026-10-04
 ### While casting, the volume buttons drive the TV only while the app is open
 

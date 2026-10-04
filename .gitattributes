@@ -1,0 +1,3 @@
+# cmd.exe mis-parses labels in an LF-only batch file, and a GitHub ZIP is made
+# with these rules, so this is what keeps install.bat runnable from a download.
+*.bat text eol=crlf

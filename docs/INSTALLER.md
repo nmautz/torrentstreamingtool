@@ -1,137 +1,177 @@
-# Graphical Installer (`install.bat` + `installer.py`)
+# Graphical Installer (`install.bat` + `installer.py` + `installsteps.py`)
 
-The one-click, no-terminal first-install path for **Windows** (primary target).
-A user double-clicks `install.bat`, clicks through a small wizard, and ends up
-with a fully configured, running StreamLink. It is a thin front-end over the
-existing [`setup.py`](SETUP.md) — it does **not** reimplement any setup logic.
+The no-terminal first-install path for **Windows**. Someone downloads the ZIP (or
+clones), double-clicks `install.bat`, and ends with a configured, running
+StreamLink. It is a front-end over [`setup.py`](SETUP.md): it reimplements none
+of setup's steps.
 
-> Linux/macOS: there's no `.sh` equivalent yet; use `python3 setup.py`. The
-> wizard (`installer.py`) does run on those platforms (Tk is cross-platform)
-> but is not the documented path there.
+> **Status: built on a Mac, never run on Windows.** The decision logic is covered
+> by `tests/test_installsteps.py` (120 cases, including a real ZIP-folder-to-clone
+> run against a throwaway git remote), and every page was laid out headlessly.
+> `install.bat` and everything that touches Windows itself (UAC, winget, Task
+> Scheduler, the Tk window) has not been executed. See [What has not been
+> checked](#what-has-not-been-checked).
+
+> Linux/macOS: use `python3 setup.py`. `installer.py` starts on those platforms
+> but is not a supported path there.
 
 ---
 
-## Two pieces
+## Three pieces
 
-### `install.bat` — the bootstrap
+| File | Role |
+|------|------|
+| `install.bat` | Runs before any Python is known to exist. Elevates, finds or installs a usable Python, starts the wizard. |
+| `installer.py` | The Tk window, and nothing else. Standard library only, runs under the **system** Python. |
+| `installsteps.py` | Every decision the wizard makes, with no window attached. Leaf module (stdlib only, no `main`/`run`/`setup` import), tests in `tests/test_installsteps.py`. |
 
-Runs under `cmd.exe`, before any Python is guaranteed to exist.
+### `install.bat`
 
-1. **Self-elevates** via `powershell Start-Process -Verb RunAs` if not already
-   admin. Everything downstream needs admin: an **all-users** Python install,
-   the Jackett Windows service, firewall rules, and binding ports 80/443.
-2. **`cd /d "%~dp0"`** so the rest runs from the repo root regardless of where
-   the elevated shell starts.
-3. **Finds a usable Python ≥ 3.9** with the `:try_py` subroutine, preferring the
-   `py -3` launcher, then `python`. The version gate is a `raise SystemExit(...)`
-   one-liner, so a too-old Python doesn't count.
-4. **Installs Python 3.12 if none found** — `winget install -e --id
-   Python.Python.3.12 --scope machine --silent …` (all-users), falling back to
-   downloading the official python.org installer and running it `/quiet
-   InstallAllUsers=1 PrependPath=1 Include_tcltk=1 Include_launcher=1`. **All-users
-   is deliberate**: a per-user Python produces a `.venv` the service account
-   can't execute — see [GOTCHAS.md](GOTCHAS.md) "Microsoft Store / per-user
-   Python". `Include_tcltk` guarantees Tkinter for the wizard. After install it
-   re-detects via `py -3` (the launcher lands in `%WINDIR%`, already on PATH).
-5. **Launches the wizard**: `%PY% installer.py`. Blocks until the window closes;
-   pauses on a non-zero exit so the user can read the error.
+1. Refuses to run from inside the ZIP viewer (`installer.py` isn't beside it).
+2. **Elevates** (`fltmc` as the admin test, `Start-Process -Verb RunAs`). Says so
+   and stops if the prompt is declined.
+3. **Finds a usable Python**, in order: `%ProgramFiles%\Python3*\python.exe`,
+   `py -3`, `python`. "Usable" is checked by running it: 3.9+, `tkinter`
+   imports, and its path is **not per-user** (no `AppData`, no `WindowsApps`).
+   A per-user Python is the default python.org install, and `setup.py` refuses
+   it when there is nobody to ask (see [GOTCHAS.md](GOTCHAS.md) "per-user Python").
+4. **Installs Python 3.12 for all users** if none qualifies: `winget --scope
+   machine`, falling back to the python.org installer with `InstallAllUsers=1
+   Include_tcltk=1`. Re-scans `%ProgramFiles%` afterwards, because the new
+   Python is not on this cmd session's PATH.
+5. Starts the wizard, from inside one parenthesised block (see GOTCHAS: the
+   wizard can replace `install.bat` while cmd is still reading it).
 
-### `installer.py` — the wizard
+The file is plain ASCII with CRLF endings. `.gitattributes` pins `*.bat eol=crlf`,
+which also applies to GitHub's ZIP downloads.
 
-A standard-library-only Tkinter app (no pip deps — Tk ships with the python.org
-build). **Must run under the system Python**, same constraint as `setup.py`; it
-launches `setup.py` with `sys.executable`.
+### `installer.py`: the pages
 
-Pages (frame-swap, no separate windows):
+Welcome → Settings → Install → VPN → qBittorrent → VLC → Jackett → TMDb → Finish
 
 | Page | What it does |
 |------|--------------|
-| **Welcome** | Explains what will be installed; shows the detected Python. |
-| **Settings** | Download folder (+Browse), admin password, content filter (All/Movies/TV). An **Advanced** drawer reveals Jackett/qBit/VLC URLs+credentials and buffer thresholds. Checkboxes: *AI auto-subtitles* and *Start on boot*. Defaults are the factory defaults, pre-filled. Validates port collision (qBit vs VLC) and numeric buffers before continuing. |
-| **Install** | Runs `setup.py` in a worker thread, streams its stdout into a live log (ANSI stripped), indeterminate progress bar. Enables **Next** on completion; flags a non-zero exit in red (which routes straight to Finish with a "didn't finish cleanly" message instead of the guided steps). |
-| **Connect VPN** (step 2) | *Guided manual step.* Mullvad is now installed, so this explains the kill-switch, links to get an account, offers an **Open Mullvad** button, the log-in/connect steps, and a **Test VPN connection** button (live check — see below). |
-| **qBittorrent Web UI** (step 3) | *Guided manual step.* StreamLink drives downloads through qBit's Web UI; `setup.py` writes the ini but qBit can overwrite it if it was open during install. An **Open qBittorrent** button (launches `_QBIT_BIN`), numbered steps, a read-only **"match these values"** panel (exact Port / Username / Password / save path, pulled live from the chosen config), and a **Test Web UI** button. |
-| **VLC remote control** (step 4) | *Guided manual step.* An **Open VLC** button (launches `_VLC_BIN`), steps to dismiss VLC's one-time privacy dialog (which otherwise blocks the Lua HTTP interface), the web port + password panel, and a **Test web control** button (which actually launches VLC with the right flags and confirms reachability — so it also surfaces the first-run dialog). |
-| **Add a search source** (step 5) | *Guided manual step.* Jackett is now installed **and running**, so this offers an **Open Jackett** button (opens `INDEXER_URL`), numbered steps to add an indexer and copy the API key, fields for the **API key** + optional Jackett admin password, and a **Test Jackett** button. On continue the key/password are written into `.env` in place via `_set_env_keys()`. *Skip for now* is offered. |
-| **Finish** | Success summary + dashboard URLs. Adapts to the *Install as a service* choice (`_update_finish()`): **if the service was installed**, `daemon.install()` already started it during setup, so the redundant "Launch now" is hidden and the page notes it'll auto-start on login (plus the auto-login tip for surviving a full reboot); **if not**, it shows an optional **Launch StreamLink now** that runs `run.py` in a new console. |
+| **Welcome** | What will happen. **Stops here** if the wizard is running as a different account than the one signed in (the admin prompt was approved with someone else's password: settings would land in the wrong profile), or under a per-user Python. |
+| **Settings** | Download folder, **admin password (required, no default)**, VPN kill-switch mode, start-at-sign-in. Pre-filled from an existing `.env`. *Ports & passwords* opens the rarely-needed fields on their own page. |
+| **Install** | Connects a ZIP folder to GitHub (below), then runs `setup.py` and streams its output into a log, which is also saved to `logs/installer.log`. On failure: *Try again*, *Back*, *Close*. |
+| **VPN** | Skipped when the mode is *off*. Checks with `run.check_vpn()`. |
+| **qBittorrent** | Starts qBittorrent (only if the VPN check passes), logs in to its Web UI the way the server does, and stops it again. |
+| **VLC** | Reads `vlcrc` to see whether VLC's first-run privacy question has been answered. Does not start VLC. |
+| **Jackett** | Starts Jackett, **reads its API key from `ServerConfig.json`**, asks Jackett's own API whether the key works and how many indexers are set up. |
+| **TMDb** | Optional key, checked against TMDb. |
+| **Finish** | Registers and starts the service (or offers *Start StreamLink*), waits for port 80, offers *Open StreamLink*. Lists any step that was skipped. |
 
-### Live connection tests (the green/red checks)
+**Check first, explain on failure.** Each step page runs its check when it opens.
+Green means one click to move on; the numbered instructions only appear when the
+check fails. Every step can be skipped: the dashboard's own first-run checklist
+(`/api/setup-status`) reports the same gaps later.
 
-Each guided page has a **Test** button that actually **starts the service and
-verifies it**, then shows ✓ green / ✗ red (with the failure's last log line) /
-amber "checking…". This reuses `run.py`'s real `start_vlc()` /
-`start_qbittorrent()` / `start_jackett()` / `check_mullvad()` — no duplicated
-launch logic, so VLC comes up with the exact same flags (HTTP interface,
-fullscreen, marquee) the dashboard uses, and the readiness checks match.
+**StreamLink starts last.** `setup.py` is always run with
+`STREAMLINK_INSTALL_SERVICE=0`; the wizard runs `run.py --install` itself on the
+Finish page. The server reads `.env` once at startup, so started any earlier it
+would never see the Jackett or TMDb key. Its watchdog would also kill a
+qBittorrent the user had just been asked to open.
 
-The wizard runs under the **system** Python and can't `import run` directly:
-`run.py` `os.execv`s itself into `.venv` at import, and its deps (psutil, …)
-live there. So `_run_check()` shells out to **the venv Python**
-(`.venv/Scripts/python.exe`) with a tiny driver — `import run; run.<call>()` —
-in a worker thread, and maps the exit code to pass/fail. (Running under the venv
-Python means `run.py`'s execv guard is a no-op, since `sys.prefix` is already the
-venv.) Because the test *starts* VLC, it also triggers VLC's first-run privacy
-dialog right there, so the user can dismiss it and re-test. If `.venv` isn't
-present yet (setup failed), the button reports that instead of hanging.
-
-### Why the manual steps come *after* the install
-
-The Jackett API key and the Mullvad login can't be collected up front: the key
-only exists once Jackett is installed, running, and has an indexer added, and the
-login needs the Mullvad app present. So the wizard collects only the values
-`setup.py` needs *before* running it, then — once `setup.py` has installed and
-started those apps — walks the user through the external steps with working
-links/buttons. The API key (and optional `JACKETT_PASSWORD`) are written to the
-already-generated `.env` directly; everything else flows through `setup.py`.
+**The page area scrolls** if a page is taller than the window. Text height
+depends on the font and display scaling, so no fixed size fits everywhere.
 
 ---
 
-## How the wizard drives `setup.py` (the seam)
+## The seam into `setup.py`
 
-The wizard deliberately reuses `setup.py` instead of duplicating it. The seam is
-small and lives in `setup.py`:
+`setup.py` already answers every prompt with its default when there is no
+stdin. The wizard runs it with `stdin=DEVNULL` and steers it with env vars
+(built by `installsteps.setup_env`):
 
-- **No stdin → defaults.** `setup.py`'s `ask()`/`ask_bool()` already return their
-  default when there's no interactive stdin. The wizard runs setup with
-  `stdin=DEVNULL`, so every prompt auto-answers with its default.
-- **`STREAMLINK_WIZARD=1`** — `WIZARD` flag in `setup.py`. Forces
-  `reuse_env=False` even when a stale `.env` exists, so the user's choices are
-  written (and `qBittorrent.ini` regenerated) rather than silently skipped.
-- **`SL_<ENV_KEY>=value`** — read in `gather_config()`'s `ask_field` / `ask_secret`
-  with priority over the stored/factory default
-  (`os.environ.get("SL_"+key) or prev.get(key, factory)`). An empty `SL_*` is
-  ignored (falls back), so blank fields use the factory default. Keys mirror the
-  `.env` keys exactly: `SL_QBIT_DOWNLOAD_PATH`, `SL_ADMIN_PASSWORD`,
-  `SL_INDEXER_URL`, `SL_INDEXER_API_KEY`, `SL_INDEXER_CATEGORIES`, `SL_QBIT_URL`,
-  `SL_QBIT_USERNAME`, `SL_QBIT_PASSWORD`, `SL_VLC_URL`, `SL_VLC_PASSWORD`,
-  `SL_BUFFER_MIN_MB`, `SL_BUFFER_MIN_PCT`.
-- **`STREAMLINK_INSTALL_STT` / `STREAMLINK_INSTALL_SERVICE`** — checked via
-  `_env_skip()` (`"0"` = skip). `install_stt_deps()` skips the whisper.cpp
-  download; `offer_service_install()` skips registering the boot service. Any
-  other value leaves the original default behaviour intact.
+| Variable | Effect in `setup.py` |
+|----------|----------------------|
+| `STREAMLINK_WIZARD=1` | Never reuse `.env` wholesale: re-gather and rewrite it and `qBittorrent.ini`. Skips the closing "steps you still do by hand" list. |
+| `SL_<ENV_KEY>` | The value for that key. **Set wins, even when empty; absent leaves the stored/factory value.** The wizard seeds every key it shows except `INDEXER_API_KEY` and `JACKETT_PASSWORD`, which it finds after Jackett is installed, so a stored key survives a re-run. |
+| `STREAMLINK_VPN_MODE` | `mullvad` / `generic` / `off`. Mullvad is only winget-installed for `mullvad`. `seed_vpn_mode()` writes the mode into `library.json` so the first start already enforces it. |
+| `STREAMLINK_INSTALL_SERVICE=0` | Skip `offer_service_install()`. |
 
-Because everything routes through `setup.py`, an unattended click-through with
-all-defaults produces exactly the same `.env`, `qBittorrent.ini`, SSL cert, and
-service registration that the terminal flow would.
+`write_env()` now keeps keys setup doesn't prompt for (`TMDB_API_KEY`,
+`WINDOWS_ADMIN_*`, anything added by hand). That also fixes the terminal flow,
+where answering "no" to "reuse existing .env?" used to drop them.
 
-> Keep `installer.py`'s `DEFAULTS` dict in lock-step with `gather_config()`'s
-> factory defaults — they're duplicated for display, and drift would show the
-> user a default the backend doesn't actually use.
+`seed_vpn_mode()` writes `library.json` outside `_lib_lock`, which is only safe
+when no server holds it. So it writes when the file doesn't exist yet, or when
+nothing is listening on port 80; otherwise it leaves the mode alone and points at
+Admin → VPN Kill Switch. The Settings page disables the choice in the same case.
+
+`installsteps.DEFAULTS` duplicates `gather_config()`'s factory defaults for
+display. The test file parses `setup.py` and fails if they drift.
 
 ---
 
-## Manual steps
+## A ZIP download becomes a clone
 
-Every step that needs a human is **walked through inline**, in its own page, at
-the point where the relevant app is installed: connecting **Mullvad VPN**,
-verifying the **qBittorrent Web UI**, dismissing **VLC's** first-run dialog, and
-adding a **Jackett indexer + API key** (see the table above). They're no longer
-just "surfaced" at the end. Each is skippable and can be redone later from the
-app / README. The qBit & VLC pages show the exact values to match (port,
-credentials, save path) so the user doesn't have to cross-reference `.env`.
+The updater is git (`updater.py`), and a ZIP has no `.git`. On the Install page,
+before `setup.py`:
+
+1. If Git is missing, `winget install Git.Git --scope machine`.
+2. `installsteps.ensure_clone()`: `git init`, add `origin`, fetch one branch,
+   `checkout -f -B <branch> origin/<branch>`, set upstream, and add the folder to
+   the user's `safe.directory` (the wizard is elevated, so `.git` is owned by
+   Administrators and the unelevated service's git would refuse it).
+
+**Which branch:** the folder name. GitHub names a ZIP's folder `<repo>-<branch>`,
+so `torrentstreamingtool-alpha (1)` is `alpha`. A renamed folder falls back to
+`main`.
+
+**A branch is only used if it contains the installer** (`installer.py` and
+`installsteps.py` at its tip). Checking out a branch without them would delete
+the running wizard and hand `setup.py` a seam it doesn't have. If no candidate
+qualifies, or there is no network, the folder is left as it was, any half-made
+`.git` is removed, and the log says updates are off. This never fails the install.
+
+`checkout -f` brings the files to the branch tip, so a ZIP that is a few commits
+old is updated on the spot. Untracked files (`.env`, `.venv`, `library.json`) are
+not touched.
+
+---
+
+## Checks that need `run.py`
+
+`run.py` re-executes itself into `.venv` at import and its dependencies live
+there, so the wizard cannot import it. `installsteps.run_driver()` runs a short
+driver under the venv's Python instead; each prints one `RESULT:<word>` line.
+
+- `VPN_DRIVER`: `run.check_vpn()`.
+- `JACKETT_DRIVER`: `run.start_jackett()`.
+- `QBIT_DRIVER`: if the Web UI isn't already up, require `check_vpn()`, start
+  qBittorrent, log in, then **kill it if this check started it**.
+
+Children get `PYTHONIOENCODING=utf-8` / `PYTHONUTF8=1` and are read as UTF-8 with
+`errors="replace"` (see GOTCHAS).
+
+---
+
+## What has not been checked
+
+Nothing here has run on Windows. In rough order of how likely each is to need a fix:
+
+- `install.bat` end to end: the elevation relaunch, the `for /d` Python scan, the
+  winget and python.org installs, the final parenthesised block.
+- The Tk window's look on Windows (fonts, DPI awareness on a scaled display,
+  scrolling). Layout was only measured on a Mac, where Apple's bundled Tk cannot
+  open a window at all.
+- `vlcrc` containing `qt-privacy-ask=0` after the first-run dialog is answered.
+  If VLC records it differently the VLC page will always say "still waiting"; it
+  can be skipped.
+- Jackett's answer to a wrong API key (the code accepts both a 401 and a 200 with
+  an `<error>` body) and the location of `ServerConfig.json` for a service install
+  (`%ProgramData%\Jackett`).
+- qBittorrent's first-launch legal notice. `setup.py` does not pre-accept it; if
+  it holds up the Web UI the qBittorrent page fails with instructions that
+  mention it.
+- `run.py --install` from the elevated wizard, and whether the task it starts is
+  serving within the 90 s the Finish page waits.
+- The ZIP-to-clone path with a real Git for Windows (line endings, the
+  `safe.directory` entry being enough for the unelevated updater).
 
 ## See also
 
-- [SETUP.md](SETUP.md) — what `setup.py` actually does, step by step.
-- [RUNTIME.md](RUNTIME.md) — what `run.py` does when the wizard launches it.
-- [GOTCHAS.md](GOTCHAS.md) — the per-user-Python footgun the all-users install avoids.
+- [SETUP.md](SETUP.md): what `setup.py` does, step by step.
+- [RUNTIME.md](RUNTIME.md): what `run.py` does once started.
+- [GOTCHAS.md](GOTCHAS.md) § Graphical installer.

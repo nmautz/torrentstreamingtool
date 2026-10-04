@@ -7027,3 +7027,67 @@ A phrase cannot carry a `String` parameter, so the old Siri asks "Which title?" 
 - **Say only what the server knows.** `library_download` returns how many race candidates
   were OFFERED (up to 6); the race engine then runs `download_race.size`. The first
   spoken confirmation said "trying 6 copies" while two ran.
+
+## Graphical installer (20.9.0)
+
+Built on a Mac and not yet run on Windows; [INSTALLER.md](INSTALLER.md) lists what is
+unchecked. These are the traps the first version of it fell into, or that its design
+has to keep avoiding.
+
+### A child's output through a pipe is not UTF-8 unless both ends say so
+
+`setup.py` reconfigures its own stdout to UTF-8. A parent that reads the pipe with
+`text=True` decodes it in the ANSI code page. The first `header()` line contains `━`
+(`E2 94 81`), and `0x81` has no meaning in cp1252, so the reader thread died with
+`UnicodeDecodeError` and the first wizard would have sat on "Installing…" forever.
+`run.py` is the opposite case: it does not reconfigure, so printing `✓` into a pipe
+raises `UnicodeEncodeError` in the child. Start both through
+`installsteps.child_env()` (`PYTHONIOENCODING=utf-8`, `PYTHONUTF8=1`) and read with
+`encoding="utf-8", errors="replace"`.
+
+### The wizard is elevated, and so is everything it starts directly
+
+`install.bat` elevates because an all-users Python, the Jackett service, the firewall
+rules and Task Scheduler all need it. The StreamLink service it registers runs
+**unelevated**. An unelevated process cannot kill an elevated one, so:
+
+- A qBittorrent the wizard starts must not outlive the check. `QBIT_DRIVER` kills it if
+  it started it. Left running, it would be a qBittorrent the watchdog cannot stop when
+  the VPN drops.
+- VLC, Mullvad and URLs are opened through `explorer.exe` (`shell_open`), which starts
+  them as the signed-in user. An elevated VLC is one `start_vlc()` cannot restart with
+  its HTTP interface.
+- `.git` made by the wizard is owned by Administrators. Git would refuse the folder to
+  the unelevated updater ("dubious ownership"), so `ensure_clone()` adds it to
+  `safe.directory`.
+
+When a **standard user** approves the admin prompt with another account's password, the
+wizard runs as that other account: `Path.home()`, the download folder and
+`qBittorrent.ini` all belong to the wrong profile. The Welcome page compares the
+process's user with the owner of its desktop session (`session_user()`) and stops.
+
+### StreamLink must start after the wizard's steps, not during setup
+
+The first version let `setup.py` register and start the service, then asked for the
+Jackett key. The server reads `.env` once at startup, so it never saw the key. The
+wizard passes `STREAMLINK_INSTALL_SERVICE=0` and runs `run.py --install` on its last
+page.
+
+### `install.bat` can be rewritten while cmd is reading it
+
+cmd reads a batch file a line at a time, by byte offset, re-opening it after each
+command. Turning a ZIP folder into a clone does `git checkout -f`, which rewrites
+`install.bat` (and converts its line endings) while the wizard it launched is still
+running. The lines after the wizard are therefore one parenthesised block, which cmd
+parses whole before running any of it. Keep it that way. The same file must stay
+ASCII with CRLF endings (`.gitattributes`): cmd mis-finds labels in an LF-only file.
+
+### A branch without the installer must never be checked out by the installer
+
+`ensure_clone()` picks the branch from the ZIP folder's name and falls back to `main`.
+Until the installer has been promoted, `main` does not contain it: checking `main` out
+would delete the running wizard and give `setup.py` no seam, so it would install with
+factory defaults and a blank admin password while the wizard reported success. The
+branch's tip is checked for `installer.py` and `installsteps.py` before anything is
+switched.
+

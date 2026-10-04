@@ -10,13 +10,29 @@ StreamLink is a home media server you run on the PC connected to your TV. Search
 
 ---
 
-## Easiest: the one-click installer (recommended)
+## Easiest: the graphical installer
 
-**Just double-click `install.bat`.** No terminal, and you don't even need Python first.
+> **New and not yet proven on a clean PC.** If it gets stuck, the terminal steps below always work, and `logs\installer.log` records what the installer did.
 
-It asks for administrator access (click **Yes**), installs Python if it's missing, then opens a small **graphical wizard**: pick your download folder and admin password (or keep the defaults), tick whether you want AI auto-subtitles and start-on-boot, and click **Install**. After it installs everything, the wizard **walks you through each step that needs you** — connecting **Mullvad VPN**, enabling the **qBittorrent Web UI** (it shows the exact port/username/password to match), clearing **VLC's** first-run dialog so remote control works, and adding a **Jackett** search source + API key — each on its own page with the links, steps, an "Open app" button, and (for Jackett) a box to paste the key. **Every page has a live Test button** that starts the service and shows a green ✓ / red ✗ so you know it's actually working before you move on. Then it offers to launch StreamLink. You never touch a terminal.
+1. On GitHub, press **Code → Download ZIP**, then right-click the ZIP and choose **Extract All**. (A `git clone` works too.)
+2. Open the extracted folder and double-click **`install.bat`**. Windows may say it "protected your PC" because the file was downloaded: press **More info → Run anyway**. Then click **Yes** on the administrator prompt.
+3. Follow the window. You don't need Python, Git or a terminal first: the installer gets what is missing.
 
-> Power users / Linux / macOS, or if you'd rather see the terminal flow, keep reading.
+You choose a **download folder**, an **admin password** (there is no default, you must pick one) and **which VPN you use**: Mullvad, another VPN, or none. It then installs everything `setup.py` installs, and checks each thing that needs you, one page at a time:
+
+| Page | What it checks | What you may have to do |
+|------|----------------|-------------------------|
+| VPN | that your VPN is connected | log in to your VPN and connect |
+| qBittorrent | that its remote control answers | usually nothing |
+| VLC | that its first-run question was answered | open VLC once and press Continue |
+| Jackett | that the API key works (it is read for you) and a search site exists | add at least one indexer in Jackett |
+| TMDb | an optional free key for posters and episode names | paste a key |
+
+A green square means that step is done. Instructions appear only when a check fails, and any step can be skipped: StreamLink's home page lists what is still missing. On the last page StreamLink is set to start when you sign in, and started.
+
+The installer also connects a ZIP download to GitHub, so **Admin → Updates** works afterwards.
+
+> Linux / macOS, or if you'd rather use a terminal, keep reading.
 
 ---
 
@@ -37,7 +53,7 @@ Then do the steps `setup.py` can't do for you (below). **Pick an admin password*
 
 | Step | Who does it | Notes |
 |------|-------------|-------|
-| Install Python 3.9+ | **You** (once) | See [Prerequisite](#0--prerequisite-python). Everything else is bootstrapped from here. |
+| Install Python 3.9+ | **You** (once), or `install.bat` | See [Prerequisite](#0--prerequisite-python). Everything else is bootstrapped from here. |
 | Create `.venv` + install Python packages | Automatic | `setup.py` |
 | Install qBittorrent, Jackett, Mullvad, VLC | Automatic | via `winget` |
 | Register Jackett as a Windows service | Automatic | UAC prompt: **click Yes** |
@@ -62,7 +78,7 @@ Then do the steps `setup.py` can't do for you (below). **Pick an admin password*
 
 ## 0 — Prerequisite: Python
 
-> Using the one-click `install.bat` above? **Skip this section** — the installer installs Python (all-users) for you if it's missing.
+> Using `install.bat`? **Skip this section.** It installs a suitable Python for you.
 
 Install **Python 3.9 or newer** from [python.org](https://www.python.org/downloads/) (or `winget install Python.Python.3.12`).
 
