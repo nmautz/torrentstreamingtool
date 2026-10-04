@@ -27885,6 +27885,19 @@ async function _lpLoadIndex(seekTo) {
   // the running player (NativePlayback.arm -> swapNativeItem), which is the only
   // path that changes the episode without releasing the display. The takeover
   // stays as a cheap catch for the case where native had already stopped.
+  if (_npHolding && (_npCastName || _npAirplay || _npPip)) {
+    // A hold on a TV or a PiP window is only real while native is running. If it
+    // stopped behind the page's back, the takeover below would start a plain
+    // player on the phone under a remote for a TV that is no longer playing.
+    let st = null;
+    try { st = await _cap.np.state(); } catch (_) {}
+    if (lp.filePath !== filePath) return;
+    if (st && !st.native) {
+      _npLog("hold-stale", { file: lp.filePath, cast: _npCastName, airplay: _npAirplay,
+                             pip: _npPip }, "ext");
+      _npHolding = false; _npAirplay = false; _npPip = false; _npCastName = ""; _npStopPoll(); _npSyncRemoteUi();
+    }
+  }
   if (_npHolding) {
     _npLog("load-while-holding", { file: lp.filePath, at: lp.resumeSec || 0,
                                    nativeMaster: !!lp._nativeMaster }, "ext");
@@ -30659,7 +30672,15 @@ async function lpUnloadCurrent() {
   // background transition landing mid-teardown would start the native player on
   // a torn-down source. Native flushes a final progress post before it wipes its
   // state, so disarming first no longer costs the outgoing episode its tail.
-  _npDisarm("unload");
+  //
+  // NOT WHILE THE PAGE IS A REMOTE. A disarm stops the native player, and with
+  // it the cast / AirPlay / glasses session it is feeding — but nothing here
+  // ends the hold, so the load that follows restarted native as a plain player
+  // on the phone under controls that still said "On Dining Room TV" (client log
+  // 2026-10-04 01:52). Playing another episode from the list is the same act as
+  // Next: _lpLoadIndex's arm carries the file into the running player and the
+  // TV keeps the picture. lpStop() ends the hold before it gets here.
+  if (!_npHolding) _npDisarm("unload");
   try { v.pause(); } catch (_) {}
   _lpTeardownOctopus();   // drop any styled-sub libass overlay before the src changes
   _lpDestroyHls();
@@ -32709,6 +32730,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.8.5</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.8.6</div>
 </body>
 </html>

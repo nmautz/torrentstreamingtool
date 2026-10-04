@@ -3090,6 +3090,21 @@ reached through Tailscale is on no network the TV can see. So AirPlay always goe
   call refuses both; that case is open. A `cast-dropped why:silent` right after a
   `becomeActive` means the phone had been suspended: read upward for what stopped the
   audio, and do not look at the network first.
+- **The receiver does not always say `FINISHED` (20.8.6).** A cast's only advance,
+  when no credits skip carries it, is `IDLE` + `idleReason: FINISHED`. The Default
+  Media Receiver can stop a fraction of a second short of the end instead (714.44 of
+  714.74 s, 2026-10-04; the bundle's audio and video differ in length by a few frames)
+  and stay there, never idle. `castTailStalled` treats a clock that has stood still for
+  4 s inside the last 2 s, on a receiver that is not `PAUSED`, as the end. Do not widen
+  the window: a receiver buffering mid-episode is starving, not finished.
+- **A disarm ends the cast, not the hold.** `disarm` stops the native player and with
+  it the cast / AirPlay session, but `_npHolding` and `_npCastName` are the page's and
+  only `lpStop`, a hand-back or a native event clear them. `lpUnloadCurrent` used to
+  disarm on every new play: the next load then restarted native as a plain player on
+  the phone under the TV's controls. It no longer disarms while holding (the arm in
+  `_lpLoadIndex` moves the episode in place, as Next does), and `_lpLoadIndex` checks
+  `state().native` before trusting a TV / PiP hold (`hold-stale`). Any new path that
+  disarms while holding has to end the hold itself.
 - **No Google Cast SDK, on purpose** (`CastSession.swift`). If you change the protobuf,
   change it in both `encode` and `decode`. There are six fields, and the field numbers
   and wire types are the protocol.

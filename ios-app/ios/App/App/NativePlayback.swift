@@ -77,7 +77,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "20.8.5"
+let NP_BUILD = "20.8.6"
 
 // MARK: - Armed state
 
@@ -952,6 +952,11 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private var cast: CastSession?
     private var castLive = false
     private var castReady = false
+    // The receiver's last player state (logged on change) and where/when its
+    // clock was last seen to move inside the final seconds — see castTailStalled.
+    private var castLastState = ""
+    private var castTailPos = -1.0
+    private var castTailSince: Date?
     /// Tracks are picked once per LOAD, from the first status that lists them.
     private var castTracksApplied = false
     /// The receiver's last status that listed tracks — what a live pick maps onto.
@@ -3519,6 +3524,9 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         guard let c = cast else { return }
         castReady = false
         castTracksApplied = false
+        castLastState = ""
+        castTailPos = -1
+        castTailSince = nil
         let lan = AirPlayDoor.shared.lanURL(for: url) ?? url
         let title = armed.title, series = armed.series, sub = armed.subIndex
         castSubs(for: lan) { [weak self] subs in
@@ -3707,6 +3715,12 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         guard let c = cast else { return }
         castRejoins = 0
         if st.idleReason == "ERROR" { castFailed("media-error"); return }
+        if st.playerState != castLastState {
+            castLastState = st.playerState
+            DiagLog.shared.write("cast-state", ["state": st.playerState, "idle": st.idleReason,
+                                                "pos": st.currentTime,
+                                                "dur": armed.duration], cat: "cast")
+        }
         let loaded = st.playerState == "PLAYING" || st.playerState == "PAUSED"
             || st.playerState == "BUFFERING"
         if loaded {
@@ -3726,6 +3740,11 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
                 castTracksApplied = true
                 applyCastTracks(st)
             }
+        }
+        if castTailStalled(st) {
+            castReady = false
+            reachedEnd()
+            return
         }
         if st.playerState == "PLAYING" || st.playerState == "PAUSED" {
             let t = st.currentTime
@@ -3747,6 +3766,35 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             castReady = false
             reachedEnd()
         }
+    }
+
+    /// THE RECEIVER DOES NOT ALWAYS SAY "FINISHED". The audio and video
+    /// renditions of a bundle differ in length by a few frames, and the Default
+    /// Media Receiver can sit short of the end waiting for media that does not
+    /// exist: its clock stops, it never goes IDLE, and the only advance a cast
+    /// has (when no credits skip carries it) never fires. Measured 2026-10-04:
+    /// Nature Pants held at 714.44 of 714.74 for 30 s, until the viewer gave up.
+    /// A clock that has not moved for 4 s inside the last 2 s, on a receiver
+    /// that is not paused, is the end. PAUSED is the viewer's and never counts.
+    private func castTailStalled(_ st: CastMediaStatus) -> Bool {
+        let t = st.currentTime, dur = armed.duration
+        guard castReady, dur > 0, t >= dur - 2,
+              st.playerState == "PLAYING" || st.playerState == "BUFFERING" else {
+            castTailSince = nil
+            castTailPos = -1
+            return false
+        }
+        if castTailSince == nil || abs(t - castTailPos) > 0.05 {
+            castTailPos = t
+            castTailSince = Date()
+            return false
+        }
+        guard let since = castTailSince, Date().timeIntervalSince(since) >= 4 else { return false }
+        castTailSince = nil
+        castTailPos = -1
+        DiagLog.shared.write("cast-tail-stall", ["pos": t, "dur": dur,
+                                                 "state": st.playerState], cat: "cast")
+        return true
     }
 
     /// Audio and subtitle picks, from the tracks the receiver found in the

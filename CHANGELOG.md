@@ -1,5 +1,31 @@
 # Changelog
 
+## [20.8.6] — 2026-10-03
+### A cast that stuck at the end of an episode, and a TV remote with nothing behind it
+
+- **Fixed (built, not yet confirmed on a TV): a cast could sit at the end of an episode
+  and never go to the next one.** A cast with no credits skip advances when the TV
+  reports the episode finished. In the 2026-10-04 log (01:51) the TV stopped 0.3 s
+  short of the end of Nature Pants (714.44 of 714.74 s) and never reported it, so
+  Opposite Day never started. A TV whose clock has not moved for 4 s inside the last
+  2 s of an episode, and is not paused, now counts as finished. Earlier casts of the
+  same show did advance, so this is the TV's player stalling at the tail now and then,
+  not every time. Needs the app (Swift).
+- **Fixed (not yet confirmed on a TV): playing another episode from the list during a
+  cast started it on the phone, under the TV's controls.** Starting a play stopped the
+  phone's native player, which ends the cast, but the page went on believing it was a
+  remote: it started the new episode on a plain player on the phone (sound from the
+  phone, no cast) and kept showing "On Dining Room TV". It now does what Next always
+  did: the new episode goes to the TV in place. The same holds for AirPlay, Picture in
+  Picture and the glasses. Host-side (`static/index.html`).
+- **A remote for a TV that has stopped ends itself.** If the native player is found
+  gone when a new file loads during a cast, AirPlay or PiP, the page stops being a
+  remote and plays the episode itself (`hold-stale`).
+- **New log rows.** `cast-state` (the TV's player state, on each change: `state`,
+  `idle`, `pos`, `dur`), `cast-tail-stall` (`pos`, `dur`, `state`), `hold-stale`.
+  The first is what was missing here: the log could not say whether the TV was
+  buffering or playing a frozen clock.
+
 ## [20.8.5] — 2026-10-03
 ### Chromecast buffering until the app is opened
 

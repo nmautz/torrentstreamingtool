@@ -777,7 +777,9 @@ glue pre-arms the `NativePlayback` plugin so playback survives a lock:
 the project's trusted-playhead rule — `currentTime > 2 ? currentTime : lp.lastKnownT`);
 `_npArm()` pushes it on load, play, pause, seeked, and every `_lpSaveLocalTracks`
 track pick; `_npTick()` refreshes position at 1 Hz from `_lpClockTick`; `_npDisarm()`
-runs in `lpUnloadCurrent`/`lpStop`. `_npHandBack()` reclaims the playhead on
+runs in `lpUnloadCurrent`/`lpStop`. `lpUnloadCurrent` skips it while the page is a remote
+(`_npHolding`, 20.8.6): a disarm would end the cast, and the arm in `_lpLoadIndex` moves
+the episode in place instead. `_npHandBack()` reclaims the playhead on
 foreground — **the `visibilitychange`→visible branch now chains
 `_lpRecoverActiveSub` / `_lpRecoverMediaPipeline` after it** instead of racing them on
 independent timers, because those probes read the playhead and the frame-counting one
