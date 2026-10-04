@@ -1,5 +1,25 @@
 # Changelog
 
+## [20.8.7] — 2026-10-03
+### A cast that stopped a second after the picture arrived
+
+- **Fixed (built, not yet confirmed on a TV): locking the phone while a cast was still
+  connecting stopped the TV a few seconds in.** Locking bounces the app through
+  "active" on its way to the background. If that landed after the cast was started but
+  before the TV reported it playing, the app armed its five-second "the page never took
+  playback back" timer, and the timer then stopped the cast. In the 2026-10-04 log the
+  bounce is at 02:08:57.3, `cast-live` at 02:08:58.4, the TV playing at 02:09:01.0 and
+  `disarm reason:"handback-timeout"` at 02:09:02.6. The timer now stands down for a
+  cast from the moment it is started, and is cancelled when the cast goes live. Swift
+  only.
+- **Not explained: the cast before that one paused 2.5 s after it started**
+  (02:07:27.97, `setPaused src:"remote-pause"`, 3 s after the phone was locked). That
+  row is the system's pause command (lock screen, headphones, Control Centre); the log
+  cannot say what sent it. It has happened twice in about fifty casts.
+- **New log row for it.** `remote` with `cmd: "play"` / `"pause"` now records the
+  phone's state when the system's command arrives: `app`, `locked`, `outputs`,
+  `other` (another app is playing audio), `cast`, `keepalive`.
+
 ## [20.8.6] — 2026-10-03
 ### A cast that stuck at the end of an episode, and a TV remote with nothing behind it
 

@@ -3097,6 +3097,12 @@ reached through Tailscale is on no network the TV can see. So AirPlay always goe
   and stay there, never idle. `castTailStalled` treats a clock that has stood still for
   4 s inside the last 2 s, on a receiver that is not `PAUSED`, as the end. Do not widen
   the window: a receiver buffering mid-episode is starving, not finished.
+- **A cast is a cast before it is live (20.8.7).** `castLive` turns true on the first
+  loaded status, 2-3 s after `startCast`. Anything that asks "is native presenting
+  somewhere else?" in that window has to test `cast != nil`. `appDidBecomeActive`
+  tested `castLive`, and a lock's active bounce inside the window armed the hand-back
+  deadline, which stopped the TV (`disarm reason:"handback-timeout"` a few seconds
+  after `cast-live`).
 - **A disarm ends the cast, not the hold.** `disarm` stops the native player and with
   it the cast / AirPlay session, but `_npHolding` and `_npCastName` are the page's and
   only `lpStop`, a hand-back or a native event clear them. `lpUnloadCurrent` used to

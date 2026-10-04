@@ -77,7 +77,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "20.8.6"
+let NP_BUILD = "20.8.7"
 
 // MARK: - Armed state
 
@@ -2611,7 +2611,13 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             DiagLog.shared.write("cast-rejoin", ["pos": armed.position], cat: "cast")
             c.rejoin()
         }
-        if extWindow != nil || airplayOn || castLive || pipOn { return }
+        // `cast != nil`, not `castLive`: a cast that is still connecting is not
+        // live yet, and locking the phone bounces the app through "active" on
+        // the way down. Measured 2026-10-04 02:08:57: that bounce landed 1 s
+        // before `cast-live`, the deadline was armed, and it stopped the TV 1.5 s
+        // after the picture arrived. A cast that never goes live ends itself
+        // (castFailed), so nothing is left for the deadline to catch.
+        if extWindow != nil || airplayOn || cast != nil || pipOn { return }
 
         // If the webview never calls resume() — it reloaded, crashed, or the
         // page was replaced — we'd be left playing invisible audio with no UI.
@@ -2712,6 +2718,25 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         if endActivity { PlaybackLiveActivity.shared.end("teardown") }
     }
 
+    /// A pause nobody remembers pressing (a cast paused 2.5 s in, 3 s after the
+    /// lock, 2026-10-04 02:07) arrives as the system's pause command, which names
+    /// no sender. What the phone looked like at that instant is the only clue:
+    /// a locked screen cannot be tapped, a headset is a route, and another app
+    /// taking the audio shows as `other`.
+    private func logRemoteTransport(_ cmd: String) {
+        let s = AVAudioSession.sharedInstance()
+        let app = UIApplication.shared.applicationState
+        DiagLog.shared.write("remote", [
+            "cmd": cmd,
+            "app": app == .active ? "act" : app == .background ? "bg" : "inact",
+            "locked": !UIApplication.shared.isProtectedDataAvailable,
+            "outputs": s.currentRoute.outputs.map { "\($0.portType.rawValue):\($0.portName)" }
+                .joined(separator: ","),
+            "other": s.isOtherAudioPlaying,
+            "cast": cast != nil, "keepalive": SilentKeepAlive.shared.isRunning,
+        ], cat: "play")
+    }
+
     // MARK: Transport (remote commands + Live Activity intents share this)
 
     func handlePlaybackCommand(_ cmd: PlaybackCommand) {
@@ -2762,9 +2787,11 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // intent left the flag disagreeing with the transport, and the next
         // handoff inherited the disagreement.
         _ = c.playCommand.addTarget { [weak self] _ in
+            self?.logRemoteTransport("play")
             self?.setPaused(false, source: "remote-play"); return .success
         }
         _ = c.pauseCommand.addTarget { [weak self] _ in
+            self?.logRemoteTransport("pause")
             self?.setPaused(true, source: "remote-pause"); return .success
         }
         _ = c.togglePlayPauseCommand.addTarget { [weak self] _ in
@@ -3727,6 +3754,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             castReady = true
             if !castLive {
                 castLive = true
+                handBackDeadline?.cancel(); handBackDeadline = nil
                 DiagLog.shared.write("cast-live", ["device": c.device.name, "at": st.currentTime,
                                                    "dur": st.duration,
                                                    "tracks": st.tracks.count], cat: "cast")
