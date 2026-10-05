@@ -32,9 +32,14 @@ neither. It does now. See `docs/EXTERNAL_SERVICES.md` for the wider review this 
   library makes a few hundred TMDb requests once.
 - Browsers were told to keep artwork for a year; they are now told 30 days.
 
-Not checked: this was verified with unit tests and against a temporary library with a
-fake TMDb, on macOS. It has **not** run on the box against the real library or the real
-TMDb, and the credits have not been looked at in a browser or in the app.
+Checked on the box (Windows, 2026-10-04): it starts clean on 20.11.0, all 139 library
+items kept identical metadata across the update, the credits render in a desktop browser
+with no script errors, and artwork is served with the 30-day header.
+
+Not checked: the refresh, the 180-day removal and the artwork sweep have **not** run
+against real data. Nothing on the box is older than 18 days, so the first pass had nothing
+to do and logged nothing. Those paths are covered only by unit tests and a run against a
+temporary library with a fake TMDb, on macOS. The credits have not been seen in the iOS app.
 
 Not covered by the limit: episode names already baked into a prepped bundle's label, names
 stored with a download on the phone, and a bookmark's stored title and poster.
