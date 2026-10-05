@@ -3297,7 +3297,7 @@ clock, not the gate, is the binding constraint.
 
 ## Things that are **not** stream-to-device
 
-- The Search tab — depends on Jackett, which depends on the host.
+- Search (the box at the top of Explore) — depends on TMDb and Jackett, which depend on the host.
   Entirely network-only.
 - New library downloads (qBit) — still need the host (and VPN).
 - Admin panel — auth + Jackett + ffmpeg jobs all require the host.

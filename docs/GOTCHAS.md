@@ -7038,3 +7038,28 @@ A phrase cannot carry a `String` parameter, so the old Siri asks "Which title?" 
 - **Say only what the server knows.** `library_download` returns how many race candidates
   were OFFERED (up to 6); the race engine then runs `download_race.size`. The first
   spoken confirmation said "trying 6 copies" while two ran.
+
+## A keystroke must never start an indexer search (20.10.0)
+
+Search is the box at the top of Explore and it searches as you type. That is only
+affordable because typing asks **TMDb** and nothing else. An indexer search goes through
+Jackett to every configured site and takes seconds; on a debounce it would fire for
+`st`, `star`, `star w` and queue behind itself. So `_exShowSearch(submit)` reaches
+`doJackettSearch` only when `submit` is true (Enter, or the button an empty result
+offers) and `doClassicSearch` only from the **Search raw results** button. Anything that
+re-runs the current view (`_exApply()` from a kind chip, Hide owned, a late
+`loadExplore`) passes no `submit` — but note it **does** re-run an indexer search that is
+already up, because `_exSearchRaw` is still set. `loadExplore` therefore skips its closing
+`_exApply()` while a query is active.
+
+Two smaller traps from the same merge:
+
+- **The Sources and Categories pickers do nothing for a title search.** They feed
+  `/api/search` in `doClassicSearch` / `doJackettSearch` only; the show page a poster
+  card opens never reads them. They were sitting under the old Search box looking
+  global. They now live inside the raw-results bar, the one place they act.
+- **`_renderTmdbResults` returns its card count and the caller depends on it.** Hide
+  owned can filter every match away, which is a different message ("Nothing left to
+  show") from TMDb finding nothing (which, on Enter, goes on to the indexers). A missing
+  `return` reads as "everything was filtered" for every query.
+

@@ -8,7 +8,8 @@ controls it remotely over SSE.
 
 Spans `main.py` (the `/api/youtube*` endpoints + kiosk launch/kill),
 `static/tv.html` (the host-side player page), and `static/index.html` (the
-Search-tab input + control routing).
+paste box at the bottom of the Library tab, moved from the Search tab in 20.10.0, +
+control routing).
 
 ---
 
@@ -21,7 +22,7 @@ Changing any of:
 - `_extract_youtube_id`, `_find_chrome`, `_launch_tv_browser`, `_kill_tv_browser`,
   `TV_CHROME_PROFILE`
 - `static/tv.html` (the kiosk player)
-- The Search-tab YouTube input / `playYoutube` / `ytControl`, or the
+- The YouTube input (bottom of the Library tab) / `playYoutube` / `ytControl`, or the
   `app.youtube_active` branches in the player controls
 
 For the control-bar UI itself see [FRONTEND.md](FRONTEND.md); for endpoint

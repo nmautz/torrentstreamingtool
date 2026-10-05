@@ -181,7 +181,7 @@ Some indexers sit behind a Cloudflare / DDoS-Guard browser challenge and fail in
 
 Get a free key at [themoviedb.org/settings/api](https://www.themoviedb.org/settings/api), then paste it into **Admin → Indexers → TMDb Metadata** (or set `TMDB_API_KEY` in `.env`).
 
-It is optional but strongly recommended. TMDb powers the poster search, the Explore tab, bookmarks, artwork, and episode names and numbering in the library. Without a key, search falls back to plain Jackett results, and episodes show their file names.
+It is optional but strongly recommended. TMDb powers the poster search, the Explore tab, bookmarks, artwork, and episode names and numbering in the library. Without a key, Explore has nothing to browse and its search box falls back to plain Jackett results (type a title and press Enter), and episodes show their file names.
 
 ---
 

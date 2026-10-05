@@ -616,6 +616,7 @@
     body.tv-mode #adminPanelLink,
     body.tv-mode #srcWrap,
     body.tv-mode #catWrap,
+    body.tv-mode #exRawOffer,
     body.tv-mode #epRenameBtn,
     body.tv-mode #epMetaFixBtn,
     body.tv-mode #epOndemandBtn,
@@ -638,7 +639,6 @@
     body.simple-ui .adv-only { display: none !important; }
     body.simple-ui #srcWrap,
     body.simple-ui #catWrap,
-    body.simple-ui #searchModeWrap,
     body.simple-ui #diskSpaceContainer,
     body.simple-ui [onclick="openStorageModal()"],
     body.simple-ui #epBulkChips,
@@ -2786,8 +2786,6 @@
           style="min-width:7.5rem"></div>
         <!-- Tabs: order-3 + w-full on mobile (wraps to row 2), order-2 inline on sm+ -->
         <div id="topTabs" class="order-3 sm:order-2 w-full sm:w-auto flex sm:flex-shrink-0 h-11 sm:h-14 border-t border-gray-800 sm:border-t-0 -mx-2 sm:mx-0">
-          <button id="tabSearch" onclick="switchTab('search')"
-            class="tab-btn tab-inactive flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap">Search</button>
           <!-- #bmTabDot: a bookmarked title came out (see _bmRenderBadges). The
                button's class is rewritten by switchTab, so `relative` is inline. -->
           <button id="tabExplore" onclick="switchTab('explore')" style="position:relative"
@@ -2853,140 +2851,30 @@
 <main class="flex-1 pb-36 overflow-y-auto overflow-x-hidden">
   <div class="max-w-screen-2xl mx-auto px-3 sm:px-4 py-5">
 
-    <!-- Search tab -->
-    <div id="searchTab" class="hidden">
+    <!-- Explore tab: the one place to find something. A search box on top (title
+         search, with the raw indexer list behind it), then TMDb browse —
+         trending / popular / new releases + filters. Cards and tiles open the
+         same show page. -->
+    <div id="exploreTab" class="hidden">
       <!-- First-run setup checklist: rendered by refreshSetupChecklist() from
            /api/setup-status when a required prerequisite (indexer, etc.) is missing.
            Stays hidden once everything required is configured. -->
       <div id="setupChecklist" class="hidden mb-4"></div>
-      <!-- YouTube → TV: paste a link, play it fullscreen in the host browser on the TV -->
-      <div class="mb-3">
-        <div class="flex gap-0">
-          <input id="ytInput" type="url" autocomplete="off" inputmode="url"
-            placeholder="Paste a YouTube link to play on the TV…"
-            class="flex-1 bg-gray-900 border-0 border-b-2 border-gray-700 focus:border-red-500
-                   px-4 py-3 text-sm placeholder-gray-700 focus:outline-none transition-colors" />
-          <button id="ytPlayBtn" onclick="playYoutube(this)"
-            class="bg-red-600 hover:bg-red-500 active:bg-red-700 px-5 py-3
-                   text-sm font-black uppercase tracking-wide transition-colors
-                   disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap
-                   flex items-center gap-1.5">
-            <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-            <span class="hidden sm:inline">Play on TV</span>
-          </button>
-        </div>
+      <!-- Search. Typing looks titles up (exSearchInput); Enter also goes on to
+           the indexers when there is no title match or no TMDb key (exSearchSubmit).
+           Outside #exploreFilters so it is there without a TMDb key. -->
+      <div class="relative mb-3">
+        <svg class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+        <input id="exSearch" type="text" enterkeyhint="search" placeholder="Search for movies, shows…" autocomplete="off" spellcheck="false"
+          oninput="exSearchInput(this.value)"
+          onkeydown="if(event.key==='Enter'){exSearchSubmit();}else if(event.key==='Escape'){exClearSearch();this.blur();}"
+          class="w-full bg-gray-900 border border-gray-800 focus:border-indigo-600 outline-none text-sm text-gray-200 placeholder-gray-600 pl-10 pr-10 py-3 uppercase tracking-wide"/>
+        <button id="exSearchClear" type="button" onclick="exClearSearch()" title="Clear search"
+          class="hidden absolute right-1 top-1/2 -translate-y-1/2 p-2 text-gray-500 hover:text-gray-200">
+          <svg class="ic" aria-hidden="true"><use href="#i-x"/></svg>
+        </button>
       </div>
-      <div class="mb-5">
-        <div class="flex gap-0">
-          <input id="searchInput" type="search" autocomplete="off"
-            placeholder="Search for movies, shows…"
-            class="vpn-gated flex-1 bg-gray-900 border-0 border-b-2 border-gray-700 focus:border-indigo-500
-                   px-4 py-4 text-base placeholder-gray-700 focus:outline-none transition-colors" />
-          <button id="searchBtn"
-            class="vpn-gated bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 px-6 py-4
-                   text-sm font-black uppercase tracking-wide transition-colors
-                   disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap">Search</button>
-        </div>
-        <!-- Search sources: pick which indexers to query (within what the profile is allowed) -->
-        <div id="srcWrap" class="hidden mt-2 px-1">
-          <button id="srcToggle" type="button" onclick="toggleSourcePanel()"
-            class="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide
-                   text-gray-500 hover:text-gray-300 transition-colors">
-            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M4 6h16M4 12h16M4 18h7"/>
-            </svg>
-            Sources <span id="srcSummary" class="text-indigo-400">All</span>
-            <svg id="srcChevron" class="w-3 h-3 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
-          </button>
-          <div id="srcPanel" class="hidden mt-2 bg-gray-900 border border-gray-800">
-            <div class="flex items-center justify-between px-3 py-2 border-b border-gray-800">
-              <span class="text-[11px] font-black uppercase tracking-widest text-gray-500">Search Sources<span class="help-tip" tabindex="0" data-tip="The sites StreamLink searches when you look for something. Tick the ones to include in this search; leave them all on if you're not sure.">?</span></span>
-              <div class="flex gap-2">
-                <button type="button" onclick="setAllSources(true)"
-                  class="text-[10px] font-bold uppercase tracking-wide text-gray-400 hover:text-white">All</button>
-                <span class="text-gray-700">·</span>
-                <button type="button" onclick="setAllSources(false)"
-                  class="text-[10px] font-bold uppercase tracking-wide text-gray-400 hover:text-white">None</button>
-              </div>
-            </div>
-            <div id="srcList" class="max-h-64 overflow-y-auto divide-y divide-gray-800"></div>
-          </div>
-        </div>
-        <!-- Search categories: hide results from unselected content types (e.g. untick XXX) -->
-        <div id="catWrap" class="hidden mt-2 px-1">
-          <button id="catToggle" type="button" onclick="toggleCategoryPanel()"
-            class="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide
-                   text-gray-500 hover:text-gray-300 transition-colors">
-            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M7 7h.01M7 3h5a1.99 1.99 0 011.41.59l7 7a2 2 0 010 2.82l-5 5a2 2 0 01-2.82 0l-7-7A2 2 0 014 9V4a1 1 0 011-1z"/>
-            </svg>
-            Categories <span id="catSummary" class="text-indigo-400">All</span>
-            <svg id="catChevron" class="w-3 h-3 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
-          </button>
-          <div id="catPanel" class="hidden mt-2 bg-gray-900 border border-gray-800">
-            <div class="flex items-center justify-between px-3 py-2 border-b border-gray-800">
-              <span class="text-[11px] font-black uppercase tracking-widest text-gray-500">Categories</span>
-              <div class="flex gap-2">
-                <button type="button" onclick="setAllCategories(true)"
-                  class="text-[10px] font-bold uppercase tracking-wide text-gray-400 hover:text-white">All</button>
-                <span class="text-gray-700">·</span>
-                <button type="button" onclick="setAllCategories(false)"
-                  class="text-[10px] font-bold uppercase tracking-wide text-gray-400 hover:text-white">None</button>
-              </div>
-            </div>
-            <div id="catList" class="max-h-64 overflow-y-auto divide-y divide-gray-800"></div>
-          </div>
-        </div>
-        <!-- Search mode: TMDb-first "Smart" poster browse vs the legacy indexer-first list -->
-        <div id="searchModeWrap" class="mt-2 px-1 flex items-center gap-2">
-          <span class="text-[11px] font-bold uppercase tracking-wide text-gray-500">Search<span class="help-tip" tabindex="0" data-tip="Smart: pick the show or movie by its poster first, then get it. Classic: skip that and see the raw list of copies grouped by title. Smart is easier; use Classic if a title has no poster match.">?</span></span>
-          <div class="inline-flex border border-gray-800">
-            <button id="searchModeSmart" type="button" onclick="setSearchMode('smart')"
-              title="Browse shows and movies by poster">Smart</button>
-            <button id="searchModeClassic" type="button" onclick="setSearchMode('classic')"
-              title="Classic search: list raw results grouped by show, with no poster matching">Classic</button>
-          </div>
-        </div>
-        <div class="flex justify-between mt-2 px-1">
-          <span id="resultCount" class="text-[11px] text-gray-600 uppercase tracking-wide"></span>
-          <span class="text-[11px] text-gray-700 uppercase tracking-wide">sorted by availability<span class="help-tip" tabindex="0" data-tip="Availability is how many people are sharing a copy right now. Excellent or Good usually means a fast download that plays without buffering; Low or Unavailable may stall or never finish.">?</span></span>
-        </div>
-      </div>
-      <div id="alert" class="hidden mb-4 px-4 py-3 border-l-4 text-sm"></div>
-      <div id="resultsWrap" class="hidden">
-        <div id="resultsGrid" class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2 items-start"></div>
-      </div>
-      <div id="emptyState" class="flex flex-col items-center justify-center py-20 text-center">
-        <div class="w-16 h-16 bg-gray-900 border border-gray-800 flex items-center justify-center mb-4">
-          <svg class="w-8 h-8 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
-              d="M21 21l-4.35-4.35m0 0A7.5 7.5 0 104.5 4.5a7.5 7.5 0 0012.15 12.15z"/>
-          </svg>
-        </div>
-        <p class="text-gray-500 font-black uppercase tracking-wide">Search for movies &amp; shows</p>
-        <p class="text-gray-700 text-xs mt-1">Type a title above to find something to watch. If nothing comes back, check the setup steps at the top of this page.</p>
-      </div>
-    </div>
-
-    <!-- Explore tab: TMDb browse — trending / popular / new releases + genre
-         filters. Tiles open the same search show page as TMDb-first results. -->
-    <div id="exploreTab" class="hidden">
       <div id="exploreFilters" class="hidden mb-4 space-y-2">
-        <!-- Inline TMDb title search -->
-        <div class="relative">
-          <svg class="w-4 h-4 absolute left-2 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
-          <input id="exSearch" type="text" placeholder="Search titles…" autocomplete="off"
-            oninput="exSearchInput(this.value)"
-            class="w-full bg-gray-900 border border-gray-800 focus:border-indigo-600 outline-none text-sm text-gray-200 placeholder-gray-600 pl-8 pr-8 py-2 uppercase tracking-wide"/>
-          <button id="exSearchClear" type="button" onclick="exClearSearch()"
-            class="hidden absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-200">
-            <svg class="ic" aria-hidden="true"><use href="#i-x"/></svg>
-          </button>
-        </div>
         <!-- Kind: All / Shows / Movies -->
         <div class="flex items-center gap-1.5">
           <button id="exKindAll" type="button" onclick="exSetKind('')">All</button>
@@ -3024,6 +2912,8 @@
         </div>
         <!-- Genre chips: single scrollable row (multi-select) -->
         <div id="exGenreChips" class="flex gap-1.5 overflow-x-auto pb-1"></div>
+        <!-- Shown while searching: which of the controls above the results obey. -->
+        <p id="exSearchNote" class="hidden text-[11px] text-gray-500"></p>
       </div>
 
       <!-- No TMDb key configured -->
@@ -3031,8 +2921,94 @@
         <div class="w-16 h-16 bg-gray-900 border border-gray-800 flex items-center justify-center mb-4">
           <svg class="ic text-2xl text-gray-700" aria-hidden="true"><use href="#i-key"/></svg>
         </div>
-        <p class="text-gray-500 font-black uppercase tracking-wide">Explore needs a TMDb key</p>
-        <p class="text-gray-700 text-xs mt-1 max-w-sm">Add a free TMDb API key in the Admin panel (or .env) to browse popular shows, movies, and new releases.</p>
+        <p class="text-gray-500 font-black uppercase tracking-wide">Browsing needs a TMDb key</p>
+        <p class="text-gray-700 text-xs mt-1 max-w-sm">Add a free TMDb API key in the Admin panel (or .env) to browse popular shows, movies, and new releases. Search works without one: type a title above and press Enter.</p>
+      </div>
+
+      <!-- Search view: what the box at the top found. Titles (TMDb, wide cards)
+           by default; raw indexer results on request, or when there is no title
+           match / no TMDb key. Painted by _exShowSearch + _exSearchIndexers. -->
+      <div id="exSearchView" class="hidden">
+        <div class="flex items-center justify-between mb-3 gap-2">
+          <h2 id="exSearchTitle" class="text-sm font-black uppercase tracking-wide border-l-4 border-indigo-600 pl-2 min-w-0 truncate"></h2>
+          <span id="resultCount" class="flex-shrink-0 text-[11px] text-gray-600 uppercase tracking-wide"></span>
+        </div>
+        <!-- Raw results only: the source + category pickers apply to nothing else. -->
+        <div id="exRawBar" class="hidden mb-3">
+          <div class="flex items-center justify-between gap-2 flex-wrap">
+            <span class="text-[11px] text-gray-600 uppercase tracking-wide">Straight from the indexers · sorted by availability<span class="help-tip" tabindex="0" data-tip="Availability is how many people are sharing a copy right now. Excellent or Good usually means a fast download that plays without buffering; Low or Unavailable may stall or never finish.">?</span></span>
+            <div class="flex gap-1.5">
+              <button id="exRawBack" type="button" onclick="exSearchTitles()"
+                class="text-[11px] font-bold uppercase tracking-wide px-2.5 py-1 border border-gray-800 text-gray-400 hover:text-gray-200 hover:border-gray-600 transition-colors">‹ Titles</button>
+              <button type="button" onclick="exSearchAgain()"
+                class="vpn-gated text-[11px] font-bold uppercase tracking-wide px-2.5 py-1 border border-gray-800 text-gray-400 hover:text-gray-200 hover:border-gray-600 transition-colors">Search again</button>
+            </div>
+          </div>
+          <!-- Search sources: pick which indexers to query (within what the profile is allowed) -->
+          <div id="srcWrap" class="hidden mt-2">
+            <button id="srcToggle" type="button" onclick="toggleSourcePanel()"
+              class="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide
+                     text-gray-500 hover:text-gray-300 transition-colors">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                  d="M4 6h16M4 12h16M4 18h7"/>
+              </svg>
+              Sources <span id="srcSummary" class="text-indigo-400">All</span>
+              <svg id="srcChevron" class="w-3 h-3 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+            </button>
+            <div id="srcPanel" class="hidden mt-2 bg-gray-900 border border-gray-800">
+              <div class="flex items-center justify-between px-3 py-2 border-b border-gray-800">
+                <span class="text-[11px] font-black uppercase tracking-widest text-gray-500">Search Sources<span class="help-tip" tabindex="0" data-tip="The sites StreamLink searches when you look for something. Tick the ones to include in this search; leave them all on if you're not sure.">?</span></span>
+                <div class="flex gap-2">
+                  <button type="button" onclick="setAllSources(true)"
+                    class="text-[10px] font-bold uppercase tracking-wide text-gray-400 hover:text-white">All</button>
+                  <span class="text-gray-700">·</span>
+                  <button type="button" onclick="setAllSources(false)"
+                    class="text-[10px] font-bold uppercase tracking-wide text-gray-400 hover:text-white">None</button>
+                </div>
+              </div>
+              <div id="srcList" class="max-h-64 overflow-y-auto divide-y divide-gray-800"></div>
+            </div>
+          </div>
+          <!-- Search categories: hide results from unselected content types (e.g. untick XXX) -->
+          <div id="catWrap" class="hidden mt-2">
+            <button id="catToggle" type="button" onclick="toggleCategoryPanel()"
+              class="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide
+                     text-gray-500 hover:text-gray-300 transition-colors">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                  d="M7 7h.01M7 3h5a1.99 1.99 0 011.41.59l7 7a2 2 0 010 2.82l-5 5a2 2 0 01-2.82 0l-7-7A2 2 0 014 9V4a1 1 0 011-1z"/>
+              </svg>
+              Categories <span id="catSummary" class="text-indigo-400">All</span>
+              <svg id="catChevron" class="w-3 h-3 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+            </button>
+            <div id="catPanel" class="hidden mt-2 bg-gray-900 border border-gray-800">
+              <div class="flex items-center justify-between px-3 py-2 border-b border-gray-800">
+                <span class="text-[11px] font-black uppercase tracking-widest text-gray-500">Categories</span>
+                <div class="flex gap-2">
+                  <button type="button" onclick="setAllCategories(true)"
+                    class="text-[10px] font-bold uppercase tracking-wide text-gray-400 hover:text-white">All</button>
+                  <span class="text-gray-700">·</span>
+                  <button type="button" onclick="setAllCategories(false)"
+                    class="text-[10px] font-bold uppercase tracking-wide text-gray-400 hover:text-white">None</button>
+                </div>
+              </div>
+              <div id="catList" class="max-h-64 overflow-y-auto divide-y divide-gray-800"></div>
+            </div>
+          </div>
+        </div>
+        <div id="resultsWrap" class="hidden">
+          <div id="resultsGrid" class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2 items-start"></div>
+        </div>
+        <div id="emptyState" class="hidden flex flex-col items-center justify-center py-16 text-center"></div>
+        <!-- The way out when the title match is wrong or missing: one card per torrent. -->
+        <div id="exRawOffer" class="adv-only hidden mt-4 pt-3 border-t border-gray-800 flex items-center justify-between gap-3 flex-wrap">
+          <span class="text-[11px] text-gray-600">Not listed, or matched to the wrong title?</span>
+          <button type="button" onclick="exSearchClassic()"
+            class="vpn-gated text-[11px] font-bold uppercase tracking-wide px-2.5 py-1 border border-gray-800 text-gray-400 hover:text-gray-200 hover:border-gray-600 transition-colors">Search raw results</button>
+        </div>
       </div>
 
       <!-- Rails view (default): one horizontal poster row per curated list -->
@@ -3112,6 +3088,24 @@
           </button>
         </div>
       </div>
+      <!-- YouTube → TV: paste a link, play it fullscreen in the host browser on the TV.
+           Rarely used, so it sits at the very bottom, under the toolbar. -->
+      <div class="mt-6">
+        <div class="flex gap-0">
+          <input id="ytInput" type="url" autocomplete="off" inputmode="url"
+            placeholder="Paste a YouTube link to play on the TV…"
+            class="flex-1 bg-gray-900 border-0 border-b-2 border-gray-700 focus:border-red-500
+                   px-4 py-3 text-sm placeholder-gray-700 focus:outline-none transition-colors" />
+          <button id="ytPlayBtn" onclick="playYoutube(this)"
+            class="bg-red-600 hover:bg-red-500 active:bg-red-700 px-5 py-3
+                   text-sm font-black uppercase tracking-wide transition-colors
+                   disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap
+                   flex items-center gap-1.5">
+            <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+            <span class="hidden sm:inline">Play on TV</span>
+          </button>
+        </div>
+      </div>
     </div>
 
     <!-- Downloads tab (iOS app only; reached from the bottom tab bar). What is
@@ -3137,7 +3131,6 @@
 <!-- ── iOS app: bottom tab bar (shown only when html.has-apptabs) ──────────── -->
 <nav id="appTabs" class="flex-shrink-0 bg-gray-950 border-t-2 border-gray-800 safe-bottom">
   <div class="flex max-w-screen-2xl mx-auto">
-    <button class="apptab" data-tab="search" onclick="_appTab('search')"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><span>Search</span></button>
     <button class="apptab" data-tab="explore" onclick="_appTab('explore')"><svg class="ic" aria-hidden="true"><use href="#i-compass"/></svg><span>Explore</span><span id="bmTabDot2" class="hidden absolute top-2 w-2 h-2 bg-rose-500" style="left:calc(50% + 9px)"></span></button>
     <button class="apptab" data-tab="library" onclick="_appTab('library')"><svg class="ic" aria-hidden="true"><use href="#i-library"/></svg><span>Library</span></button>
     <button class="apptab" data-tab="downloads" onclick="_appTab('downloads')"><svg class="ic" aria-hidden="true"><use href="#i-download"/></svg><span>Downloads</span><span id="appTabDlBadge" class="apptab-badge hidden"></span></button>
@@ -4756,13 +4749,11 @@ let SIMPLE = false;
 function applySimpleUi(){
   SIMPLE = !!(profile && profile.simple_ui);
   document.body.classList.toggle("simple-ui", SIMPLE);
-  // Classic search is the raw indexer list — release names, seeder columns, no
-  // posters. Its toggle is hidden in Simple mode, so a profile that inherited a
-  // stored "classic" (this device was last used by someone else, or the profile
-  // was switched over) would be stuck in the very view Simple exists to avoid,
-  // with no visible way out. Force the poster-first path.
-  // (Both callers run after load, so `searchMode` is always initialised here.)
-  try{ if(SIMPLE && searchMode==="classic") setSearchMode("smart"); }catch(_){}
+  // The raw indexer list is release names and seeder columns with no posters,
+  // and its way in and out (#exRawOffer, #exRawBack's bar) is advanced-only. A
+  // profile switched to Simple while it was up would be stuck in it.
+  // (Both callers run after load, so the Explore state is initialised here.)
+  try{ if(SIMPLE && _exSearchRaw==="classic"){ _exSearchRaw=""; if(_exSearchQ) _exApply(); } }catch(_){}
 }
 if (TV_MODE) {
   document.title = "StreamLink TV Dashboard";
@@ -5403,23 +5394,10 @@ function setFcTitle(title, filePath, label, itemId) {
 }
 
 // ── Alert ──────────────────────────────────────────────────────────────────
-const ALERT_STYLES = {
-  error:"border-l-4 border-red-600 bg-red-950/70 text-red-300",
-  warn:"border-l-4 border-yellow-600 bg-yellow-950/70 text-yellow-300",
-  info:"border-l-4 border-blue-600 bg-blue-950/70 text-blue-300",
-  success:"border-l-4 border-green-600 bg-green-950/70 text-green-300",
-};
-// "ok" is what the app's own code has always passed for good news. It was
-// never a key here, so every "Saved to this phone" was painted as an error.
-ALERT_STYLES.ok = ALERT_STYLES.success;
 // Toast card tone per alert type (the .notice-* classes on #noticeStack).
 const NOTICE_TONES = { error:"red", warn:"yellow", info:"blue", success:"green", ok:"green" };
 let alertTimer;
 function showAlert(msg,type="error") {
-  // In-tab alert (search tab)
-  const el=document.getElementById("alert");
-  el.className=`mb-4 px-4 py-2.5 text-sm ${ALERT_STYLES[type]||ALERT_STYLES.error}`;
-  el.textContent=msg; el.classList.remove("hidden");
   // Global toast (always visible regardless of active tab)
   const toast=document.getElementById("globalToast");
   const inner=document.getElementById("globalToastInner");
@@ -5429,13 +5407,11 @@ function showAlert(msg,type="error") {
   clearTimeout(alertTimer);
   const delay=type==="error"?7000:4000;
   alertTimer=setTimeout(()=>{
-    el.classList.add("hidden");
     toast.classList.add("hidden");
     renderFcNotice();
   },delay);
 }
 function hideAlert(){
-  document.getElementById("alert").classList.add("hidden");
   document.getElementById("globalToast").classList.add("hidden");
   renderFcNotice();
 }
@@ -5988,8 +5964,6 @@ if (TV_MODE) libViewMode = "card";
 // Search mode (device-local UI preference, never per-profile / server): "smart"
 // (TMDb-first poster browse, default) or "classic" (legacy indexer-first grouped
 // list — skips TMDb entirely). The Classic toggle lives beside Sources/Categories.
-let searchMode = "smart";
-try { const _sm = localStorage.getItem("streamlink_search_mode"); if (_sm === "classic" || _sm === "smart") searchMode = _sm; } catch (_) {}
 let _libPosterCache = new Map();   // itemId → poster URL ("" = none/definitive-miss)
 let _libPosterObs = null;          // IntersectionObserver for lazy poster loading
 let _seekPhase       = 0;      // 0 idle, 1 holding, 2 ready (awaiting release), 3 settling — 1-3 still LOCKED
@@ -6899,12 +6873,12 @@ async function saveSubtitlesPref(){
 function switchTab(tab){
   // Downloads and App exist only in the iOS app (the bottom tab bar). With no
   // server behind the page they are the only two tabs there are.
+  if(tab==="search") tab="explore";   // Search lives at the top of Explore (20.10.0)
   const appTab = tab==="downloads" || tab==="app";
   if(appTab && !_appHasTabs()) tab="library";
   else if(!appTab && _appOffline) return;   // nothing behind those tabs; a TAP on one says so (_appTab)
   activeTab=tab;
-  const isS=tab==="search", isL=tab==="library", isE=tab==="explore";
-  document.getElementById("searchTab").classList.toggle("hidden",!isS);
+  const isL=tab==="library", isE=tab==="explore";
   document.getElementById("exploreTab").classList.toggle("hidden",!isE);
   document.getElementById("libraryTab").classList.toggle("hidden",!isL);
   document.getElementById("downloadsTab").classList.toggle("hidden",tab!=="downloads");
@@ -6914,7 +6888,6 @@ function switchTab(tab){
   if(tab==="app") _appTabShow();
   { const m=document.querySelector("main"); if(m && appTab) m.scrollTop=0; }
   const cls=(on)=>`tab-btn flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap ${on?"tab-active":"tab-inactive"}`;
-  document.getElementById("tabSearch").className=cls(isS);
   document.getElementById("tabExplore").className=cls(isE);
   document.getElementById("tabLibrary").className=cls(isL);
   if(isL) loadLibrary();
@@ -14857,7 +14830,6 @@ async function loadSearchIndexers(){
   else { wrap.classList.add("hidden"); document.getElementById("srcPanel").classList.add("hidden"); }
   renderSourceList(); updateSrcSummary();
   rebuildSearchCategories();
-  _renderSearchModeToggle();
 }
 
 function renderSourceList(){
@@ -15010,24 +14982,6 @@ function _selectedCategoriesParam(){
   return [...selectedCategories].join(",");
 }
 
-// ── Search mode (Smart TMDb-first vs Classic indexer-first) ──────────────────
-// Device-local toggle beside Sources/Categories. "classic" forces the legacy
-// Jackett-first grouped search, skipping TMDb even when a key is configured.
-function setSearchMode(mode){
-  searchMode = mode === "classic" ? "classic" : "smart";
-  try { localStorage.setItem("streamlink_search_mode", searchMode); } catch (_) {}
-  _renderSearchModeToggle();
-}
-function _renderSearchModeToggle(){
-  const s=document.getElementById("searchModeSmart");
-  const c=document.getElementById("searchModeClassic");
-  if(!s||!c) return;
-  const classic=searchMode==="classic";
-  const base="text-[10px] font-bold uppercase tracking-wide px-2.5 py-1 transition-colors ";
-  s.className = base + (!classic ? "bg-indigo-600 text-white" : "bg-gray-900 text-gray-400 hover:text-gray-200");
-  c.className = base + "border-l border-gray-800 " + (classic ? "bg-indigo-600 text-white" : "bg-gray-900 text-gray-400 hover:text-gray-200");
-}
-
 // ── Explore (TMDb browse: trending / popular / new releases + genres) ──────
 // Query-less browsing of /api/tmdb/explore. Default view = horizontal poster
 // rails; a genre chip (or a rail's "All ›") switches to a paged grid. Tiles
@@ -15035,6 +14989,7 @@ function _renderSearchModeToggle(){
 // download/stream plumbing is shared with Search.
 let _exLoaded=false;          // one-time init (genres fetched, first rails load)
 let _exEnabled=null;          // TMDb key present (from /api/tmdb/genres)
+let _exProbed=false;          // that answer is in (until then a missing key is not known)
 let _exImgBase="/api/metadata/img";
 let _exGenres=[];             // [{name, tv_id, movie_id}]
 let _exKind="";               // "" | "tv" | "movie"
@@ -15043,7 +14998,8 @@ let _exSort="";               // "" (popular) | "rating" | "newest"
 let _exYearMin=0, _exYearMax=0;  // release/air year range (0 = unset)
 let _exMinRating=0;           // TMDb vote floor (0 = any)
 let _exHideOwned=false;       // filter out titles already in the library
-let _exSearchQ="";            // active inline search query ("" = not searching)
+let _exSearchQ="";            // active search query ("" = not searching)
+let _exSearchRaw="";          // "" titles (TMDb) | "classic" flat raw list | "grouped" indexer fallback
 let _exLibKeys=new Set();     // "kind:tmdb_id" for library items (In-library badge / hide-owned)
 let _exGridState=null;        // full param object of the open grid (see _exFetch)
 let _exSeq=0;                 // invalidates in-flight rail/grid fetches on view change
@@ -15117,10 +15073,10 @@ async function loadExplore(){
     const d=r.ok?await r.json():{enabled:false};
     _exEnabled=!!d.enabled; _exGenres=d.genres||[];
   }catch(_){ _exEnabled=false; }
+  _exProbed=true;
   if(!_exEnabled){
-    const dis=document.getElementById("exploreDisabled");
-    dis.classList.remove("hidden"); dis.classList.add("flex");
     _exLoaded=false;   // retry on next tab visit (key may get configured)
+    if(!_exSearchQ) _exApply();   // a search already up stays up (and isn't re-run)
     return;
   }
   document.getElementById("exploreFilters").classList.remove("hidden");
@@ -15128,15 +15084,44 @@ async function loadExplore(){
   await _exEnsureLib();
   _exRenderChips();
   _exRenderFilterBar();
-  _exApply();
+  if(_exSearchQ) _exSetView("search"); else _exApply();
 }
 
 // Central dispatcher: search box wins, then any active filter → grid, else rails.
-function _exApply(){
+// `submit` = the person pressed Enter (see _exShowSearch).
+function _exApply(submit){
   _exBuildLibKeys();
-  if(_exSearchQ){ _exShowSearch(); return; }
+  if(_exSearchQ){ _exShowSearch(submit===true); return; }
+  _exSearchSeq++;   // a search still in flight must not repaint a cleared box
+  if(!_exEnabled){ _exSetView(_exProbed?"disabled":""); return; }
   if(_exFiltersActive()){ _exOpenFilterGrid(); return; }
   _exShowRails();
+}
+// One of Explore's views at a time: the curated rails, a paged grid (a rail's
+// All, the filter set, Bookmarks), the search results, or the no-key notice.
+function _exSetView(v){
+  [["exploreRails","rails"],["exploreGridWrap","grid"],["exSearchView","search"]]
+    .forEach(([id,k])=>document.getElementById(id).classList.toggle("hidden",v!==k));
+  const dis=document.getElementById("exploreDisabled");
+  dis.classList.toggle("hidden",v!=="disabled"); dis.classList.toggle("flex",v==="disabled");
+  // A title search takes no sort, rating, year or genre (TMDb's search has no
+  // such parameters). Controls that would do nothing must not look live.
+  const srch=v==="search";
+  ["exSort","exMinRating","exYear"].forEach(id=>{
+    const el=document.getElementById(id);
+    el.disabled=srch; el.classList.toggle("opacity-40",srch);
+  });
+  const chips=document.getElementById("exGenreChips");
+  chips.classList.toggle("opacity-40",srch); chips.classList.toggle("pointer-events-none",srch);
+  _exPaintSearchNote(srch);
+}
+function _exPaintSearchNote(on){
+  const note=document.getElementById("exSearchNote");
+  note.classList.toggle("hidden",!on);
+  if(!on) return;
+  note.textContent=_exSearchRaw
+    ? "Raw results come straight from the indexers. None of the filters above apply to them."
+    : "Search ignores sort, rating, year and genre. Shows / Movies and Hide owned still apply.";
 }
 
 // Decade options relative to the current year (value = "min-max", "" = any).
@@ -15198,31 +15183,6 @@ function _collBits(c){
 }
 function _collOpen(c){
   openGroupPage({kind:"group", id:`coll:${c.id}`, title:c.name, browse:true});
-}
-
-// A collection's poster tile, in the Explore search grid.
-function _exCollTile(c){
-  const t=document.createElement("button");
-  t.type="button";
-  t.className="w-full text-left bg-gray-900 border border-gray-800 hover:border-indigo-600 transition-colors overflow-hidden";
-  const img=c.poster_path
-    ? `<img src="${_exImgBase}/w185${c.poster_path}" alt="" loading="lazy"
-           class="w-full aspect-[2/3] object-cover bg-gray-950"/>`
-    : `<div class="w-full aspect-[2/3] bg-gray-950 flex items-center justify-center p-2">
-         <span class="text-[10px] font-black uppercase tracking-widest text-gray-700 text-center line-clamp-4">${escHtml(c.name)}</span>
-       </div>`;
-  const owned=c.owned
-    ? `<span class="bg-green-700/90 text-white text-[8px] font-black uppercase tracking-widest px-1 py-0.5 leading-none">${c.owned} of ${c.film_count} in Library</span>` : "";
-  t.innerHTML=`<div class="relative">${img}
-      <div class="absolute top-1 left-1 right-1 flex flex-col gap-0.5 items-start">
-        <span class="bg-indigo-700 text-white text-[8px] font-black uppercase tracking-widest px-1 py-0.5 leading-none">Collection</span>${owned}
-      </div></div>
-    <div class="p-1.5">
-      <p class="text-[11px] font-bold uppercase tracking-wide text-gray-200 truncate">${escHtml(c.name)}</p>
-      <div class="text-[9px] text-gray-500 font-bold mt-0.5 truncate">${escHtml(_collBits(c).join(" \u00b7 "))}</div>
-    </div>`;
-  t.addEventListener("click",()=>_collOpen(c));
-  return t;
 }
 
 // One poster tile. `grid` = fluid width (grid cell) vs fixed rail width.
@@ -15342,9 +15302,8 @@ function exToggleHideOwned(){
 function _exShowRails(){
   const seq=++_exSeq;
   _exGridState=null; _bmView=false; _bmViewNew=new Set();
-  document.getElementById("exploreGridWrap").classList.add("hidden");
+  _exSetView("rails");
   const rails=document.getElementById("exploreRails");
-  rails.classList.remove("hidden");
   rails.innerHTML="";
   _exRailDefs().forEach(def=>{
     const sec=document.createElement("section");
@@ -15389,8 +15348,7 @@ function _exOpenGrid(st){
   _exSeq++; _bmView=false; _bmViewNew=new Set();
   _exGridState={...st, page:0, totalPages:1};
   document.getElementById("exGridEmpty").textContent="Nothing found";
-  document.getElementById("exploreRails").classList.add("hidden");
-  document.getElementById("exploreGridWrap").classList.remove("hidden");
+  _exSetView("grid");
   document.getElementById("exGridTitle").textContent=st.title;
   document.getElementById("exGridEmpty").classList.add("hidden");
   document.getElementById("exMoreBtn").classList.add("hidden");
@@ -15459,8 +15417,7 @@ async function exLoadMore(btn){
 // "‹ Back" from any grid/search view: clear every active filter → curated rails.
 function exCloseGrid(){
   _exSelGenres=[]; _exSort=""; _exYearMin=0; _exYearMax=0; _exMinRating=0;
-  _exSearchQ=""; const box=document.getElementById("exSearch"); if(box) box.value="";
-  document.getElementById("exSearchClear").classList.add("hidden");
+  _exResetSearchBox();
   _exRenderChips(); _exRenderFilterBar();
   _exShowRails();
 }
@@ -15610,8 +15567,8 @@ function exOpenBookmarks(){
   if(!profile.id) return;
   _exSeq++; _exGridState=null; _bmView=true;
   _bmViewNew=new Set(_bmList.filter(b=>b.new).map(_bmKey));
-  document.getElementById("exploreRails").classList.add("hidden");
-  document.getElementById("exploreGridWrap").classList.remove("hidden");
+  _exResetSearchBox();   // the list replaces a search; its text must not linger above it
+  _exSetView("grid");
   document.getElementById("exGridSections").classList.add("hidden");
   document.getElementById("exMoreBtn").classList.add("hidden");
   document.getElementById("exGridTitle").textContent="Bookmarks";
@@ -15634,126 +15591,151 @@ function _bmRenderGrid(){
   empty.classList.toggle("hidden",items.length>0);
 }
 
-// ── Inline Explore search (debounced TMDb title lookup → same poster grid) ──
+// ── Search (the box at the top of Explore) ──────────────────────────────────
+// Typing looks titles up on TMDb (debounced) and draws them as wide cards;
+// Jackett is only hit *inside* the show page a card opens. Enter does the same
+// and, when TMDb has nothing or there is no key, goes on to the indexers: the
+// grouped "one card per show" list (doJackettSearch). "Search raw results" is
+// the flat one-card-per-torrent list (doClassicSearch), the way out when TMDb
+// matched the wrong title. An indexer search costs seconds, so only an explicit
+// action starts one — never a keystroke.
+let _tmdbResultsById={};   // "id-kind" → TMDb candidate (for the result cards)
+
+function _exResetSearchBox(){
+  const box=document.getElementById("exSearch"); if(box) box.value="";
+  document.getElementById("exSearchClear").classList.add("hidden");
+  clearTimeout(_exSearchTimer);
+  _exSearchQ=""; _exSearchRaw=""; _exSearchSeq++;
+}
 function exSearchInput(v){
   const q=(v||"").trim();
   document.getElementById("exSearchClear").classList.toggle("hidden",!q);
   clearTimeout(_exSearchTimer);
-  _exSearchTimer=setTimeout(()=>{ _exSearchQ=q; _exApply(); }, 300);
+  _exSearchTimer=setTimeout(()=>{
+    if(q===_exSearchQ) return;            // e.g. a trailing space: nothing to redo
+    _exSearchQ=q; _exSearchRaw=""; _exApply();
+  }, 300);
 }
-function exClearSearch(){
-  const box=document.getElementById("exSearch"); if(box) box.value="";
-  document.getElementById("exSearchClear").classList.add("hidden");
+// Enter, or the button an empty result offers.
+function exSearchSubmit(){
+  const box=document.getElementById("exSearch");
+  const q=(box.value||"").trim();
   clearTimeout(_exSearchTimer);
-  _exSearchQ=""; _exApply();
+  if(q!==_exSearchQ) _exSearchRaw="";
+  _exSearchQ=q;
+  if(q) box.blur();                       // a phone's keyboard covers the results
+  _exApply(true);
 }
-async function _exShowSearch(){
+function exClearSearch(){ _exResetSearchBox(); _exApply(); }
+function exSearchClassic(){ if(!_exSearchQ||vpnBlocked()) return; _exSearchRaw="classic"; _exApply(); }
+function exSearchTitles(){ _exSearchRaw=""; _exApply(); }
+function exSearchAgain(){ if(_exSearchQ) _exApply(true); }
+
+function _exSearchSkeleton(n=6){
+  let h="";
+  for(let i=0;i<n;i++)
+    h+=`<div class="bg-gray-900 border border-gray-800 animate-pulse flex">
+          <div class="w-16 sm:w-20 h-24 sm:h-28 bg-gray-800/40 flex-shrink-0"></div>
+          <div class="flex-1 p-3 space-y-2"><div class="h-3 bg-gray-800/60 w-1/3"></div><div class="h-3 bg-gray-800/60 w-3/4"></div></div>
+        </div>`;
+  return h;
+}
+// The search view's one message slot. `btn` labels a button that submits the box.
+function _exSearchEmpty(title, sub, btn){
+  const empty=document.getElementById("emptyState");
+  empty.innerHTML=`<p class="text-gray-500 font-black uppercase tracking-wide">${escHtml(title)}</p>
+    ${sub?`<p class="text-gray-700 text-xs mt-1 max-w-sm">${escHtml(sub)}</p>`:""}
+    ${btn?`<button type="button" onclick="exSearchSubmit()" class="vpn-gated mt-4 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-xs font-black uppercase tracking-wide transition-colors">${escHtml(btn)}</button>`:""}`;
+  empty.classList.remove("hidden");
+}
+async function _exShowSearch(submit){
   const q=_exSearchQ, seq=++_exSearchSeq; _exSeq++; _exGridState=null; _bmView=false; _bmViewNew=new Set();
-  document.getElementById("exGridEmpty").textContent="Nothing found";
-  document.getElementById("exploreRails").classList.add("hidden");
-  document.getElementById("exploreGridWrap").classList.remove("hidden");
-  document.getElementById("exGridSections").classList.add("hidden");
-  document.getElementById("exMoreBtn").classList.add("hidden");
-  document.getElementById("exGridEmpty").classList.add("hidden");
-  document.getElementById("exGridTitle").textContent=`Search · ${q}`;
-  const grid=document.getElementById("exGrid");
-  grid.innerHTML=_exSkeletonTiles(12,true);
+  const live=()=>seq===_exSearchSeq;
+  const grid=document.getElementById("resultsGrid"), wrap=document.getElementById("resultsWrap");
+  const empty=document.getElementById("emptyState"), count=document.getElementById("resultCount");
+  const offer=document.getElementById("exRawOffer");
+  _exSetView("search");
+  if(_exSearchRaw){ await _exSearchIndexers(q, live); return; }
+  document.getElementById("exSearchTitle").textContent=`Search · ${q}`;
+  document.getElementById("exRawBar").classList.add("hidden");
+  empty.classList.add("hidden");
+  // Results already up stay up until their replacement lands: a skeleton on
+  // every keystroke would make typing flicker.
+  if(wrap.classList.contains("hidden")||!grid.querySelector(".tmdb-card")){
+    count.textContent=""; offer.classList.add("hidden");
+    grid.innerHTML=_exSearchSkeleton(); wrap.classList.remove("hidden");
+  }
+  let d=null;
   try{
     let url=`/api/tmdb/search?query=${encodeURIComponent(q)}`;
     if(_exKind) url+=`&kind=${_exKind}`;
-    const r=await fetch(url);
-    const d=r.ok?await r.json():{results:[]};
-    if(seq!==_exSearchSeq) return;
-    _exImgBase=d.img_base||_exImgBase;
-    let {colls, items}=_collFold(d, (kind,id)=>_exLibKeys.has(`${kind}:${id}`));
-    if(_exHideOwned){
-      items=items.filter(c=>!_exInLib(c));
-      colls=colls.filter(c=>c.owned<c.film_count);
-    }
-    grid.innerHTML="";
-    colls.forEach(c=>grid.appendChild(_exCollTile(c)));
-    items.forEach(c=>grid.appendChild(_exTile(c,true)));
-    document.getElementById("exGridEmpty").classList.toggle("hidden",colls.length+items.length>0);
-  }catch(e){
-    if(seq!==_exSearchSeq) return;
-    grid.innerHTML="";
-    showAlert(e.message||"Search failed","error");
+    // Coverage rides along with the TMDb call so the cards can say what's
+    // already on this box without a second, serial round trip.
+    const [r]=await Promise.all([fetch(url), loadCoverage()]);
+    if(r.ok) d=await r.json();
+  }catch(_){}
+  if(!live()) return;
+  _exBuildLibKeys();
+  const found=(d&&d.enabled)?((d.results||[]).length+(d.collections||[]).length):0;
+  if(found && _renderTmdbResults(q, d, grid, wrap, count)){
+    offer.classList.remove("hidden");
+    applyVpnGate();
+    return;
   }
+  grid.innerHTML=""; wrap.classList.add("hidden"); count.textContent=""; offer.classList.add("hidden");
+  if(found){ _exSearchEmpty("Nothing left to show", "Every match is already in your library, and Hide owned is on."); return; }
+  // Nothing from TMDb. An explicit search goes on to the indexers.
+  if(submit && !vpnBlocked()){ _exSearchRaw="grouped"; await _exSearchIndexers(q, live); return; }
+  if(d&&d.enabled) _exSearchEmpty(`Nothing found for "${q}"`, "No show or movie has that title. Your indexers may still have it.", "Search the indexers");
+  else _exSearchEmpty("Press Enter to search", d ? "Without a TMDb key, results come straight from your indexers." : "The title lookup did not answer. Your indexers can still be searched.", "Search");
+  applyVpnGate();
 }
-
-// ── Search ─────────────────────────────────────────────────────────────────
-// Search is TMDb-first: the box queries TMDb for real shows/movies (poster
-// cards); Jackett is only hit *inside* the show page (explicit Search buttons).
-// With no TMDb key (or zero TMDb matches) it falls back to the legacy Jackett-
-// first grouped search (doJackettSearch), so nothing regresses without a key.
-// The user can also force the legacy path via the Classic search-mode toggle.
-let _tmdbResultsById={};   // "id-kind" → TMDb candidate (for the result cards)
-
-// Narrow TMDb to tv/movie only when the Categories picker unambiguously selects
-// one video type; otherwise search both.
-function _searchTmdbKind(){
-  const sel=selectedCategories;
-  if(!sel||sel.has("__none__")||sel.size===0) return "";   // "all"
-  const hasMovies=sel.has("movies"), hasTv=sel.has("tv");
-  if(hasMovies && !hasTv) return "movie";
-  if(hasTv && !hasMovies) return "tv";
-  return "";
-}
-
-async function doSearch(q){
-  q=q.trim(); if(!q) return;
-  if(vpnBlocked()) return;   // qBit is down; downloading/streaming a result would 403 anyway
-  const btn=document.getElementById("searchBtn");
-  const grid=document.getElementById("resultsGrid");
-  const wrap=document.getElementById("resultsWrap"),empty=document.getElementById("emptyState");
-  const count=document.getElementById("resultCount");
-  btn.textContent="…"; _markLoading(btn, true);
-  grid.innerHTML=""; wrap.classList.add("hidden"); empty.classList.add("hidden"); hideAlert();
+// The indexer half: `_exSearchRaw` says which list ("classic" flat, "grouped").
+async function _exSearchIndexers(q, live){
+  const grid=document.getElementById("resultsGrid"), wrap=document.getElementById("resultsWrap");
+  const empty=document.getElementById("emptyState"), count=document.getElementById("resultCount");
+  const offer=document.getElementById("exRawOffer");
+  const classic=_exSearchRaw==="classic";
+  document.getElementById("exSearchTitle").textContent=`${classic?"Raw results":"Search"} · ${q}`;
+  document.getElementById("exRawBar").classList.remove("hidden");
+  document.getElementById("exRawBack").classList.toggle("hidden",!classic);
+  _exPaintSearchNote(true);
+  grid.innerHTML=""; wrap.classList.add("hidden"); count.textContent=""; offer.classList.add("hidden");
+  _exSearchEmpty("Searching the indexers…", "This takes a few seconds.");
   try{
-    // Classic mode: the pre-9.0 flat indexer list — one card per raw torrent,
-    // no show grouping, no TMDb. Straight to doClassicSearch and done.
-    if(searchMode==="classic"){
-      await doClassicSearch(q, grid, wrap, empty, count);
-      return;
-    }
-    // 1) TMDb-first — pick a real show/movie before touching any indexer.
-    let tmdb=null;
-    try{
-      const catKind=_searchTmdbKind();
-      let turl=`/api/tmdb/search?query=${encodeURIComponent(q)}`;
-      if(catKind) turl+=`&kind=${catKind}`;
-      // Coverage rides along with the TMDb call so the cards can say what's
-      // already on this box without a second, serial round trip.
-      const [tr]=await Promise.all([fetch(turl), loadCoverage()]);
-      if(tr.ok) tmdb=await tr.json();
-    }catch(_){}
-    if(tmdb && tmdb.enabled && (tmdb.results||[]).length){
-      _renderTmdbResults(q, tmdb, grid, wrap, count);
-      applyVpnGate();
-      return;
-    }
-    // 2) Fallback (no TMDb key or no match): legacy Jackett-first grouped search.
-    await doJackettSearch(q, grid, wrap, empty, count);
-  } catch(err){
-    showAlert(err.message,"error"); empty.classList.remove("hidden");
-  } finally {
-    btn.textContent="Search"; _markLoading(btn, false);
+    await (classic?doClassicSearch:doJackettSearch)(q, grid, wrap, empty, count, live);
+  }catch(e){
+    if(!live()) return;
+    showAlert(e.message||"Search failed","error");
+    _exSearchEmpty("Search failed", e.message||"");
+    return;
   }
+  if(!live()) return;
+  // The grouped list still has the flat one behind it.
+  offer.classList.toggle("hidden",classic);
+  applyVpnGate();
 }
 
 // Render the TMDb candidate list as poster cards. Clicking one opens the show
 // page (openSearchShowFromTmdb), which is where Jackett is finally queried.
+// Returns how many cards it drew (Hide owned can leave none).
 function _renderTmdbResults(q, tmdb, grid, wrap, count){
-  const {colls, items:results}=_collFold(tmdb, (kind,id)=>!!_covFor(kind,id));
+  let {colls, items:results}=_collFold(tmdb, (kind,id)=>!!_covFor(kind,id));
+  if(_exHideOwned){
+    results=results.filter(c=>!_covFor(c.kind,c.id)&&!_exInLib(c));
+    colls=colls.filter(c=>c.owned<c.film_count);
+  }
   const imgBase=tmdb.img_base||"/api/metadata/img";
+  _exImgBase=imgBase;
   _tmdbResultsById={};
   const total=colls.length+results.length;
+  if(!total) return 0;
   count.textContent=`${total} result${total===1?"":"s"}`;
   grid.innerHTML="";
   // Collections lead: the query named the franchise, so it is the best answer.
   colls.forEach((c,i)=>{
     const card=document.createElement("div");
-    card.className="result-row bg-gray-900 border border-gray-800 overflow-hidden cursor-pointer hover:border-indigo-700 transition-colors flex";
+    card.className="result-row tmdb-card bg-gray-900 border border-gray-800 overflow-hidden cursor-pointer hover:border-indigo-700 transition-colors flex";
     card.style.animationDelay=`${i*18}ms`;
     card.setAttribute("role","button"); card.tabIndex=0;
     const poster=c.poster_path
@@ -15781,7 +15763,7 @@ function _renderTmdbResults(q, tmdb, grid, wrap, count){
     const cid=`${c.id}-${c.kind}`;
     _tmdbResultsById[cid]=c;
     const card=document.createElement("div");
-    card.className="result-row bg-gray-900 border border-gray-800 overflow-hidden cursor-pointer hover:border-indigo-700 transition-colors flex";
+    card.className="result-row tmdb-card relative bg-gray-900 border border-gray-800 overflow-hidden cursor-pointer hover:border-indigo-700 transition-colors flex";
     card.style.animationDelay=`${(i+colls.length)*18}ms`;
     const poster=c.poster_path
       ? `<img src="${imgBase}/w185${c.poster_path}" alt="" loading="lazy"
@@ -15804,25 +15786,40 @@ function _renderTmdbResults(q, tmdb, grid, wrap, count){
            _libNewSeasons(cov).length?` · ${_libNewSeasons(cov).length} season${_libNewSeasons(cov).length>1?"s":""} to get`:""}</p>`
       : "";
     if(cov) card.classList.add("border-l-4","border-l-emerald-700");
+    // Bookmarks, as on the Explore tiles: the countdown badge (exact) or the
+    // In Theaters heuristic, and the corner toggle.
+    const bm=_bmGet(c), bmBadge=bm&&_bmBadge(bm);
+    const when=bmBadge
+      ? `<span class="${bmBadge.cls} text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 whitespace-nowrap">${escHtml(bmBadge.txt)}</span>`
+      : (_exInTheaters(c)?`<span class="bg-amber-500/90 text-black text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 whitespace-nowrap">In Theaters</span>`:"");
+    const tog=_bmToggleHtml(c);
     card.innerHTML=`${poster}
-      <div class="min-w-0 flex-1 p-3 flex flex-col">
-        <div class="flex items-center gap-2 mb-1">${chip}${owned}${c.year?`<span class="text-[11px] text-gray-500 font-bold">${escHtml(c.year)}</span>`:""}</div>
+      <div class="min-w-0 flex-1 p-3 ${tog?"pr-9 ":""}flex flex-col">
+        <div class="flex items-center gap-x-2 gap-y-1 flex-wrap mb-1">${chip}${owned}${when}${c.year?`<span class="text-[11px] text-gray-500 font-bold">${escHtml(c.year)}</span>`:""}</div>
         <p class="text-sm font-black uppercase tracking-wide text-gray-100 leading-snug line-clamp-2">${escHtml(c.title)}</p>
         ${ownedLine}
         <p class="text-[11px] text-gray-500 mt-1 line-clamp-2 flex-1">${escHtml(c.overview||"")}</p>
-      </div>`;
+      </div>${tog}`;
     card.dataset.cid=cid;
-    card.addEventListener("click",()=>openSearchShowFromTmdb(_tmdbResultsById[card.dataset.cid]));
+    const togEl=card.querySelector("[data-bm-key]");
+    if(togEl){
+      const fire=e=>{ e.stopPropagation(); e.preventDefault(); toggleBookmark(c); };
+      togEl.addEventListener("click",fire);
+      togEl.addEventListener("keydown",e=>{ if(e.key==="Enter"||e.key===" ") fire(e); });
+    }
+    card.addEventListener("click",()=>{ _bmSeenOne(c); openSearchShowFromTmdb(_tmdbResultsById[card.dataset.cid]); });
     grid.appendChild(card);
   });
   wrap.classList.remove("hidden");
+  return total;
 }
 
 // Classic search (the pre-9.0 flat list, restored via the Classic toggle):
 // renders the raw `results[]` from /api/search as one card per torrent — title,
 // size, seeders/peers/tracker, and Save (→ download modal) / Play (→ stream
-// picker) — with NO show grouping and NO TMDb. Caller owns the button chrome.
-async function doClassicSearch(q, grid, wrap, empty, count){
+// picker) — with NO show grouping and NO TMDb. `live()` turns false once a
+// newer search has started; nothing is painted after that.
+async function doClassicSearch(q, grid, wrap, empty, count, live){
   const srcParam=_selectedSourcesParam();
   const catParam=_selectedCategoriesParam();
   let url=`/api/search?q=${encodeURIComponent(q)}`;
@@ -15832,6 +15829,8 @@ async function doClassicSearch(q, grid, wrap, empty, count){
   const r=await fetch(url);
   if(!r.ok){ const e=await r.json().catch(()=>({detail:"Search failed"})); throw new Error(e.detail||`HTTP ${r.status}`); }
   const items=(await r.json()).results||[];
+  if(live&&!live()) return;
+  empty.classList.add("hidden");
   count.textContent=items.length?`${items.length} results`:"";
   if(!items.length){
     empty.classList.remove("hidden");
@@ -15893,8 +15892,8 @@ async function doClassicSearch(q, grid, wrap, empty, count){
 
 // Legacy Jackett-first grouped search: "one card per show" from raw indexer
 // results. Used only as the no-TMDb-key / no-TMDb-match fallback. The caller
-// (doSearch) owns the search button chrome + the outer try/catch.
-async function doJackettSearch(q, grid, wrap, empty, count){
+// (_exSearchIndexers) owns the outer try/catch; `live()` as in doClassicSearch.
+async function doJackettSearch(q, grid, wrap, empty, count, live){
   {
     const srcParam=_selectedSourcesParam();
     const catParam=_selectedCategoriesParam();
@@ -15905,6 +15904,8 @@ async function doJackettSearch(q, grid, wrap, empty, count){
     const r=await fetch(url);
     if(!r.ok){ const e=await r.json().catch(()=>({detail:"Search failed"})); throw new Error(e.detail||`HTTP ${r.status}`); }
     const data=await r.json();
+    if(live&&!live()) return;
+    empty.classList.add("hidden");
     const groups=data.groups||[];
     count.textContent=groups.length?`${groups.length} show${groups.length===1?"":"s"}`:"";
     if(!groups.length){
@@ -24091,8 +24092,8 @@ async function _appRunQuickAction(action) {
   // Both of the others are per profile; the picker is up. Finish after it.
   if (!profile.id) { _qaPending = action; return; }
   if (action === "search") {
-    switchTab("search");
-    const i = document.getElementById("searchInput");
+    switchTab("explore");
+    const i = document.getElementById("exSearch");
     if (i) { i.focus(); i.select(); }
     return;
   }
@@ -32563,7 +32564,7 @@ window.addEventListener("resize",  ()=>{ if(_tipEl) _tipHide(); });
 
 // ── First-run setup checklist ────────────────────────────────────────────────
 // Fetches /api/setup-status and, when a prerequisite is missing, paints a
-// "finish setup" card at the top of Search so a fresh install explains WHY its
+// "finish setup" card at the top of Explore so a fresh install explains WHY its
 // tabs look empty instead of just showing blank screens. Hides itself once every
 // required item is satisfied. Dismissible per session, but a failing REQUIRED
 // item (e.g. no indexer) re-shows it on reload so the real blocker can't be
@@ -32648,7 +32649,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   evictLegacyServiceWorker();
   _lpAttachVideoEvents();
   _renderOnlineBadge();
-  _renderSearchModeToggle();  // paint the Smart/Classic search toggle from the saved pref
   _applyPhoneLandLayout();   // position the footer fullscreen btn for the current orientation
   // iOS app: the bottom tab bar, which server this is and whose phone, then
   // subscribe to BundleDownloader events + hydrate the offline-download state.
@@ -32691,10 +32691,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
     if(g){ e.preventDefault(); e.stopPropagation(); showAlert("VPN disconnected — reconnect Mullvad VPN first.","error"); }
   },true);
 
-  // Search wiring
-  const input=document.getElementById("searchInput"),btn=document.getElementById("searchBtn");
-  btn.addEventListener("click",()=>doSearch(input.value));
-  input.addEventListener("keydown",e=>{if(e.key==="Enter") doSearch(input.value);});
   document.getElementById("dlEpisode").addEventListener("keydown",e=>{if(e.key==="Enter") submitDownload();});
   document.getElementById("dlSeries").addEventListener("keydown",e=>{if(e.key==="Enter") document.getElementById("dlEpisode").focus();});
   document.getElementById("profileNameInput").addEventListener("keydown",e=>{if(e.key==="Enter") submitProfile();});
@@ -32773,6 +32769,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.8.13</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.10.0</div>
 </body>
 </html>

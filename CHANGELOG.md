@@ -1,5 +1,43 @@
 # Changelog
 
+## [20.10.0] — 2026-10-04
+### Search moved into Explore; the Search tab is gone
+
+20.9.0 is the graphical installer on the `graphicalsetup` branch, so this is 20.10.0.
+
+- **One place to find something.** The search box at the top of Explore is now the
+  search. It looks titles up as you type, and its results are the wide cards the Search
+  tab had (overview, what you already own, "N seasons to get"), now with the bookmark
+  button and Hide owned as well. The header and the app's tab bar lose the Search tab;
+  the app's home-screen **Search** action opens Explore with the box focused.
+- **Search says which filters it ignores.** A title search has no sort, rating, year or
+  genre. While you search those controls are dimmed and disabled, with a line under
+  them saying so; Shows / Movies and Hide owned still narrow the results.
+- **Classic search is now "Search raw results"**, a button under the results, instead of
+  a Smart / Classic switch that stayed set. It applies to the one search, and typing
+  something else returns to titles. A saved Classic preference is ignored.
+- **The Sources and Categories pickers moved to the raw results**, the only searches
+  they ever applied to. They never changed a title search or the show page it opens.
+- **Pressing Enter searches the indexers when no title matches**, as the Search tab did.
+  Typing alone never does (an indexer search takes seconds); it shows "Nothing found"
+  with a **Search the indexers** button instead.
+- **Without a TMDb key, Explore still searches.** It used to show only "Explore needs a
+  TMDb key". The box is there and Enter gives the grouped indexer results.
+- **The YouTube link box moved to the bottom of the Library**, under the toolbar. The
+  setup checklist moved to the top of Explore.
+
+Checked in headless Chrome at phone width, the local page against the box's live data:
+title results, Shows-only, Hide owned on a show the library holds (4 cards to 3), raw
+results and back, a query with no title match (typed, then Enter), Bookmarks and Back
+clearing the box, the filter grid, a Simple profile, and a simulated missing TMDb key.
+No console errors. Not checked: the iOS app, the TV kiosk, a desktop-width layout, and
+a real install with no TMDb key.
+
+**Dashboard:** [static/index.html](static/index.html).
+**Docs:** [docs/FRONTEND.md](docs/FRONTEND.md), [docs/GOTCHAS.md](docs/GOTCHAS.md),
+[docs/YOUTUBE.md](docs/YOUTUBE.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
+[docs/STREAMING.md](docs/STREAMING.md), [README.md](README.md).
+
 ## [20.8.13] — 2026-10-04
 ### Casting no longer pauses other apps
 

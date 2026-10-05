@@ -66,7 +66,7 @@ All four services (VLC, qBittorrent, Jackett, dashboard) run on the same host ex
 
 *(Legacy transient path: `POST /api/stream` still exists — `stream_pipeline`, same buffer/`in_play` flow, but `library_item_id` stays `None` so `/api/stop` deletes the torrent + files. The UI no longer routes Play through it; it deletes on stop.)*
 
-### YouTube on TV (Search tab → Play on TV)
+### YouTube on TV (paste box at the bottom of the Library tab → Play on TV)
 1. Browser POST `/api/youtube` `{url}` → 202. Backend extracts the video id, sets `youtube_active`, stops VLC, broadcasts `yt_command:load`, and launches a fullscreen Chrome kiosk at `/tv?v=<id>` (or hot-swaps if the page is already open).
 2. `static/tv.html` plays the video via the YouTube IFrame API and reports position/title/volume back via `POST /api/youtube/tv-state` every 1 s; the backend mirrors those onto the reused `vlc_*` display fields and rebroadcasts `state`.
 3. The dashboard's existing footer/fullscreen controls route to `POST /api/youtube/control` (→ SSE `yt_command` → IFrame API) whenever `app.youtube_active`.
