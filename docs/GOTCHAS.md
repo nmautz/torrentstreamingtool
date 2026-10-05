@@ -2443,8 +2443,16 @@ Since `v7-hls-abr`, `_build_hls_ffmpeg_args` emits multiple video variants (Orig
 - **NVENC ⇒ GPU decode (and, when safe, GPU scaling) — two tiers, with a deadlock trap.** On the NVENC path the builder routes decode onto NVDEC; without it the CPU does full-res decode + every software scale and pegs at 80-90% while the GPU idles ~50% (the symptom that prompted this). Two forms, picked in `_run_offline_job`:
   - **All-GPU** (`full_gpu`: `-hwaccel cuda -hwaccel_output_format cuda -extra_hw_frames 8` + `scale_cuda=-2:H:format=yuv420p`, no `-pix_fmt`) keeps frames in VRAM end-to-end. Used **only** when `_has_cuda_scale()` (build has the filter), `_source_nvdec_safe(info)` (h264/hevc/mpeg2/vc1/vp9, 4:2:0 8/10-bit), **and `not copy_original`** (so the ladder is all-encode — no `-c:v copy` rung).
   - **Transparent** (`-hwaccel cuda` only) is everything else — copyable H.264, no `scale_cuda`, exotic formats: NVDEC decodes, frames download to system memory for the CPU `scale`. **It is gated on the NVDEC decode probe below** (`hw_decode`) — see the next gotcha: `-hwaccel cuda` does NOT reliably fall back for codecs whose hwaccel init hard-fails (AV1 on older cards), so the probe decides whether it's added at all.
-  - **THE TRAP — never mix `-c:v copy` with cuda-filtered rungs.** A stream-copy rung in the same invocation as `scale_cuda` rungs (under `-hwaccel_output_format cuda`) **deadlocks**: the copy stream races ahead while the muxer / NVDEC surface pool backs up, and ffmpeg wedges at low CPU+GPU with **no progress and no exit** (so the failure-retry never fires — this is why a hang, not a crash, is the danger). That's the whole reason `full_gpu` requires `not copy_original`. The `GPU_STALL_TIMEOUT_SECS=90` watchdog (kills + retries transparent if `out_time` stalls) is the backstop, not the primary defence.
+  - **THE TRAP — never mix `-c:v copy` with cuda-filtered rungs.** A stream-copy rung in the same invocation as `scale_cuda` rungs (under `-hwaccel_output_format cuda`) **deadlocks**: the copy stream races ahead while the muxer / NVDEC surface pool backs up, and ffmpeg wedges at low CPU+GPU with **no progress and no exit** (so the failure-retry never fires — this is why a hang, not a crash, is the danger). That's the whole reason `full_gpu` requires `not copy_original`. The `GPU_STALL_TIMEOUT_SECS=45` watchdog (kills + retries transparent if `out_time` stalls) is the backstop, not the primary defence.
   Either decode form is added only when a rung actually decodes (`needs_decode`). Don't set `-pix_fmt yuv420p` on the all-GPU rungs (forces a hwdownload, defeats the VRAM-resident pipeline — the format is pinned inside `scale_cuda`). And don't loosen `full_gpu` to allow `copy_original`: that reintroduces the deadlock.
+
+### The all-GPU prep path stalls without a copy rung too — and a stall is a tax, not a failure
+The trap above is not the only way in. On 2026-10-04 six of nine This Is Us S03 episodes stalled on the all-GPU path with **no** copy rung in the ladder (1080p HEVC, rungs 1080 + 480, two audio, three subtitle tracks, ffmpeg 8.1.1), at 648-1212 s into the file, with audio about 100 segments ahead of video. The cause is not known. Every bundle was still made, which is why nobody noticed: the cost is time (449-580 s against ~240 s), and the only trace is a WARNING in `logs/hls.log`.
+
+- **Don't judge the GPU path by whether prep succeeds.** It always does. Count `STALLED` lines against `START` lines.
+- **`gpugate.py` decides whether to try it at all.** Two watchdog kills in four attempts close it for eight qualifying encodes, then one probe. Only a watchdog kill counts; an ffmpeg error exits in seconds and costs nothing worth gating.
+- **Don't persist the gate.** A driver or ffmpeg update can fix the stall, and a stored verdict would outlive it. Relearning after a restart costs two stalls.
+- **If you find the cause, the stall report is where the evidence is**: source codec and pixel format, ffmpeg's last `-progress` block, the last video and audio segment opened, an `nvidia-smi` sample, and stderr with the `Opening '…' for writing` lines removed (they used to be all 800 characters of it).
 
 ### `-hwaccel cuda` does NOT gracefully fall back — probe NVDEC per codec before adding it
 The long-standing assumption (baked into old comments) that transparent `-hwaccel cuda` "silently falls back to software for any codec NVDEC can't handle" is **false** for codecs whose hwaccel *initialisation* fails. On a Pascal GTX 1060 (no AV1 decode block) an AV1 source produces, per frame:
@@ -4250,6 +4258,18 @@ doesn't move. The consequence is easy to miss — a **device copy of the bundle 
 a copy of the files, so those two names aren't in it**, and in a proxied session
 a request for them falls through to the host, which has no idea what
 `/StreamLinkBundles/<sha>/…` means and 404s.
+
+**Since 20.11.1 that is no longer true of real files.** A file that is in the host's
+bundle but missing from the device copy (a hole) is fetched from the host: the
+loopback server rewrites `/StreamLinkBundles/<sha>/<file>` to
+`/api/library/offline-cache/<sha>/<file>` before proxying (`hostBundleTarget` in
+`LocalMediaServer.swift`, which also writes one `bundle-hole` row per file), and the
+host answers the phone's path itself for older apps (`device_bundle_path_alias`). What
+it replaced: on 2026-10-03 a cast of a bundle missing `seg_audio_1_00000.m4s` produced
+1,883 404s in 70 minutes, one every two seconds, because a Cast receiver never stops
+asking, and the wanted audio track never played. Two limits: the hole is served
+around, not repaired, so offline it is still a 404; and how a `complete` bundle came to
+lack a file is not known.
 
 That left `native_master_url` unset on the device path (`_appStartLocalPlayback`),
 so `_npOk()` was false, nothing ever armed, and **locking the phone during a

@@ -20,6 +20,7 @@ test:
 	python3 tests/test_subsearch.py
 	python3 tests/test_packslice.py
 	python3 tests/test_stallrule.py
+	python3 tests/test_gpugate.py
 	python3 tests/test_race_rescue.py
 	python3 tests/test_reaper.py
 	python3 tests/test_clientlog.py

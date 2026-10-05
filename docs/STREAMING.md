@@ -611,10 +611,21 @@ only the scaled down-rungs hit the encoder.
 > (and targets the worst CPU offender — h265 packs that re-encode all three rungs).
 > Two more safety nets: `-extra_hw_frames 8` enlarges the surface pool the parallel
 > `scale_cuda` branches draw from, and a **stall watchdog** in `_run_offline_job`
-> (`GPU_STALL_TIMEOUT_SECS`) kills the encode if `out_time` stops advancing for 90s,
+> (`GPU_STALL_TIMEOUT_SECS`) kills the encode if `out_time` stops advancing for 45s (90s until 20.11.1),
 > so a residual deadlock auto-**retries once** on the transparent path. The
 > optimisation can therefore never leave a file unpreppable (Windows is the primary
 > target; a working prep matters more than a slightly warmer CPU).
+>
+> **The stall is real, common on some sources, and unexplained** (20.11.1). On
+> 2026-10-04 six of nine This Is Us S03 episodes (1080p HEVC, two rungs, two audio
+> tracks, three subtitle tracks) stalled, at a different point each time, with audio
+> segments about 100 ahead of video when ffmpeg stopped. A stalled episode took
+> 449-580 s against 237-247 s clean, so at that rate trying the GPU first is slower
+> than never trying. `gpugate.Gate` (`_GPU_GATE` in `main.py`) therefore counts
+> watchdog kills: two in the last four attempts and the next eight qualifying encodes
+> skip the attempt, after which it is tried once. State is per process. The stall
+> report in `logs/hls.log` carries the source codec, ffmpeg's last progress block, the
+> last video and audio segment opened and an `nvidia-smi` sample.
 
 > **All outputs are bare filenames and ffmpeg runs with `cwd=<bundle .part dir>`**
 > (`_run_offline_job` passes `cwd=str(tmp_dir)`). Only the `-i` source is an

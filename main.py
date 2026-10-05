@@ -66,6 +66,7 @@ import episodes
 import racerules
 import relquality
 import stallrule
+import gpugate
 import reltracks
 import srcevict
 import reaper
@@ -31252,8 +31253,13 @@ OFFLINE_FFMPEG_THREADS = 2
 # job["progress"] doesn't advance for this long while the encode is alive, we
 # kill ffmpeg and let _run_offline_job retry on the transparent -hwaccel path.
 # Generous enough that a genuinely-encoding job (out_time ticks every ~second)
-# never trips it; only a true stall does.
-GPU_STALL_TIMEOUT_SECS = 90
+# never trips it; only a true stall does. 45 s, down from 90 (20.11.1): every
+# stall on the box had been dead for the full window, so half of it was pure
+# waiting, and a false kill only costs the faster path, never the bundle.
+GPU_STALL_TIMEOUT_SECS = 45
+# Stalls are a tax per episode, so once they are common the all-GPU attempt is
+# skipped for a while. See gpugate.py for the measurements behind the numbers.
+_GPU_GATE = gpugate.Gate()
 
 # How many times a file may produce a structurally-damaged bundle before prep
 # gives up on it. The first rejection is almost always a source that wasn't all
@@ -33322,6 +33328,13 @@ async def _run_offline_job(job_id: str) -> None:
                 and _source_nvdec_safe(info)
                 and hw_decode
             )
+            if full_gpu and not _GPU_GATE.allow():
+                full_gpu = False
+                hls_log.info(
+                    "job %s all-GPU path skipped (it has been stalling: %s) — "
+                    "using the transparent -hwaccel path.",
+                    job_id, _GPU_GATE.state(),
+                )
 
             while True:
                 args, kept_audios, kept_subs, kept_videos = _build_hls_ffmpeg_args(
@@ -33376,6 +33389,9 @@ async def _run_offline_job(job_id: str) -> None:
                 # (2) on failure we want the *whole* error, not the 500-char tail
                 #     job["error"] keeps for the UI — it goes to logs/hls.log.
                 stderr_tail: deque[str] = deque(maxlen=300)
+                # ffmpeg's last `-progress` block (frame, fps, out_time, speed…),
+                # kept so a stall report can say where the encode stopped.
+                prog_last: dict[str, str] = {}
 
                 async def _drain_stderr() -> None:
                     assert proc.stderr is not None
@@ -33404,6 +33420,7 @@ async def _run_offline_job(job_id: str) -> None:
                         if not txt or "=" not in txt:
                             continue
                         k, _, v = txt.partition("=")
+                        prog_last[k] = v
                         if k in ("out_time_ms", "out_time_us") and duration > 0:
                             # out_time_ms is microseconds despite the name on
                             # older ffmpeg; out_time_us is always microseconds.
@@ -33470,6 +33487,8 @@ async def _run_offline_job(job_id: str) -> None:
 
                 job["_proc"] = None
                 if proc.returncode == 0:
+                    if full_gpu:
+                        _GPU_GATE.record(False)
                     break  # success → leave the retry loop and write meta.json
 
                 # Did _free_file_for_compression() terminate us so the source could
@@ -33533,12 +33552,37 @@ async def _run_offline_job(job_id: str) -> None:
                 if full_gpu:
                     reason = ("stalled (watchdog kill)" if stall["killed"]
                               else f"failed rc={proc.returncode}")
-                    tail = "\n".join(stderr_tail).strip()
+                    # The muxer's "Opening 'seg_…' for writing" lines are most of
+                    # stderr and say nothing; drop them so the 800 characters
+                    # kept are the ones that might name the cause.
+                    tail = "\n".join(
+                        t for t in stderr_tail if "' for writing" not in t).strip()
+                    last_seg = next(
+                        (t for t in reversed(stderr_tail) if "seg_video_" in t), "")
+                    last_aud = next(
+                        (t for t in reversed(stderr_tail) if "seg_audio_" in t), "")
+                    _v = info.get("video") or {}
+                    gpu_now = await _sample_gpu() if stall["killed"] else None
+                    closed = _GPU_GATE.record(stall["killed"])
                     hls_log.warning(
                         "job %s all-GPU encode %s — retrying on the transparent "
-                        "-hwaccel path.\n  stderr tail:\n%s",
-                        job_id, reason, tail[-800:] or "(no stderr captured)",
+                        "-hwaccel path.\n  source: %s %s %sx%s\n  stopped at: %s\n"
+                        "  last video segment: %s\n  last audio segment: %s\n"
+                        "  gpu at kill: %s\n  stderr tail:\n%s",
+                        job_id, reason,
+                        _v.get("codec", "?"), _v.get("pix_fmt", "?"),
+                        _v.get("width", "?"), _v.get("height", "?"),
+                        {k: prog_last.get(k) for k in
+                         ("frame", "fps", "out_time", "speed", "dup_frames", "drop_frames")},
+                        last_seg[-40:] or "?", last_aud[-40:] or "?",
+                        gpu_now if gpu_now is not None else "n/a",
+                        tail[-800:] or "(no stderr captured)",
                     )
+                    if closed:
+                        hls_log.warning(
+                            "all-GPU prep path closed after repeated stalls — the "
+                            "next %d full re-encodes go straight to the transparent "
+                            "path, then it is tried once more.", gpugate.REST)
                     full_gpu = False
                     await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
                     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -37606,6 +37650,25 @@ async def offline_cache_bundle_file(cache_key: str, filename: str,
                 pass
         return Response(content=cleaned, media_type=media)
     return FileResponse(str(p), media_type=media, filename=p.name)
+
+
+@app.get("/StreamLinkBundles/{cache_key}/{filename}")
+async def device_bundle_path_alias(cache_key: str, filename: str,
+                                   audio: Optional[int] = None,
+                                   lang: Optional[str] = None,
+                                   maxh: Optional[int] = None) -> Response:
+    """The iOS app's on-device bundle path, answered with the host's copy.
+
+    The app serves a downloaded bundle from `/StreamLinkBundles/<sha>/` on its
+    own loopback server, and that server forwards whatever it cannot find to
+    this host. Until 20.11.1 it forwarded the path as it stood, which is a path
+    only the phone has: a bundle with one file missing made a Cast receiver ask
+    for it 1,883 times in 70 minutes (2026-10-03) and never get the second
+    audio track. The device copy is a byte copy keyed by the same sha, so the
+    same file is the right answer. Apps from 20.11.1 ask the real route
+    themselves; this is for the ones already installed.
+    """
+    return await offline_cache_bundle_file(cache_key, filename, audio, lang, maxh)
 
 
 # ── Subtitle image packs (styled ASS + PGS/VOBSUB) ───────────────────────────

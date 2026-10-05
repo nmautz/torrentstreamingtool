@@ -478,14 +478,23 @@ final class HLSStaticServer {
 
         // 2) Everything else → reverse-proxy to the host (proxied playback session).
         if let host = proxyHost {
+            // A hole in a device bundle. The host has no route for
+            // `/StreamLinkBundles/<sha>/…`, so forwarding the path as it stands
+            // can only 404, and a player that never gives up (a Cast receiver
+            // asked for the second audio track) then asks again every two
+            // seconds for the whole episode: 1,883 times in 70 minutes on
+            // 2026-10-03. The device copy is a byte copy of the host's bundle,
+            // keyed by the same sha, so ask the host for the file it was copied
+            // from instead.
+            let upTarget = hostBundleTarget(for: rawTarget, method: method) ?? rawTarget
             let clen = Int(headerValue(in: lines, name: "content-length") ?? "") ?? 0
             if clen > initialBody.count {
                 readBody(conn, have: initialBody, need: clen) { [weak self] body in
-                    self?.proxy(conn, method: method, target: rawTarget, headerLines: lines, body: body, host: host)
+                    self?.proxy(conn, method: method, target: upTarget, headerLines: lines, body: body, host: host)
                 }
             } else {
                 let body = clen > 0 ? Data(initialBody.prefix(clen)) : Data()
-                proxy(conn, method: method, target: rawTarget, headerLines: lines, body: body, host: host)
+                proxy(conn, method: method, target: upTarget, headerLines: lines, body: body, host: host)
             }
             return
         }
@@ -547,6 +556,31 @@ final class HLSStaticServer {
         }
         fwd.start(req)
     }
+
+    /// The host's address for a device-bundle file we do not have, or nil when
+    /// `target` is not one (`/StreamLinkBundles/<sha>/<file>` only: one level,
+    /// which is all a bundle has). Writes one `bundle-hole` row per missing file
+    /// so the hole is visible, not just papered over.
+    private func hostBundleTarget(for target: String, method: String) -> String? {
+        guard method == "GET" || method == "HEAD", bundlesMount != nil else { return nil }
+        let prefix = "/StreamLinkBundles/"
+        guard target.hasPrefix(prefix) else { return nil }
+        let tail = String(target.dropFirst(prefix.count))
+        let path = tail.prefix(while: { $0 != "?" && $0 != "#" })
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty,
+              !parts.contains(where: { $0 == ".." || $0 == "." }) else { return nil }
+        holeLock.lock()
+        let fresh = holesSeen.count < 256 && holesSeen.insert(String(path)).inserted
+        holeLock.unlock()
+        if fresh {
+            DiagLog.shared.write("bundle-hole", ["sha": String(parts[0]), "file": String(parts[1])],
+                                 cat: "offline")
+        }
+        return "/api/library/offline-cache/" + tail
+    }
+    private let holeLock = NSLock()
+    private var holesSeen = Set<String>()
 
     /// Map a request path to a file inside `root`, rejecting traversal.
     /// Player mode (`bundlesMount` set — the offline cached dashboard): paths

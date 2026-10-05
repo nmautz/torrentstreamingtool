@@ -1,5 +1,39 @@
 # Changelog
 
+## [20.11.1] — 2026-10-04
+### Two things the server log showed: prep that stalls on the GPU, and a TV asking for one file 1,883 times
+
+Both came out of reading the box's logs, not from a report.
+
+- **Prep stops paying for a GPU path that keeps stalling.** The fastest prep path keeps
+  every frame on the graphics card. It sometimes wedges: ffmpeg stops with no error, a
+  watchdog kills it, and the episode is encoded again from the start the slower way. On
+  2026-10-04 that happened on 6 of 9 This Is Us S03 episodes, each taking 449-580 s
+  instead of about 240 s.
+  - After two stalls in four attempts, the next eight full re-encodes skip the GPU
+    attempt and go straight to the path that works. Then it is tried once more.
+    Replayed against that night, six wasted attempts become two (`gpugate.py`).
+  - The watchdog now waits 45 s without progress before killing, not 90 s.
+  - A stall now logs where the encode stopped, the source's codec and the GPU's load,
+    with the muxer's noise removed. **The cause of the stall is still unknown**; this
+    is so the next one says more than the last six did.
+- **A hole in a downloaded episode no longer starves a cast.** On 2026-10-03 the phone's
+  copy of an episode was missing one file, the first segment of its English audio. The
+  app passed the TV's request for it to the server under a path only the phone has, the
+  server answered 404, and the TV asked again every two seconds for the whole 70-minute
+  episode. English never played.
+  - The app now asks the server for the file under the server's own path, and writes a
+    `bundle-hole` row to its diagnostic log, once per file.
+  - The server also answers the phone's path, so apps already installed are covered
+    without an update.
+  - **Why the file was missing is not known**, and the hole is not repaired on the
+    phone: with no server in reach that episode still has no English audio.
+
+**Not checked on the box, a phone or a TV.** The gate has unit tests
+(`tests/test_gpugate.py`); the server route was checked only as far as its path
+validation; the app change compiles. Nothing here has run against a real stall or a
+real cast.
+
 ## [20.11.0] — 2026-10-04
 ### TMDb is credited, and nothing from it is kept past six months
 
