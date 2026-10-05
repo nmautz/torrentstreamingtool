@@ -3087,7 +3087,18 @@ reached through Tailscale is on no network the TV can see. So AirPlay always goe
   `cast-keepalive-revive`. The cast's session is exclusive, and an exclusive session
   cannot take the audio back from another app while backgrounded (`OSStatus
   560557684`), so the restart falls back to a mixable session (`mixed: true`). A phone
-  call refuses both; that case is open. A `cast-dropped why:silent` right after a
+  call refuses both; that case is open.
+- **The restart must not take the audio back from another app (20.8.13).** Activating
+  an exclusive session pauses whichever app is playing, and from the background it
+  is *not* always refused: on 2026-10-05 it succeeded nine times in 50 seconds
+  (`cast-keepalive-revive mixed:false ok:true` after each `interruption began`) and
+  paused TikTok every time. While an interruption is open or
+  `isOtherAudioPlaying`, the restart is mixable and the keep-alive is `yielded`;
+  `activateAudioSession` returns early for a yielded cast, so no arm or interruption
+  handler can put the exclusive session back. It returns on `interruption ended`,
+  after 10 s with no other app playing, or on become-active with nothing else
+  playing (`cast-audio-reclaim`). While yielded the cast is not the Now Playing app.
+  A `cast-dropped why:silent` right after a
   `becomeActive` means the phone had been suspended: read upward for what stopped the
   audio, and do not look at the network first.
 - **The receiver does not always say `FINISHED` (20.8.6).** A cast's only advance,

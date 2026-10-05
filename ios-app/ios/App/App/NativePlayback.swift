@@ -77,7 +77,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "20.8.8"
+let NP_BUILD = "20.8.13"
 
 // MARK: - Armed state
 
@@ -1437,6 +1437,11 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // activation, landing while the page plays, interrupted it: one pause at
         // every start and every return from PiP (measured 01:17:40.013
         // `mix:false` → 40.184 `unasked-pause`).
+        //
+        // A CAST THAT STEPPED ASIDE STAYS ASIDE (20.8.13). Another app is playing
+        // and SilentKeepAlive made the session mixable; activating it exclusive
+        // here would pause that app. The keep-alive says when (onReclaim).
+        if cast != nil, SilentKeepAlive.shared.yielded { return }
         let mix = !exclusive && player == nil && cast == nil
             && (shadowPlayer != nil || sessionMixable || armed.autoPip)
         // PiP is opening and didStart's off-main switch owns this one (20.8.3).
@@ -2582,6 +2587,8 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         restoreStrandedBrightness()
         // The volume buttons drive the TV only while the app is in front.
         onMain { [weak self] in self?.startVolumeCapture() }
+        // A cast that stepped aside for another app's sound takes its session back.
+        SilentKeepAlive.shared.reclaim("foreground")
         drainPendingCommand()
         // Hand the external display back to mirroring: the web player is about to
         // become primary again, and TV Mode's whole premise is that the monitor
@@ -3530,6 +3537,12 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
                 c.onDropped = { [weak self] why in self?.castDropped(why) }
                 c.onFailed  = { [weak self] why in self?.castFailed(why) }
                 c.onVolume  = { [weak self] level, muted in self?.castVolumeReported(level, muted) }
+                SilentKeepAlive.shared.onReclaim = { [weak self] in
+                    guard let self = self, self.cast != nil else { return }
+                    self.sessionActivated = false     // the keep-alive re-categorised it
+                    self.activateAudioSession()
+                    self.updateNowPlaying()
+                }
                 SilentKeepAlive.shared.start()
                 self.armed.paused = false         // casting it IS pressing play (see AirPlay)
                 let at = self.extrapolatedPosition()

@@ -1920,7 +1920,10 @@ without the token, because the receiver is a web page on another origin.
 **Staying alive.** The TV fetches every segment through the phone, and nothing plays
 locally. So `SilentKeepAlive` loops silence (mixable) under the `audio` background mode
 for the whole session. Without it, a locked phone is a stalled TV one buffer's length
-later. If the TLS link drops anyway, `rejoin()` finds the running receiver app and joins
+later. The cast's session is exclusive (it owns the lock-screen controls) until another
+app plays sound; then the keep-alive restarts mixable and stays out of that app's way
+(`yielded`, 20.8.13), and the exclusive session returns once the other app is quiet for
+10 s or StreamLink is in front again (`cast-audio-reclaim`). If the TLS link drops anyway, `rejoin()` finds the running receiver app and joins
 its transport rather than reloading: up to 3 tries in the foreground, or on the next
 foreground.
 

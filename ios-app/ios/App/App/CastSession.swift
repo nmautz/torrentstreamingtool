@@ -638,6 +638,16 @@ enum CastProto {
 /// was suspended as soon as the last background task ran out. The TV buffered
 /// until the app was opened. The same order (interruption, then `cast-dropped`)
 /// is in the log on 2026-09-27 and 2026-10-03 02:47.
+///
+/// AND IT MUST NOT TAKE THE AUDIO BACK FROM ANOTHER APP (20.8.13). The cast's
+/// session is exclusive, so that the cast owns the lock-screen controls. Another
+/// app starting sound interrupts it, and the restart above then interrupted that
+/// app in turn. Measured 2026-10-05 00:51, casting with TikTok in front: nine
+/// `interruption began`, each answered within 2 s by `cast-keepalive-revive
+/// mixed:false ok:true`, and TikTok paused every time. So while another app is
+/// playing the silence restarts MIXABLE (`yielded`): it interrupts nobody and
+/// nobody interrupts it. The exclusive session comes back when that app has
+/// gone quiet, or when ours is in front again.
 final class SilentKeepAlive {
     static let shared = SilentKeepAlive()
     private var engine: AVAudioEngine?
@@ -646,6 +656,14 @@ final class SilentKeepAlive {
     private var observers: [NSObjectProtocol] = []
     private var watch: DispatchSourceTimer?
     private var down = false
+    /// Another app has the audio and the session is mixable until it is done.
+    private(set) var yielded = false
+    /// Between an interruption's `began` and its `ended`: someone else is talking.
+    private var interrupted = false
+    /// Watchdog ticks (2 s each) with no other app playing while yielded.
+    private var quiet = 0
+    /// The owner puts its exclusive session, and Now Playing, back.
+    var onReclaim: (() -> Void)?
 
     var isRunning: Bool { engine?.isRunning ?? false }
 
@@ -671,6 +689,9 @@ final class SilentKeepAlive {
         self.node = node
         buffer = buf
         down = false
+        yielded = false
+        interrupted = false
+        quiet = 0
         watchForStops(e)
         DiagLog.shared.write("cast-keepalive", ["on": true], cat: "cast")
     }
@@ -684,6 +705,7 @@ final class SilentKeepAlive {
         engine = nil
         node = nil
         buffer = nil
+        yielded = false
         DiagLog.shared.write("cast-keepalive", ["on": false], cat: "cast")
     }
 
@@ -702,15 +724,26 @@ final class SilentKeepAlive {
             let info = note.userInfo ?? [:]
             let type = AVAudioSession.InterruptionType(
                 rawValue: (info[AVAudioSessionInterruptionTypeKey] as? UInt) ?? 0)
-            if type == .ended { self?.revive("interruption-ended"); return }
+            if type == .ended {
+                self?.interrupted = false
+                self?.revive("interruption-ended")
+                self?.reclaim("interruption-ended", force: true)
+                return
+            }
             // A disconnected route interrupts and never says `ended`. Any other
-            // interrupter is still talking; the timer asks again in two seconds.
+            // interrupter is still talking: the restart goes mixable under it,
+            // and the timer asks again in two seconds if the engine has not
+            // reported its stop yet.
             let reason = (info[AVAudioSessionInterruptionReasonKey] as? UInt) ?? 0
-            if reason == 4 { self?.revive("route-disconnected") }
+            if reason != 4 { self?.interrupted = true }
+            self?.revive(reason == 4 ? "route-disconnected" : "interrupted")
         })
         let t = DispatchSource.makeTimerSource(queue: .main)
         t.schedule(deadline: .now() + 2, repeating: 2)
-        t.setEventHandler { [weak self] in self?.revive("watchdog") }
+        t.setEventHandler { [weak self] in
+            self?.revive("watchdog")
+            self?.reclaimWhenQuiet()
+        }
         t.resume()
         watch = t
     }
@@ -721,15 +754,24 @@ final class SilentKeepAlive {
         let s = AVAudioSession.sharedInstance()
         var err = ""
         var mixed = false
-        do { try s.setActive(true) } catch {
-            // The cast's session is exclusive (it owns the lock-screen controls),
-            // and from the background an exclusive session may not take the audio
-            // back from another app. A mixable one asks nobody.
+        let goMixed = {
             do {
                 try s.setCategory(.playback, mode: .default, options: [.mixWithOthers])
                 try s.setActive(true)
                 mixed = true
             } catch { err = "session: \(error.localizedDescription)" }
+        }
+        // The cast's session is exclusive (it owns the lock-screen controls), and
+        // activating it pauses whichever app is playing. A mixable one asks nobody.
+        if yielded || interrupted || s.isOtherAudioPlaying {
+            goMixed()
+        } else {
+            // Refused from the background (OSStatus 560557684) is the same answer.
+            do { try s.setActive(true) } catch { goMixed() }
+        }
+        if mixed, !yielded {
+            yielded = true
+            quiet = 0
         }
         if err.isEmpty {
             do {
@@ -749,5 +791,27 @@ final class SilentKeepAlive {
                                  ["why": why, "ok": ok, "err": err, "mixed": mixed], cat: "cast")
         }
         down = !ok
+    }
+
+    /// The other app has been silent for ten seconds: the lock-screen controls
+    /// are worth more than a session nobody else is using. If it plays again it
+    /// interrupts us and we step aside again, without pausing it.
+    private func reclaimWhenQuiet() {
+        guard yielded else { return }
+        if AVAudioSession.sharedInstance().isOtherAudioPlaying { quiet = 0; return }
+        quiet += 1
+        if quiet >= 5 { reclaim("quiet", force: true) }
+    }
+
+    /// Back to the exclusive session. Without `force` only when no other app is
+    /// playing: the viewer who came back to this app with music on keeps it.
+    func reclaim(_ why: String, force: Bool = false) {
+        guard engine != nil, yielded else { return }
+        if !force, AVAudioSession.sharedInstance().isOtherAudioPlaying { return }
+        yielded = false
+        interrupted = false
+        quiet = 0
+        DiagLog.shared.write("cast-audio-reclaim", ["why": why], cat: "cast")
+        onReclaim?()
     }
 }

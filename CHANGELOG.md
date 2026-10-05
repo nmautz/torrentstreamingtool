@@ -1,5 +1,26 @@
 # Changelog
 
+## [20.8.13] — 2026-10-04
+### Casting no longer pauses other apps
+
+- **Fixed: with a Chromecast playing and another app open, that app's video kept
+  pausing.** The 2026-10-05 00:51 log shows it with TikTok:
+  nine times in 50 seconds TikTok started sound, the app's silent keep-alive took the
+  audio back within 2 seconds, and TikTok paused. The keep-alive now restarts in a
+  session that mixes with other apps while one of them is playing, so it interrupts
+  nobody. Run once on the phone with a dev build (2026-10-05 01:00, about 12 seconds
+  of TikTok during a cast): one interruption, the keep-alive back in 185 ms as
+  `mixed:true`, TikTok kept playing, and the exclusive session returned 10 seconds
+  after coming back (`cast-audio-reclaim why:quiet`). A longer session in another app
+  and a lock-screen check while yielded have not been run.
+- **While another app has the sound, the lock-screen controls belong to that app.**
+  The cast's controls return when the other app has been silent for 10 seconds or
+  StreamLink is opened again. The Live Activity's buttons work throughout.
+
+**App:** [CastSession.swift](ios-app/ios/App/App/CastSession.swift),
+[NativePlayback.swift](ios-app/ios/App/App/NativePlayback.swift).
+**Docs:** [docs/STREAMING.md](docs/STREAMING.md), [docs/GOTCHAS.md](docs/GOTCHAS.md).
+
 ## [20.8.12] — 2026-10-04
 ### Two setup and startup fixes
 
