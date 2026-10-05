@@ -1125,7 +1125,8 @@ is deliberately **dropped** rather than migrated; see [GOTCHAS.md](GOTCHAS.md)
                                         "trailer": "", "collection": {}}}},
     "extras": {"source": "none", "kind": "extras", "title": "Extras"} // stamped so it is never searched again
   },
-  "fetched_at": "2026-05-15T01:23:45+00:00"
+  "fetched_at": "2026-05-15T01:23:45+00:00",  // the age the six-month limit is measured from
+  "expired": true                           // only on a stub emptied at 180 days; see § TMDb retention
 }
 ```
 
@@ -1166,17 +1167,17 @@ over under the same id once a second film lands.
 
 Populated by `_fetch_item_metadata` ([main.py](../main.py)) on first hit of `GET /api/library/{id}/metadata`, then served from cache. Per-id `asyncio.Lock` coalesces concurrent first-loads. **The first-access fetch never blocks the endpoint**: it runs as a background task (`_spawn_metadata_fetch`) the endpoint waits on for ≤4 s before answering `pending:true`; a `metadata_update` SSE event fires when the fetch lands. Cached entries answer instantly regardless of internet state. Force refresh via `POST /api/library/{id}/metadata/refresh` (admin); the same endpoint accepts an optional `{tmdb_id, kind}` to manually bind the item to a TMDb entry when auto-match picks the wrong show.
 
-Each successful fetch also **pre-warms the on-disk artwork cache** (`.tmdb_img_cache/`, `_prefetch_metadata_images`): poster w342, backdrop w1280, season posters w342, episode stills w300 — served to clients via the `/api/metadata/img` proxy (the `img_base` all metadata endpoints now return), so artwork keeps rendering on the LAN when the internet is down.
+Each successful fetch also **pre-warms the on-disk artwork cache** (`.tmdb_img_cache/`, `_prefetch_metadata_images`): poster w342, backdrop w1280, season posters w342, episode stills w300 — served to clients via the `/api/metadata/img` proxy (the `img_base` all metadata endpoints now return), so artwork keeps rendering on the LAN when the internet is down. A cached image is fetched again once it is 150 days old and deleted at 180 (see § TMDb retention below).
 
 #### TMDb response cache (16.2.0)
 
 The per-item `metadata` above only covers the seasons that item's files are in. Everything else, including the episode lists of seasons you own nothing from, Search, Explore and the search show page, comes from TMDb when you ask for it. **`tmdbcache.py`** caches every raw TMDb API response on disk in `.tmdb_cache/<k[:2]>/<k>.json` (`k` = SHA-1 of path + sorted params, **excluding `api_key`**, which is never written). It sits inside `_tmdb_get`, so every caller gets it without any change on their side.
 
 - **Fresh:** served with no network call. TTL by kind (`tmdbcache.ttl_for`): a season whose every episode aired >60 days ago, 30 d; an airing or undated season, 12 h; `/tv/{id}` 12 h, or 7 d once `status` is Ended/Canceled (this is where a new season's inventory entry comes from); `/movie/{id}` 12 h within 180 days of release (theatrical-only flags), else 7 d; `/search/*` 24 h; `/genre/*` and `/collection/*` 7 d; trending/discover/popular lists 1 h; anything else 6 h.
-- **Stale + refetch fails** (transport error, 429, 5xx): the stale copy is served **at any age**. A 404 returns None as before.
+- **Stale + refetch fails** (transport error, 401, 429, 5xx): the stale copy is served, **up to 180 days old** (`tmdbcache.MAX_AGE`); past that `TmdbCache.get` returns nothing. A 404 returns None as before. Every such failure bumps `_tmdb_fail_seq`, which is how a caller tells a fallback from a real answer.
 - **Offline backoff:** a transport error sets `_tmdb_offline_until` (30 s). Until it passes, calls go straight to the cache, so a 28-season fan-out doesn't wait out 28 connect timeouts.
 - **Explicit refresh bypasses the fresh path:** `_fetch_item_metadata(force=True)` without an override id (the Refresh button, a rename) sets the `_tmdb_fresh` ContextVar. A re-bind to a picked id is allowed to use the cache.
-- **Pruned** once per start (`TmdbCache.prune` via `asyncio.to_thread`): entries not rewritten within 180 days, then the oldest beyond 20 000 files, plus orphaned `.tmp` files.
+- **Pruned** by `tmdb_retention_loop` (5 min after start, then every 6 h; `TmdbCache.prune` via `asyncio.to_thread`): entries not rewritten within 180 days, then the oldest beyond 20 000 files, plus orphaned `.tmp` files.
 
 Above it, `_tmdb_lookup_by_id` / `_tmdb_lookup_by_title` memoise the assembled show for 15 min (`_TMDB_LOOKUP_TTL`) and **never memoise an incomplete TV result**, meaning any inventory season missing from `seasons` because its fetch failed (`_tmdb_memo_put`). Season lists are fetched concurrently (`_tmdb_fetch_seasons`, bounded by `_tmdb_net_sem` = 8) over one shared keep-alive client (`_tmdb_http()`, closed in `lifespan`).
 
@@ -1189,6 +1190,59 @@ Above it, `_tmdb_lookup_by_id` / `_tmdb_lookup_by_title` memoise the assembled s
 The query the auto-match runs is built from `item.series` (or `item.title` for one-offs) by `_search_terms_for_item`, so a badly-named download (e.g. "AOT") can match the wrong show. `POST /api/library/{id}/rename` ([main.py](../main.py)) fixes this: it renames the series across the whole group (or the title for a movie/one-off), **drops the cached `metadata` on every renamed entry (except pinned `manual`/`custom` ones, which are preserved)**, and re-fetches the requested item immediately — the next access of the siblings re-matches lazily. It also re-keys each profile's `series_subtitle_prefs[<series>]` so a remembered subtitle pick survives the rename. Surfaced in the UI by the pencil button on the episode page hero (`renameSeries()`).
 
 When no TMDb API key is configured (env or admin override), the metadata/search/refresh endpoints return `{enabled: false}` and the frontend gracefully falls back to filename parsing — but `metadata/set` with `mode:"custom"` still works, letting users supply metadata by hand with no key.
+
+#### TMDb retention: nothing is kept past six months (20.11.0)
+
+TMDb's API terms (section 1.C) forbid caching anything obtained from the API for longer than
+6 months. The rule lives in `tmdbcache.py` (`MAX_AGE` 180 d, `REFRESH_AFTER` 150 d, `age_state`,
+`metadata_state`, `expire_metadata`) and `tmdb_retention_loop` in `main.py` applies it to the
+three places TMDb data rests:
+
+| Store | At 150 days | At 180 days |
+|---|---|---|
+| `.tmdb_cache/` (responses) | nothing: TTLs refetch long before | not served, then pruned |
+| `.tmdb_img_cache/` (artwork) | fetched again the next time it is asked for; the old copy is served if that fails | not served; deleted by the sweep |
+| `item["metadata"]` | re-fetched from the **same binding** (`_fetch_item_metadata(refresh=True)`) | emptied to a stub, if TMDb still could not be asked |
+
+In normal running nothing reaches 180 days: metadata is refreshed at 150, which leaves 30 days
+of TMDb being unreachable before anything is lost. The age is `fetched_at`; metadata with no
+readable `fetched_at` counts as expired.
+
+**The stub.** `expire_metadata` keeps only what is ours, the matching decision:
+
+```jsonc
+"metadata": { "source": "manual", "tmdb_id": 1396, "tmdb_kind": "tv", "expired": true,
+              "sections": { "extras": {"source": "none", …} } }   // only "none"/"custom" sections
+```
+
+Titles, overviews, artwork paths, season and episode lists are gone, so the item shows its
+`series` name and file-derived labels, exactly as an item with no TMDb key does. `source` is
+kept so a hand-picked binding is still pinned. A stub is refilled, with no re-match, by the
+next retention pass or the next time the item is opened (`_nudge_metadata_health`, throttled
+to once per 10 min per item). File season/episode numbers are not touched: they were settled
+when the metadata was live and live on the files.
+
+**A refresh never writes a fallback.** `_tmdb_fetch_tv` / `_tmdb_fetch_movie` build a dict
+whatever TMDb said, including from a stale cached response. A `refresh` (or a stub refill)
+compares `_tmdb_fail_seq` before and after and writes nothing if it moved or the title came
+back empty, so old data is never re-stamped with today's `fetched_at`.
+
+**Expiry needs two failed passes.** A pass that finds something past the limit while TMDb is
+not answering (or no key is set) removes nothing and asks to be re-run in 15 minutes; only
+that second pass may empty it. A box that boots before its network does not blank its library.
+The one exception is TMDb *answering* that the entry no longer exists: there is nothing to
+wait for.
+
+`source: "custom"` metadata is the user's own and never expires; TMDb-resolved **sections**
+inside a custom item are dropped at 180 days and resolved again on the next open. A refresh
+carries `none`/`custom` sections across and leaves TMDb-resolved ones out, so they are looked
+up again fresh. Tests: `tests/test_tmdbcache.py` (the rule) and `tests/test_tmdb_retention.py`
+(the pass, driven against a fake library and a fake TMDb).
+
+**Not covered.** Copies that have left the caches: the `label` baked into a prepped bundle's
+meta, episode names stored with a download on the phone, and a bookmark's stored title and
+poster path. These are short strings derived from TMDb, rewritten when the thing is re-prepped,
+re-downloaded or re-bookmarked, with no age stamp of their own.
 
 ## Migration ([main.py:77](../main.py#L77))
 

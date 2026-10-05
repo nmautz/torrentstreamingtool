@@ -15,8 +15,14 @@ every one of them went to the network every time. Two problems followed:
 This cache sits underneath `_tmdb_get`. A response is stored once it arrives. It
 is served straight from disk while it is **fresh** (the TTL depends on what kind
 of data it is, see `ttl_for`), and when a refetch fails it is served again
-**at any age**. Stale data is always better than none, because the alternative is
-a page with no episode names at all.
+**stale**, because the alternative is a page with no episode names at all.
+
+Stale has a ceiling. TMDb's API terms (section 1.C) forbid caching anything
+obtained from the API for longer than 6 months, so nothing older than `MAX_AGE`
+is ever served or kept: not a response here, not an image in the artwork
+cache, not the per-item metadata in `library.json`. The retention rules for all
+three live at the bottom of this module (`age_state`, `expire_metadata`) and
+`main.py` applies them (`tmdb_retention_loop`). See docs/EXTERNAL_SERVICES.md.
 
 Layout: `<root>/<k[:2]>/<k>.json`, where `k` is a SHA-1 of the path plus the
 sorted query params. The API key is excluded, so it never lands on disk and
@@ -37,12 +43,19 @@ import json
 import os
 import re
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 HOUR = 3600
 DAY = 24 * HOUR
+
+# TMDb API terms, section 1.C: no caching "for longer than 6 months". 180 days
+# is under every reading of six months (the shortest run of six is 181).
+MAX_AGE = 180 * DAY
+# When a copy is this old, ask TMDb for a new one. The 30 days between the two
+# are the room an outage has before anything is dropped.
+REFRESH_AFTER = 150 * DAY
 
 # Never part of a cache key, and never written to disk.
 _SECRET_PARAMS = {"api_key"}
@@ -142,6 +155,8 @@ class TmdbCache:
         if not isinstance(data, dict):
             return None
         t = now if now is not None else time.time()
+        if t - stored >= MAX_AGE:
+            return None             # past the terms' limit: not even as a fallback
         return data, (t - stored) < ttl_for(path, data, t)
 
     def put(self, path: str, params: Optional[dict], data: dict,
@@ -170,7 +185,7 @@ class TmdbCache:
             except Exception:
                 pass
 
-    def prune(self, max_age: float = 180 * DAY, max_entries: int = 20000,
+    def prune(self, max_age: float = MAX_AGE, max_entries: int = 20000,
               now: Optional[float] = None) -> int:
         """Drop entries not rewritten within `max_age`, then the oldest beyond
         `max_entries`, plus any orphaned `.tmp` files. Returns how many files
@@ -206,3 +221,105 @@ class TmdbCache:
                 except Exception:
                     pass
         return removed
+
+
+# ── Retention: nothing from TMDb is kept past six months ─────────────────────
+# One rule for the three places TMDb data rests: this response cache, the
+# artwork cache, and `item["metadata"]` in library.json. Pure, so the policy is
+# testable without a library or a network.
+
+FRESH, REFRESH, EXPIRED = "fresh", "refresh", "expired"
+
+# Section stamps that hold nothing from TMDb: a miss ("none") and a hand-entered
+# entry ("custom"). Everything else in `metadata.sections` is TMDb's.
+_OWN_SECTION_SOURCES = ("none", "custom")
+
+
+def age_state(age: Optional[float]) -> str:
+    """What to do with a copy `age` seconds old. An unknown age is EXPIRED: a
+    copy that can't show it is under six months old doesn't get the benefit of
+    the doubt."""
+    if age is None or age >= MAX_AGE:
+        return EXPIRED
+    return REFRESH if age >= REFRESH_AFTER else FRESH
+
+
+def is_tmdb_metadata(meta) -> bool:
+    """Does this `item["metadata"]` hold data fetched from TMDb? A hand-entered
+    entry (`source: "custom"`) has no `tmdb_id` and is the user's own."""
+    return (isinstance(meta, dict) and meta.get("source") != "custom"
+            and bool(meta.get("tmdb_id")))
+
+
+def metadata_age(meta, now: Optional[float] = None) -> Optional[float]:
+    """Seconds since `meta` was fetched (`fetched_at`, ISO 8601), or None when
+    it doesn't say or the stamp can't be read."""
+    raw = (meta or {}).get("fetched_at") if isinstance(meta, dict) else None
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    t = now if now is not None else time.time()
+    return max(0.0, t - dt.timestamp())
+
+
+def metadata_state(meta, now: Optional[float] = None) -> str:
+    """FRESH / REFRESH / EXPIRED for one item's metadata. Metadata that isn't
+    TMDb's is always FRESH, and so is a stub `expire_metadata` already emptied
+    (there is nothing left in it to expire; `expired` marks it for refetching)."""
+    if not is_tmdb_metadata(meta):
+        return FRESH if not _has_tmdb_sections(meta) else age_state(metadata_age(meta, now))
+    if meta.get("expired"):
+        return FRESH
+    return age_state(metadata_age(meta, now))
+
+
+def _has_tmdb_sections(meta) -> bool:
+    secs = meta.get("sections") if isinstance(meta, dict) else None
+    return isinstance(secs, dict) and any(
+        isinstance(b, dict) and b.get("source") not in _OWN_SECTION_SOURCES
+        for b in secs.values())
+
+
+def own_sections(meta) -> dict:
+    """The entries of `metadata.sections` that hold nothing from TMDb. These
+    survive a refresh and an expiry; the rest are resolved again from scratch."""
+    secs = meta.get("sections") if isinstance(meta, dict) else None
+    if not isinstance(secs, dict):
+        return {}
+    return {k: v for k, v in secs.items()
+            if isinstance(v, dict) and v.get("source") in _OWN_SECTION_SOURCES}
+
+
+def expire_metadata(meta) -> Optional[dict]:
+    """`meta` with everything TMDb supplied removed, or None when there is
+    nothing to remove.
+
+    What stays is ours: WHICH entry the item is bound to (`tmdb_id`,
+    `tmdb_kind`) and how that was decided (`source`, so a hand-picked binding is
+    still pinned). That is the matching decision, not TMDb's content, and it is
+    what lets the item fill back in exactly, with no fuzzy re-match, the moment
+    TMDb answers again. `expired: True` marks the stub for that refetch."""
+    if not isinstance(meta, dict):
+        return None
+    if not is_tmdb_metadata(meta):
+        # A hand-entered item can still carry TMDb-resolved sections.
+        if not _has_tmdb_sections(meta):
+            return None
+        out = dict(meta)
+        out["sections"] = own_sections(meta)
+        return out
+    if meta.get("expired"):
+        return None
+    out = {"source": meta.get("source") or "tmdb",
+           "tmdb_id": meta["tmdb_id"],
+           "tmdb_kind": meta.get("tmdb_kind") or "",
+           "expired": True}
+    keep = own_sections(meta)
+    if keep:
+        out["sections"] = keep
+    return out

@@ -126,6 +126,76 @@ try:
 finally:
     shutil.rmtree(root, ignore_errors=True)
 
+# ── Retention: nothing from TMDb past six months ─────────────────────────────
+from datetime import datetime, timezone
+
+
+def _iso(days_ago):
+    return datetime.fromtimestamp(NOW - days_ago * tc.DAY, timezone.utc).isoformat(timespec="seconds")
+
+
+eq("limit is under six months", tc.MAX_AGE <= 181 * tc.DAY, True)
+eq("refresh comes first", tc.REFRESH_AFTER < tc.MAX_AGE, True)
+eq("young copy", tc.age_state(10 * tc.DAY), tc.FRESH)
+eq("due a refresh", tc.age_state(160 * tc.DAY), tc.REFRESH)
+eq("at the limit", tc.age_state(tc.MAX_AGE), tc.EXPIRED)
+eq("unknown age is not permission", tc.age_state(None), tc.EXPIRED)
+
+root2 = tempfile.mkdtemp(prefix="tmdbcache_ret_")
+try:
+    c2 = tc.TmdbCache(root2)
+    c2.put("/tv/1", {}, {"status": "Ended"}, now=NOW - 179 * tc.DAY)
+    c2.put("/tv/2", {}, {"status": "Ended"}, now=NOW - 181 * tc.DAY)
+    eq("stale under the limit still serves", c2.get("/tv/1", {}, now=NOW), ({"status": "Ended"}, False))
+    eq("past the limit serves nothing", c2.get("/tv/2", {}, now=NOW), None)
+finally:
+    shutil.rmtree(root2, ignore_errors=True)
+
+tv = {"source": "manual", "tmdb_id": 30984, "tmdb_kind": "tv", "title": "Bleach",
+      "overview": "x", "poster_path": "/p.jpg", "all_seasons": [{"season": 1}],
+      "seasons": {"1": {"episodes": [{"name": "A"}]}},
+      "sections": {"extras": {"source": "none", "kind": "extras", "title": "Extras"},
+                   "movies": {"source": "tmdb", "kind": "movies", "title": "Movies"}},
+      "fetched_at": _iso(200)}
+custom = {"source": "custom", "tmdb_kind": "tv", "title": "Home video",
+          "poster_url": "http://x/p.jpg", "fetched_at": _iso(900)}
+
+eq("tmdb metadata", tc.is_tmdb_metadata(tv), True)
+eq("custom is the user's own", tc.is_tmdb_metadata(custom), False)
+eq("age read from fetched_at", round(tc.metadata_age(tv, NOW) / tc.DAY), 200)
+eq("naive stamp read as UTC", round(tc.metadata_age(
+    {"fetched_at": _iso(3).replace("+00:00", "")}, NOW) / tc.DAY), 3)
+eq("unreadable stamp", tc.metadata_age({"fetched_at": "soon"}, NOW), None)
+eq("old tmdb metadata", tc.metadata_state(tv, NOW), tc.EXPIRED)
+eq("due metadata", tc.metadata_state(dict(tv, fetched_at=_iso(155)), NOW), tc.REFRESH)
+eq("young metadata", tc.metadata_state(dict(tv, fetched_at=_iso(5)), NOW), tc.FRESH)
+eq("no stamp is expired", tc.metadata_state(
+    {k: v for k, v in tv.items() if k != "fetched_at"}, NOW), tc.EXPIRED)
+eq("custom never expires", tc.metadata_state(custom, NOW), tc.FRESH)
+eq("no metadata", tc.metadata_state(None, NOW), tc.FRESH)
+
+stub = tc.expire_metadata(tv)
+eq("stub keeps the binding", (stub["tmdb_id"], stub["tmdb_kind"], stub["source"]),
+   (30984, "tv", "manual"))
+eq("stub is marked", stub["expired"], True)
+eq("stub holds none of TMDb's content",
+   sorted(stub), ["expired", "sections", "source", "tmdb_id", "tmdb_kind"])
+eq("only our own sections survive", stub["sections"],
+   {"extras": {"source": "none", "kind": "extras", "title": "Extras"}})
+eq("input untouched", tv["title"], "Bleach")
+eq("a stub is not expired twice", tc.expire_metadata(stub), None)
+eq("a stub has nothing left to expire", tc.metadata_state(stub, NOW), tc.FRESH)
+eq("custom is left alone", tc.expire_metadata(custom), None)
+eq("nothing to expire", tc.expire_metadata(None), None)
+
+mixed = dict(custom, sections={"spin": {"source": "tmdb", "tmdb_id": 5, "title": "Spin"},
+                               "mine": {"source": "custom", "title": "Mine"}})
+eq("custom item with tmdb sections ages", tc.metadata_state(mixed, NOW), tc.EXPIRED)
+out = tc.expire_metadata(mixed)
+eq("its own fields stay", out["title"], "Home video")
+eq("its tmdb sections go", out["sections"], {"mine": {"source": "custom", "title": "Mine"}})
+eq("then nothing more to do", tc.expire_metadata(out), None)
+
 print("tmdbcache: %d passed, %d failed" % (_PASS, len(_FAIL)))
 for f in _FAIL:
     print("  FAIL " + f)

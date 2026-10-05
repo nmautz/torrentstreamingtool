@@ -1,5 +1,44 @@
 # Changelog
 
+## [20.11.0] — 2026-10-04
+### TMDb is credited, and nothing from it is kept past six months
+
+TMDb's API terms ask two things of every app that uses a free key, and StreamLink did
+neither. It does now. See `docs/EXTERNAL_SERVICES.md` for the wider review this came from.
+
+- **Credits.** The TMDb logo and the notice their terms require ("This product uses TMDB
+  and the TMDB APIs but is not endorsed, certified, or otherwise approved by TMDB.") are
+  in profile settings under **Credits**, under the Explore tab, on the admin panel's TMDb
+  card, and in the README.
+- **A six-month limit on cached TMDb data.** The terms forbid caching anything from the
+  API for longer than 6 months. Three things held it for longer: artwork (kept for ever),
+  each library item's stored names and episode lists (never refreshed), and stale cached
+  responses (served at any age when TMDb was unreachable).
+  - Library metadata is now re-fetched when it is 150 days old, from the same TMDb entry
+    it is already matched to. A hand-picked match stays hand-picked.
+  - Artwork is fetched again at 150 days and deleted at 180.
+  - Cached responses older than 180 days are no longer served, even as a fallback.
+- **What you will notice: nothing, unless the box cannot reach TMDb for a long time.** If
+  metadata reaches 180 days and TMDb still cannot be asked, that item's titles, artwork
+  and episode names are removed and it shows its series name and file-derived labels.
+  Your files, watch progress and episode numbering are untouched, and the names come back
+  by themselves, from the same match, when TMDb answers. Before this, an offline box kept
+  its names indefinitely.
+- **One failed check never removes anything.** Removal needs two passes in a row, 15
+  minutes apart, in which TMDb did not answer. A box that boots before its network is up
+  keeps its library.
+- **On the first start after this update** every item fetched more than 150 days ago is
+  refreshed, one every two seconds, starting five minutes after startup. A large, old
+  library makes a few hundred TMDb requests once.
+- Browsers were told to keep artwork for a year; they are now told 30 days.
+
+Not checked: this was verified with unit tests and against a temporary library with a
+fake TMDb, on macOS. It has **not** run on the box against the real library or the real
+TMDb, and the credits have not been looked at in a browser or in the app.
+
+Not covered by the limit: episode names already baked into a prepped bundle's label, names
+stored with a download on the phone, and a bookmark's stored title and poster.
+
 ## [20.10.0] — 2026-10-04
 ### Search moved into Explore; the Search tab is gone
 

@@ -3258,6 +3258,43 @@ The iOS app serves a device snapshot of the dashboard from `LocalMediaServer` wh
 
 `/api/search` reads `indexer_categories` from the admin override first, falling back to `.env`. Library paths are unioned across both. `_tmdb_effective_key()` follows the same admin-beats-env precedence.
 
+## TMDb data has a shelf life: six months, everywhere it rests (20.11.0)
+
+TMDb's API terms forbid caching anything from the API for longer than 6 months, and
+require their logo and one exact sentence wherever the data is shown. Both are now
+enforced in code and both are easy to undo by accident.
+
+- **Do not add a new place that stores TMDb data without an age.** The response cache,
+  the artwork cache and `item["metadata"]` are covered by `tmdb_retention_loop`. A new
+  sidecar, a new field copied out of `metadata`, a "permanent" cache for speed: each one
+  is a breach that nothing will notice. Read through `_tmdb_get` and the existing caches.
+- **"Stale beats nothing" stops at 180 days.** `TmdbCache.get` returns `None` for an older
+  entry even as a fallback, and `/api/metadata/img` returns 404 for an older image it
+  cannot re-fetch. An offline box loses names and artwork after six months by design.
+- **`item["metadata"]` can be a stub.** `{source, tmdb_id, tmdb_kind, expired: true}` and
+  nothing else. Code that reads `meta["title"]` instead of `meta.get("title")`, or treats
+  "has a `tmdb_id`" as "has a title", breaks on it. `metadata.get(...) or <fallback>` is
+  the house style for exactly this reason.
+- **Never write what a TMDb fetcher returned without checking TMDb answered.**
+  `_tmdb_fetch_tv` and `_tmdb_fetch_movie` return a well-formed dict when every request
+  failed (blank) or was served from the stale cache (old). Writing it stamps
+  `fetched_at` with today, which hides old data from the retention loop for another five
+  months. The refresh path compares `_tmdb_fail_seq` before and after. The
+  `stale_seasons` top-up in `_fetch_item_metadata` predates this and still writes
+  unconditionally.
+- **The credits are a licence condition, not decoration.** The logo
+  (`static/vendor/tmdb-logo.svg`, their file, unmodified) and the sentence appear in
+  Settings → Credits, under the Explore tab, on the admin TMDb card and in the README.
+  The sentence must stay word for word and the logo smaller than our own name.
+- **The image route no longer says `immutable`.** Browsers were told to keep artwork for
+  a year; they are now told 30 days.
+
+What the code cannot make true: the terms also forbid using the API "in any manner, or
+for any purpose, that violates any law or regulation, or the rights of any person,
+including but not limited to intellectual property rights", and any commercial use. What
+is searched for and downloaded with this tool is the operator's responsibility. See
+[EXTERNAL_SERVICES.md](EXTERNAL_SERVICES.md) § TMDb.
+
 ## A provider that refuses us looks exactly like a provider with nothing
 
 Two places turn "the service said no" into "there is nothing":
@@ -3283,7 +3320,7 @@ Fire-and-forget tasks here (`_prefetch_metadata_images`, the SSE notify) go thro
 
 ### Artwork is proxied through the host — img_base is /api/metadata/img, not image.tmdb.org
 
-All metadata endpoints hand out `img_base = "/api/metadata/img"`; the route serves a permanent on-disk cache (`.tmdb_img_cache/{size}/{filename}`) and fetches from TMDb only on a miss, so posters/backdrops/stills work for every LAN client (including ones that never saw the show) with the internet down. Size + filename are strictly whitelisted (`_TMDB_IMG_SIZES`, `_TMDB_IMG_FILE_RE`) — the proxy can only ever hit `image.tmdb.org`, so this is NOT the SSRF surface the custom-art rule below worries about; keep user-supplied absolute `poster_url`/`backdrop_url` **unproxied**. One exception keeps the absolute `TMDB_IMG_BASE`: the iOS bundle's `meta.img_base` (`_bundle_meta_for_file`) — the offline player has no host to resolve a relative path against (it uses the inlined `poster_data_url` anyway, which now also reads through the disk cache).
+All metadata endpoints hand out `img_base = "/api/metadata/img"`; the route serves an on-disk cache (`.tmdb_img_cache/{size}/{filename}`, kept at most 180 days) and fetches from TMDb only on a miss or when the copy is 150 days old, so posters/backdrops/stills work for every LAN client (including ones that never saw the show) with the internet down. Size + filename are strictly whitelisted (`_TMDB_IMG_SIZES`, `_TMDB_IMG_FILE_RE`) — the proxy can only ever hit `image.tmdb.org`, so this is NOT the SSRF surface the custom-art rule below worries about; keep user-supplied absolute `poster_url`/`backdrop_url` **unproxied**. One exception keeps the absolute `TMDB_IMG_BASE`: the iOS bundle's `meta.img_base` (`_bundle_meta_for_file`) — the offline player has no host to resolve a relative path against (it uses the inlined `poster_data_url` anyway, which now also reads through the disk cache).
 
 ### Auto-match grabs the most-popular result
 
@@ -3306,7 +3343,7 @@ The library page fills in the episode rows of a season you own nothing from with
 - **Don't make per-season TMDb calls one at a time.** `_tmdb_fetch_seasons` gathers them (bounded by `_tmdb_net_sem`) over the shared `_tmdb_http()` client. Don't go back to `async with httpx.AsyncClient()` per call.
 - **Don't memoise a partial show.** `_tmdb_get` returns None for a failed season, which leaves that season out of the result, not empty. The old forever-cache stored that gap for the rest of the process's life. `_tmdb_memo_put` refuses any TV result missing an inventory season; the disk cache already holds the seasons that worked, so the retry only refetches the missing ones.
 
-The on-disk response cache (`tmdbcache.py`) serves stale data at any age when TMDb is unreachable, and backs off to cache-only for 30 s after a transport error. Without the backoff, an outage makes every season fetch wait out its own 5 s connect timeout. See [LIBRARY_DATA.md](LIBRARY_DATA.md) § TMDb response cache.
+The on-disk response cache (`tmdbcache.py`) serves stale data, up to 180 days old, when TMDb is unreachable, and backs off to cache-only for 30 s after a transport error. Without the backoff, an outage makes every season fetch wait out its own 5 s connect timeout. See [LIBRARY_DATA.md](LIBRARY_DATA.md) § TMDb response cache.
 
 ### A show can be matched as a MOVIE — and that silently kills the missing-seasons diff (12.6.1)
 

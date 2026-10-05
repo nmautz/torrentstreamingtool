@@ -3192,7 +3192,10 @@ TMDB_IMG_BASE = "https://image.tmdb.org/t/p"
 LOCAL_IMG_BASE = "/api/metadata/img"
 
 # On-disk cache for TMDb artwork (posters/backdrops/stills). TMDb image paths
-# are content-addressed, so entries never go stale and are kept forever.
+# are content-addressed, so a cached file never goes out of date. It is still
+# not kept for ever: TMDb's API terms cap caching at 6 months, so a file is
+# fetched again once it is `tmdbcache.REFRESH_AFTER` old and dropped at
+# `tmdbcache.MAX_AGE` if TMDb still can't be reached (`_tmdb_img_bytes`).
 TMDB_IMG_CACHE = Path(__file__).parent / ".tmdb_img_cache"
 _TMDB_IMG_SIZES = {"w92", "w154", "w185", "w300", "w342", "w500", "w780",
                    "w1280", "original"}
@@ -3233,11 +3236,16 @@ async def _tmdb_img_bytes(size: str, filename: str,
     # route and the metadata prefetch; inline, a busy F: drive froze the whole
     # server for 18-35 s while a big show's stills were checked (see GOTCHAS
     # § Sync file I/O on the event loop).
-    body = await asyncio.to_thread(_tmdb_img_read, cache_file)
-    if body is not None:
+    global _tmdb_offline_until
+    body, age = await asyncio.to_thread(_tmdb_img_read, cache_file)
+    held = tmdbcache.age_state(age) if body is not None else tmdbcache.EXPIRED
+    if held == tmdbcache.FRESH:
         return body, ct
-    if not fetch:
-        return None
+    # REFRESH: ours to serve, but due a new copy. EXPIRED: past the six months
+    # TMDb's terms allow, so it is served only if TMDb hands it over again.
+    usable = (body, ct) if held == tmdbcache.REFRESH else None
+    if not fetch or time.monotonic() < _tmdb_offline_until:
+        return usable
     try:
         url = f"{TMDB_IMG_BASE}/{size}/{filename}"
         async with _http_client(timeout=httpx.Timeout(12.0, connect=5.0),
@@ -3246,16 +3254,41 @@ async def _tmdb_img_bytes(size: str, filename: str,
         if r.status_code == 200 and r.content:
             await asyncio.to_thread(_tmdb_img_write, cache_file, r.content)
             return r.content, ct
+    except httpx.TransportError:
+        # Same backoff as `_tmdb_get`: an ageing poster grid would otherwise
+        # wait out one connect timeout per image for as long as TMDb is down.
+        _tmdb_offline_until = time.monotonic() + _TMDB_OFFLINE_BACKOFF
     except Exception:
         pass
-    return None
+    return usable
 
 
-def _tmdb_img_read(cache_file: Path) -> Optional[bytes]:
+def _tmdb_img_read(cache_file: Path) -> tuple[Optional[bytes], Optional[float]]:
+    """(bytes, age in seconds) of a cached image, or (None, None)."""
     try:
-        return cache_file.read_bytes()
+        age = max(0.0, time.time() - cache_file.stat().st_mtime)
+        return cache_file.read_bytes(), age
     except OSError:
-        return None
+        return None, None
+
+
+def _tmdb_img_sweep(max_age: float = tmdbcache.MAX_AGE) -> int:
+    """Delete every cached image older than `max_age`. Returns how many went.
+    Blocking: run it through `asyncio.to_thread`."""
+    removed = 0
+    cutoff = time.time() - max_age
+    try:
+        files = list(TMDB_IMG_CACHE.glob("*/*"))
+    except OSError:
+        return 0
+    for f in files:
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+                removed += 1
+        except OSError:
+            pass
+    return removed
 
 
 def _tmdb_img_write(cache_file: Path, content: bytes) -> None:
@@ -3270,10 +3303,19 @@ def _tmdb_img_write(cache_file: Path, content: bytes) -> None:
 
 
 def _tmdb_img_missing(wanted: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """The (size, filename) pairs not yet in the artwork cache. One stat each,
-    no reads: blocking, so call it through `asyncio.to_thread`."""
-    return [(size, fn) for size, fn in wanted
-            if not (TMDB_IMG_CACHE / size / fn).exists()]
+    """The (size, filename) pairs not in the artwork cache, or in it but due a
+    new copy (`tmdbcache.REFRESH_AFTER`). One stat each, no reads: blocking, so
+    call it through `asyncio.to_thread`."""
+    out = []
+    now = time.time()
+    for size, fn in wanted:
+        try:
+            age = now - (TMDB_IMG_CACHE / size / fn).stat().st_mtime
+        except OSError:
+            age = None
+        if tmdbcache.age_state(age) != tmdbcache.FRESH:
+            out.append((size, fn))
+    return out
 
 
 async def _prefetch_metadata_images(data: dict) -> None:
@@ -3477,6 +3519,12 @@ _tmdb_net_sem = asyncio.Semaphore(8)
 # fan-out stacks those into tens of seconds.
 _tmdb_offline_until = 0.0
 _TMDB_OFFLINE_BACKOFF = 30.0
+# Bumped every time `_tmdb_get` wanted an answer from TMDb and didn't get one
+# (unreachable, backing off, refused, rate-limited). A caller that must not
+# mistake a fallback for a fresh answer compares it before and after: the
+# metadata refresh re-stamps `fetched_at`, and a stale copy must never be
+# re-stamped as new. A 404 is an answer and doesn't count.
+_tmdb_fail_seq = 0
 # True inside an explicit metadata refresh: ignore the fresh-cache fast path
 # (the stale fallback still applies). Set by _fetch_item_metadata.
 _tmdb_fresh: contextvars.ContextVar[bool] = contextvars.ContextVar(
@@ -3497,7 +3545,7 @@ def _tmdb_http() -> httpx.AsyncClient:
 
 
 async def _tmdb_get(path: str, params: Optional[dict] = None) -> Optional[dict]:
-    global _tmdb_offline_until
+    global _tmdb_offline_until, _tmdb_fail_seq
     key = await _tmdb_effective_key()
     if not key:
         return None
@@ -3507,6 +3555,7 @@ async def _tmdb_get(path: str, params: Optional[dict] = None) -> Optional[dict]:
     if hit and hit[1] and not _tmdb_fresh.get():
         return hit[0]
     if time.monotonic() < _tmdb_offline_until:
+        _tmdb_fail_seq += 1
         return hit[0] if hit else None
     q = dict(params or {})
     q["api_key"] = key
@@ -3528,7 +3577,9 @@ async def _tmdb_get(path: str, params: Optional[dict] = None) -> Optional[dict]:
         _tmdb_offline_until = time.monotonic() + _TMDB_OFFLINE_BACKOFF
     except Exception:
         pass
-    # 429 / 5xx / unreachable: stale beats nothing.
+    # 401 / 429 / 5xx / unreachable: stale beats nothing, up to the six months
+    # the disk cache will hand back (`tmdbcache.MAX_AGE`).
+    _tmdb_fail_seq += 1
     return hit[0] if hit else None
 
 
@@ -4330,19 +4381,25 @@ async def _settle_attribution(lib: dict, item: dict,
 
 async def _fetch_item_metadata(item_id: str, force: bool = False,
                                 override_tmdb_id: Optional[int] = None,
-                                override_kind: Optional[str] = None) -> Optional[dict]:
+                                override_kind: Optional[str] = None,
+                                refresh: bool = False) -> Optional[dict]:
     """Match an item against TMDb and cache the result on the item. Coalesces
-    concurrent fetches for the same item via a per-id lock."""
+    concurrent fetches for the same item via a per-id lock.
+
+    `refresh` re-fetches the entry the item is ALREADY bound to: no re-match,
+    the binding's `source` kept, and nothing written unless TMDb really
+    answered. It is how metadata stays under the six months TMDb's terms allow
+    (`tmdb_retention_loop`); returns None when TMDb didn't answer."""
     if not await _tmdb_effective_key():
         return None
     # A plain refresh (the Refresh button, a rename) means "ask TMDb again", so
     # it skips the fresh-response cache. A re-bind to a picked id doesn't need
     # to: the cached copy of that entry is as good as a new one.
-    if force and not override_tmdb_id and not _tmdb_fresh.get():
+    if (force or refresh) and not override_tmdb_id and not _tmdb_fresh.get():
         token = _tmdb_fresh.set(True)
         try:
             return await _fetch_item_metadata(item_id, force, override_tmdb_id,
-                                              override_kind)
+                                              override_kind, refresh)
         finally:
             _tmdb_fresh.reset(token)
 
@@ -4367,6 +4424,12 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
         stale_seasons = (cached.get("tmdb_kind") == "tv"
                          and cached.get("tmdb_id")
                          and "all_seasons" not in cached)
+        # Same entry, new copy: the retention refresh, or a stub whose content
+        # was dropped at six months (`tmdbcache.expire_metadata`) filling back
+        # in. A forced refresh or a re-bind is a different request and wins.
+        same_binding = ((refresh or cached.get("expired"))
+                        and tmdbcache.is_tmdb_metadata(cached)
+                        and not force and not override_tmdb_id)
         # Both early returns below go through `_settle_attribution`: a cache hit
         # still has to run the absolute-numbering pass, because the item's files
         # may have only just been re-attributed by the load-time migration and
@@ -4376,13 +4439,14 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
         # Manual picks / hand-entered custom metadata are pinned — never let a
         # plain (non-forced) access silently re-run the auto-match over them.
         # Custom entries have no tmdb_id, so this is the guard that protects them.
-        if cached.get("source") in ("manual", "custom", "picked") and not force and not stale_seasons:
+        if (cached.get("source") in ("manual", "custom", "picked") and not force
+                and not stale_seasons and not same_binding):
             return await _settle_attribution(lib, item, cached)
         # `stale_kind` is only ever set on a `source == "tmdb"` binding, so the
         # manual/custom guard above needs no matching clause — a deliberate
         # "this is a movie" pick stays pinned.
         if (cached.get("tmdb_id") and not force and not override_tmdb_id
-                and not stale_seasons and not stale_kind):
+                and not stale_seasons and not stale_kind and not same_binding):
             return await _settle_attribution(lib, item, cached)
 
         # The binding the user picked in Smart search, carried through the
@@ -4393,6 +4457,9 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
                   and pick.get("kind") in ("tv", "movie"))
         if override_tmdb_id and override_kind:
             match = {"kind": override_kind, "id": int(override_tmdb_id)}
+        elif same_binding:
+            match = {"kind": cached.get("tmdb_kind") or "tv",
+                     "id": int(cached["tmdb_id"])}
         elif stale_seasons:
             # Season-inventory top-up only — reuse the existing binding verbatim.
             match = {"kind": "tv", "id": int(cached["tmdb_id"])}
@@ -4408,10 +4475,25 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
             if int(f.get("season", 0)) > 0
         })
 
+        fails_before = _tmdb_fail_seq
         if match["kind"] == "tv":
             data = await _tmdb_fetch_tv(match["id"], seasons)
         else:
             data = await _tmdb_fetch_movie(match["id"])
+
+        if same_binding:
+            # Both fetchers build a dict whatever TMDb said, blank or assembled
+            # from the stale disk cache. Writing either would stamp old data as
+            # fetched today, or wipe a good copy. Leave what we hold alone.
+            if _tmdb_fail_seq != fails_before or not data.get("title"):
+                return None
+            # What isn't TMDb's rides across; TMDb-resolved sections are left
+            # out so the next open resolves them again, fresh.
+            keep = tmdbcache.own_sections(cached)
+            if keep:
+                data["sections"] = keep
+            if cached.get("kind_recheck"):
+                data["kind_recheck"] = cached["kind_recheck"]
 
         # Record how this binding was chosen. A user-forced override is a
         # deliberate "manual" pick and is pinned (see the early-return guard
@@ -4423,7 +4505,7 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
         # exactly like a manual correction — never silently re-matched, and never
         # reopened by the movie-binding repair below (a deliberate movie stays a
         # movie).
-        if stale_seasons and not override_tmdb_id:
+        if (stale_seasons or same_binding) and not override_tmdb_id:
             data["source"] = cached.get("source") or "tmdb"
         elif override_tmdb_id:
             data["source"] = "manual"
@@ -5002,6 +5084,145 @@ def _assert_item_visible(request: Request, lib: dict, item: dict,
     raise HTTPException(404, "Item not found.")
 
 
+# ── TMDb retention ─────────────────────────────────────────────────────────
+# TMDb's API terms (section 1.C) forbid caching anything from the API for longer
+# than 6 months. Three places hold TMDb data at rest: the response cache, the
+# artwork cache, and `item["metadata"]`. The first two simply drop old files.
+# Item metadata is re-fetched at `tmdbcache.REFRESH_AFTER` (150 d) so that in
+# normal running nothing ever reaches the limit, and is emptied to its binding
+# at `tmdbcache.MAX_AGE` (180 d) only when TMDb could not be asked in between.
+# See docs/EXTERNAL_SERVICES.md and docs/GOTCHAS.md § TMDb data has a shelf life.
+
+_TMDB_KEEP_FIRST = 5 * 60          # after startup, once the box has settled
+_TMDB_KEEP_EVERY = 6 * 3600
+_TMDB_KEEP_RETRY = 15 * 60         # sooner, after a pass TMDb didn't answer
+_TMDB_KEEP_GAP = 2.0               # between items: a refresh is 1 + seasons calls
+
+
+def _tmdb_retention_due(lib: dict) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Item ids sorted by what their metadata needs: `(due, over, stubs, own)`.
+    `due` a refresh, `over` the limit, `stubs` already emptied and waiting to be
+    filled back in, `own` hand-entered items whose TMDb-resolved SECTIONS are
+    over the limit (there is no entry to refresh, the sections are just dropped
+    and resolved again on the next open)."""
+    due, over, stubs, own = [], [], [], []
+    for it in lib.get("items", []):
+        meta = it.get("metadata")
+        st = tmdbcache.metadata_state(meta)
+        if not tmdbcache.is_tmdb_metadata(meta):
+            if st == tmdbcache.EXPIRED:
+                own.append(it["id"])
+        elif meta.get("expired"):
+            stubs.append(it["id"])
+        elif st == tmdbcache.REFRESH:
+            due.append(it["id"])
+        elif st == tmdbcache.EXPIRED:
+            over.append(it["id"])
+    return due, over, stubs, own
+
+
+async def _tmdb_expire_items(item_ids: list[str]) -> int:
+    """Empty the metadata of these items down to its binding. Re-checks each
+    under the lock: a refresh may have landed since the caller looked."""
+    lib = await get_library()
+    ids = {i for i in item_ids}
+    if not any(it["id"] in ids
+               and tmdbcache.metadata_state(it.get("metadata")) == tmdbcache.EXPIRED
+               for it in lib.get("items", [])):
+        return 0
+    done: list[str] = []
+    async with mutate_library() as lib_w:
+        for it in lib_w.get("items", []):
+            if it["id"] not in ids:
+                continue
+            if tmdbcache.metadata_state(it.get("metadata")) != tmdbcache.EXPIRED:
+                continue
+            stub = tmdbcache.expire_metadata(it.get("metadata"))
+            if stub is not None:
+                it["metadata"] = stub
+                done.append(it["id"])
+    for iid in done:
+        _tmdb_bg(broadcast("metadata_update", {"item_id": iid}))
+    return len(done)
+
+
+async def _tmdb_retention_pass(expire: bool) -> bool:
+    """One pass. Returns True when it wants to be run again soon: something is
+    past the limit, TMDb didn't answer, and this pass was not allowed to empty it.
+
+    `expire` is that permission. The loop grants it only on the pass after one
+    that returned True, so a bad quarter of an hour (a box that boots before its
+    network, a blip during an update) can't blank a library the retry would
+    have refreshed."""
+    global _tmdb_fail_seq
+    pruned = await asyncio.to_thread(_tmdb_disk.prune)
+    swept = await asyncio.to_thread(_tmdb_img_sweep)
+    if pruned or swept:
+        log.info("TMDb retention: dropped %d cached responses and %d images "
+                 "past six months", pruned, swept)
+
+    due, over, stubs, own = _tmdb_retention_due(await get_library())
+    if own:
+        await _tmdb_expire_items(own)
+    if not (due or over or stubs):
+        return False
+
+    have_key = bool(await _tmdb_effective_key())
+    tmdb_failed = not have_key
+    over_set = set(over)
+    gone: list[str] = []
+    refreshed = 0
+    # What is already over the limit first, then what is due, then the stubs.
+    for iid in (over + due + stubs) if have_key else []:
+        before = _tmdb_fail_seq
+        got = None
+        try:
+            got = await _fetch_item_metadata(iid, refresh=True)
+        except Exception:
+            log.exception("TMDb retention: refresh failed for %s", iid)
+            _tmdb_fail_seq += 1
+        if got:
+            refreshed += 1
+            _tmdb_bg(broadcast("metadata_update", {"item_id": iid}))
+        elif _tmdb_fail_seq != before:
+            tmdb_failed = True
+            break                   # TMDb isn't answering: the rest would fail too
+        elif iid in over_set:
+            gone.append(iid)        # TMDb answered, and has no such entry any more
+        await asyncio.sleep(_TMDB_KEEP_GAP)
+    if refreshed:
+        log.info("TMDb retention: refreshed metadata for %d item(s)", refreshed)
+
+    retry = False
+    expiring = list(gone)
+    if over and tmdb_failed:
+        if expire:
+            expiring = over
+        else:
+            retry = True
+    if expiring:
+        n = await _tmdb_expire_items(expiring)
+        if n:
+            log.warning("TMDb retention: %d item(s) held metadata older than six "
+                        "months that could not be refreshed; it was removed and "
+                        "will be fetched again when TMDb answers", n)
+    return retry
+
+
+async def tmdb_retention_loop() -> None:
+    await asyncio.sleep(_TMDB_KEEP_FIRST)
+    retry = False
+    while True:
+        try:
+            retry = await _tmdb_retention_pass(expire=retry)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("TMDb retention pass failed")
+            retry = False
+        await asyncio.sleep(_TMDB_KEEP_RETRY if retry else _TMDB_KEEP_EVERY)
+
+
 def _nudge_metadata_health(item: dict) -> None:
     """Background-repair an item whose cached TMDb binding can't answer "what is
     this show missing?". Every condition is self-healing and idempotent.
@@ -5053,6 +5274,15 @@ def _nudge_metadata_health(item: dict) -> None:
             return
         _tmdb_unbound_tried[item["id"]] = now
         _spawn_metadata_fetch(item["id"])
+        return
+    if meta.get("expired"):
+        # A stub emptied at six months (`tmdbcache.expire_metadata`): fill it
+        # back in. Throttled like condition 0, because it stays a stub for as
+        # long as TMDb can't be reached and every open would otherwise re-ask.
+        now = time.monotonic()
+        if now - _tmdb_unbound_tried.get(item["id"], -1e9) >= _TMDB_UNBOUND_RETRY_SEC:
+            _tmdb_unbound_tried[item["id"]] = now
+            _spawn_metadata_fetch(item["id"])
         return
     if ((meta.get("tmdb_kind") == "tv" and "all_seasons" not in meta)
             or _movie_binding_is_stale(item, meta)
@@ -14452,8 +14682,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     dlsched_loop = asyncio.create_task(download_scheduler_loop())
     sysmon_loop = asyncio.create_task(system_monitor_loop())
     cachepurge_loop = asyncio.create_task(cache_autopurge_loop())
-    # Trim the TMDb response cache once per start (old/unused entries only).
-    _tmdb_bg(asyncio.to_thread(_tmdb_disk.prune))
+    # Keeps everything cached from TMDb under six months old: prunes the
+    # response and artwork caches, re-fetches ageing item metadata.
+    tmdbkeep_loop = asyncio.create_task(tmdb_retention_loop())
     # Fetch the anime season-mapping table if the cached copy is missing or a
     # week old. Fire-and-forget: attribution reads whatever is on disk at the
     # time, and a box that never reaches GitHub simply keeps the old behaviour.
@@ -14511,7 +14742,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     for t in (guard, broadcaster, dl_monitor, dvbackfill, animefill, vlc_tracker, bg_loop,
               jackett_mon, reboot_loop, autoprep_loop, update_loop, dlsched_loop,
               sysmon_loop, cachepurge_loop, subupgrade_loop, od_reaper_loop,
-              maint_loop, evict_loop, devact_loop, bookmark_loop, shotscan_task, tvui_task, rvol_guard,
+              maint_loop, evict_loop, devact_loop, bookmark_loop, tmdbkeep_loop, shotscan_task, tvui_task, rvol_guard,
               diag_lag, diag_vitals, diag_probe):
         t.cancel()
     if remote_listener is not None:
@@ -16793,10 +17024,11 @@ async def get_item_metadata(request: Request, item_id: str,
 
 @app.get("/api/metadata/img/{size}/{filename}")
 async def metadata_image(size: str, filename: str) -> Response:
-    """TMDb artwork proxy with a permanent on-disk cache. Clients join this
-    route via the `img_base` returned by the metadata endpoints, so posters,
-    backdrops and episode stills keep rendering on the LAN when the internet
-    is down (once cached). TMDb image paths are content-addressed → immutable."""
+    """TMDb artwork proxy with an on-disk cache. Clients join this route via
+    the `img_base` returned by the metadata endpoints, so posters, backdrops
+    and episode stills keep rendering on the LAN when the internet is down
+    (once cached, and for up to six months: `tmdbcache.MAX_AGE`). The browser
+    is told 30 days, so its own copy can't outlive ours by much."""
     if size not in _TMDB_IMG_SIZES or not _TMDB_IMG_FILE_RE.match(filename):
         raise HTTPException(404, "Not found.")
     got = await _tmdb_img_bytes(size, filename)
@@ -16804,7 +17036,7 @@ async def metadata_image(size: str, filename: str) -> Response:
         raise HTTPException(404, "Image unavailable (not cached, no internet).")
     body, ct = got
     return Response(content=body, media_type=ct, headers={
-        "Cache-Control": "public, max-age=31536000, immutable",
+        "Cache-Control": "public, max-age=2592000",
     })
 
 
@@ -26412,6 +26644,7 @@ _PLAYER_SNAPSHOT_FILES = [
     "vendor/subtitles-octopus-worker.js",
     "vendor/subtitles-octopus-worker.wasm",
     "vendor/libass-fallback-font.ttf",
+    "vendor/tmdb-logo.svg",
 ]
 # Anchored on the <div> element: a looser pattern also matches the JS comment
 # "// <div data-ui-version>) and compares against /api/version" much earlier in

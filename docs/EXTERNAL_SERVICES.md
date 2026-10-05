@@ -75,13 +75,16 @@ search (which looks titles up by the **IMDb id that TMDb gives us**).
 - **Per-item metadata** is stored in `library.json` under `item["metadata"]`. An
   existing library keeps its names, numbering and episode lists with TMDb gone forever.
 - **The response cache** (`.tmdb_cache/`) serves fresh entries without a network call
-  and serves stale entries at any age when a refetch fails. It is pruned at 180 days
-  or 20,000 entries.
-- **The artwork cache** (`.tmdb_img_cache/`) keeps every image ever shown, with no expiry.
+  and serves stale entries, up to 180 days old, when a refetch fails.
+- **The artwork cache** (`.tmdb_img_cache/`) keeps every image shown, for up to 180 days.
+- **All three stop at six months** (20.11.0). TMDb's terms cap caching there, so an
+  outage is survived for 30 to 180 days depending on how recently each thing was
+  fetched, not indefinitely. See [LIBRARY_DATA.md](LIBRARY_DATA.md) § TMDb retention.
 - A 30 s offline backoff stops an outage from stacking timeouts.
 - With no key at all, search falls back to raw Jackett results and episodes show file names.
 
-So a TMDb outage, or a rate limit, is already handled. The gap is a **permanent** loss.
+So a TMDb outage, or a rate limit, is already handled. The gap is a **permanent** loss,
+or any loss longer than about a month.
 
 ### What a permanent loss would cost
 
@@ -95,8 +98,11 @@ So a TMDb outage, or a rate limit, is already handled. The gap is a **permanent*
 | | Subtitle search precision for new items (no IMDb id; falls back to title search) |
 | | Anime remapping and episode groups for new items |
 
-After 180 days the response cache would also prune entries it could no longer refresh,
-so show pages for seasons you do not own would empty out.
+**The "still works" column has a clock on it.** Metadata is refreshed every 150 days, so
+when TMDb stops answering each item has between 30 and 180 days left. After that its
+names, artwork and episode lists are removed and it shows its series name and file-derived
+labels. Playback, progress and episode numbering are unaffected. This is the price of
+meeting the terms, and it is the strongest argument for having a second source ready.
 
 ### How likely, and in what form
 
@@ -107,18 +113,17 @@ so show pages for seasons you do not own would empty out.
 - **Each install uses its own key.** There is no shared StreamLink key for TMDb to
   revoke, so the realistic failures are (1) one user's key revoked, (2) a new free-tier
   quota, (3) the free tier ending.
-- **We are out of step with the terms in two places today.** These are the most likely
-  reason for a key to be revoked, and both are cheap to fix:
-  1. **No attribution.** The terms require the TMDb logo and the sentence "This product
-     uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise approved by
-     TMDB." The dashboard credits JustWatch on the where-to-watch row but credits TMDb
-     nowhere.
-  2. **Caching beyond 6 months.** The terms forbid caching TMDb information for longer
-     than 6 months. The response cache prunes at 180 days, which fits. The artwork cache
-     never expires, and `item["metadata"]` in `library.json` is kept indefinitely.
-     The second one is in tension with our own offline design: resolving it strictly
-     means a library goes blank six months after TMDb disappears. That is a decision for
-     the owner, not a bug to fix quietly.
+- **Compliance, as of 20.11.0.** The two gaps found on 2026-10-04 are closed:
+  1. **Attribution.** The TMDb logo and the required sentence are shown in Settings →
+     Credits, under the Explore tab, on the admin TMDb card and in the README.
+  2. **Caching.** Nothing fetched from TMDb is served or kept past 180 days. See
+     [LIBRARY_DATA.md](LIBRARY_DATA.md) § TMDb retention for the rule and what it does
+     not reach (labels baked into bundles, copies on the phone, bookmark titles).
+- **What code cannot fix.** The terms forbid use "for any purpose that violates any law
+  or regulation, or the rights of any person, including but not limited to intellectual
+  property rights", and any commercial use. Whether an install meets that depends on
+  what its operator downloads with it, not on anything in this repo. A key can be
+  revoked on that ground whatever else we do, and each operator holds their own key.
 
 ### Backup plan
 
@@ -152,7 +157,6 @@ change. Three things make that harder than it sounds:
 
 **Cheap preparation worth doing while TMDb is free** (not done; each needs its own patch):
 
-- Show the TMDb attribution. Removes the likeliest reason for a revoked key.
 - Store `tvdb_id` and `imdb_id` on every item. `external_ids` is already requested for
   TV (since 17.7.0) but only `imdb_id` is kept. Once TMDb is gone the crosswalk for an
   existing library can no longer be fetched.

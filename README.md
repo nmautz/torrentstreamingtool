@@ -183,6 +183,8 @@ Get a free key at [themoviedb.org/settings/api](https://www.themoviedb.org/setti
 
 It is optional but strongly recommended. TMDb powers the poster search, the Explore tab, bookmarks, artwork, and episode names and numbering in the library. Without a key, Explore has nothing to browse and its search box falls back to plain Jackett results (type a title and press Enter), and episodes show their file names.
 
+The key is yours and is covered by [TMDb's API terms](https://www.themoviedb.org/api-terms-of-use): free for personal, non-commercial use. To meet them, StreamLink credits TMDb in the dashboard (Settings → Credits) and keeps nothing it fetched from TMDb for longer than six months. In normal use that is invisible, because everything is refreshed well before then. A box that cannot reach TMDb for six months loses its titles and artwork until it can again; your files, progress and episode numbering are untouched.
+
 ---
 
 ## Watching
@@ -440,6 +442,14 @@ The same `python3 setup.py` / `python3 run.py` flow works, with these difference
 - **Auto-login**: Linux = display-manager autologin (or `loginctl enable-linger $USER` for headless); macOS = System Settings → Users & Groups → *Automatically log in as…* (needs FileVault off).
 - **Privileged ports**: binding 80/443 needs root, so run `sudo python3 run.py`.
 - **macOS** has a TCC limitation that blocks some HLS playback. Treat it as a development host only.
+
+---
+
+## Credits
+
+<img src="static/vendor/tmdb-logo.svg" alt="TMDB" height="12">
+
+This product uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise approved by TMDB. Where-to-watch listings are provided by JustWatch.
 
 ---
 

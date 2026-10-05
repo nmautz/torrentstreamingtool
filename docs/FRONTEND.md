@@ -449,6 +449,12 @@ Search plus query-less TMDb browsing — the first of the two top-level tabs (**
 
 #### TMDb metadata
 
+**Credits (20.11.0) are a licence condition.** TMDb's terms require their logo and one exact
+sentence wherever their data is shown. They live in `#psCredits` (profile settings), in a
+strip at the bottom of `#exploreTab`, and on the admin TMDb card. The logo is their own file,
+`static/vendor/tmdb-logo.svg`, unmodified and kept smaller than our own name. Do not reword
+the sentence or drop any of the three. See [GOTCHAS.md](GOTCHAS.md) § TMDb data has a shelf life.
+
 **Never gates the page.** `openEpisodePicker` kicks the `/metadata` fetch off in parallel with `/files` but renders hero/tabs/episodes as soon as `/files` returns; `_epApplyMetadata(itemId, title, respPromise)` applies the metadata response whenever it lands and repaints (`renderEpHero` + `renderEpSeasonTabs` + `renderEpList`). If the server answers `pending:true` (first-ever TMDb fetch still running against a slow/dead internet link), the page waits for the `metadata_update` SSE event (handler re-calls `_epApplyMetadata` with `epHeroTitle`) with an 8 s `_epMetaRetryTimer` re-pull as fallback. `img_base` is now the host's artwork proxy (`/api/metadata/img`), so posters/backdrops/stills keep working on the LAN with the internet down once cached (see [API.md](API.md)).
 
 Returns `{enabled, img_base, metadata, pending}`. When `enabled=false` (no TMDb API key configured) or no match was found, the page degrades gracefully:
