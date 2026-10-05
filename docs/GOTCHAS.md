@@ -3258,6 +3258,21 @@ The iOS app serves a device snapshot of the dashboard from `LocalMediaServer` wh
 
 `/api/search` reads `indexer_categories` from the admin override first, falling back to `.env`. Library paths are unioned across both. `_tmdb_effective_key()` follows the same admin-beats-env precedence.
 
+## A provider that refuses us looks exactly like a provider with nothing
+
+Two places turn "the service said no" into "there is nothing":
+
+- `_tmdb_get` answers a 401 or 429 the same way it answers an outage: the stale cached
+  copy, or `None`. A revoked or rate-limited key shows no error anywhere; the first
+  visible sign is a newly added item showing file names.
+- `_os_get_json` reports a failed search as zero results. The legacy OpenSubtitles
+  endpoint was given a final shutdown notice on 2026-01-29 and was still answering on
+  2026-10-04. The day it stops, the player will say "no subtitles found".
+
+When a feature that needs the internet goes quiet with no local cause, check the
+provider before the code. What each loss costs and the backup plan are in
+[EXTERNAL_SERVICES.md](EXTERNAL_SERVICES.md).
+
 ## TMDb metadata
 
 ### The metadata endpoint must never block on TMDb (episode pages on dead internet)

@@ -93,6 +93,7 @@ All four services (VLC, qBittorrent, Jackett, dashboard) run on the same host ex
 - [API.md](API.md) — full endpoint reference
 - [LIBRARY_DATA.md](LIBRARY_DATA.md) — library.json schema
 - [SETUP.md](SETUP.md) — first-time configuration
+- [EXTERNAL_SERVICES.md](EXTERNAL_SERVICES.md) — outside services we depend on, and the backup plan for each
 - [RUNTIME.md](RUNTIME.md) — `run.py` launcher details
 - [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md) — service install and process supervision
 - [ANALYZER.md](ANALYZER.md) — Smart Skip
