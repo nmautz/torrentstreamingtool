@@ -152,6 +152,26 @@ Scheme: **x.y.z**
 
 Current version lives in the `<div>` at the very bottom of `static/index.html`. After bumping, add a bullet to `CHANGELOG.md` under the new version heading.
 
+### Side branches take their number at merge, not before
+
+The rule above is for work that lands on `alpha`. A branch that will sit for a while
+before it merges (`graphicalsetup` is the example) can't know which number it will ship
+as, and a number taken early collides with whatever alpha ships in the meantime.
+
+- **On the branch:** write the changelog entry under `## [Unreleased]` and do **not**
+  take the next version. Leave the badge at what alpha had when the branch was cut,
+  with a suffix naming the branch (`20.8.13-gsetup`) so a test install is recognisable.
+  Commit titles on the branch carry no version number either.
+- **At merge into `alpha`:** bring alpha in first, then rename `[Unreleased]` to the
+  next free version with the merge date, move it to the top of the changelog, and set
+  the badge. That is the only moment the number is assigned.
+- **A number that has been pushed anywhere is spent.** Never reuse it, even if the
+  branch that took it never shipped. Gaps in the sequence are fine; two different
+  builds with one name are not. (20.9.0 is such a hole: it was taken on
+  `graphicalsetup` before this rule, so alpha went from 20.8.13 to 20.10.0.)
+- Before picking a version on alpha, check no other branch already used it:
+  `git log --all --oneline | grep " <version> "`.
+
 ---
 
 ## iOS app changes — ALWAYS flag the rebuild (mandatory)
