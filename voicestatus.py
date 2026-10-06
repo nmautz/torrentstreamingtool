@@ -242,6 +242,7 @@ def overview(rows: list[dict], done: "list[dict] | None" = None,
 
 _WHY = {
     "none":       "I couldn't find a copy of %s anywhere right now.",
+    "cam":        "%s is only out as camera recordings so far, so I didn't download it.",
     "vpn":        "I can't download %s right now: the VPN isn't connected.",
     "unreleased": "%s isn't out yet.",
     "indexers":   "I couldn't search for %s: the indexers aren't answering.",

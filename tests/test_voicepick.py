@@ -121,6 +121,15 @@ order = [x["title"] for x in vp.candidates(res)]
 eq("richer tracks win inside a bucket; green last; sequel, episode, linkless dropped",
    order, ["Star.Wars.1977.1080p.DUAL", "Star.Wars.1977.720p", "Star.Wars.1977.480p",
            "Star.Wars.1977.1080p.DV"])
+cams = [r("Film.2026.HDTS", 9000, cam=True), r("Film.2026.HDCAM", 4000, cam=True)]
+eq("a cam is never a candidate, however well seeded",
+   [x["title"] for x in vp.candidates(cams + [r("Film.2026.1080p.WEB-DL", 3)])],
+   ["Film.2026.1080p.WEB-DL"])
+eq("only cams is no candidate", vp.candidates(cams), [])
+eq("only cams is known as that", vp.only_cams(cams), True)
+eq("one real copy and it is not", vp.only_cams(cams + [r("Film.2026.1080p.WEB-DL", 3)]), False)
+eq("nothing found is not 'only cams'", vp.only_cams([]), False)
+eq("an episode is not a film copy", vp.only_cams([r("Film.S01E01", 5, kind="episode")]), False)
 eq("nothing relevant enough is nothing", vp.candidates([r("Other.Film.2001", 900, rel=0.5)]), [])
 eq("the band follows the best", [x["title"] for x in vp.candidates(
     [r("A", 5, rel=1.0), r("B", 500, rel=0.9), r("C", 900, rel=0.8)])], ["B", "A"])

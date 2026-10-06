@@ -7135,3 +7135,33 @@ Two smaller traps from the same merge:
   show") from TMDb finding nothing (which, on Enter, goes on to the indexers). A missing
   `return` reads as "everything was filtered" for every query.
 
+## A cam is not a copy (20.12.0)
+
+On 2026-10-05 one-press Get on a film still in cinemas downloaded a camera recording.
+Two separate faults:
+
+- **The pick never looked at the source.** `_pickCmp` (and its Siri port
+  `voicepick._order_key`) sorts on Dolby Vision risk, availability, track count,
+  seeders. While a film is in cinemas the cam is the best-seeded copy there is, so
+  it won every time. `relquality` already ranked `cam` last, but that only orders
+  race *alternates* on the server; the primary is chosen by the client.
+  Now `/api/search` flags `cam` on film results and every automatic path drops
+  them: `_ssAutoPickFrom`, the pool in `_ssAutoPickRace`, `voicepick.candidates`,
+  and `_retry_candidates` (so a dead download is not "rescued" with a cam). Only
+  cams left means **no pick**, with a message that says so. A person can still tap
+  a cam row; a hand-picked cam keeps its kind through a retry.
+- **Films only.** In a TV or anime title a bare `TS` is a transport-stream capture
+  (`[Raws] Show - 01 (BS11 1920x1080 MPEG2 TS)`) far more often than a telesync, so
+  the flag is only set where `parse_torrent_title` says `movie`.
+- **TMDb's home-release date is a day, not a moment, and UTC reaches it first.**
+  The release lands at midnight US Eastern; the UTC date turns over at 5 pm Pacific
+  the evening before. So the "likely a camera recording" banner came down and the
+  bookmark said "New · out now" about four hours early. `_home_release_today`
+  judges a home date against a fixed UTC-8 clock (no tz database needed on
+  Windows). It can be late by a few hours, never early for a US release. Theatrical
+  dates and TV air dates still use their old clocks.
+- **Even on the day, the indexers lag.** A WEB-DL takes hours to appear. The banner
+  therefore also reads the results themselves: every film result a cam shows it
+  whatever TMDb says.
+- The flag is a **title** reading. A cam uploaded under a clean name is not caught,
+  and the size cross-check only orders race alternates, it does not veto a primary.

@@ -112,8 +112,9 @@ _RE_DVD = re.compile(r"\b(dvd[-. _]?rip|dvd[59]|dvdr|dvdscr|ntsc|pal)\b", re.I)
 # `_source_of`: they collide with release-group names far more often than they
 # mean telesync.
 _RE_CAM_HARD = re.compile(
-    r"\b(camrip|hdcam|telesync|telecine|hd[-. _]?ts|hd[-. _]?tc"
-    r"|workprint|screener|cam)\b", re.I)
+    r"\b((?:hd|hq|new)?[-. _]?cam(?:[-. _]?rip)?|telesync|telecine"
+    r"|hd[-. _]?t[sc](?:[-. _]?rip)?|t[sc][-. _]?rip|pre[-. _]?dvd(?:[-. _]?rip)?"
+    r"|pdvd(?:[-. _]?rip)?|workprint|screener)\b", re.I)
 _RE_CAM_SOFT = re.compile(r"\b(ts|tc|scr|wp)\b", re.I)
 
 _RE_AV1 = re.compile(r"\bav1\b", re.I)
@@ -226,6 +227,14 @@ def parse(title: Any) -> dict:
     return {"height": height, "source": source, "codec": codec,
             "bit10": bool(_RE_10BIT.search(t)), "hdr": bool(_RE_HDR.search(t)),
             "repack": bool(_RE_REPACK.search(t)), "confidence": round(conf, 2)}
+
+
+def is_cam(title: Any) -> bool:
+    """Does this title name a cinema recording or a pre-release copy (CAM,
+    telesync, telecine, screener, workprint)? The one source no amount of
+    seeders makes worth an unattended download. Same reading as `parse`, so the
+    bare-`TS` rule in `_source_of` applies."""
+    return _source_of(_norm(title)) == "cam"
 
 
 def expected_bpm(height: int, codec: str, source: str) -> tuple:

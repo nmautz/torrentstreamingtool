@@ -8882,6 +8882,7 @@ async function grpGetFilm(tmdbId, btn){
     const rc=cands.length ? _ssAutoPickRace(cands, _ssParseBulkFilters(), {})
                           : {pick:null, candidates:[]};
     const src=rc.pick;
+    if(!src && _onlyCams(cands)){ showAlert(_camOnlyMsg(f.title, ""),"warn"); return; }
     if(!src){ showAlert(`Couldn't find ${f.title} anywhere right now — try again in a few minutes.`,"warn"); return; }
     let res=null;
     try{
@@ -16785,10 +16786,19 @@ function _ssFmtDate(iso){
 function _ssRenderTheaterBanner(){
   const banner=document.getElementById("ssTheaterBanner");
   const m=_ssMeta;
-  if(!m||!m.theatrical_only){ banner.classList.add("hidden"); return; }
-  const since=m.theatrical_date?` since ${_ssFmtDate(m.theatrical_date)}`:"";
-  let msg=`In cinemas${since}, not out on digital or disc yet — any download now is likely a camera recording.`;
-  if(m.digital_date) msg+=` Digital release: ${_ssFmtDate(m.digital_date)}.`;
+  // What the indexers hold is evidence TMDb's dates are not: the day a film
+  // reaches digital there is still nothing but cams for some hours.
+  const cams=_onlyCams(_ssPacks.filter(p=>p.kind==="movie"));
+  if(!cams&&(!m||!m.theatrical_only)){ banner.classList.add("hidden"); return; }
+  let msg;
+  if(m&&m.theatrical_only){
+    const since=m.theatrical_date?` since ${_ssFmtDate(m.theatrical_date)}`:"";
+    msg=`In cinemas${since}, not out on digital or disc yet — any download now is likely a camera recording.`;
+    if(m.digital_date) msg+=` Digital release: ${_ssFmtDate(m.digital_date)}.`;
+    if(cams) msg+=" Every copy found is a camera recording.";
+  }else{
+    msg="Every copy found is a camera recording — a proper one has not reached the indexers yet. Get will not download these.";
+  }
   banner.querySelector("[data-txt]").textContent=msg;
   banner.classList.remove("hidden");
 }
@@ -16968,6 +16978,7 @@ function ssSwitchSeason(s){ _ssSeason=s; _ssRenderBody(); }
 
 function _ssRenderBody(){
   _ssRenderAudioChips();
+  _ssRenderTheaterBanner();   // "every copy is a cam" follows the result list
   _ssUpdateTrailerBtn();   // the hero trailer follows the selected season tab
   // Simple mode replaces this entire screen. The advanced page asks the reader
   // to understand the difference between a season pack and twelve single
@@ -17115,6 +17126,9 @@ async function ssSimpleGetMovie(btn){
     }
     const rc=_ssAutoPickRace(_ssPacks, _ssParseBulkFilters(), {});
     const src=rc.pick;
+    if(!src && _onlyCams(_ssPacks)){
+      showAlert(_camOnlyMsg(grp&&grp.title, _ssMeta&&_ssMeta.digital_date),"warn"); return;
+    }
     if(!src){ showAlert("Couldn't find a usable copy right now.","warn"); return; }
     await _ssDownloadOne(src, 0, 0,
       {race:true, candidates:rc.candidates, ..._ssRuntimeHint(0, 0)});
@@ -18863,6 +18877,16 @@ function _ssAutoPick(sources, filt){
 // `tracks` comes from the server (reltracks.track_rank) and rides on grouped
 // search results only; absent ⇒ 0, so anything that never saw it sorts exactly
 // as it did before.
+// `cam` is set by the server on film results only (relquality.is_cam). Auto
+// never takes one; a person tapping the row still can. voicepick.candidates is
+// the Siri port of this - change one, change both.
+function _noCam(sources){ return (sources||[]).filter(s=>!(s&&s.cam)); }
+function _onlyCams(sources){ return !!(sources&&sources.length) && sources.every(s=>s&&s.cam); }
+function _camOnlyMsg(title, digital){
+  return `${title||"This"} is only out as camera recordings so far, so nothing was downloaded.`
+       + (digital?` Digital release: ${_ssFmtDate(digital)}.`:"")
+       + " You can still pick a copy by hand.";
+}
 function _pickCmp(a,b){
   return ((a.dv_risk?1:0)-(b.dv_risk?1:0))
       || (_availRank(b.seeders)-_availRank(a.seeders))
@@ -18873,7 +18897,9 @@ function _ssAutoPickFrom(sources, filt, meta){
   // A release that is really another episode is never an automatic answer,
   // however well seeded. None left means no pick: better than a wrong file.
   const m=meta===undefined?_ssMeta:meta;
-  sources=sources.filter(s=>!_srcNamesOtherEpisode(s, m));
+  // Nor is a cinema recording (20.12.0): while a film is in cinemas the cam is
+  // the best-seeded copy there is, and this sort would hand it over every time.
+  sources=_noCam(sources.filter(s=>!_srcNamesOtherEpisode(s, m)));
   if(!sources.length) return null;
   const okSeed=s=>(s.seeders||0)>=filt.minSeed;
   const okSize=s=>{ const z=s.size||0; return z>=filt.minBytes && z<=filt.maxBytes; };
@@ -18927,7 +18953,9 @@ function _ssAutoPickRace(sources, filt, opts){
   if(!app.download_race || !sources || sources.length<2) return {pick, candidates:[]};
   const pref=sources.filter((opts&&opts.match)||_ssAudioMatch);
   const meta=(opts&&opts.meta!==undefined)?opts.meta:_ssMeta;
-  const pool=(pref.length?pref:sources).filter(x=>!_srcNamesOtherEpisode(x, meta));
+  // A cam never races beside a real copy; only a hand-picked cam keeps its kind.
+  const pool=(pref.length?pref:sources).filter(x=>!_srcNamesOtherEpisode(x, meta))
+                                       .filter(x=>!x.cam || pick.cam);
   // De-duplicate by release identity, mirroring the server's _release_key: the
   // same release indexed by two trackers must never eat two race slots.
   const key=x=>((x&&x.title)||"").toLowerCase().replace(/[^a-z0-9]+/g,"");
@@ -18995,6 +19023,17 @@ function _runtimeHint(m, season, episode){
 // Warning chip for a release whose title claims Dolby Vision with no HDR10/SDR
 // layer beside it — the shape that plays green. Advisory, hence the wording.
 function _dvRiskBadge(s){
+  return _camBadge(s) + _dvRiskOnly(s);
+}
+// A cinema recording. Rides on _dvRiskBadge so every row that warns about a
+// green picture warns about this too.
+function _camBadge(s){
+  return (s && s.cam)
+    ? `<span class="text-[9px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-red-950/70 text-red-400 whitespace-nowrap"
+             title="Recorded in a cinema, or a pre-release copy: poor picture and sound. Auto never picks one.">Cam</span>`
+    : "";
+}
+function _dvRiskOnly(s){
   return (s && s.dv_risk)
     ? `<span class="text-[9px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-red-950/70 text-red-400 whitespace-nowrap"
              title="This release advertises Dolby Vision with no HDR10 or SDR layer. If it is Profile 5 it will play with a heavy green tint - pick another if one is available.">May play green</span>`
@@ -32788,6 +32827,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.11.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.12.0</div>
 </body>
 </html>

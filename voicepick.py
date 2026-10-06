@@ -161,14 +161,26 @@ def release_key(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (title or "").lower())
 
 
+def _films(results: list[dict]) -> list[dict]:
+    return [r for r in results if r.get("magnet") and r.get("kind") != "episode"]
+
+
+def only_cams(results: list[dict]) -> bool:
+    """Every copy found is a cinema recording: the film is not out at home yet,
+    which is a different thing to say than "I couldn't find it"."""
+    films = _films(results)
+    return bool(films) and all(r.get("cam") for r in films)
+
+
 def candidates(results: list[dict]) -> list[dict]:
     """The releases that may be picked for a film, best first.
 
     `results` are grouped-search members (`magnet`, `kind`, `rel`, `seeders`,
     `tracks`, `dv_risk`). An episode is never a film; and only the strongest
     relevance tier counts, because every sequel shares the title's words and it
-    is the year that tells them apart."""
-    pool = [r for r in results if r.get("magnet") and r.get("kind") != "episode"]
+    is the year that tells them apart. A cinema recording (`cam`) is never one:
+    it outseeds everything while a film is in cinemas, and nobody asked for it."""
+    pool = [r for r in _films(results) if not r.get("cam")]
 
     def rel(r):
         v = r.get("rel")

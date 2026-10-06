@@ -174,6 +174,8 @@ eq("confirm, unsure", vs.confirm_line("Star Wars (1977)", False),
    "The closest I found is Star Wars (1977). Download it?")
 eq("started", vs.started_line("Dune (1984)"), "Okay, Dune (1984) is downloading.")
 eq("no copy", vs.refusal("none", "Dune (1984)"), "I couldn't find a copy of Dune (1984) anywhere right now.")
+eq("cams only", vs.refusal("cam", "Dune (2026)"),
+   "Dune (2026) is only out as camera recordings so far, so I didn't download it.")
 eq("an unlisted reason guesses nothing", vs.refusal("qbit", "Dune (1984)"),
    "I couldn't start downloading Dune (1984).")
 eq("report carries a search still running and one that failed, not one that started",

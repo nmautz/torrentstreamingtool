@@ -80,6 +80,20 @@ eq("bare TS with no other source IS cam",
 eq("bare TS beside WEB-DL is the group, not cam",
    rq.parse("Movie.2024.1080p.WEB-DL.x264-TS")["source"], "webdl")
 
+# 2b. is_cam: what the auto-pickers refuse. Real release shapes, both ways.
+for _t in ("Spider-Man.Brand.New.Day.2026.1080p.HDTS.x264-GRP",
+           "Spider-Man Brand New Day 2026 HDCAM c1nem4 x264",
+           "Film.2026.HQCAM.x264", "Film.2026.HQ-CAM.x264", "Film 2026 NEW CAM 720p",
+           "Film.2026.CAMRip.XviD", "Film.2026.720p.HD-TS.x264", "Film.2026.HDTC.x264",
+           "Film.2026.TSRip.x264", "Film.2026.TELESYNC.x264", "Film 2026 PreDVDRip",
+           "Film 2026 Hindi pDVDRip", "Film.2026.TS.XviD", "Film.2026.SCREENER.x264"):
+    ok("cam: " + _t, rq.is_cam(_t))
+for _t in ("Spider-Man.Brand.New.Day.2026.1080p.WEB-DL.DDP5.1.H.264-GRP",
+           "Film.2026.1080p.WEB-DL.x264-TS", "Film.2026.1080p.BluRay.x264-CAMELOT",
+           "Cam.2018.1080p.NF.WEB-DL.x264", "Film.2026.2160p.AMZN.WEB.H265-TSuRRouNDeD",
+           "Film.2026.1080p.x265", "Camp.Rock.2008.720p.BluRay", "", None):
+    ok("not cam: %r" % (_t,), not rq.is_cam(_t))
+
 
 # 3. REMUX outranks the BluRay token that always sits beside it.
 eq("remux beats bluray",

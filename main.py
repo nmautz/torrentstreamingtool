@@ -3902,6 +3902,19 @@ _TMDB_REL_HOME = {4, 5, 6}
 _THEATRICAL_WINDOW_DAYS = 365
 
 
+# A home-release date from TMDb is a day with no time on it, and the release
+# itself lands at midnight US Eastern or later. Judged against the UTC date it
+# "passed" at 5 pm Pacific the evening before, hours ahead of any real copy:
+# the cinema warning came down and the bookmark said "out now" while every
+# torrent was still a camera recording. So a home date has passed only once it
+# is that date on the US west coast (a fixed UTC-8: no tz database on Windows).
+_HOME_RELEASE_UTC_OFFSET = timedelta(hours=-8)
+
+
+def _home_release_today() -> str:
+    return (datetime.now(timezone.utc) + _HOME_RELEASE_UTC_OFFSET).date().isoformat()
+
+
 def _movie_release_flags(details: dict) -> dict:
     """From a movie's `release_dates` (append_to_response), derive whether it's
     still theatrical-only — i.e. it opened in theaters within the last
@@ -3920,6 +3933,7 @@ def _movie_release_flags(details: dict) -> dict:
         entries.extend(r.get("release_dates") or [])
     now = datetime.now(timezone.utc).date()
     today = now.isoformat()
+    home_today = _home_release_today()
     window_start = (now - timedelta(days=_THEATRICAL_WINDOW_DAYS)).isoformat()
     home_past = False
     theatrical_dates: list[str] = []
@@ -3936,7 +3950,7 @@ def _movie_release_flags(details: dict) -> dict:
             theatrical_dates.append(date)
         if typ in _TMDB_REL_HOME:
             home_dates.append(date)
-            if date <= today:
+            if date <= home_today:
                 home_past = True
     # The FIRST theatrical date decides the window: a 1990 film's 2025
     # anniversary re-release is not a new film waiting for its digital date.
@@ -10599,9 +10613,15 @@ def _retry_candidates(item: dict, shaped: list, tried: set,
     BOTTOM but is never dropped: an unattended retry should not pick a release
     that will play green when a plain one is right there, but a green episode
     still beats no episode when it is the only thing left. See `dvprobe`.
+
+    A cinema recording (`relquality.is_cam`) IS dropped for a film: unlike a
+    green picture it is not a risk, it is what the file is.
     """
     season = int(item.get("season") or 0)
     episode = int(item.get("episode") or 0)
+    # A cinema recording is never an unattended replacement for a film — unless
+    # the copy being replaced is one, which means a person chose it by hand.
+    own_cam = relquality.is_cam(item.get("title") or "")
     out: list = []
     seen: set = set()
     for r in shaped:
@@ -10609,6 +10629,9 @@ def _retry_candidates(item: dict, shaped: list, tried: set,
         if not mag:
             continue
         title = r.get("title", "")
+        if (not season and not episode and not own_cam and relquality.is_cam(title)
+                and parse_torrent_title(title)["kind"] == "movie"):
+            continue
         rkey = _release_key(title)
         # Link-style results (no info-hash in the URI) fall back to the title key,
         # so they can still be recorded and de-duplicated across attempts.
@@ -21948,6 +21971,11 @@ def _group_search_results(shaped: list, query: str,
             "rel": round(rel, 3),
             "audio": aud, "audio_lang": aud_lang, "tracks": trk,
             "special": p["special"],
+            # A cinema recording. Films only: a TV title's bare `TS` is a
+            # transport-stream capture far more often than a telesync. The
+            # auto-pickers never take one (`_noCam` in index.html,
+            # voicepick.candidates); a person still can.
+            "cam": p["kind"] == "movie" and relquality.is_cam(r["title"]),
         })
         key = p["show_key"] or "?"
         g = groups.get(key)
@@ -26485,7 +26513,8 @@ async def _voice_download_film(request: Request, job: dict, det: dict) -> None:
             results += await search(orig)
         cands = voicepick.candidates(results)
         if not cands:
-            job.update(state="failed", reason="none")
+            job.update(state="failed",
+                       reason="cam" if voicepick.only_cams(results) else "none")
             return
         pick = cands[0]
         rcfg = _download_race_cfg(lib)
@@ -27884,7 +27913,9 @@ async def _bookmark_status(kind: str, tmdb_id: int) -> Optional[dict]:
                             {"append_to_response": "alternative_titles,videos,release_dates"})
         if not d or not d.get("id"):
             return None
-        return bookmarks.movie_status(_movie_release_flags(d), d.get("release_date") or "", today)
+        # The home-release clock, not `today`: see _home_release_today.
+        return bookmarks.movie_status(_movie_release_flags(d), d.get("release_date") or "",
+                                      _home_release_today())
     if kind == "tv":
         d = await _tmdb_get(f"/tv/{tmdb_id}",
                             {"append_to_response": "alternative_titles,videos,external_ids"})

@@ -1,5 +1,30 @@
 # Changelog
 
+## [20.12.0] — 2026-10-05
+### Get no longer downloads a camera recording
+
+Pressing Get on a film that was still in cinemas downloaded a cam. The picker chose
+on seeders and never looked at what kind of copy it was, and for a film in cinemas
+the cam is the best-seeded copy there is.
+
+- **Automatic picks never take a cam.** Search results for films are now marked when
+  the title names a cinema recording or pre-release copy (CAM, HDCAM, HDTS/telesync,
+  telecine, screener, PreDVD). One-press Get, the race beside it, Siri's download and
+  the server's automatic replacement of a dead download all leave those out.
+- **When only cams exist, nothing downloads and it says so**: "only out as camera
+  recordings so far", with the digital release date when TMDb has one. Siri says the
+  same instead of "I couldn't find a copy".
+- **Cams are labelled.** Each one has a red "Cam" chip, and the film's page shows a
+  warning when every copy found is one. You can still pick a cam by hand.
+- **"Out now" no longer arrives early.** A digital release date was judged against the
+  UTC date, which reaches it at 5 pm Pacific the evening before, about four hours
+  ahead of a midnight-Eastern release. The cinema warning disappeared and the bookmark
+  said "New · out now" while only cams existed. It is now judged on US west-coast time.
+- Films only: TV results are never marked, because "TS" in a TV or anime title usually
+  means a broadcast capture.
+- **Not checked:** nothing here was run on the box or seen in a browser. The marking is
+  read from the release title, so a cam uploaded under a clean name is not caught.
+
 ## [20.11.1] — 2026-10-04
 ### Two things the server log showed: prep that stalls on the GPU, and a TV asking for one file 1,883 times
 
