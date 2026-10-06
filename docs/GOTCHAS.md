@@ -7157,8 +7157,9 @@ Two separate faults:
   The release lands at midnight US Eastern; the UTC date turns over at 5 pm Pacific
   the evening before. So the "likely a camera recording" banner came down and the
   bookmark said "New · out now" about four hours early. `_home_release_today`
-  judges a home date against a fixed UTC-8 clock (no tz database needed on
-  Windows). It can be late by a few hours, never early for a US release. Theatrical
+  judges a home date against **US Eastern** time (`bookmarks.us_eastern_day`, 20.12.2;
+  20.12.0's fixed UTC-8 ran four hours late in summer; no tz database needed on
+  Windows). Exact for a midnight-Eastern release, never early for a US one. Theatrical
   dates and TV air dates still use their old clocks.
 - **Even on the day, the indexers lag.** A WEB-DL takes hours to appear. The banner
   therefore also reads the results themselves: every film result a cam shows it

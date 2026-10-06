@@ -3907,12 +3907,11 @@ _THEATRICAL_WINDOW_DAYS = 365
 # "passed" at 5 pm Pacific the evening before, hours ahead of any real copy:
 # the cinema warning came down and the bookmark said "out now" while every
 # torrent was still a camera recording. So a home date has passed only once it
-# is that date on the US west coast (a fixed UTC-8: no tz database on Windows).
-_HOME_RELEASE_UTC_OFFSET = timedelta(hours=-8)
-
-
+# is that date in US Eastern time (bookmarks.us_eastern_day: its own daylight-
+# time arithmetic, no tz database on Windows). 20.12.0 used a fixed UTC-8, which
+# was never early but ran four hours LATE all summer.
 def _home_release_today() -> str:
-    return (datetime.now(timezone.utc) + _HOME_RELEASE_UTC_OFFSET).date().isoformat()
+    return bookmarks.us_eastern_day(datetime.now(timezone.utc))
 
 
 def _movie_release_flags(details: dict) -> dict:

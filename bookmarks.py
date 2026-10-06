@@ -26,7 +26,7 @@ Pure: stdlib only, no `main` import. Tests in `tests/test_bookmarks.py`.
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 # More than anyone curates by hand; a bound so a buggy client can't grow
@@ -74,6 +74,28 @@ def normalize(raw) -> Optional[dict]:
         "poster_path": poster[:200] if poster.startswith("/") else "",
         "date": _day(raw.get("date")),
     }
+
+
+def _nth_sunday(year: int, month: int, n: int) -> int:
+    first = date(year, month, 1).weekday()          # Monday = 0
+    return 1 + (6 - first) % 7 + 7 * (n - 1)
+
+
+def us_eastern_day(now_utc: datetime) -> str:
+    """The calendar date in US Eastern time, as an ISO day.
+
+    The clock a US home-release date is judged by: a digital release lands at
+    midnight Eastern, and TMDb gives only the day. Daylight time is worked out
+    here (second Sunday of March 07:00 UTC to first Sunday of November 06:00
+    UTC, the rule since 2007) because Windows ships no tz database."""
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    now_utc = now_utc.astimezone(timezone.utc)
+    y = now_utc.year
+    start = datetime(y, 3, _nth_sunday(y, 3, 2), 7, tzinfo=timezone.utc)
+    end = datetime(y, 11, _nth_sunday(y, 11, 1), 6, tzinfo=timezone.utc)
+    hours = -4 if start <= now_utc < end else -5
+    return (now_utc + timedelta(hours=hours)).date().isoformat()
 
 
 def movie_status(flags: dict, release_date: str, today: str) -> dict:

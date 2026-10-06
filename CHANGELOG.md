@@ -1,5 +1,16 @@
 # Changelog
 
+## [20.12.2] — 2026-10-05
+### "Out now" arrives at midnight Eastern, not four hours after
+
+- 20.12.0 stopped a digital release date counting as passed too early by judging it on
+  a fixed UTC-8 clock. That was never early, but it was three hours late in winter and
+  four in summer: at 9:10 pm Pacific on release night the box still said "in cinemas".
+  A home-release date now passes at midnight US Eastern, with daylight time worked out
+  in code (Windows has no timezone database to ask).
+- **Not checked:** on the box. The date arithmetic has unit tests across both
+  daylight-time changes.
+
 ## [20.12.1] — 2026-10-05
 ### The cam that started it was not caught
 

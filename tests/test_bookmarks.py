@@ -165,6 +165,35 @@ lst = [
 eq("order: new, soonest countdown, undated wait, newest bookmark",
    [e["id"] for e in bm.ordered(lst)], [4, 3, 2, 6, 5, 1])
 
+# The home-release clock: US Eastern, daylight time by rule.
+from datetime import datetime as _dt, timezone as _tz
+def _e(*a): return bm.us_eastern_day(_dt(*a, tzinfo=_tz.utc))
+eq("the evening before, 5 pm Pacific, is still the 5th", _e(2026, 10, 6, 0, 0), "2026-10-05")
+eq("one minute before midnight Eastern (EDT)", _e(2026, 10, 6, 3, 59), "2026-10-05")
+eq("midnight Eastern (EDT) is the 6th", _e(2026, 10, 6, 4, 0), "2026-10-06")
+eq("winter: midnight Eastern is 05:00 UTC", [_e(2026, 1, 15, 4, 59), _e(2026, 1, 15, 5, 0)],
+   ["2026-01-14", "2026-01-15"])
+eq("spring forward 2026-03-08 07:00 UTC", [_e(2026, 3, 9, 3, 59), _e(2026, 3, 9, 4, 0)],
+   ["2026-03-08", "2026-03-09"])
+eq("the night before it, still EST", [_e(2026, 3, 8, 4, 59), _e(2026, 3, 8, 5, 0)],
+   ["2026-03-07", "2026-03-08"])
+eq("fall back 2026-11-01 06:00 UTC", [_e(2026, 11, 2, 4, 59), _e(2026, 11, 2, 5, 0)],
+   ["2026-11-01", "2026-11-02"])
+eq("the night of the change, still EDT", [_e(2026, 11, 1, 3, 59), _e(2026, 11, 1, 4, 0)],
+   ["2026-10-31", "2026-11-01"])
+eq("a naive datetime is read as UTC", bm.us_eastern_day(_dt(2026, 10, 6, 4, 0)), "2026-10-06")
+try:
+    from zoneinfo import ZoneInfo
+    _ny = ZoneInfo("America/New_York")
+    from datetime import timedelta as _td
+    _t, _bad = _dt(2024, 1, 1, tzinfo=_tz.utc), []
+    while _t.year < 2031:
+        if bm.us_eastern_day(_t) != _t.astimezone(_ny).date().isoformat(): _bad.append(_t.isoformat())
+        _t += _td(minutes=30)
+    eq("agrees with the tz database every half hour, 2024-2030", _bad[:3], [])
+except Exception:
+    pass   # no tz database (Windows): the fixed cases above stand alone
+
 print("bookmarks: %d passed, %d failed" % (_PASS, len(_FAIL)))
 for f in _FAIL:
     print("  FAIL " + f)
