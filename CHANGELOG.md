@@ -1,5 +1,16 @@
 # Changelog
 
+## [20.13.1] — 2026-10-05
+### No "To TV" while the picture is already on another screen
+
+- **To TV is gone from the player while it is playing on glasses or a wired display.**
+  It was in the header and in the remote's last row, offering to move the picture to the
+  box's TV while it was already on a screen.
+- **AirPlay and Chromecast are unchanged:** To TV was already replaced by **To Phone**
+  there, and still is.
+- To TV is back as soon as the picture returns to the phone.
+- **Not checked:** on a phone with glasses, AirPlay or a Chromecast. No app update needed.
+
 ## [20.13.0] — 2026-10-05
 ### The app's logs can arrive without anyone sending them
 

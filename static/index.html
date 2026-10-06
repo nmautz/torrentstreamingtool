@@ -4053,7 +4053,7 @@
              one label the eye lands on, and it was wrong. -->
         <div id="lpWhere" class="text-[10px] uppercase tracking-widest text-emerald-500 font-bold">On Device</div>
       </div>
-      <button id="lpToTvBtn" onclick="_npOnCastOrTv() ? lpBackToPhone() : lpHandoffToVlc(this)" title="Hand off to the TV (VLC) — resume there at the same time"
+      <button id="lpToTvBtn" onclick="_npOnCastOrTv() ? lpBackToPhone() : (_npHolding ? null : lpHandoffToVlc(this))" title="Hand off to the TV (VLC) — resume there at the same time"
         class="h-full px-4 flex items-center gap-1.5 text-indigo-400 hover:text-indigo-200 hover:bg-indigo-950/40 active:bg-indigo-950/70 transition-colors text-xs font-bold uppercase tracking-wide">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
           <rect x="2" y="4" width="20" height="14" rx="0"/><path stroke-linecap="round" d="M8 20h8M12 18v2"/>
@@ -21223,14 +21223,20 @@ function _npSyncRemoteUi() {
   const banner = document.getElementById("lpRemoteBannerTxt");
   if (banner) banner.textContent = "Playing " + _npWhereLabel().replace(/^(On|In) /, (m) => m.toLowerCase());
   // Casting / AirPlay: TV volume row, and To Phone in place of To TV (header too).
+  // To TV itself is offered only while the picture is on this phone: on glasses,
+  // a wired display, AirPlay or a Chromecast it already has a screen to be on.
   const onTv = on && _npOnCastOrTv();
   const volRow = document.getElementById("lpRemoteVolRow");
   if (volRow) volRow.style.display = (on && _npCastName) ? "flex" : "none";
   const toPhone = document.getElementById("lpRemoteToPhone");
   const toTv = document.getElementById("lpRemoteToTv");
   if (toPhone) toPhone.style.display = onTv ? "flex" : "none";
-  if (toTv) toTv.style.display = onTv ? "none" : "";
+  if (toTv) toTv.style.display = on ? "none" : "";
+  // More is the row's last tile when neither follows it: no divider on the edge.
+  const more = document.getElementById("lpRemoteMoreBtn");
+  if (more) more.classList.toggle("border-r", !on || onTv);
   const hdr = document.getElementById("lpToTvBtn");
+  if (hdr) hdr.style.display = (on && !onTv) ? "none" : "";
   const hdrLbl = hdr && hdr.querySelector(".lp-btn-label");
   if (hdrLbl) hdrLbl.textContent = onTv ? "To Phone" : "To TV";
   if (hdr) hdr.title = onTv ? "Stop on the TV and keep watching on this phone"
@@ -32868,6 +32874,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.13.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.13.1</div>
 </body>
 </html>

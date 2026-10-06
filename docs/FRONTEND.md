@@ -751,7 +751,8 @@ Don't re-add the `controls` attribute. Pieces:
   keeps working; the restore branch runs in the same function), then
   `#lpRemoteGrid`: seek steps, a full-bleed `#lpRemotePlayBtn`,
   `#lpRemoteEpRow` (hold-to-activate Prev/Next with the readiness dots, hidden
-  when the playlist has nowhere to go), and Stop / To TV. `#lpWhere` in the
+  when the playlist has nowhere to go), and Stop / More (plus To Phone on
+  AirPlay / Chromecast; To TV is hidden for the whole hold). `#lpWhere` in the
   header flips "On Device" → "On Glasses". **No volume row and no track row** —
   `NativePlayback` has no volume method and track switching needs a native
   reload, and a tile that can't do anything is worse than a missing one. See

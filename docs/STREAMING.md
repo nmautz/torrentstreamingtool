@@ -1757,7 +1757,7 @@ a remote there is no picture, so it leaves most of the screen empty by construct
 18.13.0 the remote is a **control panel built in the same idiom as the TV's
 `#fullscreenControls`** — a full-height flex column of fixed rows (status strip,
 now-playing line, seek bar, skip offer) over a `flex-1` tile grid: seek steps, a
-full-bleed play tile, episode nav with the readiness dots, and Stop / To TV. The tiles
+full-bleed play tile, episode nav with the readiness dots, and Stop / More. The tiles
 reuse `.fc-tile` and the fullscreen grid's own class strings. See
 [GOTCHAS.md](GOTCHAS.md) § "A remote is a control panel, not an overlay".
 
@@ -1986,7 +1986,8 @@ Not yet exercised: seek, auto-skip, advance, and a locked phone.
   it is taken again on become-active. AirPlay is never captured: there iOS itself
   points the buttons at the receiver, and no API changes that.
 - **Back to phone.** It replaces **To TV** in the remote's last row and in the header
-  while on AirPlay or a Chromecast. `release()` drops the hold, and the usual
+  while on AirPlay or a Chromecast. On glasses or a wired display **To TV** is simply
+  hidden in both places (20.13.1): it is offered only while the picture is on the phone. `release()` drops the hold, and the usual
   `_npHandBack()` → `reclaim` → `stopNative` stops the TV and resumes the page's element
   at the native playhead.
 
@@ -2410,6 +2411,7 @@ onto the TV:
 
 The **To TV** button lives in the local player's fullscreen header (next to
 Stop); it's part of `.lp-chrome`, so it's hidden in tiny mode (maximize first).
+It is hidden whenever native holds the picture on another screen (`_npSyncRemoteUi`).
 Guarded by `withInflight("handoff_vlc")`.
 
 ---
