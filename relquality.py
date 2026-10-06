@@ -114,7 +114,11 @@ _RE_DVD = re.compile(r"\b(dvd[-. _]?rip|dvd[59]|dvdr|dvdscr|ntsc|pal)\b", re.I)
 _RE_CAM_HARD = re.compile(
     r"\b((?:hd|hq|new)?[-. _]?cam(?:[-. _]?rip)?|telesync|telecine"
     r"|hd[-. _]?t[sc](?:[-. _]?rip)?|t[sc][-. _]?rip|pre[-. _]?dvd(?:[-. _]?rip)?"
-    r"|pdvd(?:[-. _]?rip)?|workprint|screener)\b", re.I)
+    r"|pdvd(?:[-. _]?rip)?|workprint|screener"
+    # `HQ Pre` / `PreHD` / `Pre-Rip`: what a cinema recording is called when the
+    # uploader would rather not say so. The copy that prompted all of this was
+    # `Spider-Man: Brand New Day 2026.1080p.HQ Pre.Multi.AAC 2.0.x264`.
+    r"|(?:hq|hd)[-. _]?pre|pre[-. _]?(?:hd|rip|release))\b", re.I)
 _RE_CAM_SOFT = re.compile(r"\b(ts|tc|scr|wp)\b", re.I)
 
 _RE_AV1 = re.compile(r"\bav1\b", re.I)

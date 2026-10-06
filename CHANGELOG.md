@@ -1,5 +1,16 @@
 # Changelog
 
+## [20.12.1] — 2026-10-05
+### The cam that started it was not caught
+
+- 20.12.0 marked 11 of 34 Spider-Man: Brand New Day results on the box as cams and
+  missed the best-seeded one, the copy that was actually downloaded:
+  `…2026.1080p.HQ Pre.Multi.AAC 2.0.x264`. "HQ Pre", "PreHD" and "Pre-Rip" are now
+  read as cinema recordings.
+- **Checked on the box (20.12.0):** the cam flag on live search results, and the
+  cinema warning back up for a film whose digital date is tomorrow in UTC terms.
+  **Not checked:** the Get button, the chip and the banner in a browser.
+
 ## [20.12.0] — 2026-10-05
 ### Get no longer downloads a camera recording
 

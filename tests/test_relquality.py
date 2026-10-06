@@ -86,12 +86,15 @@ for _t in ("Spider-Man.Brand.New.Day.2026.1080p.HDTS.x264-GRP",
            "Film.2026.HQCAM.x264", "Film.2026.HQ-CAM.x264", "Film 2026 NEW CAM 720p",
            "Film.2026.CAMRip.XviD", "Film.2026.720p.HD-TS.x264", "Film.2026.HDTC.x264",
            "Film.2026.TSRip.x264", "Film.2026.TELESYNC.x264", "Film 2026 PreDVDRip",
-           "Film 2026 Hindi pDVDRip", "Film.2026.TS.XviD", "Film.2026.SCREENER.x264"):
+           "Film 2026 Hindi pDVDRip",
+           "Spider-Man: Brand New Day 2026.1080p.HQ Pre.Multi.AAC 2.0.x264",
+           "Film.2026.1080p.PreHD.x264", "Film 2026 HQ-PRE 720p", "Film.2026.Pre-Rip.x264", "Film.2026.TS.XviD", "Film.2026.SCREENER.x264"):
     ok("cam: " + _t, rq.is_cam(_t))
 for _t in ("Spider-Man.Brand.New.Day.2026.1080p.WEB-DL.DDP5.1.H.264-GRP",
            "Film.2026.1080p.WEB-DL.x264-TS", "Film.2026.1080p.BluRay.x264-CAMELOT",
            "Cam.2018.1080p.NF.WEB-DL.x264", "Film.2026.2160p.AMZN.WEB.H265-TSuRRouNDeD",
-           "Film.2026.1080p.x265", "Camp.Rock.2008.720p.BluRay", "", None):
+           "Film.2026.1080p.x265", "Camp.Rock.2008.720p.BluRay",
+           "The.Prestige.2006.1080p.x265", "Predator.1987.1080p.x264", "", None):
     ok("not cam: %r" % (_t,), not rq.is_cam(_t))
 
 
