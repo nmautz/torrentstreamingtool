@@ -3144,6 +3144,10 @@ reached through Tailscale is on no network the TV can see. So AirPlay always goe
   session, so the later `stop(stopApp: true)` sends nothing: a phone that was taken
   over must never STOP the receiver. Never adopt an id from an unproven status, and
   never clear the id on `INVALID_MEDIA_SESSION_ID` to "ask what is current".
+- **A frozen picture with the sound running is not a network fault, and the phone
+  cannot see it.** The receiver reports `PLAYING` and an advancing clock. It is a rung
+  switch onto a segment with no keyframe near the playhead: read the box's request log
+  for the Chromecast's fetches. See § A rung with one keyframe per segment.
 - **No Google Cast SDK, on purpose** (`CastSession.swift`). If you change the protobuf,
   change it in both `encode` and `decode`. There are six fields, and the field numbers
   and wire types are the protocol.
@@ -7014,6 +7018,45 @@ it is a reload at the playhead. It's the same lesson as the AirPlay audio pin (1
 anything the receiver chooses, you control by what you hand it, never by a setting on
 the phone. `LocalMediaServer` doesn't implement `maxh`: a downloaded master has one rung.
 If that ever changes, mirror `_cap_variants` there.
+
+## A rung with one keyframe per segment freezes a TV that switches onto it (20.13.2)
+
+A Chromecast showed a still picture for several seconds with the sound carrying on,
+and a back-10s cleared it (2026-10-06, a film whose source rung was copied and whose
+480p rung was encoded). The receiver's status said `PLAYING` and its clock advanced
+the whole time, so nothing on the phone could see it. What happened is in the box's
+request log for the device (Admin → Devices → raw requests; the Chromecast is the
+`Linux aarch64` user agent) read beside the phone's `cast-state` rows:
+
+- The link dipped, and the receiver fetched `video_480.m3u8` and then the 480p segment
+  that **contained its playhead**: `seg_video_480_00090`, 938.4 to 948.9 s, with the
+  playhead at 943.3 (`cast-state BUFFERING pos:943.27`, `PLAYING` half a second later).
+- That segment's only keyframe was at 938.4. A decoder can start only on a keyframe, so
+  the video had nothing to show until 948.9. The audio is a separate rendition and was
+  never touched.
+- The rewind landed at 937.3, before the keyframe, and the picture came back.
+
+The encoders' default is a keyframe every 250 frames (libx264 and h264_nvenc alike),
+which made every encoded rung 10.4 s segments of one keyframe each. `_build_hls_ffmpeg_args`
+now sets `-g` to two seconds of frames on every encoded rung (`_hls_gop_frames`), so the
+longest such freeze is two seconds. Three things to keep in mind:
+
+- **A receiver switches rung by reloading the segment it is in, not the next one.** Every
+  switch in that log re-fetched the new rung's segment covering time the TV already held.
+  Segment alignment across rungs does not prevent the reload; a keyframe close behind the
+  playhead is what bounds the damage.
+- **A copied rung has whatever the source has.** That film's source had a keyframe every
+  2 s. A source with sparse keyframes still freezes for as long as its own spacing on a
+  switch up to the copied rung; only a re-encode of that rung would change it.
+- **Bundles prepped before 20.13.2 are unchanged.** `OFFLINE_CACHE_VERSION` did not move,
+  so nothing rebuilds them. Until one is prepped again, only the LOWEST quality on the
+  remote stops the switching for that title: `?maxh=` is a ceiling (`_cap_variants`), so
+  any higher pick still leaves the receiver two rungs to move between.
+
+`bundlecheck`'s size-collapse test was measured on 10.4 s single-keyframe segments. A
+held frame encoded with three keyframes per 6 s segment is a larger fraction of a healthy
+one, so that test has less margin on new bundles; the identical-size test does not depend
+on it. Not re-measured on a real damaged bundle.
 
 ## A Siri intent has no web view, and no profile (20.4.0)
 

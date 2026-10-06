@@ -1,5 +1,20 @@
 # Changelog
 
+## [20.13.2] — 2026-10-05
+### A TV's picture no longer freezes for ten seconds when it changes quality
+
+- **Casting to a Chromecast, the picture could stop on one frame while the sound carried
+  on,** until you rewound. It happened when the TV dropped to a lower quality part-way
+  through a segment: the lower-quality video had one keyframe every 10 seconds, and a TV
+  can only start a picture on a keyframe.
+- **Newly prepared videos have a keyframe every 2 seconds** at every quality the server
+  encodes, so the longest such pause is 2 seconds.
+- **Videos prepared before this update are unchanged** until they are prepared again.
+  For one of those, the lowest quality on the remote is the only setting that stops the
+  TV from switching: the pick is a ceiling, so any higher one still leaves it a choice.
+- **Not checked:** no video has been prepared with this change yet, on the box or
+  anywhere else, and it has not been seen on a TV. No app update needed.
+
 ## [20.13.1] — 2026-10-05
 ### No "To TV" while the picture is already on another screen
 

@@ -540,10 +540,10 @@ ffmpeg -y -progress pipe:1 -nostats \
   -c:v:0 copy \
   # v:1 = 720p down-rung (always transcodes; CPU scale feeds NVENC if present):
   -filter:v:1 scale=-2:720 -c:v:1 libx264 -preset veryfast -crf:v:1 23 \
-  -maxrate:v:1 3000k -bufsize:v:1 6000k -pix_fmt:v:1 yuv420p -profile:v:1 high -level:v:1 4.1 \
+  -maxrate:v:1 3000k -bufsize:v:1 6000k -g:v:1 48 -pix_fmt:v:1 yuv420p -profile:v:1 high -level:v:1 4.1 \
   # v:2 = 480p down-rung:
   -filter:v:2 scale=-2:480 -c:v:2 libx264 -preset veryfast -crf:v:2 23 \
-  -maxrate:v:2 1200k -bufsize:v:2 2400k -pix_fmt:v:2 yuv420p -profile:v:2 high -level:v:2 4.1 \
+  -maxrate:v:2 1200k -bufsize:v:2 2400k -g:v:2 48 -pix_fmt:v:2 yuv420p -profile:v:2 high -level:v:2 4.1 \
   -c:a aac -b:a 160k -ac 2 \
   -f hls -hls_time 6 -hls_playlist_type vod \
   -hls_segment_type fmp4 -hls_flags independent_segments \
@@ -559,6 +559,16 @@ ffmpeg -y -progress pipe:1 -nostats \
   -map 0:s:0 -c:s webvtt -f webvtt "sub_0.vtt" \
   -map 0:s:1 -c:s webvtt -f webvtt "sub_1.vtt"
 ```
+
+**`-g:v:N` is two seconds of frames, on every rung that is encoded (20.13.2).**
+`_hls_gop_frames(fps)` gives `HLS_KEYFRAME_SECS` (2 s) of video: 48 at 23.976 fps,
+50 at 25, 60 at 29.97. A copied rung keeps the source's own keyframes. Without it
+libx264 and h264_nvenc both default to 250 frames, so an encoded rung had ONE
+keyframe per 10.4 s segment, and a TV that changed rung mid-segment showed a still
+picture over running sound until the next one. Encoded rungs now cut at ~6 s like a
+copied one, so they have about 1.7 times the segment files they had. Bundles made
+before 20.13.2 keep the long spacing until they are prepped again; the cache key
+does not change. See [GOTCHAS.md](GOTCHAS.md) § A rung with one keyframe per segment.
 
 **`-level:v:N` is computed, not fixed.** `_h264_level_for(width, height, fps)`
 picks the lowest H.264 level whose MaxFS *and* MaxMBPS cover that rung, floored

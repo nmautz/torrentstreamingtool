@@ -31642,6 +31642,25 @@ _ffmpeg_version_probe: dict = {}
 # stays under the user-perceptible threshold.
 HLS_SEGMENT_SECS = 6
 
+# Keyframe spacing on every rung we ENCODE (a copied rung keeps the source's own).
+# The encoders' default is 250 frames, 10.4 s at 23.976 fps: one keyframe per
+# segment. A TV that changes rung reloads the segment under its playhead, and a
+# decoder can only start on a keyframe, so the picture stood still over running
+# sound until the next one. Two seconds bounds that, and three of them make the
+# 6 s segment. See docs/GOTCHAS.md § A rung with one keyframe per segment.
+HLS_KEYFRAME_SECS = 2
+
+
+def _hls_gop_frames(fps: float) -> int:
+    """Frames between keyframes on an encoded rung: HLS_KEYFRAME_SECS of video.
+
+    An unknown or absurd frame rate reads as 24 fps; a wrong guess only moves the
+    keyframes a little closer together or further apart.
+    """
+    if not (10.0 <= fps <= 130.0):
+        fps = 24.0
+    return max(1, int(round(fps * HLS_KEYFRAME_SECS)))
+
 # Adaptive-bitrate ladder: lower video renditions emitted alongside the original.
 # Each rung is (name, target_height, maxrate_kbps, bufsize_kbps). The original
 # (source-resolution) variant is always emitted as index 0; a rung is added only
@@ -32738,6 +32757,12 @@ def _build_hls_ffmpeg_args(
         if v.get("maxrate"):
             a += [f"-maxrate:v:{i}", f"{v['maxrate']}k",
                   f"-bufsize:v:{i}", f"{v['bufsize']}k"]
+        # A keyframe every HLS_KEYFRAME_SECS, on libx264 and h264_nvenc alike (a
+        # GOP start is an IDR on both). Left at the default, a rung has ONE
+        # keyframe per 10.4 s segment and a TV that switches onto it mid-segment
+        # freezes the picture until the next.
+        a += [f"-g:v:{i}",
+              str(_hls_gop_frames(float((info.get("video") or {}).get("fps") or 0.0)))]
         # H.264 level must satisfy the OUTPUT frame size AND throughput, or the
         # encoder refuses to init ("Invalid Level" → NVENC/x264 error -22 → the
         # whole job dies, and prep then retries it forever).
