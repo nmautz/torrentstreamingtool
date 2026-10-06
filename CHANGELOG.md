@@ -1,5 +1,24 @@
 # Changelog
 
+## [20.13.0] — 2026-10-05
+### The app's logs can arrive without anyone sending them
+
+Twice in one evening a problem on the phone could not be read, because the last log the
+box held was a day old: the app only sends its log when someone presses Send.
+
+- **Admin → System → Collect App Logs Automatically.** Off by default. On, each iOS app
+  sends its diagnostic log to the box by itself: within a minute of opening or coming
+  back to the foreground, then about every 15 minutes while it is open.
+- A send is skipped when nothing new was written, and a failed one is retried after two
+  minutes.
+- **No app update needed.** The box cannot reach into a phone, so the sending is done by
+  the page the box serves into the app.
+- **What it costs:** the app sends its whole log each time, up to 8 MB, which counts
+  against mobile data away from home.
+- **What it does not do:** nothing is sent while the app is in the background. Those rows
+  arrive with the next send.
+- **Not checked:** on a phone. The schedule was run in a simulation only.
+
 ## [20.12.2] — 2026-10-05
 ### "Out now" arrives at midnight Eastern, not four hours after
 

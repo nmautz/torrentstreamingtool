@@ -21533,6 +21533,47 @@ function _npAbs(u) {
 // The host to POST progress to while backgrounded. In a proxied session the
 // page origin is the loopback proxy; writing through it would work but adds a
 // hop that can outlive the proxy, so prefer the real host when we know it.
+// ── Automatic client-log collection (20.13.0) ───────────────────────────────
+// The box cannot reach into a phone, so "the server collects the logs" is this:
+// the admin setting rides in the state (`client_log_auto`, minutes; 0 = off) and
+// the page inside the app does the sending. Once shortly after it opens — the
+// moment after "something went wrong, I reopened it" — then on that interval.
+// The device sends its WHOLE log, so a send is skipped when nothing was written
+// since the last one (the send itself writes a row; the stats are re-read after).
+let _logAutoAt = 0, _logAutoSig = "", _logAutoBusy = false;
+async function _logAutoTick() {
+  const mins = +(app && app.client_log_auto) || 0;
+  if (!mins || !isApp || _appOffline || _logAutoBusy) return;
+  if (!(_cap && _cap.np && _cap.np.sendLog)) return;
+  if (document.visibilityState === "hidden" || !navigator.onLine) return;
+  if (Date.now() - _logAutoAt < mins * 60000) return;
+  _logAutoBusy = true;
+  const sig = async () => {
+    try { const st = await _cap.np.logStats(); return (st.rows || 0) + ":" + (st.bytes || 0); }
+    catch (_) { return ""; }
+  };
+  try {
+    const now = await sig();
+    if (now && now === _logAutoSig) { _logAutoAt = Date.now(); return; }
+    const r = await _cap.np.sendLog({
+      serverUrl: _npServerUrl(),
+      device: _pbDeviceName() || _pbDeviceId() || "ios",
+    });
+    const ok = /^sent/.test((r && r.result) || "");
+    // A failed send is retried in two minutes, not a full interval later.
+    _logAutoAt = ok ? Date.now() : Date.now() - Math.max(0, mins - 2) * 60000;
+    if (ok) _logAutoSig = await sig();
+  } catch (_) {
+    _logAutoAt = Date.now() - Math.max(0, mins - 2) * 60000;
+  } finally { _logAutoBusy = false; }
+}
+if (isApp) {
+  setInterval(_logAutoTick, 60000);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") setTimeout(_logAutoTick, 4000);
+  });
+}
+
 function _npServerUrl() {
   return (typeof _appProxyHost !== "undefined" && _appProxyHost)
     ? _appProxyHost : location.origin;
@@ -32827,6 +32868,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.12.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.13.0</div>
 </body>
 </html>

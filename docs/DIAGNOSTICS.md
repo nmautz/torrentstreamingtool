@@ -55,6 +55,28 @@ point: the in-memory diagnostics trail is 40 rows that die with the process and 
 in seconds-since-launch, so it can answer "what happened in this ten-minute test" and
 nothing longer.
 
+### Automatic collection (20.13.0)
+
+Admin → System → **Collect App Logs Automatically** (`settings.client_log_auto.enabled`,
+`GET`/`POST /api/admin/client-log-auto`). **Off by default**: it spends the phone's data
+and battery for the box's benefit, so it is asked for.
+
+The server still cannot reach a phone. "Collect" means the setting rides in the `state`
+event as `client_log_auto` (minutes between sends, `0` = off) and the page running
+inside the app calls the same `sendLog` the button does (`_logAutoTick` in
+`static/index.html`): once within a minute of the app opening or returning to the
+foreground, then every `_CLIENT_LOG_AUTO_MIN` (15). It is host-served JavaScript, so it
+needs no app rebuild and works on any app from 18.7.0.
+
+- The device sends its **whole** log each time (up to 8 MB). A send is skipped when
+  `logStats` shows nothing was written since the last one. A failed send is retried
+  after two minutes.
+- **Nothing is sent while the app is in the background** (page timers are frozen) or in
+  offline cached-player mode. What happened then arrives with the next send, because
+  the log is on disk; it is late, not lost.
+- Sending only what is new would need the app to track it, which is a Swift change and
+  the bookkeeping `DiagLog.upload` deliberately avoids. Not built.
+
 ### Retention — the part that is easy to get wrong
 
 **The device sends its WHOLE file every time and the server MERGES it.** Before 18.8.0 the

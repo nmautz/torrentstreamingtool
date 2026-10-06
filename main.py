@@ -1409,6 +1409,7 @@ class AppState:
     stream_throttled_count: int = 0                       # how many other torrents currently carry a stream-focus download limit
     stream_focus_pack_enabled: bool = True                # settings.stream_focus.pack_focus — mirrored
     pack_first_enabled: bool = True                       # settings.pack_first.enabled — mirrored so the UI knows it may reach for a pack
+    client_log_auto: int = 0                              # settings.client_log_auto — minutes between the app's automatic log uploads; 0 = off
     pack_first_max_bytes: int = 200 * 1024 ** 3           # settings.pack_first.max_bytes — the size above which it may not
     stream_focus_sibling_bps: int = 512 * 1024            # settings.stream_focus.sibling_kbps × 1024 — total budget the OTHER torrents share while streaming (0 = no throttle)
     shotscan_current: str = ""                            # basename of the file the shot-boundary credit scan is decoding ("" = idle); surfaced in the admin Activity tab so the most expensive pass in the app is never invisible
@@ -1843,6 +1844,10 @@ def state_snapshot() -> dict:
         # Pack-first — mirrored so the auto picker in the page knows whether it may
         # answer a one-episode request with a season pack, and how big a one.
         "pack_first": state.pack_first_enabled,
+        # Minutes between automatic client-log uploads, 0 = off. The server cannot
+        # reach a phone, so "collect the logs" is the page inside the app reading
+        # this and sending (`_logAutoTick` in index.html).
+        "client_log_auto": state.client_log_auto,
         "pack_first_max_bytes": state.pack_first_max_bytes,
         # Stream focus — surfaced so the UI can say "other downloads are held
         # back while you watch" rather than leaving it as invisible magic.
@@ -6687,6 +6692,30 @@ _PACK_SLICE_GRACE_SECS = 300
 # run is 144.7 GB) and stops only genuinely absurd complete-franchise torrents, which
 # cost real qBit bookkeeping for one episode.
 _PACK_FIRST_MAX_BYTES = 200 * 1024 ** 3
+
+
+# How often an app sends its diagnostic log when collection is on. The device
+# sends its WHOLE log each time (up to 8 MB, see DiagLog) and skips a send when
+# nothing was written since the last one, so this is a ceiling on traffic, not a
+# rate.
+_CLIENT_LOG_AUTO_MIN = 15
+
+
+def _client_log_auto_cfg(lib: dict) -> dict:
+    """Read settings.client_log_auto — whether apps send their diagnostic log to
+    this box on their own.
+
+    **Ships disabled.** It is the owner's phone data and battery being spent to
+    make the box easier to debug, so it is asked for, not assumed. Off, the log
+    still arrives when someone presses Send in the app."""
+    cfg = (lib.get("settings", {}) or {}).get("client_log_auto") or {}
+    return {"enabled": bool(cfg.get("enabled", False)),
+            "interval_min": _CLIENT_LOG_AUTO_MIN}
+
+
+def _client_log_auto_minutes(lib: dict) -> int:
+    cfg = _client_log_auto_cfg(lib)
+    return cfg["interval_min"] if cfg["enabled"] else 0
 
 
 def _pack_first_cfg(lib: dict) -> dict:
@@ -14630,6 +14659,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         state.download_race_ceiling = _dr0["quality_ceiling"]
         _pf0 = _pack_first_cfg(_lib0)
         state.pack_first_enabled = _pf0["enabled"]
+        state.client_log_auto = _client_log_auto_minutes(_lib0)
         state.pack_first_max_bytes = _pf0["max_bytes"]
         _sf0 = _stream_focus_cfg(_lib0)
         state.stream_focus_pack_enabled = _sf0["pack_focus"]
@@ -15699,6 +15729,10 @@ class DownloadRaceReq(BaseModel):
     max_items: int = 2                         # concurrent races, box-wide
     quality_ceiling: int = 1080                # the HQ track's target tier (720/1080/2160)
     hq_upgrade: bool = True                    # keep a better copy and swap it in when it lands
+
+
+class ClientLogAutoReq(BaseModel):
+    enabled: bool = False                      # apps send their diagnostic log on their own
 
 
 class PackFirstReq(BaseModel):
@@ -29352,6 +29386,25 @@ async def admin_set_stream_focus(request: Request,
     return JSONResponse({"ok": True, **cfg,
                          "active": bool(state.stream_focus_hash),
                          "throttled": state.stream_throttled_count})
+
+
+@app.get("/api/admin/client-log-auto")
+async def admin_get_client_log_auto(request: Request) -> JSONResponse:
+    """Return whether apps send their diagnostic log without being asked."""
+    _require_admin(request)
+    return JSONResponse(_client_log_auto_cfg(await get_library()))
+
+
+@app.post("/api/admin/client-log-auto")
+async def admin_set_client_log_auto(request: Request,
+                                    body: ClientLogAutoReq) -> JSONResponse:
+    """Turn automatic client-log collection on or off. Mirrored onto `state`, so
+    an app with the dashboard open starts (or stops) within a minute."""
+    _require_admin(request)
+    async with mutate_library() as lib:
+        lib.setdefault("settings", {}).setdefault("client_log_auto", {})["enabled"] = bool(body.enabled)
+    state.client_log_auto = _client_log_auto_minutes(lib)
+    return JSONResponse({"ok": True, **_client_log_auto_cfg(lib)})
 
 
 @app.get("/api/admin/pack-first")

@@ -325,6 +325,11 @@ Both settings live in `library.json → settings.pack_first` and are mirrored on
 - `GET /api/admin/pack-first` → `{enabled, max_bytes}`
 - `POST /api/admin/pack-first` → same shape. A non-positive `max_bytes` is a **400**.
 
+**Collect App Logs Automatically (20.13.0).** One toggle, off by default
+(`settings.client_log_auto.enabled`, `GET`/`POST /api/admin/client-log-auto`). On, each
+iOS app sends its diagnostic log to the box without being asked. The mechanism, its cost
+and what it cannot do are in [DIAGNOSTICS.md § Automatic collection](DIAGNOSTICS.md).
+
 See [LIBRARY_DATA.md](LIBRARY_DATA.md) § `pack_slice`, [API.md](API.md) § `/api/library/pack-fetch`, and [GOTCHAS.md](GOTCHAS.md).
 
 #### Priority While Watching

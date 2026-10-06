@@ -54,6 +54,9 @@ The only persistent server-side state. Lives at the project root. Accessed via `
       "enabled":      true,             // diff the show's TMDb inventory against what's on disk. Absent ⇒ true
       "show_unaired": false             // future/undated TMDb episodes render as "Upcoming" instead of being hidden. Absent ⇒ false
     },
+    "client_log_auto": {                // 20.13.0 — apps send their diagnostic log on their own (admin System tab)
+      "enabled": false                  // OFF by default. See DIAGNOSTICS.md § Automatic collection
+    },
     "download_race": {                  // parallel candidate downloads for an auto-picked title (admin System tab)
       "enabled":         false,         // OFF by default: racing multiplies bandwidth + disk for the length of the race
       "size":            3,             // candidates per race; 2 | 3 | 4

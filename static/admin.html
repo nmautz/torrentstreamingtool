@@ -1547,6 +1547,21 @@
       </div>
     </div>
 
+    <!-- Automatic client-log collection -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Collect App Logs Automatically<span class="help-tip" tabindex="0" data-tip="The box cannot reach into a phone, so the app does the sending: while it is open and connected it uploads its diagnostic log about every 15 minutes, and once shortly after it opens. A send is skipped when nothing new was written.">?</span></h2>
+          <p class="text-xs text-gray-500 mt-0.5">Each iOS app sends its diagnostic log to this box on its own, so a problem can be read here without anyone pressing <em>Send log</em> afterwards. The app sends its whole log each time (up to 8 MB), which counts against mobile data when the phone is away from home. Off, logs still arrive when someone sends one by hand. Logs are kept until an admin clears them.</p>
+        </div>
+        <button id="claEnabledBtn" onclick="toggleClientLogAuto()"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                 bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">
+          &hellip;
+        </button>
+      </div>
+    </div>
+
     <!-- Stream focus: what "play this now" does to everything else -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
@@ -2323,7 +2338,7 @@ function switchTab(tab){
   else                   stopCompressionPolling();
   if(tab==="cleanup")    loadCleanup();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")   { loadNetwork(); loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadMissingContent(); loadDownloadRace(); loadPackFirst(); loadStreamFocus(); loadAutoMaint(); loadPrepValidate(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
+  if(tab==="system")   { loadNetwork(); loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadMissingContent(); loadDownloadRace(); loadPackFirst(); loadClientLogAuto(); loadStreamFocus(); loadAutoMaint(); loadPrepValidate(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
   else                 { stopSysHealthPolling(); stopForcePrepPolling(); stopFileValidationPolling(); stopFileRepairPolling(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); if(!_auChangelogLoaded) loadChangelog(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
@@ -3412,6 +3427,49 @@ function _pfRender(){
   // Don't stomp what the admin is mid-way through typing.
   if(gb && document.activeElement !== gb)
     gb.value = Math.round((_pfCfg.max_bytes || 0) / (1024 ** 3));
+}
+
+// Whether apps send their diagnostic log on their own. See
+// `_client_log_auto_cfg` in main.py and `_logAutoTick` in index.html.
+let _claOn = false;
+function _claRender(){
+  const b = document.getElementById("claEnabledBtn");
+  if(!b) return;
+  b.textContent = _claOn ? "On" : "Off";
+  b.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors "
+    + (_claOn ? "bg-emerald-900 border-emerald-700 text-emerald-100 hover:bg-emerald-800"
+              : "bg-gray-800 border-gray-700 text-gray-400 hover:text-white");
+}
+async function loadClientLogAuto(){
+  try{
+    const r = await fetch("/api/admin/client-log-auto", {headers: authHeader()});
+    if(!r.ok) return;
+    _claOn = !!(await r.json()).enabled;
+    _claRender();
+  }catch(_){}
+}
+async function toggleClientLogAuto(){
+  const b = document.getElementById("claEnabledBtn");
+  if(b) b.disabled = true;
+  try{
+    const r = await fetch("/api/admin/client-log-auto",{
+      method: "POST",
+      headers: {...authHeader(), "Content-Type": "application/json"},
+      body: JSON.stringify({enabled: !_claOn}),
+    });
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      showToast(`Save failed: ${d.detail || r.status}`, true);
+      return;
+    }
+    _claOn = !!(await r.json()).enabled;
+    showToast(_claOn ? "Apps will send their logs on their own." : "Apps send a log only when asked.");
+  }catch(_){
+    showToast("Save failed.", true);
+  }finally{
+    if(b) b.disabled = false;
+    _claRender();
+  }
 }
 
 async function loadPackFirst(){
