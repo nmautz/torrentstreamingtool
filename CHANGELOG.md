@@ -1,5 +1,17 @@
 # Changelog
 
+## [20.14.1] — 2026-10-06
+### Get no longer mistakes a single file for a whole season
+
+- **Get on SpongeBob season 3 downloaded one file and stopped.** An indexer lists a
+  single 267 MB episode as "SpongeBob SquarePants S03". Get took it for the whole
+  season, and a second press was told it was already downloading. The 40 episodes were
+  never searched for.
+- **A season pack too small to hold its season is now ignored** (under 15 MB an episode,
+  for a season of four or more). Get then looks for a real pack or for each episode.
+- Found by pressing Get on the box for seasons 2 and 3. Season 2 started nine downloads
+  covering ten of its eleven missing episodes.
+
 ## [20.14.0] — 2026-10-06
 ### Episodes are filed by the name a release states, and one file can hold two
 

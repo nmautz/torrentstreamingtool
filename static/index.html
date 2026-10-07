@@ -18877,8 +18877,25 @@ function _bestPackFrom(cand, match, cmp, filt, sizeOf){
 // NOT the same rule as _bgPackForEpisodes, which still caps the whole torrent:
 // an episode's share is always tiny, so judging the share there would be no
 // ceiling at all.
+// A "season pack" too small to hold the season is not one (20.14.1). Indexers
+// list single files under a season's name: "SpongeBob.SquarePants.S03.1080p.
+// HEVC.x265-MeGusta" is one 267 MB episode, and for a 40-episode season that
+// is under 7 MB each. Get took it as the whole of Season 3, twice: the first
+// press downloaded one unnumbered file, the second was told "already
+// downloading" and stopped, and neither ever looked for the episodes.
+//
+// Judged on the torrent's own episode count from TMDb, and only when that is
+// known and at least 4 - a two-part special is allowed to be small. 15 MB an
+// episode is far under any real encode (an 11-minute SD cartoon runs 60).
+// Excluded outright, unlike the size limits: with no real pack left, the
+// per-episode hunt is the right answer.
+const _PACK_MIN_EP_BYTES=15*1024*1024;
+function _packHollow(meta, p){
+  const n=_packEpisodeCount({meta}, p), z=(p&&p.size)||0;
+  return n>=4 && z>0 && z/n<_PACK_MIN_EP_BYTES;
+}
 function _packScopePool(packs, want, seasons, meta){
-  const pool=(packs||[]).filter(p=>_packCoversScope(p, want, seasons));
+  const pool=(packs||[]).filter(p=>_packCoversScope(p, want, seasons) && !_packHollow(meta, p));
   const cap=+app.pack_first_max_bytes||0;
   if(!cap) return pool;
   const under=pool.filter(p=>!_packNeedsSeasonSlice(p, want)
@@ -19420,6 +19437,7 @@ function _bgPackForEpisodes(ctx, season, wanted, filt){
   const cap=+app.pack_first_max_bytes||0;
   const pool=(ctx.packs||[]).filter(p=>
     _packCoversScope(p, +season, ctx.seasons||[])
+    && !_packHollow(ctx.meta, p)
     && (!cap || (p.size||0)<=cap));
   if(!pool.length) return null;
   // Audio preference first, exactly as _bestPackFrom does — a dub household must
@@ -33080,6 +33098,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.14.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.14.1</div>
 </body>
 </html>

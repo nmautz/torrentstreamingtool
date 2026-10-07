@@ -6996,6 +6996,17 @@ name** it states. Things to keep in mind:
 - **Many old cartoons' releases state no episode name** (measured: The Powerpuff Girls 0 of
   65, Rugrats 7 of 35). The rule has nothing to read there and changes nothing.
 
+## A "season pack" can be one file (20.14.1)
+
+Indexers list single episodes under a season's name. "SpongeBob.SquarePants.S03.1080p.HEVC.
+x265-MeGusta" is one 267 MB file; `parse_torrent_title` reads it as a season pack, and Get's
+pack-first branch took it as all 40 episodes of Season 3. The file lands at `(3, 0)`, so the
+season still reads as wholly missing, and the next press picks the same torrent, gets
+`duplicate: true` from the server, and returns without hunting episodes. `_packHollow`
+(`static/index.html`) drops any pack under 15 MB per TMDb episode (count of 4 or more) from
+`_packScopePool` and `_bgPackForEpisodes`. It is a hard exclusion, not a preference: with no
+real pack the per-episode hunt runs. Not mirrored in `voicepick` (films only) or on the server.
+
 ## A still, silent ending is not a hole (19.10.0)
 
 `bundlecheck` judges from segment sizes. A sparse-file hole (a source prepped
