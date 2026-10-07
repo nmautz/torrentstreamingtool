@@ -77,7 +77,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "20.8.13"
+let NP_BUILD = "20.13.3"
 
 // MARK: - Armed state
 
@@ -2988,7 +2988,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private func maybeClaimEarly() {
         guard earlyClaim, armed.active, armed.handoffEnabled else { return }
         onMain { [weak self] in
-            guard let self = self, self.extWindow == nil,
+            guard let self = self, self.extWindow == nil, self.cast == nil,
                   self.externalScene != nil else { return }
             self.detachFallbackLayer()
             self.ensureExternalWindow()
@@ -3029,7 +3029,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     /// isn't there.
     private func attachVideoSurface() {
         onMain { [weak self] in
-            guard let self = self else { return }
+            guard let self = self, self.cast == nil else { return }
             if self.wantsOwnExternalWindow {
                 self.ensureExternalWindow()
                 self.attachExternalLayer()
@@ -3048,8 +3048,17 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     /// Black window on the external display. Deliberately separate from
     /// `attachExternalLayer` — at resign-active time there is no player yet, but
     /// that is the last moment the app is guaranteed a composite pass.
+    ///
+    /// NEVER DURING A CAST (20.13.3). A cast has no player of ours to put in the
+    /// window, so all a window did was black out the display, and `isHolding`
+    /// counts a window as the picture being held. With glasses plugged in
+    /// mid-cast, To Phone cleared `castLive`, `reclaim()` still answered
+    /// "holding" for the empty window, the page left everything alone, and the
+    /// next status put `castLive` back: the button did nothing until the glasses
+    /// were unplugged. The display stays mirrored for the length of the cast;
+    /// the first arm after it ends claims it (`maybeClaimEarly`).
     private func ensureExternalWindow() {
-        guard extWindow == nil, let scene = externalScene else { return }
+        guard cast == nil, extWindow == nil, let scene = externalScene else { return }
         let vc = UIViewController()
         // A view whose BACKING layer is the AVPlayerLayer, rather than a layer
         // hand-added as a sublayer. See ExternalPlayerView for why that matters.
@@ -3529,6 +3538,9 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
                 if let n = self.armed.nextUrl { self.armed.nextUrl = AirPlayDoor.shared.lanURL(for: n) ?? n }
                 let c = CastSession(device: dev)
                 self.cast = c
+                // A window claimed before the cast holds nothing now (see
+                // ensureExternalWindow); the display goes back to mirroring.
+                if self.extWindow != nil { self.detachExternalWindow() }
                 self.castLive = false
                 self.castReady = false
                 self.castTracksApplied = false

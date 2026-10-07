@@ -1844,10 +1844,16 @@ screen. It is handed the HLS URL and **fetches the stream itself**. None of the 
 player's URLs are reachable from a TV. `http://127.0.0.1:<port>/…` is the TV's own
 loopback, and the box over Tailscale is on no network the TV is on. So `AirPlayDoor`
 (in `LocalMediaServer.swift`) opens a second listener on the phone's **Wi-Fi**
-interface. It reverse-proxies the one upstream origin the player was using (the loopback
+interface. It reverse-proxies the upstream origin the player was using (the loopback
 server or the box) under a per-session secret prefix:
 
     http://<wifi-ip>:<port>/ap/<128-bit token>/<upstream path + query>
+
+A session can cross origins: an episode streamed from the box and one downloaded to the
+phone are at different origins, and the loopback server takes a new port on every page
+load. Since 20.13.3 `lanURL(for:)` admits each new origin into its own slot,
+`/ap/<token>.<n>/…` (four slots, least recently used dropped; `airplay-door-origin` in
+the client log). Before that it refused them and the TV was handed the raw URL.
 
 Relative URIs inside the playlists resolve against the playlist's URL, so no playlist is
 rewritten. Offline bundles and box streams share the one path. While a session is up,
@@ -1860,8 +1866,8 @@ first: on the loopback page (`_appOffline` / `_appProxied`) a fully downloaded n
 episode is armed as `/StreamLinkBundles/<sha>/master-native.m3u8` (`next-armed
 via:"device"`), so an advance on a TV, the glasses or a locked phone plays the device
 copy and works with no host at all. Only an episode that is not on the phone goes to
-the box's `/offline-prepare`. From the plain host page the box is always asked: the
-door proxies one upstream origin, and there it is the box. Before 20.8.9 the box was
+the box's `/offline-prepare`. From the plain host page the box is always asked (until
+20.13.3 the door proxied one origin only, and there it is the box). Before 20.8.9 the box was
 the only source, and offline nothing was armed. **Built, not yet run on a device.**
 
 Subtitles reach the TV through `master-native.m3u8`'s subtitle group (text subtitles

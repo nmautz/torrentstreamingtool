@@ -1,5 +1,24 @@
 # Changelog
 
+## [20.13.3] — 2026-10-06
+### Picking a downloaded episode while casting no longer drops it onto the phone
+
+- **While casting something streamed from the server, picking an episode that is
+  downloaded on the phone failed on the TV and played on the phone instead.** The TV
+  fetches video through the phone, and the phone only relayed the one place the cast had
+  started from. A downloaded episode lives somewhere else, so the TV was sent an address
+  only the phone can reach. The same happened on AirPlay.
+- **The phone now relays every place an episode in the session comes from,** so a cast
+  can move between streamed and downloaded episodes in either direction.
+- **To Phone did nothing while casting with glasses or a wired display plugged in,**
+  until the display was unplugged. Plugging it in mid-cast made the app claim the
+  display with nothing to show on it, and To Phone then believed the picture was still
+  being held there. The app now leaves a display alone for as long as a cast lasts.
+  After To Phone the picture moves on to the display, as it does when one is plugged in.
+- **Not checked:** on a TV or with glasses. The app builds; neither fix has been run
+  against a Chromecast, an AirPlay TV or a display. The second was found from the code:
+  the phone had not sent its log for that moment. Needs the app update.
+
 ## [20.13.2] — 2026-10-05
 ### A TV's picture no longer freezes for ten seconds when it changes quality
 

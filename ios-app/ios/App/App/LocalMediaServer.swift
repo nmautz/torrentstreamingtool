@@ -936,9 +936,15 @@ final class HLSStaticServer {
 /// unreachable from an Apple TV — `http://127.0.0.1:<port>/…` is the Apple TV's
 /// own loopback, and the box behind Tailscale is on no network the TV is on. So
 /// the phone opens a second listener on its Wi-Fi interface and reverse-proxies
-/// ONE upstream origin (the loopback server, or the box) under a secret prefix:
+/// an upstream origin (the loopback server, or the box) under a secret prefix:
 ///
 ///     http://<wifi-ip>:<port>/ap/<token>/<upstream path + query>
+///
+/// A session can need MORE THAN ONE origin (20.13.3). An episode streamed from
+/// the box and an episode downloaded to the phone live at different origins, and
+/// the loopback server takes a new port every time the page reloads. Each origin
+/// after the first gets its own slot, `/ap/<token>.<n>/…`, admitted by `lanURL`
+/// the first time a URL under it is handed to the receiver.
 ///
 /// Relative URIs inside the playlists resolve against the playlist's own URL, so
 /// every rendition, segment and subtitle a master names stays under the prefix
@@ -957,7 +963,12 @@ final class AirPlayDoor {
     private(set) var port: UInt16?
     private(set) var host: String?
     private var token = ""
-    private var upstream: URL?     // scheme://host:port, no path
+    /// The origins (scheme://host:port, no path) the door proxies, least
+    /// recently used first. Slot 0 is the origin the door was opened at.
+    private var slots: [(id: Int, origin: URL)] = []
+    private var nextSlot = 0
+    private let slotLock = NSLock()
+    private static let maxSlots = 4
     /// The phone's device id, sent upstream as X-Device-Id so the TV's fetches are
     /// filed under this phone in the admin Devices tab (a pairing token until 19.8.0).
     private var deviceId: String?
@@ -985,13 +996,17 @@ final class AirPlayDoor {
             DispatchQueue.main.async { completion(.failure(.noWifi)) }
             return
         }
-        upstream = origin
         self.deviceId = deviceId
         host = ip
         if isOpen {
+            _ = slot(for: origin)
             DispatchQueue.main.async { completion(.success(())) }
             return
         }
+        slotLock.lock()
+        slots = [(0, origin)]
+        nextSlot = 1
+        slotLock.unlock()
         token = Self.mintToken()
         let params = NWParameters.tcp
         // Wi-Fi only: the receiver is on the Wi-Fi, and cellular must never
@@ -1027,20 +1042,79 @@ final class AirPlayDoor {
         listener?.cancel()
         listener = nil
         port = nil
-        upstream = nil
+        slotLock.lock()
+        slots = []
+        slotLock.unlock()
         deviceId = nil
         token = ""
         DiagLog.shared.write("airplay-door-closed", [:], cat: "ext")
     }
 
-    /// The receiver-reachable form of `url`, or nil when it is not under the
-    /// origin the door is pointed at (the caller then keeps the original).
+    /// The receiver-reachable form of `url`, or nil when the door is shut or
+    /// `url` is already a door URL (the caller then keeps the original).
+    ///
+    /// An origin the door has not seen is ADMITTED here, not refused. It used
+    /// to be refused, and every caller's `?? url` then handed the TV the raw
+    /// URL: on 2026-10-06 a cast that began on an episode streamed from the box
+    /// was moved to one downloaded on the phone, and the Chromecast was sent
+    /// `http://127.0.0.1:<port>/…` (`cast-load host:"127.0.0.1"`, `cast-failed
+    /// why:"load_failed"`). Every URL that reaches this is one the native side
+    /// is about to give the receiver, so there is no other answer to want.
     func lanURL(for url: URL) -> URL? {
-        guard isOpen, let port = port, let host = host, let up = upstream,
-              Self.origin(of: url) == up else { return nil }
+        guard isOpen, let port = port, let host = host,
+              url.scheme == "http" || url.scheme == "https",
+              let origin = Self.origin(of: url) else { return nil }
+        // Armed URLs are stored translated and come back through here on a
+        // reload. Admitting the door's own address would proxy it to itself.
+        if url.host == host, url.port == Int(port) { return nil }
+        let id = slot(for: origin)
         var tail = url.path
         if let q = url.query { tail += "?" + q }
-        return URL(string: "http://\(host):\(port)/ap/\(token)\(tail)")
+        return URL(string: "http://\(host):\(port)\(prefix(id))\(tail)")
+    }
+
+    private func prefix(_ id: Int) -> String {
+        id == 0 ? "/ap/\(token)" : "/ap/\(token).\(id)"
+    }
+
+    /// The slot `origin` is served under, admitting it if it is new. The oldest
+    /// unused slot goes when the table is full: a loopback port from three page
+    /// loads ago is answering nobody.
+    private func slot(for origin: URL) -> Int {
+        slotLock.lock(); defer { slotLock.unlock() }
+        if let i = slots.firstIndex(where: { $0.origin == origin }) {
+            let s = slots.remove(at: i)
+            slots.append(s)
+            return s.id
+        }
+        if slots.count >= Self.maxSlots { slots.removeFirst() }
+        let id = nextSlot
+        nextSlot += 1
+        slots.append((id, origin))
+        DiagLog.shared.write("airplay-door-origin", [
+            "slot": id, "origin": "\(origin.scheme ?? "?")://\(origin.host ?? "?")",
+            "open": slots.count,
+        ], cat: "ext")
+        return id
+    }
+
+    /// Split a door path (`/ap/<token>[.<n>]/<tail>`) into the origin its slot
+    /// stands for and the tail, which keeps its leading slash and any query.
+    private func resolve(_ target: String) -> (origin: URL, tail: String)? {
+        let base = "/ap/\(token)"
+        guard !token.isEmpty, target.hasPrefix(base) else { return nil }
+        var rest = target.dropFirst(base.count)
+        var id = 0
+        if rest.hasPrefix(".") {
+            let digits = rest.dropFirst().prefix { $0.isASCII && $0.isNumber }
+            guard let n = Int(digits), n > 0 else { return nil }
+            id = n
+            rest = rest.dropFirst(1 + digits.count)
+        }
+        guard rest.hasPrefix("/") else { return nil }
+        slotLock.lock(); defer { slotLock.unlock() }
+        guard let s = slots.first(where: { $0.id == id }) else { return nil }
+        return (s.origin, String(rest))
     }
 
     /// The inverse of `lanURL`: the upstream URL a door URL stands for. The
@@ -1048,12 +1122,10 @@ final class AirPlayDoor {
     /// listens on Wi-Fi only, and a connection to our own address arrives on
     /// loopback.
     func upstreamURL(for url: URL) -> URL? {
-        guard isOpen, let up = upstream else { return nil }
-        let prefix = "/ap/\(token)"
-        guard url.path.hasPrefix(prefix + "/") else { return nil }
-        var tail = String(url.path.dropFirst(prefix.count))
+        guard isOpen, let hit = resolve(url.path) else { return nil }
+        var tail = hit.tail
         if let q = url.query { tail += "?" + q }
-        return URL(string: up.absoluteString + tail)
+        return URL(string: hit.origin.absoluteString + tail)
     }
 
     // MARK: request handling
@@ -1080,8 +1152,7 @@ final class AirPlayDoor {
     private func respond(_ conn: NWConnection, header: Data) {
         let lines = (String(data: header, encoding: .utf8) ?? "").components(separatedBy: "\r\n")
         let parts = (lines.first ?? "").split(separator: " ")
-        let prefix = "/ap/\(token)/"
-        guard parts.count >= 2, !token.isEmpty, let up = upstream else { refuse(conn, 404); return }
+        guard parts.count >= 2, !token.isEmpty else { refuse(conn, 404); return }
         let method = String(parts[0]).uppercased()
         let target = String(parts[1])
         // A Cast receiver is a web page on another origin, so a request that
@@ -1100,8 +1171,8 @@ final class AirPlayDoor {
             return
         }
         guard method == "GET" || method == "HEAD" else { refuse(conn, 405); return }
-        guard target.hasPrefix(prefix),
-              let url = URL(string: up.absoluteString + "/" + String(target.dropFirst(prefix.count))) else {
+        guard let hit = resolve(target),
+              let url = URL(string: hit.origin.absoluteString + hit.tail) else {
             refuse(conn, 404); return
         }
         var req = URLRequest(url: url)

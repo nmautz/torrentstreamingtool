@@ -3122,6 +3122,15 @@ reached through Tailscale is on no network the TV can see. So AirPlay always goe
   tested `castLive`, and a lock's active bounce inside the window armed the hand-back
   deadline, which stopped the TV (`disarm reason:"handback-timeout"` a few seconds
   after `cast-live`).
+- **No window on a wired display during a cast (20.13.3).** `isHolding` reads
+  `extWindow != nil` as "the picture is held". `sceneDidConnect` and `screenDidChange`
+  built the window whenever native was active, and a cast is native with no player:
+  glasses plugged in mid-cast got an empty black window, To Phone's `releaseToPhone`
+  cleared `castLive`, `reclaim()` still answered `holding`, `_npHandBack` returned, and
+  the next receiver status set `castLive` again. `ensureExternalWindow`,
+  `attachVideoSurface` and `maybeClaimEarly` now refuse while `cast != nil`, and
+  `startCast` drops a window claimed earlier. The first arm after the cast ends claims
+  the display. Found from the code, with no client-log rows for the moment.
 - **A disarm ends the cast, not the hold.** `disarm` stops the native player and with
   it the cast / AirPlay session, but `_npHolding` and `_npCastName` are the page's and
   only `lpStop`, a hand-back or a native event clear them. `lpUnloadCurrent` used to
@@ -3184,10 +3193,22 @@ reached through Tailscale is on no network the TV can see. So AirPlay always goe
   episode's master under the new file path. Native keeps playing, but a quality pick or
   an AirPlay audio change reloads `armed.url`. The listener now takes the URL and the
   `source` (`device` / `server`) from the `lp._nextNative` it armed.
-- **A next episode armed from the phone must be a loopback-page URL.** `AirPlayDoor`
-  proxies ONE upstream origin. `_lpLocalNextNative` therefore only answers on the
-  loopback page (offline or proxied); a `/StreamLinkBundles/` URL armed from the host
-  page would fail `lanURL(for:)` and hand the TV a `127.0.0.1` address.
+- **A TV session crosses origins, and a URL the door will not take goes to the TV raw
+  (20.13.3).** Every caller of `lanURL(for:)` falls back to the URL it was given
+  (`?? url`). The door used to proxy ONE origin, the one the session opened on, so
+  anything from another origin reached the receiver untranslated. On 2026-10-06 a cast
+  began on SpongeBob streamed from the box (`cast-start upstream:"http://192.168.0.106"`);
+  picking a downloaded Hunter x Hunter episode reloaded the page onto the loopback
+  server, the arm carried `http://127.0.0.1:56842/…`, and the Chromecast was told to
+  load it: `cast-load host:"127.0.0.1"`, `cast-failed why:"load_failed"` 2.8 s later,
+  and the episode played on the phone. The loopback port changes on every `lms-start`,
+  so the same happens from one loopback page to the next. `lanURL` now admits a new
+  origin into its own slot (`/ap/<token>.<n>/`, `airplay-door-origin`). **`cast-load
+  host` must be the phone's Wi-Fi address; `127.0.0.1` there is this bug.** The one URL
+  `lanURL` must still refuse is a door URL (armed URLs are stored translated and pass
+  through again on a reload): admitting the door's own address proxies it to itself.
+  `_lpLocalNextNative` still only answers on the loopback page; that restriction
+  predates the slots and has not been lifted.
 - **FINISHED is polled, not pushed once.** Status is read at 1 Hz, so an IDLE/FINISHED
   arrives repeatedly. `castReady` is the latch, and without it one episode end would
   advance several times.
