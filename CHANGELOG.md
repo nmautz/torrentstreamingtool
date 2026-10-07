@@ -1,5 +1,21 @@
 # Changelog
 
+## [20.14.2] — 2026-10-06
+### A release name with a word missing still finds its episode, and a retry can't swap in another episode
+
+- **"S03E20 Mermaid and Barnacle Boy V" was filed as episode 20.** The release leaves out
+  "Man", so it did not match TMDb's name for episode 21 and stayed on its number, in the
+  "Chocolate with Nuts" slot. A name of four words or more is now recognised with one
+  word missing, unless two episodes would fit.
+- **An automatic replacement put "S03E19 Chocolate with Nuts" (really episode 20) in the
+  episode 19 download.** The retry ran before the new item had its episode names, so it
+  could only go by number. It now reads the names from another item of the same show.
+  With no names anywhere, a replacement that states a different episode title from the
+  release it replaces is refused.
+- **Not checked:** the retry change has no automated test and was not reproduced on the
+  box. The name rule was run over all 598 TV files in the box's library: the one file
+  above moves and nothing else does.
+
 ## [20.14.1] — 2026-10-06
 ### Get no longer mistakes a single file for a whole season
 

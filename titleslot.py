@@ -144,6 +144,38 @@ def _find(needle: list, hay: list) -> list:
     return out
 
 
+# A name this long may be stated with one word missing.
+_NEAR_MIN_WORDS = 4
+
+
+def _near(keys: dict, title_words: list, exact: list) -> list:
+    """Spans where a long name appears with ONE word left out: "Mermaid and
+    Barnacle Boy V" for "Mermaid Man and Barnacle Boy V".
+
+    Only for a name of four words or more, only when what is left still has a
+    word of four letters, never over words an exact match already explains, and
+    never when two episodes could both be meant: "Mermaid Man and Barnacle Boy"
+    with the numeral dropped is IV as much as it is V, so it is neither."""
+    found = {}
+    for k, nos in keys.items():
+        if len(nos) != 1 or len(k) < _NEAR_MIN_WORDS:
+            continue
+        for i in range(len(k)):
+            short = list(k[:i] + k[i + 1:])
+            if not any(len(w) >= 4 and not w.isdigit() for w in short):
+                continue
+            for a, b in _find(short, title_words):
+                found.setdefault((a, b), set()).add(nos[0])
+    out = []
+    for (a, b), nos in found.items():
+        if len(nos) != 1:
+            continue
+        if any(a < eb and ea < b for ea, eb, _ in exact):
+            continue
+        out.append((a, b, next(iter(nos))))
+    return out
+
+
 def named(title_words: list, season_eps) -> list:
     """Every episode of the season whose whole name appears in `title_words`,
     as `(position, episode)` in the order stated.
@@ -169,6 +201,7 @@ def named(title_words: list, season_eps) -> list:
             continue
         for a, b in _find(list(k), title_words):
             spans.append((a, b, nos[0]))
+    spans.extend(_near(keys, title_words, spans))
     out = []
     for a, b, no in spans:
         if any((a2 <= a and b <= b2) and (b2 - a2) > (b - a) for a2, b2, _ in spans):

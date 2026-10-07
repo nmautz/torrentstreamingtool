@@ -808,6 +808,9 @@ release tag, and looks for TMDb episode names of **that season** in them:
   and apostrophes are ignored (`Jellyfish Hunters`, `Grandmas Kisses`), and spaces inside a name are
   not significant (`Pre-Hibernation Week` is `Prehibernation Week`). Two episodes with the same name
   are never matched.
+* A name of **four words or more** also counts with **one word missing** (20.14.2: "Mermaid and
+  Barnacle Boy V"), but never over words an exact match explains and never when two episodes
+  would fit ("Mermaid Man and Barnacle Boy" is IV as much as V).
 * A file is **moved** off its own number only when its stated title shares no word with TMDb's name
   for that number. It goes to the lowest-numbered episode it names.
 * Every other episode it names goes in **`also`**. A file that names its own episode and one more

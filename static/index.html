@@ -17659,6 +17659,27 @@ function _tsNamed(title, eps){
     if(v.nos.length!==1) return;
     _tsFind(v.k, title).forEach(([a,b])=>spans.push([a,b,v.nos[0]]));
   });
+  // One word missing from a name of four or more ("Mermaid and Barnacle Boy V").
+  // Never over words an exact match explains, never when two episodes fit.
+  const near=new Map();
+  keys.forEach(v=>{
+    if(v.nos.length!==1 || v.k.length<4) return;
+    for(let i=0;i<v.k.length;i++){
+      const short=v.k.filter((_,j)=>j!==i);
+      if(!short.some(w=>w.length>=4 && !/^\d+$/.test(w))) continue;
+      _tsFind(short, title).forEach(([a,b])=>{
+        const id=a+"-"+b;
+        if(!near.has(id)) near.set(id,{a,b,nos:new Set()});
+        near.get(id).nos.add(v.nos[0]);
+      });
+    }
+  });
+  const exact=spans.slice();
+  near.forEach(n=>{
+    if(n.nos.size!==1) return;
+    if(exact.some(([ea,eb])=>n.a<eb && ea<n.b)) return;
+    spans.push([n.a,n.b,[...n.nos][0]]);
+  });
   const out=spans.filter(([a,b])=>!spans.some(([a2,b2])=>a2<=a && b<=b2 && (b2-a2)>(b-a)))
                  .map(([a,,no])=>[a,no]).sort((x,y)=>(x[0]-y[0])||(x[1]-y[1]));
   const seen=new Set(), uniq=[];
@@ -33098,6 +33119,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.14.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.14.2</div>
 </body>
 </html>

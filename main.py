@@ -10644,8 +10644,33 @@ def _proven_release_groups(lib: dict) -> set:
     return proven
 
 
+def _season_names(lib: dict, item: dict) -> list:
+    """TMDb's episode list for the season `item` was asked for, from the item's
+    own metadata or, while that has not bound yet, from any other item of the
+    same show. `[]` when nobody holds it.
+
+    A retry can fire minutes after a download starts, before the new item has
+    metadata. Without the sibling read `_retry_candidates` judged by number
+    alone and put "S03E19 Chocolate with Nuts" (TMDb's E20) in the E19 item."""
+    season = str(int(item.get("season") or 0))
+    if season == "0":
+        return []
+    own = (((item.get("metadata") or {}).get("seasons") or {}).get(season) or {}).get("episodes")
+    if own:
+        return own
+    key = _series_key(item)
+    for it in lib.get("items") or []:
+        if it is item or _series_key(it) != key:
+            continue
+        eps = (((it.get("metadata") or {}).get("seasons") or {}).get(season) or {}).get("episodes")
+        if eps:
+            return eps
+    return []
+
+
 def _retry_candidates(item: dict, shaped: list, tried: set,
-                      proven: Optional[set] = None) -> list:
+                      proven: Optional[set] = None,
+                      season_eps: Optional[list] = None) -> list:
     """Alternative releases for `item`, best first, excluding everything tried.
 
     For an episode item the candidate must parse to the **same season+episode** —
@@ -10675,8 +10700,13 @@ def _retry_candidates(item: dict, shaped: list, tried: set,
     # A cinema recording is never an unattended replacement for a film — unless
     # the copy being replaced is one, which means a person chose it by hand.
     own_cam = relquality.is_cam(item.get("title") or "")
-    season_eps = ((((item.get("metadata") or {}).get("seasons") or {})
-                   .get(str(season)) or {}).get("episodes")) or []
+    if season_eps is None:
+        season_eps = ((((item.get("metadata") or {}).get("seasons") or {})
+                       .get(str(season)) or {}).get("episodes")) or []
+    # What the release being replaced calls its episode, for when TMDb's names
+    # are not to hand: two releases that both state a title and share no word
+    # of it are not the same episode, whatever number they carry.
+    own_words = set(titleslot.stated(item.get("title") or ""))
     out: list = []
     seen: set = set()
     for r in shaped:
@@ -10704,6 +10734,10 @@ def _retry_candidates(item: dict, shaped: list, tried: set,
             holds = ([ts["episode"]] + ts["also"]) if ts else [pt["episode"]]
             if episode not in holds:
                 continue
+            if not season_eps:
+                theirs = set(titleslot.stated(title))
+                if own_words and theirs and not (own_words & theirs):
+                    continue
         seen.add(rkey)
         out.append((key, r))
     pg = proven or set()
@@ -10871,7 +10905,8 @@ async def _retry_dead_download(item: dict, lib: dict) -> str:
         log.warning("[download] retry search failed for %s: %s", query, exc)
         return ""   # indexers down — not the release's fault, try again later
 
-    cands = _retry_candidates(item, shaped, tried, _proven_release_groups(lib))
+    cands = _retry_candidates(item, shaped, tried, _proven_release_groups(lib),
+                              _season_names(lib, item))
     if not cands:
         return _fail_dead_download(item, len(attempts))
 
@@ -10995,7 +11030,8 @@ async def _rescue_stalled_download(item: dict, lib: dict) -> bool:
     except Exception as exc:
         log.warning("[stall] rescue search failed for %s: %s", query, exc)
         return True
-    cands = _retry_candidates(item, shaped, tried, _proven_release_groups(lib))
+    cands = _retry_candidates(item, shaped, tried, _proven_release_groups(lib),
+                              _season_names(lib, item))
     if not cands:
         if mark.get("tries") == 1:
             log.warning("[stall] %s is stuck at %d bytes and no other release of it "

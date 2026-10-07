@@ -6993,6 +6993,11 @@ name** it states. Things to keep in mind:
 - **The by-name query** (`_tsNameQuery`, last form in `_ssEpisodeQueries` and the fallback in
   `_bgEpisodeSearch`) returns mostly other seasons; only results whose stated title names
   the wanted episode are kept.
+- **A retry can run before the item has metadata** (20.14.2). `_retry_candidates` then had
+  no names and judged by number: SpongeBob's E19 download was replaced by "S03E19 Chocolate
+  with Nuts", TMDb's E20. `_season_names` reads the season's names from any item of the same
+  show, and with none to hand a candidate whose stated title shares no word with the title
+  of the release being replaced is refused. No unit test covers this.
 - **Many old cartoons' releases state no episode name** (measured: The Powerpuff Girls 0 of
   65, Rugrats 7 of 35). The rule has nothing to read there and changes nothing.
 

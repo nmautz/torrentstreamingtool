@@ -105,6 +105,22 @@ NEST = [{"episode": 1, "name": "Shanghaied"}, {"episode": 2, "name": "Shanghaied
 eq("a name inside a longer matched name is not a second episode",
    S("Show S01E03 Shanghaied Again 1080p", NEST), (2, []))
 
+# ── One word missing from a long name ───────────────────────────────────────
+S3 = [{"episode": 1, "name": "Mermaid Man and Barnacle Boy IV"},
+      {"episode": 20, "name": "Chocolate with Nuts"},
+      {"episode": 21, "name": "Mermaid Man and Barnacle Boy V"},
+      {"episode": 22, "name": "Club SpongeBob"}]
+eq("a long name with one word missing",
+   S("SpongeBob SquarePants S03E20 Mermaid and Barnacle Boy V REPACK 1080p AMZN", S3), (21, []))
+eq("... but not when two episodes could be meant",
+   S("SpongeBob SquarePants S03E20 Mermaid Man and Barnacle Boy REPACK 1080p", S3), None)
+eq("... and the exact name still wins",
+   S("SpongeBob SquarePants S03E20 Mermaid Man and Barnacle Boy IV REPACK 1080p", S3), (1, []))
+eq("a three-word name gets no tolerance",
+   S("Show S03E22 Big Loser 1080p", S3 + [{"episode": 23, "name": "Big Pink Loser"}]), None)
+eq("two words missing is not a match",
+   S("SpongeBob SquarePants S03E20 Barnacle Boy V REPACK 1080p", S3), None)
+
 eq("a hyphenated word is not a release tag", ts.stated("Show S01E01 Spider-Man Returns 1080p WEB-DL"),
    ["spider", "man", "return"])
 eq("the group's hyphen is", ts.stated("Show S01E01 Pilot H 264-Kitsune"), ["pilot", "h"])
