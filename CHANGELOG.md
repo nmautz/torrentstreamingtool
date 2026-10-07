@@ -1,5 +1,38 @@
 # Changelog
 
+## [20.14.0] — 2026-10-06
+### Episodes are filed by the name a release states, and one file can hold two
+
+- **"Get them" reported half of SpongeBob season 2 as having no source.** The releases
+  number the season differently from TMDb: one set leaves out "Christmas Who?", so its
+  "S02E09 Dying for Pie" is really episode 10 and every number after it is one off; the
+  half-hour releases put two episodes in one file. Get refused all of them, correctly,
+  as the wrong episode. Choose listed them anyway, and picking one put the wrong episode
+  in the slot.
+- **A release is now filed under the episode whose name it states.** "S02E09 Dying for
+  Pie" is offered, downloaded and shown as episode 10. This happens only when an
+  episode's whole name appears in the release name and that name shares no word with
+  the episode its number points at. A release that states no name is filed by number, as
+  before.
+- **A half-hour release counts as both of its episodes.** "Survival of the Idiots &
+  Dumped" fills episodes 14 and 15: neither shows as missing, and the row carries both
+  names. Get avoids a two-episode file when it would repeat an episode you already have
+  and a single-episode copy exists.
+- **Get also searches by episode name** when the numbers find nothing.
+- **Files already in the library move the next time their show is opened.** On the box
+  that is one file: "Dying for Pie", from episode 9 to 10.
+- **Automatic replacement of a stalled download** no longer accepts a release whose
+  stated name is a different episode.
+- **Not fixed:** a release that names an episode TMDb does not list in that season stays
+  under its number ("Welcome to the Chum Bucket & Frankendoodle" at S02E14, "Gary Takes
+  a Bath" at S02E20). "Christmas Who?" is only released as a special ("S00E01"), so Get
+  still finds no source for S02E09. A release whose file inside the torrent carries no
+  episode name is filed by its number.
+- **Not checked:** on the box or in a browser. Tested against real search results and
+  the box's library data offline: of 11 missing episodes Get finds 10 (all but
+  "Christmas Who?"), and across all 553 TV files in the library only the one misfiled
+  episode moves.
+
 ## [20.13.3] — 2026-10-06
 ### Picking a downloaded episode while casting no longer drops it onto the phone
 

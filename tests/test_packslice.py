@@ -29,7 +29,11 @@ WANT = {"_pack_slice_want", "_pack_slice_apply", "_pack_slice_settle",
 CONSTS = {"_PACK_EXTRA_MAX_BYTES", "_PACK_SLICE_GRACE_SECS",
           "_PACK_FIRST_MAX_BYTES", "_FILE_MODES", "_DL_PRIORITIES"}
 
+sys.path.insert(0, str(MAIN.parent))
+import titleslot            # noqa: E402  (leaf module the lifted functions call)
+
 ns = {"Path": Path, "Optional": Optional, "datetime": datetime, "timezone": timezone,
+      "titleslot": titleslot,
       "_now_iso": lambda: datetime.now(timezone.utc).isoformat(),
       "_series_key": lambda it: it.get("series", "")}
 pieces = []
@@ -255,6 +259,28 @@ it5["download"]["files"].pop(str(Path(SP3) / "ep3.mkv"))
 it5["pack_slice"]["settled"] = True
 check("the summary follows what is actually kept (Seasons 1 and 2)",
       ns["_pack_scope_summary"](it5)["seasons"] == [1, 2])
+
+# ── A two-segment file is two episodes (titleslot.py, 20.14.0) ─────────────────
+# The half-hour "S02E09 Survival of the Idiots & Dumped" is TMDb's E14 and E15:
+# filed at 14 with `also: [15]`. Asking for either must keep it.
+print("two-segment files")
+SP6 = r"D:\media\Show S02"
+def lf6(name, e, **kw): return {"path": str(Path(SP6) / name), "name": name, "season": 2,
+                                "episode": e, "size_bytes": 1_400_000_000, **kw}
+q6 = [qf("a.mkv", 1_400_000_000), qf("b.mkv", 1_400_000_000)]
+it6 = {"id": "i6", "torrent_hash": "h6", "series": "Show",
+       "files": [lf6("a.mkv", 14, also=[15]), lf6("b.mkv", 16)],
+       "pack_slice": {"want": [[2, 15]], "settled": False,
+                      "since": ns["_now_iso"](), "skipped": [], "fallback": {}}}
+check("a slice wanting the second half keeps the file", _apply(it6, q6, SP6) == "ok"
+      and _cfgmode(_dlcfg(it6), str(Path(SP6) / "a.mkv")) != "skip"
+      and _cfgmode(_dlcfg(it6), str(Path(SP6) / "b.mkv")) == "skip")
+it7 = {"id": "i7", "torrent_hash": "h7", "series": "Show", "status": "ready",
+       "files": [lf6("a.mkv", 14, also=[15])],
+       "download": {"mode": "now", "files": {str(Path(SP6) / "a.mkv"): "skip"}}}
+hit = _avail({"items": [it7]}, 2, 15, series_key="Show")
+check("a skipped half-hour is found by its second episode", bool(hit) and hit["item_id"] == "i7")
+check("... and not by an episode it does not hold", _avail({"items": [it7]}, 2, 16, series_key="Show") is None)
 
 print()
 print("FAILED: " + "; ".join(fails) if fails else "all checks passed")

@@ -129,6 +129,19 @@ def episode_span(file_name: str, season: int, episode: int) -> int:
     return end if episode < end <= episode + _MAX_SPAN else episode
 
 
+def _held(f: dict, episode: int) -> list:
+    """Every episode a file holds, ascending: its own plus `also`."""
+    out = {episode}
+    for n in f.get("also") or []:
+        try:
+            n = int(n)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            out.add(n)
+    return sorted(out)
+
+
 def _year(date) -> str:
     date = date if isinstance(date, str) else ""
     return date[:4] if re.match(r"\d{4}", date) else ""
@@ -228,13 +241,22 @@ def label_file(f: dict, meta: Optional[dict], fallback_show: str = "") -> dict:
     if season > 0 and episode > 0:
         last = episode_span(file_name, season, episode)
         code = f"S{season:02d}E{episode:02d}" + (f"-E{last:02d}" if last > episode else "")
+        # A two-segment file the title pass placed (titleslot.py): `also` is the
+        # other episodes it holds, which need not follow on from its own.
+        held = _held(f, episode)
+        if len(held) > 1:
+            run = held == list(range(held[0], held[0] + len(held)))
+            code = f"S{season:02d}E{held[0]:02d}" + (
+                f"-E{held[-1]:02d}" if run else "".join(f"+E{n:02d}" for n in held[1:]))
         abs_no = int(f.get("abs_no") or 0)
         # Only when it says something the code doesn't: TMDb numbers some
         # seasons on from the last (Hunter x Hunter S02E63 IS episode 63).
         if abs_no and abs_no != episode:
             code += f" ({abs_no})"
         eps = ((seasons.get(str(season)) or {}).get("episodes")) or []
-        name = _join_names(_episode_names(eps, episode, last)) or name_from_file(file_name)
+        names = ([_episode_names(eps, n, n)[0] for n in held] if len(held) > 1
+                 else _episode_names(eps, episode, last))
+        name = _join_names(names) or name_from_file(file_name)
         return compose(show, code, name, file_name)
 
     if season == 0 and episode > 0:

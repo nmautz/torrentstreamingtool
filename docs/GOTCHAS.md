@@ -6965,6 +6965,37 @@ run's metadata explicitly (`meta:` / `ctx.meta`): `_ssMeta` is null when no show
 is open. When every source is rejected, the pick is **null**: no download beats a
 wrong one.
 
+**20.14.0: the same evidence now places the release instead of only refusing it.**
+Refusing was right but left Get with nothing: for SpongeBob S02E10-E22 every release under
+the number is another episode, so Get reported them all unsourced while the right files sat
+in the same results under other numbers. `titleslot.py` (server, attribution pass 5) and its
+mirror `_titleSlot` / `_reslot` (dashboard) file a release under the episode whose **whole
+name** it states. Things to keep in mind:
+
+- **Change one, change both.** The Python and the JS were compared on 173 real titles and
+  agree on all of them; keep it that way. `tests/test_titleslot.py` holds the cases.
+- **`_reslot` mutates results in place and once**: `episode` becomes the stated episode,
+  `_ts` keeps the number the release carried (0 = looked at, left alone), `also` lists further
+  episodes. A result seen before the season's names loaded is left unmarked and gets its
+  turn later (`_ssRefileEpisodes` on the show page).
+- **A two-segment release sits in the bucket of every episode it holds.** Count episodes
+  with `_srcHolds`, never `r.episode` alone. `_bgPlanJobs` skips an episode an earlier job
+  already brings, and passes over a release that repeats an episode already held when a
+  copy that does not is on offer.
+- **A download is filed under the release's first episode**, whichever row it was picked
+  from (`_srcSlotEpisode` in `_ssDownloadOne`), so `item.episode` matches where the server
+  will slot the file.
+- **The server reads the FILE name, not the torrent title.** A torrent whose file carries no
+  episode name is filed by its number even when the title named one.
+- **Only within one season.** "S00E01 Christmas Who" is not recognised as S02E09. A name
+  TMDb does not list in the season ("Gary Takes a Bath") leaves the file on its number, in
+  another episode's slot. Neither is detected.
+- **The by-name query** (`_tsNameQuery`, last form in `_ssEpisodeQueries` and the fallback in
+  `_bgEpisodeSearch`) returns mostly other seasons; only results whose stated title names
+  the wanted episode are kept.
+- **Many old cartoons' releases state no episode name** (measured: The Powerpuff Girls 0 of
+  65, Rugrats 7 of 35). The rule has nothing to read there and changes nothing.
+
 ## A still, silent ending is not a hole (19.10.0)
 
 `bundlecheck` judges from segment sizes. A sparse-file hole (a source prepped

@@ -795,6 +795,41 @@ boot sweep ~75 s after start. A show whose group list can't be fetched is tried 
 real data (`tests/test_epgroups.py`): Attack on Titan's specials land after S04E28, Firefly's three
 unaired episodes after S01E11, and Breaking Bad, Game of Thrones and Hunter x Hunter move nothing.
 
+**Pass 5 — the name a file states (20.14.0)** (`titleslot.place_files`, same call site). A
+release's number is its group's idea of the show. TMDb puts SpongeBob's "Christmas Who?" at
+S02E09; the per-segment AMZN set leaves it out, so its `S02E09 Dying for Pie` is TMDb's **E10** and
+every later number is one off; the half-hour sets (SKST, MeGusta) hold two segments per file, so
+`S02E09 Survival of the Idiots & Dumped` is TMDb's **E14 and E15**.
+
+`titleslot.slot(name, season_episodes)` reads the words after the `SxxExx` marker, up to the first
+release tag, and looks for TMDb episode names of **that season** in them:
+
+* A name counts only as a **whole phrase**, in order, with a word of four letters or more. Plurals
+  and apostrophes are ignored (`Jellyfish Hunters`, `Grandmas Kisses`), and spaces inside a name are
+  not significant (`Pre-Hibernation Week` is `Prehibernation Week`). Two episodes with the same name
+  are never matched.
+* A file is **moved** off its own number only when its stated title shares no word with TMDb's name
+  for that number. It goes to the lowest-numbered episode it names.
+* Every other episode it names goes in **`also`**. A file that names its own episode and one more
+  keeps its slot and gains `also`.
+* No name stated, or none recognised: no opinion, nothing moves.
+
+Fields it writes on a file: `episode`, `also` (list of further episode numbers of the same season;
+absent when empty) and `ts_from` (the number the file name carries; present only on a moved file).
+Nothing else is stored. The answer is derived from the file name every time, which is why it
+survives `build_file_list` rebuilding the list on every monitor tick, and why a file goes back to
+its own number if TMDb renames the episode.
+
+It only touches a plain numbered file whose slot is still what its name says (or that it moved
+before): not a bucketed file, not one the anime passes numbered, not a special with a `home`. It
+stands down for any show the anime mapping table covers. `titleslot.held(f)` (own episode plus
+`also`) is what coverage, `pack_slice` matching, `pack-fetch` and `pack-lookup` count, and
+`eplabel` writes the code as `S02E14-E15` (or `S02E14+E22` when the two are not adjacent) with both
+names. Existing items reach the pass through `_nudge_metadata_health` condition 4
+(`_title_slots_pending`) on the next open of their show. The dashboard mirrors the rule for search
+results (`_titleSlot` / `_reslot`); see [GOTCHAS.md](GOTCHAS.md) § A release's number is not its
+episode. Measured on the box's library (553 TV files, 11 shows): one file moves.
+
 `_settle_attribution` also **tops up the episode lists for any season the correction reveals**: the
 season list sent to TMDb is derived from the files, so correcting the files can surface seasons whose
 episodes were never fetched (they'd gain a tab but no titles or stills). Bounded to 12 extra seasons

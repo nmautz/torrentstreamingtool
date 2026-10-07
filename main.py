@@ -62,6 +62,7 @@ import refiner
 import dvprobe
 import eplabel
 import epgroups
+import titleslot
 import episodes
 import racerules
 import relquality
@@ -4265,7 +4266,7 @@ async def _tmdb_fetch_movie(movie_id: int) -> dict:
 
 
 def _reattribute_item_files(item: dict, metadata: Optional[dict]) -> bool:
-    """Passes 2 and 3: settle the episode numbers now that TMDb's season
+    """Passes 2 to 5: settle the episode numbers now that TMDb's season
     inventory is known. In place; returns True if anything changed.
 
     **Pass 2** (`episodes.resolve_absolute`) turns series-absolute numbers into
@@ -4313,6 +4314,14 @@ def _reattribute_item_files(item: dict, metadata: Optional[dict]) -> bool:
         homes = _ep_group_homes(metadata)
         if homes is not None:
             changed |= epgroups.place_files(files, homes, metadata.get("title") or "")
+    # **Pass 5** (`titleslot.place_files`): a file whose stated episode name is
+    # another episode's - SpongeBob's "S02E09 Dying for Pie" is TMDb's E10 - and
+    # a two-segment file, which holds a second episode (`also`). Derived from
+    # the file name alone, so it survives the rebuild `_resettle_files` exists
+    # for. Never for a show the anime table covers: those numbers were decoded
+    # on another grid, and a name read against the wrong season proves nothing.
+    if not _anime_entries(metadata):
+        changed |= titleslot.place_files(files, metadata.get("seasons") or {})
     if changed:
         files.sort(key=episodes.sort_key)
     return changed
@@ -5283,6 +5292,11 @@ def _nudge_metadata_health(item: dict) -> None:
     `(4, 0)` on the box after the release. Fires when the item has a candidate
     and the groups are either unknown here or would still move something. It
     stops matching once placed, because `place_files` is idempotent.
+
+    **4 — a file its stated episode name would move (20.14.0).** Same reason,
+    for pass 5 (`titleslot.place_files`): SpongeBob's "S02E09 Dying for Pie"
+    sat in TMDb's "Christmas Who?" slot on the box. Offline and pure, so the
+    test is simply running the pass on a copy.
     """
     meta = item.get("metadata") or {}
     if not meta:
@@ -5305,8 +5319,19 @@ def _nudge_metadata_health(item: dict) -> None:
         return
     if ((meta.get("tmdb_kind") == "tv" and "all_seasons" not in meta)
             or _movie_binding_is_stale(item, meta)
-            or _ep_groups_pending(item, meta)):
+            or _ep_groups_pending(item, meta)
+            or _title_slots_pending(item, meta)):
         _spawn_metadata_fetch(item["id"])
+
+
+def _title_slots_pending(item: dict, meta: dict) -> bool:
+    """Would pass 5 (`titleslot.place_files`) change anything for this item?"""
+    if meta.get("tmdb_kind") != "tv" or not isinstance(meta.get("seasons"), dict) \
+            or not isinstance(meta.get("all_seasons"), list) or not meta["all_seasons"] \
+            or _anime_entries(meta):
+        return False
+    trial = [dict(f) for f in item.get("files") or []]
+    return titleslot.place_files(trial, meta["seasons"])
 
 
 def _ep_groups_pending(item: dict, meta: dict) -> bool:
@@ -6818,7 +6843,7 @@ def _pack_slice_apply(item: dict, qfiles: list, save_path: str) -> str:
             modes.pop(p, None)
 
     matched = {f.get("path", "") for f in item.get("files") or []
-               if ((int(f.get("season", 0) or 0), int(f.get("episode", 0) or 0)) in want
+               if (any((int(f.get("season", 0) or 0), e) in want for e in titleslot.held(f))
                    or int(f.get("season", 0) or 0) in want_seasons)
                and not (f.get("bucket") or "")}
     matched.discard("")
@@ -6953,7 +6978,7 @@ def _pack_available(lib: dict, season: int, episode: int,
         cfg = _download_cfg(it)
         for f in it.get("files") or []:
             if (int(f.get("season", 0) or 0) != s
-                    or int(f.get("episode", 0) or 0) != e
+                    or e not in titleslot.held(f)
                     or (f.get("bucket") or "")):
                 continue
             if _effective_file_mode(cfg, f.get("path", "")) != "skip":
@@ -10650,6 +10675,8 @@ def _retry_candidates(item: dict, shaped: list, tried: set,
     # A cinema recording is never an unattended replacement for a film — unless
     # the copy being replaced is one, which means a person chose it by hand.
     own_cam = relquality.is_cam(item.get("title") or "")
+    season_eps = ((((item.get("metadata") or {}).get("seasons") or {})
+                   .get(str(season)) or {}).get("episodes")) or []
     out: list = []
     seen: set = set()
     for r in shaped:
@@ -10668,8 +10695,14 @@ def _retry_candidates(item: dict, shaped: list, tried: set,
             continue
         if season and episode:
             pt = parse_torrent_title(title)
-            if (pt["kind"] != "episode" or pt["season"] != season
-                    or pt["episode"] != episode):
+            if pt["kind"] != "episode" or pt["season"] != season:
+                continue
+            # The episode it IS, not the number it carries: a release on another
+            # numbering ("S01E19 Fools in April & Neptune's Spatula") is not a
+            # replacement for S01E19 Opposite Day. See titleslot.py.
+            ts = titleslot.slot(title, season_eps)
+            holds = ([ts["episode"]] + ts["also"]) if ts else [pt["episode"]]
+            if episode not in holds:
                 continue
         seen.add(rkey)
         out.append((key, r))
@@ -16321,10 +16354,11 @@ async def library_coverage(request: Request, profile_id: str = "",
                 # episode owned. Season 0 never participates, same as the diff.
                 if not (s > 0 and e > 0) or (f.get("bucket") or ""):
                     continue
+                # `held`: a two-segment file is two episodes (titleslot.py).
                 if not skipped:
-                    bucket.setdefault(str(s), []).append(e)
+                    bucket.setdefault(str(s), []).extend(titleslot.held(f))
                 elif live:
-                    in_pack.setdefault(str(s), []).append(e)
+                    in_pack.setdefault(str(s), []).extend(titleslot.held(f))
         for d in (have, pending, in_pack):
             for s in d:
                 d[s] = sorted(set(d[s]))
@@ -16619,6 +16653,9 @@ async def _build_item_files(item: dict, profile_id: str) -> list[dict]:
             # season: {season, after[, placed]}. The Seasons view lists it in
             # that season's tab after episode `after`. See epgroups.py.
             "home": f.get("home") if isinstance(f.get("home"), dict) else None,
+            # Further episodes of its season this one file holds - the second
+            # segment of a half-hour release. Counted as owned. See titleslot.py.
+            "also": [int(n) for n in (f.get("also") or [])],
             # What to CALL this file - "Show · S01E03" over the episode's name.
             # Every surface shows this, never `name`; the file name is only the
             # label when neither number nor name is known. See eplabel.py.
@@ -19439,7 +19476,7 @@ async def library_pack_fetch(req: PackFetchReq) -> JSONResponse:
                     continue
                 if season and s != season:
                     continue
-                if want and e not in want:
+                if want and not (want & set(titleslot.held(f))):
                     continue
                 if _effective_file_mode(cfg, f.get("path", "")) != "skip":
                     continue

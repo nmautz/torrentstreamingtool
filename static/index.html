@@ -10691,19 +10691,21 @@ const _epOnBox=f=>(f.mode||"")!=="skip";
 // missing, but one flag flip from downloading rather than an indexer hunt away.
 function _epPackEpisodes(season){
   if(!epHasTorrent) return new Set();
+  // `_srcHolds`: a two-segment file is two episodes (`also`, titleslot.py).
   return new Set((epFiles||[])
     .filter(f=>!_epOnBox(f) && (+f.season||0)===+season && (+f.episode||0)>0
             && !(f.bucket||""))
-    .map(f=>+f.episode));
+    .flatMap(f=>_srcHolds(f)));
 }
 function _epPackFileFor(season, episode){
   return (epFiles||[]).find(f=>!_epOnBox(f) && (+f.season||0)===+season
-                            && (+f.episode||0)===+episode && !(f.bucket||"")) || null;
+                            && _srcHolds(f).includes(+episode) && !(f.bucket||"")) || null;
 }
 
 function _epMissingEpisodes(season){
   if(!_epMissingOn() || +season<=0) return [];
-  const have=new Set(epFiles.filter(f=>_epOnBox(f) && (+f.season||0)===+season).map(f=>+f.episode||0));
+  const have=new Set(epFiles.filter(f=>_epOnBox(f) && (+f.season||0)===+season && !(f.bucket||""))
+                            .flatMap(f=>_srcHolds(f)));
   return _missingTmdbEpisodes(epMetadata, season, have, missingUnaired);
 }
 
@@ -10712,7 +10714,9 @@ function _epMissingEpisodes(season){
 // fetched yet (a season we own nothing from, before the lazy top-up lands), so a
 // brand-new tab can still say "0 of 12" rather than nothing.
 function _epSeasonCounts(season){
-  const have=epFiles.filter(f=>_epOnBox(f) && (+f.season||0)===+season).length;
+  // Episodes, not files: a two-segment file is two of them (`also`).
+  const have=epFiles.filter(f=>_epOnBox(f) && (+f.season||0)===+season)
+                    .reduce((n,f)=>n+Math.max(1,_srcHolds(f).length),0);
   if(+season<=0 || !_epMissingOn()) return {have, total:have, missing:0};
   const eps=_tmdbSeasonEpisodes(epMetadata, season);
   let total, missing;
@@ -12250,11 +12254,11 @@ function _epOwnedRow(){
     // Counting it as owned is what let "Get the missing episodes" decide a sliced
     // season pack had nothing missing at all. See `_epOnBox`.
     if(!_epOnBox(f)){
-      if(epHasTorrent) (in_pack[String(sn)]=in_pack[String(sn)]||[]).push(ep);
+      if(epHasTorrent) (in_pack[String(sn)]=in_pack[String(sn)]||[]).push(..._srcHolds(f));
       return;
     }
     const m=(f.complete===false)?pending:have;
-    (m[String(sn)]=m[String(sn)]||[]).push(ep);
+    (m[String(sn)]=m[String(sn)]||[]).push(..._srcHolds(f));
   });
   return {have, pending, in_pack, tmdb_id:+((epMetadata||{}).tmdb_id)||0};
 }
@@ -12439,14 +12443,9 @@ function _epGetMissing(scope, label, btn, only){
     }
     const eps=await _bgEnsureSources(ctx,ctl,report);
     if(!eps) return;
-    const jobs=[], unsourced=[];
-    eps.forEach(e=>{
-      const src=e.sources.length?_bgAutoPick(ctx,e.sources,filt):null;
-      if(src) jobs.push({src, season:e.season, episode:e.episode});
-      else unsourced.push(_ssEpCode(e.season,e.episode));
-    });
+    const {jobs, unsourced}=_bgPlanJobs(ctx, eps, filt);
     await _bgStartDownloads(ctx, ctl, report, jobs, "",
-                            {total:eps.length, unsourced});
+                            {total:jobs.length+unsourced.length, unsourced});
   });
   if(!started) return;
   if(btn){ _markLoading(btn, true); setTimeout(()=>_markLoading(btn,false), 800); }
@@ -16252,16 +16251,30 @@ function _ssRenderAudioChips(){
 
 function _ssBuildEpisodes(results){
   const map=new Map();
-  results.filter(r=>r.kind==="episode").forEach(r=>{
-    const k=`${r.season}-${r.episode}`;
-    let e=map.get(k);
-    if(!e){ e={season:r.season,episode:r.episode,sources:[]}; map.set(k,e); }
-    e.sources.push(r);
+  // Filed under the episode each release STATES, and under every episode a
+  // two-segment release holds. See _reslot.
+  _reslot(results, _ssMeta).filter(r=>r.kind==="episode").forEach(r=>{
+    _srcHolds(r).forEach(ep=>{
+      const k=`${r.season}-${ep}`;
+      let e=map.get(k);
+      if(!e){ e={season:r.season,episode:ep,sources:[]}; map.set(k,e); }
+      if(!e.sources.includes(r)) e.sources.push(r);
+    });
   });
   const eps=[...map.values()];
   eps.forEach(e=>_ssSortSources(e.sources, e.season, e.episode));
   eps.sort((a,b)=>(a.season-b.season)||(a.episode-b.episode));
   return eps;
+}
+
+// The show's episode names have just arrived: file what the page already holds
+// under them. Results bucketed before the metadata loaded were bucketed by
+// number alone.
+function _ssRefileEpisodes(){
+  if(!_ssEpisodes.length) return;
+  const all=[], seen=new Set();
+  _ssEpisodes.forEach(e=>e.sources.forEach(s=>{ if(!seen.has(s)){ seen.add(s); all.push(s); } }));
+  _ssEpisodes=_ssBuildEpisodes(all);
 }
 
 function _ssSeasonsWithEpisodes(){
@@ -16359,6 +16372,7 @@ async function openSearchShow(group){
       if(_ssGroup===group && d.metadata){   // still the open show
         _ssMeta=d.metadata; _ssImgBase=d.img_base||_ssImgBase; _ssTwin=d.twin||null;
         _noteAnimeFacts(_ssMeta, d.anime);
+        _ssRefileEpisodes();
         _ssResolveOwned();   // only now is there a TMDb identity to match on
         _ssRenderHero(); _ssRenderBody();
       }
@@ -16428,6 +16442,7 @@ async function openSearchShowFromTmdb(cand, opts){
       if(_ssGroup===group && d.metadata){
         _ssMeta=d.metadata; _ssImgBase=d.img_base||_ssImgBase; _ssTwin=d.twin||null;
         _noteAnimeFacts(_ssMeta, d.anime);
+        _ssRefileEpisodes();
         const seasons=_ssAllSeasons();
         // `keepSeason` callers asked for a season the RELEASES have, which TMDb
         // may not list at all — snapping to seasons[0] there would quietly send
@@ -16662,11 +16677,13 @@ async function ssSearchSeasonPacks(season, opts={}){
 // number of NEW sources taken on.
 function _ssMergeEpisodes(results){
   let added=0;
-  results.forEach(res=>{
-    let e=_ssEpisodes.find(x=>x.season===res.season&&x.episode===res.episode);
-    if(!e){ e={season:res.season,episode:res.episode,sources:[]}; _ssEpisodes.push(e); }
-    if(e.sources.some(s=>s.magnet===res.magnet)) return;
-    e.sources.push(res); added++;
+  _reslot(results, _ssMeta).forEach(res=>{
+    _srcHolds(res).forEach(ep=>{
+      let e=_ssEpisodes.find(x=>x.season===res.season&&x.episode===ep);
+      if(!e){ e={season:res.season,episode:ep,sources:[]}; _ssEpisodes.push(e); }
+      if(e.sources.some(s=>s.magnet===res.magnet)) return;
+      e.sources.push(res); added++;
+    });
   });
   if(added){
     _ssEpisodes.forEach(e=>_ssSortSources(e.sources, e.season, e.episode));
@@ -17452,6 +17469,12 @@ function _ssEpisodeQueries(season, episode){
        ...titles.map(t=>({t, bare:false, abs:absNo, q:`${t} ${code}`}))]
     : [...(abs?[]:titles.map(t=>({t, bare:false, q:`${t} ${code}`}))),
        ...titles.map(t=>({t, bare:true, q:`${t} ${abs?episode:String(episode).padStart(2,"0")}`}))];
+  // Last, by the episode's NAME: the form that finds a release numbered on
+  // another scheme ("S02E09 Dying for Pie" for TMDb's E10), which no number in
+  // the query can. Main title only, and only a name that can identify anything.
+  const epName=_tsNameQuery(_ssMeta, season, episode);
+  if(epName && !absNo && !abs && titles.length)
+    forms.push({t:titles[0], bare:false, name:true, q:`${titles[0]} ${epName}`});
   if(!forms.length) return forms;
   forms[0].orig=true;   // what this search always asked; the rest are fallbacks
   const win=_ssGroup && _ssEpFormWin.get(_ssGroup);
@@ -17560,6 +17583,145 @@ function _srcNamesOtherEpisode(res, meta){
     return k.size>0 && [...k].some(w=>w.length>=4) && [...k].every(w=>got.has(w));
   });
 }
+// ── Which episode a release IS, by the name it states (20.14.0) ──────────────
+// The mirror of titleslot.py - change one, change both. A release's number is
+// its group's idea of the show: SpongeBob's "S02E09 Dying for Pie" is TMDb's
+// E10 (the AMZN set leaves out "Christmas Who?"), and the half-hour releases
+// hold two TMDb episodes in one file ("S02E09 Survival of the Idiots & Dumped"
+// is E14 and E15). `_srcNamesOtherEpisode` above only REFUSED those, so Get
+// reported half a season as having no source while the right files sat in the
+// results under other numbers.
+//
+// `_titleSlot` answers {episode, also} or null (no opinion): an episode's whole
+// name must appear as a phrase with a word of 4+ letters, and a release is only
+// moved off its own number when its title shares no word with TMDb's name for
+// that number. See titleslot.py for the rules and tests/test_titleslot.py.
+const _TS_TAG=/^(\d{3,4}p|2160p|4k|uhd|web|webdl|web-dl|webrip|hdtv|pdtv|bluray|blu-ray|bdrip|brrip|dvdrip|remux|x26[45]|h ?26[45]|26[45]|hevc|avc|xvid|divx|av1|aac.*|ac3|dts.*|ddp?\d?|dd|flac.*|opus|atmos|repack\d?|proper|internal|uncut|extended|ws|hr|dubbed|subbed|multi.*|vostfr|swesub|subfrench|french|truefrench|german|spanish|ita|eng|spa|jap|jpn|nl|nf|amzn|hulu|pcok|dsnp|atvp|hmax|max|cr|all4|ip|bbc|itv|iqy|viu|shahid|mp4|mkv|avi|ts|e\d{1,3}|v\d|s\d{1,2}|part|cour|batch|complete)$/i;
+const _TS_DROP=new Set(["the","a","an","of","to","and","in","on","at","for","with","from","episode","chapter","ep","pt","amp"]);
+const _TS_MAX_WORDS=18, _TS_MAX_HELD=4;
+function _tsUnescape(t){
+  return String(t||"").replace(/&amp;/gi,"&").replace(/&(#0?39|apos|#x27);/gi,"'").replace(/&quot;/gi,'"');
+}
+function _tsWords(t){
+  return _tsUnescape(t).toLowerCase().replace(/['’`]/g,"").split(/[^a-z0-9]+/)
+    .filter(w=>w && !_TS_DROP.has(w))
+    .map(w=>(w.length>=4 && w.endsWith("s")) ? w.slice(0,-1) : w);
+}
+function _tsMarker(name){
+  const base=String(name||"").split(/[\\/]/).pop();
+  const m=/[Ss](\d{1,2})[Ee](\d{1,3})(?!\d)/.exec(base);
+  if(!m) return null;
+  let rest=base.slice(m.index+m[0].length);
+  const r=/^(?:[-_ ]?[Ee](\d{1,3})(?!\d))+|^-(\d{1,3})(?![\dA-Za-z])/.exec(rest);
+  if(r) rest=rest.slice(r[0].length);
+  return {season:+m[1], episode:+m[2], rest};
+}
+function _tsStated(name){
+  const mk=_tsMarker(name);
+  if(!mk) return [];
+  const out=[];
+  for(const raw of _tsUnescape(mk.rest).split(/[ ._\[\](){}]+/)){
+    if(!raw) continue;
+    if(_TS_TAG.test(raw) || _TS_TAG.test(raw.split("-")[0])) break;
+    out.push(..._tsWords(raw));
+    if(out.length>_TS_MAX_WORDS) return [];
+  }
+  return out;
+}
+function _tsKey(name){
+  const k=_tsWords(name);
+  return k.some(w=>w.length>=4 && !/^\d+$/.test(w)) ? k : [];
+}
+function _tsFind(needle, hay){
+  const want=needle.join(""), out=[];
+  for(let i=0;i<hay.length;i++){
+    let got="";
+    for(let j=i;j<hay.length;j++){
+      got+=hay[j];
+      if(got.length>=want.length){ if(got===want) out.push([i,j+1]); break; }
+    }
+  }
+  return out;
+}
+function _tsNamed(title, eps){
+  if(!title.length) return [];
+  const keys=new Map();
+  (eps||[]).forEach(e=>{
+    const no=+(e&&e.episode)||0;
+    const k=no>0 ? _tsKey(e.name) : [];
+    if(!k.length) return;
+    const id=k.join(" ");
+    if(!keys.has(id)) keys.set(id,{k, nos:[]});
+    keys.get(id).nos.push(no);
+  });
+  const spans=[];
+  keys.forEach(v=>{
+    if(v.nos.length!==1) return;
+    _tsFind(v.k, title).forEach(([a,b])=>spans.push([a,b,v.nos[0]]));
+  });
+  const out=spans.filter(([a,b])=>!spans.some(([a2,b2])=>a2<=a && b<=b2 && (b2-a2)>(b-a)))
+                 .map(([a,,no])=>[a,no]).sort((x,y)=>(x[0]-y[0])||(x[1]-y[1]));
+  const seen=new Set(), uniq=[];
+  out.forEach(([,no])=>{ if(!seen.has(no)){ seen.add(no); uniq.push(no); } });
+  return uniq;
+}
+function _titleSlot(name, eps){
+  const mk=_tsMarker(name);
+  if(!mk || mk.season<=0 || mk.episode<=0) return null;
+  const own=mk.episode;
+  const title=_tsStated(name);
+  const hits=_tsNamed(title, eps);
+  if(!hits.length || hits.length>_TS_MAX_HELD) return null;
+  const first=Math.min(...hits);
+  const rest=hits.filter(n=>n!==first).sort((a,b)=>a-b);
+  if(hits.includes(own)) return hits.length===1 ? null : {episode:first, also:rest};
+  const te=(eps||[]).find(e=>e && (+e.episode||0)===own);
+  const ownWords=new Set(_tsWords(te&&te.name).filter(w=>!/^\d+$/.test(w)));
+  if(ownWords.size && title.some(w=>ownWords.has(w))) return null;
+  return {episode:first, also:rest};
+}
+// The episode's name as a search term, or "" when it could not single the
+// episode out (a placeholder, or no word of four letters).
+function _tsNameQuery(meta, season, episode){
+  const te=_tmdbSeasonEpisodes(meta, season).find(x=>+x.episode===+episode);
+  if(!te || !_tsKey(te.name).length) return "";
+  return String(te.name).replace(/[^0-9A-Za-z' ]+/g," ").replace(/\s+/g," ").trim();
+}
+// File search results under the episode their name states. In place, and once
+// per result: `_ts` is the number the release carried when it was moved, 0 when
+// it was looked at and left alone. A result met before the season's names had
+// loaded is left unmarked, so it gets its turn when they have.
+//
+// Not for a show the anime table covers - those numbers are on another grid
+// entirely (see titleslot.place_files, which stands down for the same reason).
+function _reslot(results, meta){
+  if(!meta || meta.tmdb_kind!=="tv" || _animeFacts(meta)) return results;
+  (results||[]).forEach(r=>{
+    if(!r || r.kind!=="episode" || r._ts!==undefined) return;
+    const eps=_tmdbSeasonEpisodes(meta, r.season);
+    if(!eps.length) return;
+    r._ts=0;
+    const mk=_tsMarker(r.title);
+    if(!mk || mk.season!==r.season || mk.episode!==r.episode) return;
+    const s=_titleSlot(r.title, eps);
+    if(!s) return;
+    if(s.episode!==r.episode){ r._ts=r.episode; r.episode=s.episode; }
+    if(s.also.length) r.also=s.also;
+  });
+  return results;
+}
+// Every episode of its season a search result (or a library file) holds.
+function _srcHolds(r){
+  const ep=+(r&&r.episode)||0;
+  const out=ep>0?[ep]:[];
+  ((r&&r.also)||[]).forEach(n=>{ n=+n||0; if(n>0 && !out.includes(n)) out.push(n); });
+  return out;
+}
+// The episode a download of `src` is filed under: its own first one when the
+// name pass placed it, else the row it was picked from.
+function _srcSlotEpisode(src, episode){
+  return (src && (src._ts || (src.also&&src.also.length))) ? src.episode : episode;
+}
 function _ssYearsIn(title){
   return String(title||"").split(/[^0-9A-Za-z]+/).filter(t=>/^(19|20)\d{2}$/.test(t)).map(Number);
 }
@@ -17644,15 +17806,16 @@ async function ssSearchEpisode(season, episode, opts={}){
           // whatever season its own grid uses (the parser files a bare number
           // under season 1), so matching it on TMDb's (season, episode) would
           // reject every real source. Match on the absolute number instead.
+          _reslot([res], _ssMeta);
           const hit=absNo
             ? (res.episode===absNo && res.season<=1)
-            : (res.season===season && res.episode===episode);
+            : (res.season===season && _srcHolds(res).includes(episode));
           if(res.kind==="episode" && hit
              && _ssEpisodeAccept(res, season)) found.push(res);
         }));
       }
     }catch(_){}
-    if(found.length){ _ssEpFormWin.set(grp, `${f.bare?1:0}|${f.t}`); break; }
+    if(found.length){ if(!f.name) _ssEpFormWin.set(grp, `${f.bare?1:0}|${f.t}`); break; }
   }
   if(_ssGroup===grp && found.length){
     let e=_ssEpisodes.find(x=>x.season===season && x.episode===episode);
@@ -17973,6 +18136,9 @@ function _ssAlternativeSources(season, episode){
 }
 
 async function _ssDownloadOne(src, season, episode, opts={}){
+  // A release the name pass placed is filed under its own first episode,
+  // whichever row it was picked from - the server slots the file the same way.
+  if(episode>0 && src && +src.season===+season) episode=_srcSlotEpisode(src, episode);
   // `series`/`locked` are overridable so a detached background run can queue
   // downloads for a show the user has since navigated away from (_ssGroup is
   // null by then, and _ssLocked belongs to whatever page is open now).
@@ -18234,14 +18400,17 @@ function _bgIngest(ctx, results){
   // episode 7 is a silent wrong answer. Excluded here rather than in the parser
   // so the release still groups and still shows on the search page, where a
   // person can see what it is (see `_TT_EP_FRAC_RE` in main.py).
-  const eps=results.filter(r=>r.kind==="episode"&&!r.special&&plausible(r));
-  eps.forEach(r=>{
-    let e=ctx.episodes.find(x=>x.season===r.season&&x.episode===r.episode);
-    if(!e){ e={season:r.season,episode:r.episode,sources:[]}; ctx.episodes.push(e); }
+  // Under the episode each release STATES, and every episode it holds: this is
+  // what turns "S02E09 Dying for Pie" into a source for TMDb's E10 instead of
+  // a rejected source for E09. See _reslot.
+  const eps=_reslot(results, ctx.meta).filter(r=>r.kind==="episode"&&!r.special&&plausible(r));
+  eps.forEach(r=>_srcHolds(r).forEach(ep=>{
+    let e=ctx.episodes.find(x=>x.season===r.season&&x.episode===ep);
+    if(!e){ e={season:r.season,episode:ep,sources:[]}; ctx.episodes.push(e); }
     if(e.sources.some(x=>x.magnet===r.magnet)) return;
     e.sources.push(r);
     e.sources.sort((a,b)=>b.seeders-a.seeders);
-  });
+  }));
   if(_bgLive(ctx)){
     _ssMergeEpisodes(eps);
     _ssMergePacks(results);
@@ -18261,8 +18430,23 @@ async function _bgSeasonSearch(ctx, sn){
 async function _bgEpisodeSearch(ctx, season, episode){
   const abs=(season<=1 && episode>=100);
   const code=`S${String(season).padStart(2,"0")}E${String(episode).padStart(2,"0")}`;
-  const out=await _bgQuery(`${ctx.query} ${abs?episode:code}`, ctx);
-  _bgIngest(ctx, out.filter(r=>r.kind==="episode" && r.season===season && r.episode===episode));
+  // Kept: this episode, and anything of its season the name pass re-filed - a
+  // query for E10 that returns "S02E10 Imitation Krabs" has found E11's source.
+  const keep=r=>r.kind==="episode" && r.season===season
+                && (_srcHolds(r).includes(episode) || !!r._ts || !!(r.also&&r.also.length));
+  const out=_reslot(await _bgQuery(`${ctx.query} ${abs?episode:code}`, ctx), ctx.meta);
+  _bgIngest(ctx, out.filter(keep));
+  // Still nothing: ask by the episode's NAME, which is the only query that
+  // reaches a release numbered on another scheme. See _ssEpisodeQueries.
+  const has=()=>ctx.episodes.some(e=>e.season===season && e.episode===episode && e.sources.length);
+  const name=(abs||ctx.absolute||has()) ? "" : _tsNameQuery(ctx.meta, season, episode);
+  if(!name) return;
+  const byName=_reslot(await _bgQuery(`${ctx.query} ${name}`, ctx), ctx.meta);
+  // Only what the name pass itself vouches for: a release whose title states
+  // this episode. The number alone is exactly what cannot be trusted here.
+  _bgIngest(ctx, byName.filter(r=>r.kind==="episode" && r.season===season
+    && _srcHolds(r).includes(episode)
+    && (r._ts || (r.also&&r.also.length) || _ssEpTitleVerdict(r, season, r.episode, ctx.meta)===1)));
 }
 
 // _ssBulkScopeEpisodes against a snapshot instead of the live page. `scope`
@@ -18293,6 +18477,33 @@ function _bgAudioMatch(ctx, s){
   if(ctx.audioPref==="eng")
     return a==="dual"||a==="dub"||((a===""||a==="sub")&&ctx.origEnglish!==false);
   return a==="dual"||a==="sub"||a==="";
+}
+// Turn a scope's episodes into download jobs. One release can hold two
+// episodes (a half-hour file of two segments), so an episode already covered
+// by a job picked for an earlier one starts nothing of its own.
+//
+// And a release that would bring an episode the box already has, or one an
+// earlier job is bringing, is passed over while a copy that does not is on
+// offer: with Wormy on its way as a single, Patty Hype comes as its own single
+// rather than as "Wormy & Patty Hype". When the two-segment file is the only
+// source there is, it is still taken - a repeat beats a gap.
+function _bgPlanJobs(ctx, eps, filt){
+  const jobs=[], unsourced=[], covered=new Set();
+  const key=(s,n)=>`${s}-${n}`;
+  eps.forEach(e=>{
+    if(covered.has(key(e.season,e.episode))) return;
+    const owned=_covSeasonEps(ctx.owned, e.season);
+    const repeats=src=>+src.season===+e.season && _srcHolds(src).some(n=>
+      n!==e.episode && (owned.has(n) || covered.has(key(e.season,n))));
+    const clean=e.sources.filter(x=>!repeats(x));
+    const src=(clean.length?_bgAutoPick(ctx,clean,filt):null)
+           || (e.sources.length?_bgAutoPick(ctx,e.sources,filt):null);
+    if(!src){ unsourced.push(_ssEpCode(e.season,e.episode)); return; }
+    (+src.season===+e.season?_srcHolds(src):[e.episode])
+      .forEach(n=>covered.add(key(e.season,n)));
+    jobs.push({src, season:e.season, episode:e.episode});
+  });
+  return {jobs, unsourced};
 }
 function _bgAutoPick(ctx, sources, filt){
   if(!sources||!sources.length) return null;
@@ -19057,12 +19268,7 @@ function ssBulkAuto(scope){
   const started=_bgRun(`${ctx.title} — ${scopeLbl}`, async(ctl,report)=>{
     const eps=await _bgEnsureSources(ctx,ctl,report);
     if(!eps) return;
-    const jobs=[], unsourced=[];
-    eps.forEach(e=>{
-      const src=e.sources.length?_bgAutoPick(ctx,e.sources,filt):null;
-      if(src) jobs.push({src, season:e.season, episode:e.episode});
-      else unsourced.push(_ssEpCode(e.season,e.episode));
-    });
+    const {jobs, unsourced}=_bgPlanJobs(ctx, eps, filt);
     // Be honest about episodes where no source satisfies the audio preference —
     // silent fallback is exactly the "mixed languages" surprise this exists to kill.
     let note="";
@@ -19071,7 +19277,7 @@ function ssBulkAuto(scope){
       if(off) note=`${off} had no ${ctx.audioPref==="eng"?"English-audio":"original-audio"} source — best available used.`;
     }
     await _bgStartDownloads(ctx, ctl, report, jobs, note,
-                            {total:eps.length, unsourced});
+                            {total:jobs.length+unsourced.length, unsourced});
   });
   if(!started) return;
   ssCloseBulkSheet();
@@ -32874,6 +33080,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.13.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.14.0</div>
 </body>
 </html>

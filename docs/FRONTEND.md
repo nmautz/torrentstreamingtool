@@ -873,6 +873,13 @@ duration. It now runs detached.
 - **Fractional episode codes (17.4.2).** `_bgIngest` also skips `special` results (`S01E07.5`, a
   recap). Flagged in `parse_torrent_title`, not un-matched — see GOTCHAS for why un-matching turns
   a recap into a season pack.
+- **Filed by stated name (20.14.0).** `_bgIngest`, `_ssBuildEpisodes`, `_ssMergeEpisodes` and
+  `ssSearchEpisode` all pass results through `_reslot(results, meta)` first: a release whose
+  title states another episode's whole name is bucketed under that episode, and a two-segment
+  release under each episode it holds (`_srcHolds`). `_titleSlot` is the mirror of
+  `titleslot.py`. `_bgPlanJobs` builds the download jobs for `ssBulkAuto` and `_epGetMissing`.
+  The library page counts `also` too (`_epMissingEpisodes`, `_epOwnedRow`, `_epPackEpisodes`,
+  `_epSeasonCounts`). See [GOTCHAS.md](GOTCHAS.md) § A release's number is not its episode.
 - **Relevance floor on ingested episodes (17.3.0).** `_bgIngest` drops episode results scoring
   below `rel` 0.7 — the same floor `_packCoversScope` applies to packs. `_bgQuery` concatenates
   **every group** the search returned, so without it a `Hunter x Hunter S01` query fed

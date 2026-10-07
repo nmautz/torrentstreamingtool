@@ -161,6 +161,19 @@ L = el.label_file(F("[Anime Time] Attack on Titan Season 4 - Finale 1.mkv", 0, 3
 eq("homed special: code", L["code"], "Special 36")
 eq("homed special: TMDb name", L["line2"], "The Final Chapters Special (1)")
 
+# ── A two-segment file the title pass placed (titleslot.py) ──────────────────
+SB = {"tmdb_kind": "tv", "title": "SpongeBob SquarePants", "seasons": {"2": {"episodes": [
+    {"episode": 14, "name": "Survival of the Idiots"}, {"episode": 15, "name": "Dumped"},
+    {"episode": 22, "name": "Shanghaied"}]}}}
+L = el.label_file(F("SpongeBob.SquarePants.S02E09.Survival.of.the.Idiots.and.Dumped.1080p.mkv", 2, 14,
+                    also=[15], ts_from=9), SB, "")
+eq("also: code is the run it holds", L["code"], "S02E14-E15")
+eq("also: both TMDb names", L["line2"], "Survival of the Idiots / Dumped")
+L = el.label_file(F("Show.S02E09.A.and.B.1080p.mkv", 2, 14, also=[22]), SB, "")
+eq("also: not a run", L["code"], "S02E14+E22")
+L = el.label_file(F("SpongeBob SquarePants S02E09 Dying for Pie 1080p.mkv", 2, 14, ts_from=9), SB, "")
+eq("moved single: TMDb's number and name", (L["code"], L["line2"]), ("S02E14", "Survival of the Idiots"))
+
 print("%d passed, %d failed" % (_PASS, len(_FAIL)))
 for f in _FAIL:
     print("  FAIL", f)
