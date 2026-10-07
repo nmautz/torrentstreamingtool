@@ -1,5 +1,19 @@
 # Changelog
 
+## [20.15.1] — 2026-10-06
+### A dead download can be replaced by a release filed under another season
+
+- **SpongeBob S03E19 could end in an error with a working copy one search away.** Get
+  picks the one release numbered S03E19, whose swarm is dead. Every other "S03E19" is a
+  different episode, so the automatic replacement found nothing. The live copy is
+  "S00E02 Party Pooper Pants".
+- **When a replacement search by number finds nothing, the server now searches by the
+  episode's name** and accepts a release from another season under the same rule Get
+  uses.
+- **The replacement rules now have tests** (`tests/test_retry_candidates.py`), including
+  the two added in 20.14.2.
+- **Not checked:** on the box. The S03E19 download there is the live case.
+
 ## [20.15.0] — 2026-10-06
 ### Get finds an episode that is only released under another season
 

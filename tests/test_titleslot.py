@@ -228,6 +228,12 @@ ok("place: an item fetched AS S02E20 keeps it", not ts.place_files(g, ALLS, (2, 
 ts.place_files(g, ALLS, (3, 31))
 eq("place: fetched for S03E31, filed there", (g[0]["season"], g[0]["episode"]), (3, 31))
 
+eq("name_query: plain", ts.name_query("Party Pooper Pants"), "Party Pooper Pants")
+eq("name_query: punctuation", ts.name_query("Christmas Who?"), "Christmas Who")
+eq("name_query: short but usable", ts.name_query("Ugh"), "Ugh")
+eq("name_query: placeholder", ts.name_query("Episode 7"), "")
+eq("name_query: nothing", ts.name_query(None), "")
+
 print("%d passed, %d failed" % (_PASS, len(_FAIL)))
 for f in _FAIL:
     print("  FAIL", f)

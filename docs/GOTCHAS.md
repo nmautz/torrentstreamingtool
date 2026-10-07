@@ -7004,6 +7004,10 @@ name** it states. Things to keep in mind:
   with Nuts", TMDb's E20. `_season_names` reads the season's names from any item of the same
   show, and with none to hand a candidate whose stated title shares no word with the title
   of the release being replaced is refused. No unit test covers this.
+- **The retry searches by name too (20.15.1).** `_retry_by_name` runs only when the by-number
+  search yields no candidate, queries `<series> <episode name>` (`titleslot.name_query`), and
+  calls `_retry_candidates(..., cross=True)`, the only mode in which a candidate from another
+  season is accepted. Tests in `tests/test_retry_candidates.py`.
 - **Many old cartoons' releases state no episode name** (measured: The Powerpuff Girls 0 of
   65, Rugrats 7 of 35). The rule has nothing to read there and changes nothing.
 

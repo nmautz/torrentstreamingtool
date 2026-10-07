@@ -10683,9 +10683,41 @@ def _season_names(lib: dict, item: dict) -> list:
     return []
 
 
+async def _retry_by_name(item: dict, lib: dict, tried: set) -> list:
+    """Second chance for a retry that found nothing by number: search by the
+    episode's NAME and accept a release filed under another season (20.15.1).
+
+    SpongeBob S03E19 "Party Pooper Pants": the one release numbered S03E19 has
+    a dead swarm, every other "S03E19" is a different episode, and the live
+    copy is "S00E02 Party Pooper Pants". Without this the item ends in error
+    with the episode one query away. `[]` when the name is unknown or unusable,
+    or the indexers fail."""
+    season, episode = int(item.get("season") or 0), int(item.get("episode") or 0)
+    series = (item.get("series") or "").strip()
+    if not (series and season and episode):
+        return []
+    eps = _season_names(lib, item)
+    name = next((e.get("name") for e in eps
+                 if isinstance(e, dict) and int(e.get("episode") or 0) == episode), "")
+    q = titleslot.name_query(name)
+    if not q:
+        return []
+    try:
+        shaped = await _indexer_query(f"{series} {q}", lib)
+    except Exception as exc:
+        log.warning("[download] by-name retry search failed for %s: %s", q, exc)
+        return []
+    cands = _retry_candidates(item, shaped, tried, _proven_release_groups(lib), eps, cross=True)
+    if cands:
+        log.info("[download] retry for %s S%02dE%02d found %d release(s) by name (%s)",
+                 series, season, episode, len(cands), q)
+    return cands
+
+
 def _retry_candidates(item: dict, shaped: list, tried: set,
                       proven: Optional[set] = None,
-                      season_eps: Optional[list] = None) -> list:
+                      season_eps: Optional[list] = None,
+                      cross: bool = False) -> list:
     """Alternative releases for `item`, best first, excluding everything tried.
 
     For an episode item the candidate must parse to the **same season+episode** —
@@ -10740,7 +10772,17 @@ def _retry_candidates(item: dict, shaped: list, tried: set,
             continue
         if season and episode:
             pt = parse_torrent_title(title)
-            if pt["kind"] != "episode" or pt["season"] != season:
+            if pt["kind"] != "episode":
+                continue
+            if pt["season"] != season:
+                # Another season's number, or a special: only from the by-name
+                # search (`_retry_by_name`), and only when its title states this
+                # episode. See titleslot.cross.
+                if not (cross and titleslot.cross(
+                        title, season, episode, {str(season): {"episodes": season_eps}})):
+                    continue
+                seen.add(rkey)
+                out.append((key, r))
                 continue
             # The episode it IS, not the number it carries: a release on another
             # numbering ("S01E19 Fools in April & Neptune's Spatula") is not a
@@ -10923,6 +10965,8 @@ async def _retry_dead_download(item: dict, lib: dict) -> str:
     cands = _retry_candidates(item, shaped, tried, _proven_release_groups(lib),
                               _season_names(lib, item))
     if not cands:
+        cands = await _retry_by_name(item, lib, tried)
+    if not cands:
         return _fail_dead_download(item, len(attempts))
 
     save_path = ((item.get("download_source") or {}).get("save_path")
@@ -11047,6 +11091,8 @@ async def _rescue_stalled_download(item: dict, lib: dict) -> bool:
         return True
     cands = _retry_candidates(item, shaped, tried, _proven_release_groups(lib),
                               _season_names(lib, item))
+    if not cands:
+        cands = await _retry_by_name(item, lib, tried)
     if not cands:
         if mark.get("tries") == 1:
             log.warning("[stall] %s is stuck at %d bytes and no other release of it "

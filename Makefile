@@ -27,6 +27,7 @@ test:
 	python3 tests/test_eplabel.py
 	python3 tests/test_epgroups.py
 	python3 tests/test_titleslot.py
+	python3 tests/test_retry_candidates.py
 	python3 tests/test_watchpurge.py
 	python3 tests/test_devactivity.py
 	python3 tests/test_bookmarks.py

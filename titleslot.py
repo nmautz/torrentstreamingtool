@@ -278,6 +278,15 @@ def states(name: str, ep_name) -> bool:
         and title[-len(k):][0] == k[0]
 
 
+def name_query(ep_name) -> str:
+    """An episode's name as an indexer search term, or "" when it could single
+    nothing out (a placeholder like "Episode 7", or under three letters)."""
+    k = words(ep_name)
+    if not any(not w.isdigit() for w in k) or len("".join(k)) < 3:
+        return ""
+    return re.sub(r"\s+", " ", re.sub(r"[^0-9A-Za-z' ]+", " ", str(ep_name))).strip()
+
+
 def at_home(name: str, own_season_eps) -> bool:
     """Is a release where its own number says, as far as its title shows?
     True when the title names an episode of its own season, or shares a word
