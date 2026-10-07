@@ -1,5 +1,26 @@
 # Changelog
 
+## [20.16.0] — 2026-10-07
+### A pack numbered on another season grid is filed where TMDb has it, and a two-episode file holds both
+
+- **Futurama's Blu-ray sets count seasons in production order; TMDb uses broadcast order.**
+  "S01E10 A Flight to Remember" landed on an episode TMDb's nine-episode season 1 does not
+  have. It is TMDb's S02E01. The Hulu seasons, released as S11 to S13, are TMDb's 8 to 10.
+- **A pack file that is not where its number says is now looked for in the show's other
+  seasons by the episode name it states**, and filed there when exactly one season has that
+  name. The server fetches the other seasons' names the first time it meets such a file.
+  Firefly's "S01E12 The Message" is filed as the TMDb special it is.
+- **"S01E04-E05" and "S04E23E24" now hold both episodes**, so the second no longer reads as
+  missing. A file that names only its own episode ("S01E01E02 Rose") is left as one.
+- **TMDb's "(1)" and "(2)" on two-parters no longer stop a name from matching** ("Aliens of
+  London (1)").
+- **Not fixed:** Money Heist. TMDb names its episodes "Episode 1", so there is no name to
+  read; it needs a season map of its own (#45 stays open for it).
+- **Not checked:** on the box, with a real download. Checked locally: the real TMDb names of
+  60 shows (nothing moves that is named as TMDb names it), the server and dashboard copies of
+  the rule against each other on 34,400 names, and the server's settle step on a Futurama pack
+  with the library and TMDb stubbed.
+
 ## [20.15.1] — 2026-10-06
 ### A dead download can be replaced by a release filed under another season
 

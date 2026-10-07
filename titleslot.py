@@ -21,6 +21,12 @@ when the name says so in words:
 * A file that names its own episode **and** others keeps its number and gains
   the others in `also`: the second half of a two-segment file.
 
+A **numeric range** is the other way a file says it holds two episodes
+(20.16.0): "S01E04-E05" and "S04E23E24" hold the second episode too, with or
+without names (`ranged`). And a file that is **not at home in its own season**
+may be another season's episode (`roam`): Futurama's Blu-ray sets are numbered
+in production order, so "S01E10 A Flight to Remember" is TMDb's S02E01.
+
 Everything is derived from the name alone, so the answer is the same every time
 it is asked and survives the file list being rebuilt (`build_file_list` runs on
 every download-monitor tick). No answer is ever a guess: when the names do not
@@ -97,6 +103,27 @@ def marker(name: str) -> Optional[tuple]:
     return int(m.group(1)), int(m.group(2)), rest
 
 
+def ranged(name: str) -> list:
+    """The further episodes a numeric range after the marker names:
+    "S01E04-E05" and "S01E04E05" give [5], "S01E01-E03" gives [2, 3].
+
+    Only a run that starts right after the file's own number and stays within
+    `_MAX_HELD` episodes: "S01E01-E12" on one file is a mislabelled pack, and
+    a tail that counts down is not a range."""
+    base = re.split(r"[\\/]", name or "")[-1]
+    m = _SXXEXX_RE.search(base)
+    if not m:
+        return []
+    r = _RANGE_TAIL_RE.match(base[m.end():])
+    if not r:
+        return []
+    own = int(m.group(2))
+    last = max(int(n) for n in re.findall(r"\d+", r.group(0)))
+    if not own < last <= own + _MAX_HELD - 1:
+        return []
+    return list(range(own + 1, last + 1))
+
+
 def stated(name: str) -> list:
     """The words of the episode title a release states after its SxxExx marker,
     up to its first release tag. Empty when it states none."""
@@ -116,10 +143,22 @@ def stated(name: str) -> list:
     return out
 
 
+# TMDb marks the halves of a two-parter "Aliens of London (1)". No release
+# writes the "(1)".
+_PART_RE = re.compile(r"\s*\(\s*\d{1,2}\s*\)\s*$")
+
+
+def _bare(name) -> str:
+    """An episode name without TMDb's trailing part number."""
+    return _PART_RE.sub("", name) if isinstance(name, str) else ""
+
+
 def _key(name) -> list:
     """An episode name as a matchable phrase, or [] when it cannot identify
-    anything: no word of four letters, or a TMDb placeholder ("Episode 7")."""
-    k = words(name)
+    anything: no word of four letters, or a TMDb placeholder ("Episode 7").
+    Both halves of "Exodus (1)" / "Exodus (2)" come out as "Exodus", which
+    `named` then refuses to tell apart."""
+    k = words(_bare(name))
     if not any(len(w) >= 4 and not w.isdigit() for w in k):
         return []
     return k
@@ -230,15 +269,27 @@ def slot(name: str, season_eps) -> Optional[dict]:
     own = mk[1]
     title = stated(name)
     hits = [no for _, no in named(title, season_eps)]
-    if not hits or len(hits) > _MAX_HELD:
+    if len(hits) > _MAX_HELD:
         return None
+    # A numeric range ("S01E04-E05") holds its later episodes too, as far as
+    # the season has them. It is the release's own count, so it only stands
+    # while the names do not say otherwise (below).
+    have = set(_int(e.get("episode")) for e in season_eps or [] if isinstance(e, dict))
+    rng = [n for n in ranged(name) if n in have] if own in have else []
+    by_range = {"episode": own, "also": rng} if rng else None
+    if not hits:
+        return by_range
     first = min(hits)
     if own in hits:
         # It is what its number says, and possibly more: filed under the
         # earliest episode it holds, like every other two-segment file.
         if len(hits) == 1:
+            # It names its own episode and no other. A range on top of that is
+            # a long episode the release counts as two ("S01E01E02 Pilot"),
+            # and TMDb's next episode is something else.
             return None
-        return {"episode": first, "also": sorted(n for n in hits if n != first)}
+        also = sorted((set(hits) | set(rng)) - {first})
+        return {"episode": first, "also": also[:_MAX_HELD - 1]}
     # It names other episodes and not its own. Only a real contradiction moves
     # it: sharing any word with its own number's name means the release may
     # simply call that episode something slightly different.
@@ -246,7 +297,7 @@ def slot(name: str, season_eps) -> Optional[dict]:
                      if isinstance(e, dict) and _int(e.get("episode")) == own), None)
     own_words = set(w for w in words(own_name) if not w.isdigit())
     if own_words and own_words & set(title):
-        return None
+        return by_range
     return {"episode": first, "also": sorted(n for n in hits if n != first)}
 
 
@@ -271,7 +322,7 @@ def states(name: str, ep_name) -> bool:
                 if any(len(w) >= 4 and not w.isdigit() for w in short) and _find(short, title):
                     return True
         return False
-    k = [w for w in words(ep_name)]
+    k = [w for w in words(_bare(ep_name))]
     if not any(not w.isdigit() for w in k) or len("".join(k)) < 3:
         return False
     return len(title) >= len(k) and "".join(title[-len(k):]) == "".join(k) \
@@ -281,6 +332,7 @@ def states(name: str, ep_name) -> bool:
 def name_query(ep_name) -> str:
     """An episode's name as an indexer search term, or "" when it could single
     nothing out (a placeholder like "Episode 7", or under three letters)."""
+    ep_name = _bare(ep_name)
     k = words(ep_name)
     if not any(not w.isdigit() for w in k) or len("".join(k)) < 3:
         return ""
@@ -327,6 +379,95 @@ def cross(name: str, want_season: int, want_episode: int, seasons: dict) -> bool
     return bool(own_eps) and not at_home(name, own_eps)
 
 
+def _eps(seasons: dict, season: int) -> list:
+    return ((seasons.get(str(season)) or {}).get("episodes")) or []
+
+
+def _overflows(name: str, seasons: dict) -> bool:
+    """Is the file's number one its own season does not have? Only answerable
+    with that season's episodes to hand."""
+    mk = marker(name)
+    own_eps = _eps(seasons, mk[0]) if mk else []
+    return bool(own_eps) and not any(isinstance(e, dict) and _int(e.get("episode")) == mk[1]
+                                     for e in own_eps)
+
+
+def roam(name: str, seasons: dict):
+    """Where in ANOTHER season a file belongs (20.16.0), for an item nobody
+    fetched for one episode (a pack).
+
+    Futurama's Blu-ray sets count seasons in production order and TMDb in
+    broadcast order: "S01E10 A Flight to Remember" is past the end of TMDb's
+    nine-episode season 1 and is its S02E01. Returns `{"season", "episode",
+    "also"}`, False for "it stays", or None for no opinion (its own season's
+    names are not to hand).
+
+    The evidence is the same as inside a season, and one thing more:
+
+    * the file is not `at_home` - its title names no episode of its own
+      season and shares no word with the name of the episode its number
+      points at (or its season has no such number);
+    * its title states the whole name of episodes in **exactly one** other
+      season of those whose names are to hand. "Pilot" in two seasons is
+      neither.
+
+    Season 0 is a destination only for a number its own season does not have
+    (Firefly's "S01E12 The Message" is a TMDb special): a special's name is
+    too loose to pull a file off a slot that exists."""
+    mk = marker(name)
+    if not mk or mk[0] <= 0 or mk[1] <= 0:
+        return False
+    seasons = seasons if isinstance(seasons, dict) else {}
+    own_eps = _eps(seasons, mk[0])
+    if not own_eps:
+        return None
+    if at_home(name, own_eps):
+        return False
+    title = stated(name)
+    if not title:
+        return False
+    over = _overflows(name, seasons)
+    found = {}
+    for key in seasons:
+        s = _int(key) if str(key).isdigit() else -1
+        if s < 0 or s == mk[0] or (s == 0 and not over):
+            continue
+        nos = [no for _, no in named(title, _eps(seasons, s))]
+        if nos:
+            found[s] = nos
+    if len(found) != 1:
+        return False
+    s, nos = next(iter(found.items()))
+    if len(nos) > _MAX_HELD:
+        return False
+    first = min(nos)
+    return {"season": s, "episode": first, "also": sorted(n for n in nos if n != first)}
+
+
+def _plain(f: dict) -> bool:
+    return not (f.get("bucket") or f.get("abs_episode") or f.get("abs_no") or f.get("rel_season"))
+
+
+def astray(files: list, seasons: dict) -> tuple:
+    """`(seasons, overflow)`: the seasons holding a file `roam` would look
+    elsewhere for, and whether any of them carries a number its season does
+    not have. What `main` asks before fetching more seasons' names - with only
+    the file's own season to hand, `roam` has nowhere to look."""
+    out, over = set(), False
+    seasons = seasons if isinstance(seasons, dict) else {}
+    for f in files or []:
+        name = f.get("name") or f.get("path") or ""
+        mk = marker(name)
+        if not mk or mk[0] <= 0 or mk[1] <= 0 or not _plain(f):
+            continue
+        own_eps = _eps(seasons, mk[0])
+        if not own_eps or at_home(name, own_eps) or not stated(name):
+            continue
+        out.add(mk[0])
+        over = over or _overflows(name, seasons)
+    return out, over
+
+
 def _int(v) -> int:
     try:
         return int(v or 0)
@@ -361,9 +502,12 @@ def place_files(files: list, seasons: dict, want: Optional[tuple] = None) -> boo
     number: the move is re-derived every time, never remembered.
 
     `want` is the `(season, episode)` the item was downloaded FOR (20.15.0).
-    It is the one way a file crosses seasons: "S00E03 The Sponge Who Could
-    Fly" fetched for S03E30 is filed there, when `cross` agrees. It also
-    records `ts_from_season`.
+    "S00E03 The Sponge Who Could Fly" fetched for S03E30 is filed there, when
+    `cross` agrees. It also records `ts_from_season`.
+
+    An item with no `want` (a pack) crosses seasons by `roam` instead
+    (20.16.0), with the same two fields. The two never mix: a file fetched
+    for a slot is never moved off it by a scan.
     """
     changed = False
     seasons = seasons if isinstance(seasons, dict) else {}
@@ -387,6 +531,27 @@ def place_files(files: list, seasons: dict, want: Optional[tuple] = None) -> boo
                 f.pop("also", None)
                 changed = True
             continue
+        # ── Across seasons, for a pack: the season its name belongs to ──────
+        if not want and season > 0 and (crossed or (cur_s, cur_e) == (season, own)):
+            to = roam(f.get("name") or f.get("path") or "", seasons)
+            if to is None or (crossed and not _eps(seasons, cur_s)):
+                # Names not to hand, its own season's or the one it sits in:
+                # no opinion, and none on undoing an earlier move either.
+                continue
+            if to:
+                if (cur_s, cur_e) != (to["season"], to["episode"]) or not crossed:
+                    f["season"], f["episode"] = to["season"], to["episode"]
+                    f["ts_from"], f["ts_from_season"] = own, season
+                    f.pop("home", None)
+                    changed = True
+                if to["also"]:
+                    if f.get("also") != to["also"]:
+                        f["also"] = to["also"]
+                        changed = True
+                elif "also" in f:
+                    del f["also"]
+                    changed = True
+                continue
         if crossed:
             # Moved across seasons before and no longer justified. With the
             # wanted season's names gone that is "no opinion"; otherwise home.

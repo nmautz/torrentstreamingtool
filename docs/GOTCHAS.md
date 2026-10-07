@@ -7011,6 +7011,31 @@ name** it states. Things to keep in mind:
 - **Many old cartoons' releases state no episode name** (measured: The Powerpuff Girls 0 of
   65, Rugrats 7 of 35). The rule has nothing to read there and changes nothing.
 
+**20.16.0: a pack crosses seasons, and a range is two episodes.** GitHub #44 and #45.
+
+- **A pack file not at home in its season is looked for in the others** (`titleslot.roam`).
+  Futurama's Blu-ray "S01E10 A Flight to Remember" is TMDb's S02E01, and the Hulu "S11E01"
+  is TMDb's S08E01. The name must be in exactly ONE other season of those held, so the answer
+  depends on which seasons' names are loaded. That is why `_roam_seasons_wanted` fetches the
+  rest before anything moves, and why a refresh keeps them.
+- **Only for an item with no `want`.** A single-episode item is filed where it was fetched
+  for. "Gary Takes a Bath" fetched as S02E20 still stays there.
+- **The alternate-title risk is real and accepted.** A release that calls S02E05 by a title
+  that is exactly another season's episode name, and shares no word with TMDb's S02E05, moves.
+  Over the real names of 60 shows (34,230 episodes, each named as TMDb names it) nothing moves.
+- **`S01E04-E05` holds E05** (`titleslot.ranged`), but `S01E01E02 Rose` does not hold E02: a
+  title that names its own episode and no other is one long episode counted twice. A range is
+  the release's own count, so a name always outranks it.
+- **TMDb's "(1)" / "(2)" is not part of a name.** `_bare` drops it everywhere a name is
+  compared or searched for. Two-parters whose halves share one name ("Exodus (1)", "Exodus
+  (2)") become duplicates, which `named` refuses, so only the range can place them.
+- **The dashboard mirrors the range and the part number** (`_tsRanged`, `_tsBare`); the two
+  were compared on 34,400 generated names and agree. `roam` has no mirror: search results
+  cross seasons one wanted episode at a time (`_reslotCross`), which already covers a number
+  past the season's end.
+- **Not run on the box.** No Futurama pack has been downloaded; the settle path was run
+  locally against the real `main.py` with the library and TMDb stubbed.
+
 ## A "season pack" can be one file (20.14.1)
 
 Indexers list single episodes under a season's name. "SpongeBob.SquarePants.S03.1080p.HEVC.

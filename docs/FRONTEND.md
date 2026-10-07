@@ -877,7 +877,8 @@ duration. It now runs detached.
   `ssSearchEpisode` all pass results through `_reslot(results, meta)` first: a release whose
   title states another episode's whole name is bucketed under that episode, and a two-segment
   release under each episode it holds (`_srcHolds`). `_titleSlot` is the mirror of
-  `titleslot.py`. `_bgPlanJobs` builds the download jobs for `ssBulkAuto` and `_epGetMissing`.
+  `titleslot.py`, including the numeric range (`_tsRanged`: "S01E04-E05" holds E05) and
+  TMDb's dropped part number (`_tsBare`), both 20.16.0. `_bgPlanJobs` builds the download jobs for `ssBulkAuto` and `_epGetMissing`.
   The library page counts `also` too (`_epMissingEpisodes`, `_epOwnedRow`, `_epPackEpisodes`,
   `_epSeasonCounts`). See [GOTCHAS.md](GOTCHAS.md) § A release's number is not its episode.
 - **Relevance floor on ingested episodes (17.3.0).** `_bgIngest` drops episode results scoring

@@ -17628,8 +17628,24 @@ function _tsStated(name){
   }
   return out;
 }
+// "S01E04-E05" / "S01E04E05" -> [5]: the further episodes a numeric range names.
+// Mirrors titleslot.ranged.
+function _tsRanged(name){
+  const base=String(name||"").split(/[\\/]/).pop();
+  const m=/[Ss](\d{1,2})[Ee](\d{1,3})(?!\d)/.exec(base);
+  if(!m) return [];
+  const r=/^(?:[-_ ]?[Ee](\d{1,3})(?!\d))+|^-(\d{1,3})(?![\dA-Za-z])/.exec(base.slice(m.index+m[0].length));
+  if(!r) return [];
+  const own=+m[2], last=Math.max(...r[0].match(/\d+/g).map(Number));
+  if(!(own<last && last<=own+_TS_MAX_HELD-1)) return [];
+  const out=[];
+  for(let n=own+1;n<=last;n++) out.push(n);
+  return out;
+}
+// TMDb's "Aliens of London (1)" without the part number no release writes.
+function _tsBare(name){ return typeof name==="string" ? name.replace(/\s*\(\s*\d{1,2}\s*\)\s*$/,"") : ""; }
 function _tsKey(name){
-  const k=_tsWords(name);
+  const k=_tsWords(_tsBare(name));
   return k.some(w=>w.length>=4 && !/^\d+$/.test(w)) ? k : [];
 }
 function _tsFind(needle, hay){
@@ -17692,13 +17708,24 @@ function _titleSlot(name, eps){
   const own=mk.episode;
   const title=_tsStated(name);
   const hits=_tsNamed(title, eps);
-  if(!hits.length || hits.length>_TS_MAX_HELD) return null;
+  if(hits.length>_TS_MAX_HELD) return null;
+  // A numeric range holds its later episodes too, as far as the season has
+  // them - unless the names say otherwise (20.16.0).
+  const have=new Set((eps||[]).map(e=>+(e&&e.episode)||0));
+  const rng=have.has(own) ? _tsRanged(name).filter(n=>have.has(n)) : [];
+  const byRange=rng.length ? {episode:own, also:rng} : null;
+  if(!hits.length) return byRange;
   const first=Math.min(...hits);
   const rest=hits.filter(n=>n!==first).sort((a,b)=>a-b);
-  if(hits.includes(own)) return hits.length===1 ? null : {episode:first, also:rest};
+  if(hits.includes(own)){
+    // Its own name and no other: a range there is one long episode counted twice.
+    if(hits.length===1) return null;
+    const also=[...new Set([...hits, ...rng])].filter(n=>n!==first).sort((a,b)=>a-b);
+    return {episode:first, also:also.slice(0,_TS_MAX_HELD-1)};
+  }
   const te=(eps||[]).find(e=>e && (+e.episode||0)===own);
   const ownWords=new Set(_tsWords(te&&te.name).filter(w=>!/^\d+$/.test(w)));
-  if(ownWords.size && title.some(w=>ownWords.has(w))) return null;
+  if(ownWords.size && title.some(w=>ownWords.has(w))) return byRange;
   return {episode:first, also:rest};
 }
 // The episode's name as a search term, or "" when it could not single the
@@ -17707,9 +17734,9 @@ function _tsNameQuery(meta, season, episode){
   const te=_tmdbSeasonEpisodes(meta, season).find(x=>+x.episode===+episode);
   // A short name still makes a query ("Ugh") - it is `_tsStates` that is strict
   // about where such a name may match. A placeholder ("Episode 7") never does.
-  const w=te?_tsWords(te.name):[];
+  const w=te?_tsWords(_tsBare(te.name)):[];
   if(!te || !w.some(x=>!/^\d+$/.test(x)) || w.join("").length<3) return "";
-  return String(te.name).replace(/[^0-9A-Za-z' ]+/g," ").replace(/\s+/g," ").trim();
+  return _tsBare(String(te.name)).replace(/[^0-9A-Za-z' ]+/g," ").replace(/\s+/g," ").trim();
 }
 // ── Across seasons, for ONE wanted episode (20.15.0) ─────────────────────────
 // Mirrors titleslot.states / at_home / cross. SpongeBob's "Christmas Who?" is
@@ -17728,7 +17755,7 @@ function _tsStates(name, epName){
     }
     return false;
   }
-  k=_tsWords(epName);
+  k=_tsWords(_tsBare(epName));
   if(!k.some(w=>!/^\d+$/.test(w)) || k.join("").length<3) return false;
   const tail=title.slice(-k.length);
   return title.length>=k.length && tail.join("")===k.join("") && tail[0]===k[0];
@@ -33180,6 +33207,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.15.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.16.0</div>
 </body>
 </html>

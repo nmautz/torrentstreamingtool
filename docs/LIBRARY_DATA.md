@@ -831,7 +831,44 @@ word, like "Ugh", must be the title's last words), and it is not `at_home` where
 (season 0) is taken at its word; a numbered season must have its names to hand and contradict
 them. The file gains `ts_from_season` beside `ts_from`, and loses any `home`. `_fetch_item_metadata`
 adds the wanted season to the seasons it asks TMDb for, since no file sits in it until this runs.
-Nothing is ever scanned for across seasons: an existing file under the wrong season stays there.
+A single-episode item is never scanned for across seasons: a file fetched as the wrong season
+stays there.
+
+**A numeric range (20.16.0).** `S01E04-E05`, `S01E04E05` and `S01E12-13` say the file holds the
+later episodes too, with or without names. `titleslot.ranged` reads the tail: a run that starts
+right after the file's own number, at most four episodes in all (`S01E01-E12` on one file is a
+mislabelled pack). `slot` puts those episodes in `also` when the season has them, except when the
+title names the file's own episode **and no other** (`S01E01E02 Rose`): that is one long episode
+the release counts as two, and TMDb's next episode is something else. TMDb's trailing part number
+(`Aliens of London (1)`) is dropped before any name is compared, so both halves of
+`Exodus (1)` / `Exodus (2)` read "Exodus" and are left to the range.
+
+**Across seasons, for a pack (20.16.0).** An item with no `want` crosses by `titleslot.roam`.
+Futurama's Blu-ray sets are numbered in production order and TMDb's seasons are broadcast order:
+`S01E10 A Flight to Remember` is past the end of TMDb's nine-episode season 1 and is its S02E01;
+the Hulu seasons were released as S11-S13 and are TMDb's 8-10. A file moves when:
+
+* it is not `at_home` in its own season (that season's names are to hand, its title names none of
+  them and shares no word with the name its number points at, or the season has no such number);
+* its title states the whole name of episodes in **exactly one** other season of those whose
+  names are held. The same name in two seasons moves nothing.
+* Season 0 is a destination only for a number the file's own season does not have (Firefly's
+  `S01E12 The Message` is a TMDb special). A special is never a source.
+
+It writes the same fields as the `want` move (`ts_from`, `ts_from_season`), re-derives the move
+every time, and has no opinion when the names of the file's own season or of the season it sits
+in are missing. The two paths never mix: a file fetched for a slot is not moved off it by a scan.
+
+`roam` can only look where it has names, and the cache holds the seasons the files sit in.
+`_roam_seasons_wanted` (main.py) lists the others when `titleslot.astray` finds a file out of
+place: every season with episodes, nearest first, season 0 only for an overflow.
+`_settle_attribution` fetches them (the existing 12-season bound applies), runs the passes again
+and marks the item tried for this run (`_roam_tried`); `_nudge_metadata_health` condition 5 gets
+existing items there on the next open. A metadata refresh asks again for the season a file was
+moved out of and, for such a pack, every season it already held. Cost: an item with a file out of
+place carries the episode lists of up to 12 more seasons per run in `library.json`.
+Not handled: a show whose TMDb names are placeholders (Money Heist's "Episode 1"), where there
+is nothing to read.
 
 It only touches a plain numbered file whose slot is still what its name says (or that it moved
 before): not a bucketed file, not one the anime passes numbered, not a special with a `home`. It

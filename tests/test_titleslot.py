@@ -234,6 +234,131 @@ eq("name_query: short but usable", ts.name_query("Ugh"), "Ugh")
 eq("name_query: placeholder", ts.name_query("Episode 7"), "")
 eq("name_query: nothing", ts.name_query(None), "")
 
+
+# ── A numeric range holds its later episodes (20.16.0) ──────────────────────
+# TMDb's real Doctor Who (2005) season 1 names, read off the box 2026-10-07.
+DW = [{"episode": 1, "name": "Rose"}, {"episode": 2, "name": "The End of the World"},
+      {"episode": 3, "name": "The Unquiet Dead"}, {"episode": 4, "name": "Aliens of London (1)"},
+      {"episode": 5, "name": "World War Three (2)"}, {"episode": 12, "name": "Bad Wolf (1)"},
+      {"episode": 13, "name": "The Parting of the Ways (2)"}]
+eq("ranged: E04-E05", ts.ranged("Doctor.Who.2005.S01E04-E05.1080p.BluRay.mkv"), [5])
+eq("ranged: E04E05", ts.ranged("Doctor.Who.2005.S01E04E05.1080p.mkv"), [5])
+eq("ranged: E12-13", ts.ranged("Doctor.Who.2005.S01E12-13.mkv"), [13])
+eq("ranged: three", ts.ranged("Show.S01E01-E03.mkv"), [2, 3])
+eq("ranged: a whole season on one name is not a range", ts.ranged("Show.S01E01-E12.mkv"), [])
+eq("ranged: counting down is not a range", ts.ranged("Show.S01E05-E02.mkv"), [])
+eq("ranged: a tag is not a range", ts.ranged("Show.S01E04-10bit.mkv"), [])
+eq("ranged: none", ts.ranged("Show.S01E04.1080p.mkv"), [])
+eq("range, no names", S("Doctor.Who.2005.S01E04-E05.1080p.BluRay.mkv", DW), (4, [5]))
+eq("range, both names, TMDb's carry (1)/(2)",
+   S("Doctor.Who.2005.S01E04E05.Aliens.of.London.World.War.Three.1080p.BluRay.mkv", DW), (4, [5]))
+eq("TMDb's part number is not part of the name", S("Doctor.Who.2005.S01E05.World.War.Three.720p.mkv", DW), None)
+eq("range past the season's end holds nothing extra", S("Doctor.Who.2005.S01E13-E14.mkv", DW), None)
+eq("range over an episode the season lacks", S("Doctor.Who.2005.S01E05-E06.mkv", DW), None)
+eq("its own name and no other: a long episode counted twice", S("Doctor.Who.2005.S01E01E02.Rose.1080p.mkv", DW), None)
+eq("two halves with one name cannot be told apart, the range still counts",
+   S("Show.S01E01E02.Exodus.mkv", [{"episode": 1, "name": "Exodus (1)"}, {"episode": 2, "name": "Exodus (2)"}]), (1, [2]))
+eq("name_query drops the part number", ts.name_query("Aliens of London (1)"), "Aliens of London")
+rf = [F("Doctor.Who.2005.S01E04-E05.1080p.BluRay.mkv", 1, 4)]
+ok("place: a range adds `also`", ts.place_files(rf, {"1": {"episodes": DW}}))
+eq("place: ... and nothing else", (rf[0]["episode"], rf[0]["also"], "ts_from" in rf[0]), (4, [5], False))
+ok("place: ... once", not ts.place_files(rf, {"1": {"episodes": DW}}))
+
+# ── A pack file that is another season's episode (20.16.0) ──────────────────
+# TMDb's real Futurama names (broadcast order; the Blu-ray sets are numbered
+# in production order, and the Hulu seasons were released as S11-S13).
+N = lambda *names, start=1: [{"episode": start + i, "name": n} for i, n in enumerate(names)]
+FUT = {"1": {"episodes": N("Space Pilot 3000", "The Series Has Landed", "I, Roommate",
+                           "Love's Labours Lost in Space", "Fear of a Bot Planet", "A Fishful of Dollars",
+                           "My Three Suns", "A Big Piece of Garbage", "Hell Is Other Robots")},
+       "2": {"episodes": N("A Flight to Remember", "Mars University", "When Aliens Attack",
+                           "Fry & the Slurm Factory", "I Second That Emotion")
+                         + [{"episode": 19, "name": "Mother's Day"}]},
+       "3": {"episodes": [{"episode": 3, "name": "The Cryonic Woman"}]},
+       "8": {"episodes": N("The Impossible Stream", "Children of a Lesser Bog")},
+       "11": {"episodes": N("Beef", "Catfish Hunter")}}
+R = lambda name, seas=FUT: ts.roam(name, seas)
+eq("roam: past the season's end", R("Futurama.S01E10.A.Flight.to.Remember.1080p.BluRay.x265.mkv"),
+   {"season": 2, "episode": 1, "also": []})
+eq("roam: a number that exists, a name that is another season's",
+   R("Futurama.S02E19.The.Cryonic.Woman.1080p.BluRay.mkv"), {"season": 3, "episode": 3, "also": []})
+eq("roam: three seasons off", R("Futurama.S11E01.The.Impossible.Stream.1080p.HULU.WEB-DL.mkv"),
+   {"season": 8, "episode": 1, "also": []})
+eq("roam: at home stays", R("Futurama.S01E01.Space.Pilot.3000.1080p.BluRay.mkv"), False)
+eq("roam: another episode of its OWN season is pass 5's, not this",
+   R("Futurama.S02E01.I.Second.That.Emotion.1080p.BluRay.mkv"), False)
+eq("roam: no title stated", R("Futurama.S01E10.1080p.BluRay.mkv"), False)
+eq("roam: a name nobody has", R("Futurama.S01E10.Some.Other.Thing.1080p.mkv"), False)
+eq("roam: own season's names not to hand", R("Futurama.S04E12.Where.No.Fan.Has.Gone.Before.mkv"), None)
+eq("roam: a special is never a source", R("Futurama.S00E01.A.Flight.to.Remember.mkv"), False)
+TWO = dict(FUT, **{"9": {"episodes": N("A Flight to Remember")}})
+eq("roam: the name in two seasons is neither", R("Futurama.S01E10.A.Flight.to.Remember.mkv", TWO), False)
+# Firefly: season 1 is 11 episodes on TMDb and the unaired three are specials.
+FF = {"1": {"episodes": N("The Train Job", "Bushwhacked", "Our Mrs. Reynolds")},
+      "0": {"episodes": N("Trash", "The Message", "Heart of Gold", start=2)}}
+eq("roam: season 0 takes a number its season lacks", R("Firefly.S01E12.The.Message.1080p.BluRay.mkv", FF),
+   {"season": 0, "episode": 3, "also": []})
+FF2 = {"1": {"episodes": N("The Train Job", "Bushwhacked", "Our Mrs. Reynolds")},
+       "0": {"episodes": N("Serenity")}}
+eq("roam: season 0 never pulls a file off a slot that exists",
+   R("Firefly.S01E03.Serenity.1080p.BluRay.mkv", FF2), False)
+
+eq("astray: the seasons to look from, and an overflow",
+   ts.astray([F("Futurama.S01E10.A.Flight.to.Remember.mkv", 1, 10), F("Futurama.S01E01.Space.Pilot.3000.mkv", 1, 1),
+              F("Futurama.S11E01.The.Impossible.Stream.mkv", 11, 1)], FUT), ({1, 11}, True))
+eq("astray: nothing out of place", ts.astray([F("Futurama.S01E01.Space.Pilot.3000.mkv", 1, 1)], FUT), (set(), False))
+eq("astray: no overflow", ts.astray([F("Futurama.S11E01.The.Impossible.Stream.mkv", 11, 1)], FUT), ({11}, False))
+
+pk = [F("Futurama.S01E10.A.Flight.to.Remember.1080p.BluRay.x265.mkv", 1, 10),
+      F("Futurama.S01E01.Space.Pilot.3000.1080p.BluRay.mkv", 1, 1),
+      F("Futurama.S02E01.I.Second.That.Emotion.1080p.BluRay.mkv", 2, 1)]
+ok("place: a pack file crosses seasons", ts.place_files(pk, FUT))
+eq("place: ... filed there", (pk[0]["season"], pk[0]["episode"], pk[0]["ts_from_season"], pk[0]["ts_from"]), (2, 1, 1, 10))
+eq("place: ... its neighbour untouched", (pk[1]["season"], pk[1]["episode"], "ts_from" in pk[1]), (1, 1, False))
+eq("place: ... and the same-season move still happens", (pk[2]["season"], pk[2]["episode"], pk[2]["ts_from"]), (2, 5, 1))
+ok("place: ... and stays", not ts.place_files(pk, FUT))
+eq("place: ... still there", (pk[0]["season"], pk[0]["episode"]), (2, 1))
+ok("place: its own season's names gone, no undo", not ts.place_files(pk[:1], {"2": FUT["2"]}))
+ok("place: the season it sits in gone, no undo", not ts.place_files(pk[:1], {"1": FUT["1"]}))
+eq("place: ... still there", (pk[0]["season"], pk[0]["episode"]), (2, 1))
+ok("place: TMDb renames the episode, it goes home",
+   ts.place_files(pk[:1], dict(FUT, **{"2": {"episodes": N("Something Else")}})))
+eq("place: ... back on its own number", (pk[0]["season"], pk[0]["episode"], "ts_from_season" in pk[0]), (1, 10, False))
+w = [F("Futurama.S11E01.The.Impossible.Stream.1080p.HULU.WEB-DL.mkv", 11, 1)]
+ok("place: an item fetched AS S11E01 is never moved by the scan", not ts.place_files(w, FUT, (11, 1)))
+ok("place: the same file in a pack is", ts.place_files(w, FUT))
+eq("place: ... filed at S08E01", (w[0]["season"], w[0]["episode"]), (8, 1))
+
+# ── main._roam_seasons_wanted: which seasons' names to fetch (20.16.0) ──────
+# Lifted out of main.py, which cannot be imported without its dependency tree
+# (as tests/test_retry_candidates.py does).
+import ast, io                    # noqa: E402
+from typing import Optional       # noqa: E402
+_src = io.open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py"),
+               encoding="utf-8").read()
+_fn = next(n for n in ast.parse(_src).body
+           if isinstance(n, ast.FunctionDef) and n.name == "_roam_seasons_wanted")
+_tried = set()
+_ns = {"Optional": Optional, "titleslot": ts, "_roam_tried": _tried,
+       "_item_want": lambda it: it.get("want"), "_anime_entries": lambda m: m.get("anime")}
+exec(ast.get_source_segment(_src, _fn), _ns)
+wanted = _ns["_roam_seasons_wanted"]
+GRID = [{"season": n, "episode_count": c} for n, c in
+        [(0, 6), (1, 9), (2, 20), (3, 15), (4, 12), (5, 16), (8, 10), (11, 10), (12, 0)]]
+meta = {"tmdb_kind": "tv", "tmdb_id": 615, "all_seasons": GRID, "seasons": {"1": FUT["1"]}}
+it = {"id": "x", "files": [F("Futurama.S01E10.A.Flight.to.Remember.mkv", 1, 10)]}
+eq("wanted: every other season, nearest first, 0 for an overflow, none that is empty",
+   wanted(it, meta), [0, 2, 3, 4, 5, 8, 11])
+eq("wanted: no season 0 without an overflow",
+   wanted({"id": "y", "files": [F("Futurama.S11E01.The.Impossible.Stream.mkv", 11, 1)]},
+          dict(meta, seasons={"11": FUT["11"]})), [8, 5, 4, 3, 2, 1])
+eq("wanted: nothing out of place", wanted({"id": "z", "files": [F("Futurama.S01E01.Space.Pilot.3000.mkv", 1, 1)]}, meta), [])
+eq("wanted: never for a single-episode item", wanted(dict(it, want=(1, 10)), meta), [])
+eq("wanted: never for an anime", wanted(it, dict(meta, anime=[1])), [])
+eq("wanted: all names already held", wanted(it, dict(meta, seasons={str(g["season"]): FUT["1"] for g in GRID})), [])
+_tried.add("x")
+eq("wanted: asked once per run", wanted(it, meta), [])
+
 print("%d passed, %d failed" % (_PASS, len(_FAIL)))
 for f in _FAIL:
     print("  FAIL", f)

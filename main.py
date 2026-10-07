@@ -4320,8 +4320,11 @@ def _reattribute_item_files(item: dict, metadata: Optional[dict]) -> bool:
     # the file name alone, so it survives the rebuild `_resettle_files` exists
     # for. Never for a show the anime table covers: those numbers were decoded
     # on another grid, and a name read against the wrong season proves nothing.
-    # `_item_want`: the one way a file crosses seasons (20.15.0) - a special or
-    # another season's number fetched for a named episode of this one.
+    # `_item_want`: a special or another season's number fetched for a named
+    # episode of this one crosses seasons (20.15.0). An item with no want (a
+    # pack) crosses by `titleslot.roam` (20.16.0): Futurama's Blu-ray "S01E10"
+    # is TMDb's S02E01. That needs other seasons' names, which
+    # `_settle_attribution` fetches (`_roam_seasons_wanted`).
     if not _anime_entries(metadata):
         changed |= titleslot.place_files(files, metadata.get("seasons") or {},
                                          _item_want(item))
@@ -4386,22 +4389,30 @@ async def _settle_attribution(lib: dict, item: dict,
         # Only for an item with a special or a stuck `(season, 0)` file; a
         # miss (no key, TMDb down) leaves the pass with no opinion.
         await _ep_groups_fetch(int(meta["tmdb_id"]))
-    if not _reattribute_item_files(item, meta):
+    changed = _reattribute_item_files(item, meta)
+    # Seasons whose names pass 5 needs to look for a file that is not where
+    # its number says (`titleslot.roam`). Asked once per item per run.
+    roam = _roam_seasons_wanted(item, meta)
+    if not changed and not roam:
         return meta
-    async with mutate_library() as lib_w:
-        fresh = next((x for x in lib_w["items"] if x["id"] == item.get("id")), None)
-        if fresh is None:
-            raise LibraryUnchanged
-        _reattribute_item_files(fresh, meta)   # pure + idempotent — same result
+    if changed:
+        async with mutate_library() as lib_w:
+            fresh = next((x for x in lib_w["items"] if x["id"] == item.get("id")), None)
+            if fresh is None:
+                raise LibraryUnchanged
+            _reattribute_item_files(fresh, meta)   # pure + idempotent — same result
 
     have = {int(k) for k in (meta or {}).get("seasons", {}) if str(k).isdigit()}
     want = {int(f.get("season", 0) or 0) for f in item.get("files", [])}
     missing = sorted(s for s in want - have if s > 0)
+    if roam:
+        _roam_tried.add(str(item.get("id")))
+        missing += [s for s in roam if s not in missing]
     # A special pass 4 homed inside a season needs season 0's names and stills,
     # or it reads "Special 36" with a blank tile where the finale should be.
     # Only then: season 0 is 300 entries for some shows.
-    if 0 not in have and any(isinstance(f.get("home"), dict)
-                             for f in item.get("files", [])):
+    if 0 not in have and 0 not in missing \
+            and any(isinstance(f.get("home"), dict) for f in item.get("files", [])):
         missing.append(0)
     # Bounded: a correction shouldn't turn into an unbounded crawl of a
     # 20-season show on a single page open.
@@ -4417,7 +4428,45 @@ async def _settle_attribution(lib: dict, item: dict,
         if not it2 or not isinstance(it2.get("metadata"), dict):
             return meta
         it2["metadata"].setdefault("seasons", {}).update(extra)
+        if roam:
+            # The names just fetched are what `roam` was waiting for.
+            _reattribute_item_files(it2, it2["metadata"])
     return it2["metadata"]
+
+
+_roam_tried: set[str] = set()   # items whose extra seasons were asked for this run
+
+
+def _roam_seasons_wanted(item: dict, meta: Optional[dict]) -> list[int]:
+    """Seasons whose episode names `titleslot.roam` still needs for this item,
+    nearest first, or [] when there is nothing to look for.
+
+    A pack file that is not at home in its own season (Futurama's Blu-ray
+    "S01E10", past the end of TMDb's nine-episode season 1) may be another
+    season's episode, and only names can say which. Season 0 is wanted only
+    for a number its season does not have. Never for a single-episode item
+    (`_item_want` is its answer), an anime, or an item already asked this run:
+    a season TMDb will not return must not be re-asked on every open."""
+    meta = meta or {}
+    if meta.get("tmdb_kind") != "tv" or not meta.get("tmdb_id") \
+            or not isinstance(meta.get("seasons"), dict) \
+            or not isinstance(meta.get("all_seasons"), list) \
+            or _item_want(item) or _anime_entries(meta) \
+            or str(item.get("id")) in _roam_tried:
+        return []
+    from_seasons, overflow = titleslot.astray(item.get("files") or [], meta["seasons"])
+    if not from_seasons:
+        return []
+    have = {int(k) for k in meta["seasons"] if str(k).isdigit()}
+    out = []
+    for s in meta["all_seasons"]:
+        n = int(s.get("season", 0) or 0)
+        if n in have or not int(s.get("episode_count", 0) or 0):
+            continue
+        if n > 0 or overflow:
+            out.append(n)
+    out.sort(key=lambda n: (min(abs(n - f) for f in from_seasons), n))
+    return out
 
 
 async def _fetch_item_metadata(item_id: str, force: bool = False,
@@ -4514,9 +4563,19 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
         seasons = sorted({
             int(f.get("season", 0)) for f in item.get("files", [])
             if int(f.get("season", 0)) > 0
-        } | ({_item_want(item)[0]} if _item_want(item) else set()))
+        } | ({_item_want(item)[0]} if _item_want(item) else set())
+          | {int(f.get("ts_from_season") or 0) for f in item.get("files", [])
+             if int(f.get("ts_from_season") or 0) > 0}
+          | ({int(k) for k in (cached.get("seasons") or {}) if str(k).isdigit() and int(k) > 0}
+             if not _item_want(item)
+             and any("ts_from_season" in f for f in item.get("files", [])) else set()))
         # ^ the season the item was fetched FOR: a special downloaded as
         # S03E30 has no file in season 3 until pass 5 has that season's names.
+        # And the season a file was moved OUT of (20.16.0): pass 5 re-derives
+        # the move from that season's names, and no file sits there any more.
+        # A pack with such a file keeps every season it already had names for:
+        # `titleslot.roam` wants a name to be in ONE season of those it can see,
+        # and seeing fewer of them after a refresh could change its answer.
 
         fails_before = _tmdb_fail_seq
         if match["kind"] == "tv":
@@ -5312,6 +5371,11 @@ def _nudge_metadata_health(item: dict) -> None:
     for pass 5 (`titleslot.place_files`): SpongeBob's "S02E09 Dying for Pie"
     sat in TMDb's "Christmas Who?" slot on the box. Offline and pure, so the
     test is simply running the pass on a copy.
+
+    **5 - a pack file that may be another season's episode (20.16.0).** Pass 5
+    can only look where it has names, and the cache holds the seasons the files
+    sit in. `_roam_seasons_wanted` lists the rest; `_settle_attribution`
+    fetches them and marks the item tried for this run.
     """
     meta = item.get("metadata") or {}
     if not meta:
@@ -5335,7 +5399,8 @@ def _nudge_metadata_health(item: dict) -> None:
     if ((meta.get("tmdb_kind") == "tv" and "all_seasons" not in meta)
             or _movie_binding_is_stale(item, meta)
             or _ep_groups_pending(item, meta)
-            or _title_slots_pending(item, meta)):
+            or _title_slots_pending(item, meta)
+            or _roam_seasons_wanted(item, meta)):
         _spawn_metadata_fetch(item["id"])
 
 
