@@ -184,6 +184,50 @@ renamed = {"2": {"episodes": [dict(e, name="Something Else Entirely") if e["epis
 ok("place: reason gone", ts.place_files(moved, renamed))
 eq("place: ... back on its own number", (moved[0]["episode"], "ts_from" in moved[0]), (9, False))
 
+# ── Across seasons, for the episode an item was fetched for (20.15.0) ───────
+# Real AMZN titles: four season 2/3 episodes are released as specials, one
+# under the wrong season.
+S3N = [{"episode": 19, "name": "Party Pooper Pants"}, {"episode": 20, "name": "Chocolate with Nuts"},
+       {"episode": 30, "name": "The Sponge Who Could Fly"}, {"episode": 31, "name": "Gary Takes a Bath"},
+       {"episode": 36, "name": "Ugh"}]
+ALLS = {"2": {"episodes": S2}, "3": {"episodes": S3N}}
+X = lambda name, s, e, seas=ALLS: ts.cross(name, s, e, seas)
+ok("special -> S02E09", X("SpongeBob SquarePants S00E01 Christmas Who 1080p AMZN WEB-DL DDP2 0 H 264-Kitsune", 2, 9))
+ok("special -> S03E30", X("SpongeBob SquarePants S00E03 The Sponge Who Could Fly 1080p AMZN WEB-DL", 3, 30))
+ok("special -> S03E19", X("SpongeBob SquarePants S00E02 Party Pooper Pants 1080p AMZN", 3, 19))
+ok("special, short name at the end of the title", X("SpongeBob SquarePants S00E04 Spongebob BC Ugh 1080p AMZN WEB-DL", 3, 36))
+ok("another season's number -> S03E31", X("SpongeBob SquarePants S02E20 Gary Takes a Bath REPACK 1080p AMZN", 3, 31))
+ok("not for a different wanted episode", not X("SpongeBob SquarePants S00E01 Christmas Who 1080p", 3, 30))
+ok("not when it is at home in its own season",
+   not X("SpongeBob SquarePants S02E15 Dumped 1080p", 3, 31,
+         {"2": {"episodes": S2}, "3": {"episodes": [{"episode": 31, "name": "Dumped"}]}}))
+ok("not from a numbered season whose names are unknown",
+   not X("SpongeBob SquarePants S02E20 Gary Takes a Bath 1080p", 3, 31, {"3": {"episodes": S3N}}))
+ok("not within the same season", not X("SpongeBob SquarePants S03E05 Gary Takes a Bath 1080p", 3, 31))
+ok("a short name in the middle of a title is not it",
+   not X("SpongeBob SquarePants S00E09 Ugh What A Day 1080p", 3, 36))
+ok("no stated title", not X("SpongeBob.SquarePants.S00E04.1080p.WEB-DL", 3, 36))
+
+sp = [F("SpongeBob SquarePants S00E03 The Sponge Who Could Fly 1080p AMZN WEB-DL.mkv", 0, 3,
+        home={"season": 3, "after": 29})]
+ok("place: crosses for the wanted episode", ts.place_files(sp, ALLS, (3, 30)))
+eq("place: ... filed there", (sp[0]["season"], sp[0]["episode"], sp[0]["ts_from_season"], sp[0]["ts_from"],
+                              "home" in sp[0]), (3, 30, 0, 3, False))
+ok("place: ... and stays", not ts.place_files(sp, ALLS, (3, 30)))
+eq("place: ... still there", (sp[0]["season"], sp[0]["episode"]), (3, 30))
+rb = [F(sp[0]["name"], 0, 3)]
+ts.place_files(rb, ALLS, (3, 30))
+eq("place: same answer from a rebuilt list", (rb[0]["season"], rb[0]["episode"]), (3, 30))
+ok("place: no names for the wanted season, no undo", not ts.place_files(sp, {"2": {"episodes": S2}}, (3, 30)))
+ok("place: item no longer wants it", ts.place_files(sp, ALLS, None))
+eq("place: ... back where its number says", (sp[0]["season"], sp[0]["episode"], "ts_from_season" in sp[0]), (0, 3, False))
+plain = [F("SpongeBob SquarePants S00E01 Christmas Who 1080p.mkv", 0, 1)]
+ok("place: a special nobody fetched for an episode stays a special", not ts.place_files(plain, ALLS, None))
+g = [F("SpongeBob SquarePants S02E20 Gary Takes a Bath REPACK 1080p AMZN.mkv", 2, 20)]
+ok("place: an item fetched AS S02E20 keeps it", not ts.place_files(g, ALLS, (2, 20)))
+ts.place_files(g, ALLS, (3, 31))
+eq("place: fetched for S03E31, filed there", (g[0]["season"], g[0]["episode"]), (3, 31))
+
 print("%d passed, %d failed" % (_PASS, len(_FAIL)))
 for f in _FAIL:
     print("  FAIL", f)

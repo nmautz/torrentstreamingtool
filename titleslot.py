@@ -250,6 +250,74 @@ def slot(name: str, season_eps) -> Optional[dict]:
     return {"episode": first, "also": sorted(n for n in hits if n != first)}
 
 
+def states(name: str, ep_name) -> bool:
+    """Does the release's stated title say `ep_name`?
+
+    The cross-season question: "S00E03 The Sponge Who Could Fly" asked about
+    TMDb's S03E30 of that name. A name that can identify an episode counts as
+    a phrase anywhere in the title (one word missing allowed for a long one,
+    as in `named`). A shorter one - "Ugh" - counts only as the title's LAST
+    words ("Spongebob BC Ugh"): too little to find in the middle of anything."""
+    title = stated(name)
+    if not title:
+        return False
+    k = _key(ep_name)
+    if k:
+        if _find(k, title):
+            return True
+        if len(k) >= _NEAR_MIN_WORDS:
+            for i in range(len(k)):
+                short = k[:i] + k[i + 1:]
+                if any(len(w) >= 4 and not w.isdigit() for w in short) and _find(short, title):
+                    return True
+        return False
+    k = [w for w in words(ep_name)]
+    if not any(not w.isdigit() for w in k) or len("".join(k)) < 3:
+        return False
+    return len(title) >= len(k) and "".join(title[-len(k):]) == "".join(k) \
+        and title[-len(k):][0] == k[0]
+
+
+def at_home(name: str, own_season_eps) -> bool:
+    """Is a release where its own number says, as far as its title shows?
+    True when the title names an episode of its own season, or shares a word
+    with the name of the episode its number points at."""
+    mk = marker(name)
+    if not mk:
+        return True
+    title = stated(name)
+    if named(title, own_season_eps):
+        return True
+    own_name = next((e.get("name") for e in own_season_eps or []
+                     if isinstance(e, dict) and _int(e.get("episode")) == mk[1]), None)
+    own_words = set(w for w in words(own_name) if not w.isdigit())
+    return bool(own_words and own_words & set(title))
+
+
+def cross(name: str, want_season: int, want_episode: int, seasons: dict) -> bool:
+    """May a release numbered in ANOTHER season be filed as
+    (`want_season`, `want_episode`)?
+
+    Only ever asked about one wanted episode, never scanned for: its stated
+    title must say that episode's name (`states`), and it must not be at home
+    where it is. A special (season 0) is taken at its word. A numbered season
+    must have its names to hand and contradict them - with no names there is
+    no evidence it is misplaced, and no evidence is not permission."""
+    mk = marker(name)
+    if not mk or mk[1] <= 0 or want_season <= 0 or want_episode <= 0 or mk[0] == want_season:
+        return False
+    seasons = seasons if isinstance(seasons, dict) else {}
+    want_eps = ((seasons.get(str(want_season)) or {}).get("episodes")) or []
+    want_name = next((e.get("name") for e in want_eps
+                      if isinstance(e, dict) and _int(e.get("episode")) == want_episode), None)
+    if not want_name or not states(name, want_name):
+        return False
+    if mk[0] == 0:
+        return True
+    own_eps = ((seasons.get(str(mk[0])) or {}).get("episodes")) or []
+    return bool(own_eps) and not at_home(name, own_eps)
+
+
 def _int(v) -> int:
     try:
         return int(v or 0)
@@ -269,7 +337,7 @@ def held(f: dict) -> list:
     return out
 
 
-def place_files(files: list, seasons: dict) -> bool:
+def place_files(files: list, seasons: dict, want: Optional[tuple] = None) -> bool:
     """Pass 5: file each episode under the name it states. In place; returns
     True if anything changed.
 
@@ -282,18 +350,45 @@ def place_files(files: list, seasons: dict) -> bool:
 
     A file that loses its reason (TMDb renamed an episode) goes back to its own
     number: the move is re-derived every time, never remembered.
+
+    `want` is the `(season, episode)` the item was downloaded FOR (20.15.0).
+    It is the one way a file crosses seasons: "S00E03 The Sponge Who Could
+    Fly" fetched for S03E30 is filed there, when `cross` agrees. It also
+    records `ts_from_season`.
     """
     changed = False
     seasons = seasons if isinstance(seasons, dict) else {}
     for f in files or []:
-        if (f.get("bucket") or f.get("abs_episode") or f.get("abs_no")
-                or f.get("rel_season") or isinstance(f.get("home"), dict)):
+        if f.get("bucket") or f.get("abs_episode") or f.get("abs_no") or f.get("rel_season"):
             continue
         mk = marker(f.get("name") or f.get("path") or "")
-        if not mk or mk[0] <= 0 or mk[1] <= 0:
+        if not mk or mk[1] <= 0:
             continue
         season, own = mk[0], mk[1]
         cur_s, cur_e = _int(f.get("season")), _int(f.get("episode"))
+        # ── Across seasons, for the episode this item was fetched for ───────
+        crossed = "ts_from_season" in f and _int(f.get("ts_from_season")) == season \
+            and _int(f.get("ts_from")) == own
+        if want and (crossed or (cur_s, cur_e) == (season, own)) \
+                and cross(f.get("name") or f.get("path") or "", _int(want[0]), _int(want[1]), seasons):
+            if (cur_s, cur_e) != (_int(want[0]), _int(want[1])) or not crossed:
+                f["season"], f["episode"] = _int(want[0]), _int(want[1])
+                f["ts_from"], f["ts_from_season"] = own, season
+                f.pop("home", None)
+                f.pop("also", None)
+                changed = True
+            continue
+        if crossed:
+            # Moved across seasons before and no longer justified. With the
+            # wanted season's names gone that is "no opinion"; otherwise home.
+            if want and not ((seasons.get(str(_int(want[0]))) or {}).get("episodes")):
+                continue
+            f["season"], f["episode"] = season, own
+            del f["ts_from"], f["ts_from_season"]
+            cur_s, cur_e = season, own
+            changed = True
+        if isinstance(f.get("home"), dict) or season <= 0:
+            continue
         moved_before = _int(f.get("ts_from")) == own
         if cur_s != season or (cur_e != own and not moved_before):
             continue

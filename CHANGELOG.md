@@ -1,5 +1,23 @@
 # Changelog
 
+## [20.15.0] — 2026-10-06
+### Get finds an episode that is only released under another season
+
+- **Five SpongeBob episodes had no source because their releases carry another season's
+  number.** "Christmas Who?" (S02E09), "Party Pooper Pants" (S03E19), "The Sponge Who
+  Could Fly" (S03E30) and "Ugh" (S03E36) are released as specials (S00E01 to S00E04), and
+  "Gary Takes a Bath" (S03E31) as S02E20.
+- **When numbers find nothing, Get's search by episode name now accepts a release from
+  another season** if its name states the wanted episode and it does not belong where
+  its own number puts it. A special is taken at its word. A release from a numbered
+  season must contradict that season's own episode names.
+- **The file is then filed as the episode it was downloaded for,** not as a special.
+- **A short name such as "Ugh" is searched for too,** and matches only as the last words
+  of a release's title.
+- **Not fixed:** a file already in the library under the wrong season is not moved. It
+  has to be deleted and fetched again. A two-episode file whose halves are in different
+  seasons is filed under one season only.
+
 ## [20.14.2] — 2026-10-06
 ### A release name with a word missing still finds its episode, and a retry can't swap in another episode
 

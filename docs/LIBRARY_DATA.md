@@ -823,6 +823,16 @@ Nothing else is stored. The answer is derived from the file name every time, whi
 survives `build_file_list` rebuilding the list on every monitor tick, and why a file goes back to
 its own number if TMDb renames the episode.
 
+**Across seasons (20.15.0), only for the episode an item was fetched for.** `place_files` takes
+`want`, the item's own `(season, episode)` from its download request (`_item_want`; packs and
+films have none). A file numbered in another season is filed at `want` when `titleslot.cross`
+agrees: its stated title says the wanted episode's name (`states`; a name with no four-letter
+word, like "Ugh", must be the title's last words), and it is not `at_home` where it is. A special
+(season 0) is taken at its word; a numbered season must have its names to hand and contradict
+them. The file gains `ts_from_season` beside `ts_from`, and loses any `home`. `_fetch_item_metadata`
+adds the wanted season to the seasons it asks TMDb for, since no file sits in it until this runs.
+Nothing is ever scanned for across seasons: an existing file under the wrong season stays there.
+
 It only touches a plain numbered file whose slot is still what its name says (or that it moved
 before): not a bucketed file, not one the anime passes numbered, not a special with a `home`. It
 stands down for any show the anime mapping table covers. `titleslot.held(f)` (own episode plus

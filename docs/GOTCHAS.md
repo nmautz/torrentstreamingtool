@@ -6987,9 +6987,15 @@ name** it states. Things to keep in mind:
   will slot the file.
 - **The server reads the FILE name, not the torrent title.** A torrent whose file carries no
   episode name is filed by its number even when the title named one.
-- **Only within one season.** "S00E01 Christmas Who" is not recognised as S02E09. A name
-  TMDb does not list in the season ("Gary Takes a Bath") leaves the file on its number, in
-  another episode's slot. Neither is detected.
+- **Across seasons only on request (20.15.0).** The by-name query re-files a result from
+  another season for the ONE episode it was run for (`_reslotCross`, mirror of
+  `titleslot.cross`): "S00E01 Christmas Who" for S02E09, "S02E20 Gary Takes a Bath" for
+  S03E31. It sets `_tsSeason` and rewrites `season`/`episode` on the result. The server files
+  the download by the item's own `(season, episode)` (`_item_want`), so **the request's
+  season/episode must be the wanted slot, never the release's number**. Nothing detects a
+  file that is already in the library under the wrong season: "Gary Takes a Bath" fetched
+  as S02E20 stays there, and its torrent hash then makes a new request for S03E31 a
+  duplicate. Delete it first.
 - **The by-name query** (`_tsNameQuery`, last form in `_ssEpisodeQueries` and the fallback in
   `_bgEpisodeSearch`) returns mostly other seasons; only results whose stated title names
   the wanted episode are kept.

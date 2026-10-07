@@ -17705,8 +17705,66 @@ function _titleSlot(name, eps){
 // episode out (a placeholder, or no word of four letters).
 function _tsNameQuery(meta, season, episode){
   const te=_tmdbSeasonEpisodes(meta, season).find(x=>+x.episode===+episode);
-  if(!te || !_tsKey(te.name).length) return "";
+  // A short name still makes a query ("Ugh") - it is `_tsStates` that is strict
+  // about where such a name may match. A placeholder ("Episode 7") never does.
+  const w=te?_tsWords(te.name):[];
+  if(!te || !w.some(x=>!/^\d+$/.test(x)) || w.join("").length<3) return "";
   return String(te.name).replace(/[^0-9A-Za-z' ]+/g," ").replace(/\s+/g," ").trim();
+}
+// ── Across seasons, for ONE wanted episode (20.15.0) ─────────────────────────
+// Mirrors titleslot.states / at_home / cross. SpongeBob's "Christmas Who?" is
+// only released as "S00E01 Christmas Who", and "Gary Takes a Bath" (TMDb
+// S03E31) as "S02E20". Never scanned for: asked about the one episode a
+// by-name query was run for.
+function _tsStates(name, epName){
+  const title=_tsStated(name);
+  if(!title.length) return false;
+  let k=_tsKey(epName);
+  if(k.length){
+    if(_tsFind(k, title).length) return true;
+    if(k.length>=4) for(let i=0;i<k.length;i++){
+      const short=k.filter((_,j)=>j!==i);
+      if(short.some(w=>w.length>=4 && !/^\d+$/.test(w)) && _tsFind(short, title).length) return true;
+    }
+    return false;
+  }
+  k=_tsWords(epName);
+  if(!k.some(w=>!/^\d+$/.test(w)) || k.join("").length<3) return false;
+  const tail=title.slice(-k.length);
+  return title.length>=k.length && tail.join("")===k.join("") && tail[0]===k[0];
+}
+function _tsAtHome(name, ownEps){
+  const mk=_tsMarker(name);
+  if(!mk) return true;
+  const title=_tsStated(name);
+  if(_tsNamed(title, ownEps).length) return true;
+  const te=(ownEps||[]).find(e=>e && (+e.episode||0)===mk.episode);
+  const own=new Set(_tsWords(te&&te.name).filter(w=>!/^\d+$/.test(w)));
+  return own.size>0 && title.some(w=>own.has(w));
+}
+function _tsCross(name, wantSeason, wantEpisode, meta){
+  const mk=_tsMarker(name);
+  if(!mk || mk.episode<=0 || wantSeason<=0 || wantEpisode<=0 || mk.season===wantSeason) return false;
+  const te=_tmdbSeasonEpisodes(meta, wantSeason).find(e=>(+e.episode||0)===+wantEpisode);
+  if(!te || !te.name || !_tsStates(name, te.name)) return false;
+  if(mk.season===0) return true;
+  const own=_tmdbSeasonEpisodes(meta, mk.season);
+  return own.length>0 && !_tsAtHome(name, own);
+}
+// Re-file the results of a by-name query that are another season's number but
+// this episode. In place; returns the ones it took.
+function _reslotCross(results, season, episode, meta){
+  if(!meta || meta.tmdb_kind!=="tv" || _animeFacts(meta)) return [];
+  return (results||[]).filter(r=>{
+    if(!r || r.kind!=="episode" || r.special || r._tsSeason!==undefined) return false;
+    if(r._ts || (r.also&&r.also.length)) return false;      // already placed in its own season
+    const mk=_tsMarker(r.title);
+    if(!mk || mk.season!==r.season || mk.episode!==r.episode) return false;
+    if(!_tsCross(r.title, season, episode, meta)) return false;
+    r._tsSeason=r.season; r._ts=r.episode;
+    r.season=season; r.episode=episode;
+    return true;
+  });
 }
 // File search results under the episode their name states. In place, and once
 // per result: `_ts` is the number the release carried when it was moved, 0 when
@@ -17828,6 +17886,7 @@ async function ssSearchEpisode(season, episode, opts={}){
           // under season 1), so matching it on TMDb's (season, episode) would
           // reject every real source. Match on the absolute number instead.
           _reslot([res], _ssMeta);
+          if(f.name) _reslotCross([res], season, episode, _ssMeta);
           const hit=absNo
             ? (res.episode===absNo && res.season<=1)
             : (res.season===season && _srcHolds(res).includes(episode));
@@ -18159,7 +18218,8 @@ function _ssAlternativeSources(season, episode){
 async function _ssDownloadOne(src, season, episode, opts={}){
   // A release the name pass placed is filed under its own first episode,
   // whichever row it was picked from - the server slots the file the same way.
-  if(episode>0 && src && +src.season===+season) episode=_srcSlotEpisode(src, episode);
+  if(episode>0 && src && +src.season===+season && src._tsSeason===undefined)
+    episode=_srcSlotEpisode(src, episode);
   // `series`/`locked` are overridable so a detached background run can queue
   // downloads for a show the user has since navigated away from (_ssGroup is
   // null by then, and _ssLocked belongs to whatever page is open now).
@@ -18465,9 +18525,10 @@ async function _bgEpisodeSearch(ctx, season, episode){
   const byName=_reslot(await _bgQuery(`${ctx.query} ${name}`, ctx), ctx.meta);
   // Only what the name pass itself vouches for: a release whose title states
   // this episode. The number alone is exactly what cannot be trusted here.
-  _bgIngest(ctx, byName.filter(r=>r.kind==="episode" && r.season===season
+  const crossed=_reslotCross(byName, season, episode, ctx.meta);
+  _bgIngest(ctx, byName.filter(r=>crossed.includes(r) || (r.kind==="episode" && r.season===season
     && _srcHolds(r).includes(episode)
-    && (r._ts || (r.also&&r.also.length) || _ssEpTitleVerdict(r, season, r.episode, ctx.meta)===1)));
+    && (r._ts || (r.also&&r.also.length) || _ssEpTitleVerdict(r, season, r.episode, ctx.meta)===1))));
 }
 
 // _ssBulkScopeEpisodes against a snapshot instead of the live page. `scope`
@@ -33119,6 +33180,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.14.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.15.0</div>
 </body>
 </html>

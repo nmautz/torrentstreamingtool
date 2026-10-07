@@ -4320,11 +4320,24 @@ def _reattribute_item_files(item: dict, metadata: Optional[dict]) -> bool:
     # the file name alone, so it survives the rebuild `_resettle_files` exists
     # for. Never for a show the anime table covers: those numbers were decoded
     # on another grid, and a name read against the wrong season proves nothing.
+    # `_item_want`: the one way a file crosses seasons (20.15.0) - a special or
+    # another season's number fetched for a named episode of this one.
     if not _anime_entries(metadata):
-        changed |= titleslot.place_files(files, metadata.get("seasons") or {})
+        changed |= titleslot.place_files(files, metadata.get("seasons") or {},
+                                         _item_want(item))
     if changed:
         files.sort(key=episodes.sort_key)
     return changed
+
+
+def _item_want(item: dict) -> Optional[tuple]:
+    """The `(season, episode)` a single-episode item was downloaded for, or None
+    for a pack or a film. Set from the download request and never revised."""
+    try:
+        s, e = int(item.get("season") or 0), int(item.get("episode") or 0)
+    except (TypeError, ValueError):
+        return None
+    return (s, e) if s > 0 and e > 0 else None
 
 
 def _resettle_files(item: dict) -> bool:
@@ -4501,7 +4514,9 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
         seasons = sorted({
             int(f.get("season", 0)) for f in item.get("files", [])
             if int(f.get("season", 0)) > 0
-        })
+        } | ({_item_want(item)[0]} if _item_want(item) else set()))
+        # ^ the season the item was fetched FOR: a special downloaded as
+        # S03E30 has no file in season 3 until pass 5 has that season's names.
 
         fails_before = _tmdb_fail_seq
         if match["kind"] == "tv":
@@ -5331,7 +5346,7 @@ def _title_slots_pending(item: dict, meta: dict) -> bool:
             or _anime_entries(meta):
         return False
     trial = [dict(f) for f in item.get("files") or []]
-    return titleslot.place_files(trial, meta["seasons"])
+    return titleslot.place_files(trial, meta["seasons"], _item_want(item))
 
 
 def _ep_groups_pending(item: dict, meta: dict) -> bool:
