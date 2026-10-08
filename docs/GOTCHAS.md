@@ -5736,9 +5736,17 @@ Three rules for any delete on this platform:
    "still open in qbittorrent.exe". Sweeping every process's open handles takes **seconds**,
    so resolve the whole failed set in one pass on the failure path — doing it per file turns
    a bulk delete into a minutes-long request.
-2. **Retry before giving up.** qBittorrent and ffmpeg release handles shortly after a
-   priority drop or a job teardown, so a short backoff wins most races. Clear the read-only
-   attribute once while you are there.
+2. **Retry before giving up.** ffmpeg releases its handle shortly after a job teardown,
+   so a short backoff wins that race. Clear the read-only attribute once while you are there.
+   **qBittorrent does not release on a priority drop** (this list said it did until
+   20.16.1). libtorrent keeps every file it has read or written in its file pool, and a
+   seeding torrent keeps reading, so a finished pack is held for as long as it seeds. On
+   2026-10-07 Delete Watched previewed 26 Hunter x Hunter episodes and removed 2: the other
+   24 were open in `qbittorrent.exe`, and a second try 75 s later failed the same way. Only
+   stopping the torrent closes its files. `_delete_files_now` tries each file once, and if
+   any is refused it stops the item's running torrents (`_qbit_let_go`), retries, and starts
+   them again. The same quick first try also ended the ~2 s wait per locked file that made
+   that request take 49 s. `_evict_one_source` has the same exposure and no such step yet.
 3. **Don't commit the bookkeeping until the bytes are actually gone.** Capture the prior
    state up front and roll it back for whatever survived, and purge derived artifacts (the
    HLS bundle) only for files that really went.

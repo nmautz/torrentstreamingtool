@@ -29,6 +29,7 @@ test:
 	python3 tests/test_titleslot.py
 	python3 tests/test_retry_candidates.py
 	python3 tests/test_watchpurge.py
+	python3 tests/test_delete_locked.py
 	python3 tests/test_devactivity.py
 	python3 tests/test_bookmarks.py
 	python3 tests/test_diagnostics.py

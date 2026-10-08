@@ -1,5 +1,22 @@
 # Changelog
 
+## [20.16.1] — 2026-10-07
+### Delete Watched removes episodes qBittorrent is still seeding
+
+- **Delete Watched offered 26 Hunter x Hunter episodes and removed 2.** The other 24 were
+  open in qBittorrent, which was seeding the pack, and Windows will not delete an open file.
+  Marking a file Skip does not make qBittorrent close it. The same applied to deleting
+  selected episodes on a show's page.
+- **When a file is refused, the torrent is now stopped, the files are deleted, and the
+  torrent is started again.** A torrent that was already stopped is left stopped.
+- **A delete of locked files no longer takes about two seconds per file** (49 s for those
+  24): each file gets one quick try before the torrent is stopped.
+- The result message is now a warning, not a success, when any file stayed behind.
+- **Not checked:** on the box. The test drives the real delete code against a stand-in
+  qBittorrent that locks files the way Windows does; that stopping a torrent makes the real
+  qBittorrent close its files is how libtorrent is documented to behave, not something seen
+  on the box yet.
+
 ## [20.16.0] — 2026-10-07
 ### A pack numbered on another season grid is filed where TMDb has it, and a two-episode file holds both
 

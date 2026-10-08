@@ -19757,9 +19757,10 @@ async def _unlink_resilient(src: Path, attempts: int = 4) -> Optional[str]:
     Returns None once the file is gone, else a human-readable reason.
 
     Two Windows-only failures POSIX never raises, both recoverable:
-      * **WinError 32** — another process holds the handle. qBittorrent and
-        ffmpeg do release theirs shortly after we drop the file to priority 0 /
-        tear a prep job down, so a short backoff usually wins.
+      * **WinError 32** — another process holds the handle. ffmpeg releases
+        its own shortly after a prep job is torn down, so a short backoff wins.
+        qBittorrent does NOT release on a priority drop; the caller has to stop
+        the torrent (`_qbit_let_go`) and the backoff then covers the release.
       * **WinError 5** — the read-only attribute, which is ours to clear.
 
     Backs off ~1.75 s in total. Naming the process still holding the file is the
@@ -19790,6 +19791,27 @@ async def _unlink_resilient(src: Path, attempts: int = 4) -> Optional[str]:
             await asyncio.sleep(delay)
             delay *= 2
     return last or "unknown error"
+
+
+# qBit states in which the torrent has no files open (or is not ours to restart).
+_QBIT_IDLE_STATES = _RACE_PAUSED_STATES + ("error", "missingFiles")
+
+
+async def _qbit_let_go(hashes: list) -> list:
+    """Stop the running torrents among `hashes` so qBittorrent closes their files.
+    Returns the ones stopped here, for `qbit_resume` once the delete is done.
+
+    A priority drop does NOT close a handle: libtorrent keeps every file it has
+    read or written in its file pool, and a seeding torrent keeps reading. Only
+    stopping the torrent releases them. See docs/GOTCHAS.md § unlink on Windows."""
+    stopped = []
+    for h in hashes:
+        info = await qbit_info(h)
+        if not info or info.get("state") in _QBIT_IDLE_STATES:
+            continue
+        await qbit_pause(h)
+        stopped.append(h)
+    return stopped
 
 
 async def _delete_files_now(item_id: str, targets: list[str]) -> dict:
@@ -19829,6 +19851,7 @@ async def _delete_files_now(item_id: str, targets: list[str]) -> dict:
             files[p] = "skip"
         await _apply_item_schedule(item, lib)
         item_status = item.get("status", "downloading")
+        hashes = _item_all_torrent_hashes(item)
 
     # 2) Remove the bytes from disk + 3) purge the cached HLS bundle — OUTSIDE the
     #    library lock. Unlinking N files and rmtree-ing N bundle dirs is unbounded
@@ -19840,7 +19863,10 @@ async def _delete_files_now(item_id: str, targets: list[str]) -> dict:
     deleted = 0
     failed: list[dict] = []
     unevict: list[str] = []
-    for p in targets:
+
+    async def _take(p: str, attempts: int) -> Optional[str]:
+        """Remove one target and its bundle. Returns the reason its source stayed."""
+        nonlocal freed, deleted
         f = records[p]
         src = Path(p)
         # Resolve the co-located bundle dir BEFORE unlinking — for a normal file its
@@ -19851,17 +19877,12 @@ async def _delete_files_now(item_id: str, targets: list[str]) -> dict:
         except OSError:
             size = -1
         if size >= 0:
-            err = await _unlink_resilient(src)
+            err = await _unlink_resilient(src, attempts)
             if err:
-                # Report it. This used to be `except OSError: pass`, so a file Windows
-                # refused to unlink (held open by qBittorrent, VLC or an ffmpeg prep
-                # job) left the row marked deleted in the UI with the bytes still on
-                # disk — a bulk delete would drop one episode and silently keep another.
-                failed.append({"name": src.name, "path": p, "reason": err})
-                continue
+                return err
             freed += size
         elif not _file_evicted(f):
-            continue                      # nothing to free; leave the skip mark
+            return None                   # nothing to free; leave the skip mark
         # Only purge the bundle once its source is really gone — a file that
         # survived the delete still needs the prepped copy it already had.
         got_bundle = False
@@ -19876,6 +19897,31 @@ async def _delete_files_now(item_id: str, targets: list[str]) -> dict:
             unevict.append(p)
         if size >= 0 or got_bundle:
             deleted += 1
+        return None
+
+    # One quick try each. Whatever Windows refuses is usually open in qBittorrent
+    # (a seeding pack: 24 of 26 Hunter x Hunter episodes, 2026-10-07), and waiting
+    # does not help, so the torrent is stopped for the second pass and started
+    # again after it. The first file of that pass waits out the release; the rest
+    # are either free by then or held by something else (ffmpeg, VLC).
+    refused: list[str] = []
+    for p in targets:
+        if await _take(p, 1):
+            refused.append(p)
+    if refused:
+        stopped = await _qbit_let_go(hashes)
+        try:
+            for n, p in enumerate(refused):
+                err = await _take(p, 6 if n == 0 else 2)
+                if err:
+                    # Report it. This used to be `except OSError: pass`, so a file
+                    # Windows refused to unlink left the row marked deleted in the UI
+                    # with the bytes still on disk — a bulk delete would drop one
+                    # episode and silently keep another.
+                    failed.append({"name": Path(p).name, "path": p, "reason": err})
+        finally:
+            for h in stopped:
+                await qbit_resume(h)
 
     # Name the holders for everything that failed — one sweep for the whole
     # request, appended to each reason so the UI can say what to close.
