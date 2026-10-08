@@ -16,6 +16,10 @@ episodes". This module is the translation, and nothing else:
     endpoints take a token in the query string (`?device_token=`), and the raw
     view is precisely where one would otherwise sit in plain text forever.
   * `ua_summary(...)`, `presence(...)`: labels for the device list.
+  * `claimed_profile(...)`: the profile a request says it is acting as. A profile
+    with no PIN never opens a session, so this is the only thing that names it.
+  * `anon_id(...)`: the id of a client that sent no device id. Keyed on the KIND
+    of client, not its version string, or every app build is a new "device".
 
 Kinds in `NOISE` (polling, the event stream, page assets) are recorded raw but are
 never a device's "current activity": a dashboard left open polls forever, and
@@ -26,6 +30,7 @@ Pure: stdlib only, no `main` import. Tests in `tests/test_devactivity.py`.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from urllib.parse import parse_qsl, urlencode
 
@@ -163,6 +168,39 @@ def ua_summary(ua: str) -> str:
     if plat in ("iPhone", "iPad") and not client:
         client = "App"          # WKWebView: no "Safari/" token
     return " · ".join(x for x in (plat, client) if x) or ua[:40]
+
+
+_PROFILE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def claimed_profile(query: str) -> str:
+    """The `profile_id` a request's query string names, or "".
+
+    The dashboard sends it on most reads (`/api/library?profile_id=…`). It is a
+    claim, not proof: only a PIN opens a session, and a profile without a PIN
+    (a shared household account) has no session at all. The caller checks the id
+    against the real profiles and prefers a proven session when there is one.
+    """
+    if not query or "profile_id=" not in query:
+        return ""
+    try:
+        pairs = parse_qsl(query, keep_blank_values=True)
+    except ValueError:
+        return ""
+    for k, v in pairs:
+        if k == "profile_id" and _PROFILE_ID.match(v):
+            return v
+    return ""
+
+
+def anon_id(ip: str, ua: str) -> str:
+    """The device id for a request that carried none: address + kind of client.
+
+    Keyed on `ua_summary`, not the raw User-Agent. The app's native requests say
+    `App/20.13.3 CFNetwork/… Darwin/…`, so the raw string made one anonymous
+    "device" per app build (twenty of them in ten days on one phone).
+    """
+    return "anon-" + hashlib.sha256(f"{ip}|{ua_summary(ua)}".encode()).hexdigest()[:12]
 
 
 def extends(prev, kind: str, key: str, ts: float, gap: float = MERGE_GAP_SEC) -> bool:

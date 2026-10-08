@@ -1,5 +1,25 @@
 # Changelog
 
+## [20.16.6] — 2026-10-08
+### The Devices tab names the account on a profile without a PIN, and stops counting app builds as devices
+
+- **A device on a profile with no PIN showed no account.** The tab took a device's
+  profile from its PIN session, and a profile without a PIN never has one. A phone on the
+  House account was listed as an unnamed "iPhone app". The profile now falls back to the
+  one the device's requests name, and devices already in the list are filled in from
+  their kept requests when the server starts.
+- **Every app build added an anonymous "device".** A request with no device id was keyed
+  on its address and full client string, which carries the app's version, and the app
+  looks for servers before its page has loaded. On the box that was twenty rows from one
+  phone. They are now keyed on the kind of client, and the old rows are merged when the
+  server starts.
+- **Anonymous clients are no longer counted as devices.** The tab's count reads
+  "31 devices · 17 anonymous clients", and the anonymous rows stay behind a **Show N
+  anonymous** button. The filter box still finds them.
+- **The account is shown beside the device's name** in All Devices.
+- **Not checked on the box.** The rules have unit tests and the tab's rendering was run
+  against the box's own device list; the merge and the fill-in have not run there yet.
+
 ## [20.16.5] — 2026-10-08
 ### The app's player has no fullscreen button, because leaving fullscreen broke the screen
 

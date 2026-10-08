@@ -7358,3 +7358,25 @@ Two separate faults:
   whatever TMDb says.
 - The flag is a **title** reading. A cam uploaded under a clean name is not caught,
   and the size cross-check only orders race alternates, it does not veto a primary.
+
+## A profile without a PIN has no session, and a User-Agent has a version in it
+
+Two things made the admin Devices tab wrong until 20.16.6, and both will bite any
+code that asks "who is this request from":
+
+- **`_profile_session_id` is `None` for every request from a profile with no PIN.**
+  A session exists only after a PIN was entered. The House account has none, so a
+  phone that had sent 81,000 requests as House was listed with no account. Where
+  the question is "which profile is this", not "is this proven", fall back to the
+  `profile_id` the request names (`devactivity.claimed_profile`) and check it exists.
+- **Never key an identity on a raw User-Agent.** The app's native requests say
+  `App/20.13.3 CFNetwork/… Darwin/…`, so `hash(ip|ua)` minted one anonymous
+  "device" per app build: twenty in ten days from one phone, each holding one or
+  two `/api/discovery` probes. Key on `ua_summary` (`devactivity.anon_id`).
+
+Also true on this box: since it became its own Tailscale subnet router, **every
+remote client arrives from the box's own LAN address** (`192.168.0.106`). The IP
+separates nothing, and the "one identified device on this IP" inference never
+fires. The app's `/api/discovery` probe and its Siri requests send no
+`X-Device-Id`, so they stay anonymous; giving them the id needs an app release.
+

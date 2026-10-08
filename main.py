@@ -15068,7 +15068,12 @@ async def diag_track_requests(request: Request, call_next):
 #      10 minutes, or — for the iOS media player only — the ONE identified device
 #      on that IP. More than one there (a NAT, the Tailscale subnet router) and
 #      it isn't guessed.
-#   4. otherwise an anonymous device keyed by IP + User-Agent.
+#   4. otherwise an anonymous device keyed by IP + the KIND of client
+#      (`devactivity.anon_id`), never its version string.
+#
+# A device's profile is the PIN-proved session when there is one, else the
+# `profile_id` its requests name (`devactivity.claimed_profile`): a profile with
+# no PIN has no session, and its devices used to show no account at all.
 DEVICE_DB = LOG_DIR / "devices" / "activity.sqlite3"
 DEVICE_COOKIE = "streamlink_device_id"
 _DEV_INFER_SEC = 600
@@ -15222,7 +15227,7 @@ def _dev_identify(ts, ip, ua, did) -> tuple:
         near = [d for d, t in (_dev_ip_seen.get(ip) or {}).items() if ts - t < _DEV_INFER_SEC]
         if len(near) == 1:
             return near[0], "inferred"
-    return "anon-" + hashlib.sha256(f"{ip}|{ua}".encode()).hexdigest()[:12], "anonymous"
+    return devactivity.anon_id(ip, ua), "anonymous"
 
 
 async def _dev_drain() -> None:
@@ -15245,6 +15250,12 @@ async def _dev_drain() -> None:
     reqs, devs, dirty = [], {}, {}
     for (ts, method, path, query, status, ms, ip, ua, did, dname, pid, appv) in batch:
         dev_id, via = _dev_identify(ts, ip, ua, did)
+        if not pid:
+            # No PIN session. A profile without a PIN never has one, so the
+            # profile the request says it is acting as is all there is.
+            claim = devactivity.claimed_profile(query)
+            if claim in _dev_names["profiles"]:
+                pid = claim
         kind, ref = devactivity.classify(method, path, query)
         reqs.append({"device_id": dev_id, "ts": ts, "method": method, "path": path,
                      "query": query, "status": status, "ms": ms, "ip": ip, "ua": ua,
@@ -15329,6 +15340,16 @@ async def device_activity_loop() -> None:
     except Exception:
         log.warning("devices: store unavailable — the Devices tab will be empty", exc_info=True)
         return
+    try:
+        await _dev_refresh_names(force=True)
+        merged = await asyncio.to_thread(_dev_store.rekey_anonymous, devactivity.anon_id)
+        named = await asyncio.to_thread(_dev_store.backfill_profiles, devactivity.claimed_profile,
+                                        set(_dev_names["profiles"]))
+        if merged or named:
+            log.info("devices: merged %d anonymous row(s), named the profile of %d device(s)",
+                     merged, named)
+    except Exception:
+        log.warning("devices: tidy-up at start failed", exc_info=True)
     last_prune = 0.0
     while True:
         try:

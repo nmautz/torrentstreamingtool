@@ -24,7 +24,7 @@ themselves); the table stays so an existing store opens unchanged. Likewise the
 Writes happen in batches from one background task (`device_activity_loop` in
 `main.py`), through `asyncio.to_thread`; the lock serialises the writer against
 retention. Reads open their own connection, which WAL lets run alongside a write.
-Leaf module: stdlib only, no `main` import. Tests in `tests/test_devstore.py`.
+Leaf module: stdlib only, no `main` import. Tests in `tests/test_devactivity.py`.
 """
 
 from __future__ import annotations
@@ -207,6 +207,62 @@ class DeviceStore:
             n += c.execute("DELETE FROM devices WHERE id=?", (device_id,)).rowcount
             c.commit()
             return n
+
+    def rekey_anonymous(self, keyfn) -> int:
+        """Move every anonymous device whose id is not `keyfn(ip, ua)` onto that
+        id, with its requests and activities. Returns how many rows moved.
+
+        The id of an anonymous device is derived from its address and client, so
+        a change to that rule would otherwise strand every old row in the list
+        forever. Rows that land on one id merge: counts add, the span widens,
+        the newest client string wins. Does nothing once the store agrees.
+        """
+        moved = 0
+        with self._lock:
+            c = self._w
+            rows = [dict(r) for r in c.execute(
+                "SELECT * FROM devices WHERE id LIKE 'anon-%' ORDER BY last_seen")]
+            for d in rows:
+                new = keyfn(d["ip"], d["ua"])
+                if not new or new == d["id"]:
+                    continue
+                c.execute("UPDATE requests SET device_id=? WHERE device_id=?", (new, d["id"]))
+                c.execute("UPDATE activities SET device_id=? WHERE device_id=?", (new, d["id"]))
+                c.execute(
+                    f"""INSERT INTO devices ({','.join(_DEVICE_COLS)})
+                        VALUES ({','.join('?' * len(_DEVICE_COLS))})
+                        ON CONFLICT(id) DO UPDATE SET
+                          label      = CASE WHEN devices.label <> '' THEN devices.label ELSE excluded.label END,
+                          ua         = excluded.ua,
+                          ua_summary = excluded.ua_summary,
+                          last_seen  = MAX(devices.last_seen, excluded.last_seen),
+                          first_seen = MIN(devices.first_seen, excluded.first_seen),
+                          requests   = devices.requests + excluded.requests,
+                          profile_id = CASE WHEN excluded.profile_id <> '' THEN excluded.profile_id ELSE devices.profile_id END""",
+                    tuple(new if k == "id" else d[k] for k in _DEVICE_COLS))
+                c.execute("DELETE FROM devices WHERE id=?", (d["id"],))
+                moved += 1
+            c.commit()
+        return moved
+
+    def backfill_profiles(self, extract, valid) -> int:
+        """Name the profile of every device that has none, from the newest of its
+        kept requests whose query names one. `extract(query)` -> profile id or "",
+        `valid` the ids that exist. Returns how many devices were filled in."""
+        filled = 0
+        with self._lock:
+            c = self._w
+            for (did,) in c.execute("SELECT id FROM devices WHERE profile_id=''").fetchall():
+                for (query,) in c.execute(
+                        "SELECT query FROM requests WHERE device_id=? AND query LIKE '%profile_id=%' "
+                        "ORDER BY ts DESC LIMIT 50", (did,)):
+                    pid = extract(query)
+                    if pid and pid in valid:
+                        c.execute("UPDATE devices SET profile_id=? WHERE id=?", (pid, did))
+                        filled += 1
+                        break
+            c.commit()
+        return filled
 
     def prune(self, now: float, raw_days: float = RAW_KEEP_DAYS,
               act_days: float = ACT_KEEP_DAYS, max_raw_rows: int = RAW_MAX_ROWS) -> dict:

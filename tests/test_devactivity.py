@@ -115,6 +115,25 @@ eq("recent", da.presence(1000, 1000 + da.ACTIVE_SEC + 1), "recent")
 eq("idle", da.presence(1000, 1000 + da.RECENT_SEC + 1), "idle")
 eq("never seen", da.presence(0, 1000), "idle")
 
+# ── claimed profile / anonymous id ───────────────────────────────────────────
+# The House account has no PIN, so no session: the query is the only thing that
+# names it. Both strings below are real rows from the box.
+eq("profile from query", da.claimed_profile("profile_id=b8220378-9476-4fc8-b05e-aa70410a741a"),
+   "b8220378-9476-4fc8-b05e-aa70410a741a")
+eq("profile among others", da.claimed_profile("profile_id=p1&device_id=dmulz3exczzfs1ftm"), "p1")
+eq("no profile", da.claimed_profile("file_path=F%3A%5Cprofile_id"), "")
+eq("empty profile", da.claimed_profile("profile_id="), "")
+eq("malformed profile", da.claimed_profile("profile_id=a%20b%2F.."), "")
+eq("no query", da.claimed_profile(""), "")
+A = da.anon_id
+eq("app builds are one client", A("10.0.0.2", "App/20.13.3 CFNetwork/3896.100.1.2.1 Darwin/27.0.0"),
+   A("10.0.0.2", "App/20.8.13 CFNetwork/3896.100.1.2.1 Darwin/27.0.0"))
+eq("curl versions are one client", A("10.0.0.2", "curl/8.7.1"), A("10.0.0.2", "curl/8.4.0"))
+eq("another address is another client", A("10.0.0.2", "curl/8.7.1") == A("10.0.0.3", "curl/8.7.1"), False)
+eq("another kind is another client",
+   A("10.0.0.2", "curl/8.7.1") == A("10.0.0.2", "App/20.13.3 CFNetwork/3896 Darwin/27.0.0"), False)
+eq("anon id shape", A("10.0.0.2", "curl/8.7.1").startswith("anon-") and len(A("", "")) == 17, True)
+
 # ── devstore ─────────────────────────────────────────────────────────────────
 tmp = tempfile.mkdtemp()
 try:
@@ -181,6 +200,38 @@ try:
     eq("request without it keeps it", st.device("a1")["app_version"], "19.6.0")
     st.write(devices=[{**base, "app_version": "19.7.0"}])
     eq("newer replaces", st.device("a1")["app_version"], "19.7.0")
+    st.close()
+
+    # Anonymous rows keyed the old way (ip + raw UA) merge onto the new id, with
+    # their history; a second run changes nothing; identified devices are left.
+    st = devstore.DeviceStore(os.path.join(tmp, "rekey.sqlite3"))
+    ua1, ua2 = "App/20.8.13 CFNetwork/1 Darwin/27", "App/20.13.3 CFNetwork/1 Darwin/27"
+    mk = lambda i, ua, a, b, n, **kw: {"id": i, "ua": ua, "ua_summary": da.ua_summary(ua), "ip": "10.0.0.2",  # noqa: E731
+                                       "via": "anonymous", "first_seen": a, "last_seen": b, "requests": n, **kw}
+    rq = lambda i, ts, q="": {"device_id": i, "ts": ts, "method": "GET", "path": "/api/discovery",  # noqa: E731
+                              "query": q, "status": 200, "kind": "other", "via": "anonymous"}
+    st.write(devices=[mk("anon-old1", ua1, 10.0, 20.0, 2), mk("anon-old2", ua2, 30.0, 40.0, 3),
+                      mk("phone", "Mozilla iPhone", 5.0, 50.0, 9, via="browser")],
+             requests=[rq("anon-old1", 10.0), rq("anon-old1", 20.0), rq("anon-old2", 40.0),
+                       rq("phone", 6.0, "profile_id=house"), rq("phone", 7.0, "profile_id=gone"),
+                       rq("anon-old2", 39.0, "profile_id=nobody")],
+             activities=[{"device_id": "anon-old1", "kind": "other", "start": 10.0, "end": 20.0}])
+    st.set_label("anon-old1", "Probe")
+    new = da.anon_id("10.0.0.2", ua1)
+    eq("two rows moved", st.rekey_anonymous(da.anon_id), 2)
+    eq("old rows gone", (st.device("anon-old1"), st.device("anon-old2")), (None, None))
+    m = st.device(new)
+    eq("merged counts and span", (m["requests"], m["first_seen"], m["last_seen"]), (5, 10.0, 40.0))
+    eq("newest client string, label kept", (m["ua"], m["label"]), (ua2, "Probe"))
+    eq("requests followed", len(st.requests(new)), 4)
+    eq("activities followed", len(st.activities(new)), 1)
+    eq("second run is a no-op", st.rekey_anonymous(da.anon_id), 0)
+    eq("identified device untouched", st.device("phone")["requests"], 9)
+    # The newest VALID claim names the device; an unknown id never does.
+    eq("one device named", st.backfill_profiles(da.claimed_profile, {"house"}), 1)
+    eq("profile filled in", st.device("phone")["profile_id"], "house")
+    eq("unknown profile ignored", st.device(new)["profile_id"], "")
+    eq("nothing left to name", st.backfill_profiles(da.claimed_profile, {"house"}), 0)
     st.close()
 finally:
     shutil.rmtree(tmp, ignore_errors=True)

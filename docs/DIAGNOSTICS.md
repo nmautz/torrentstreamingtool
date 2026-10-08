@@ -777,8 +777,29 @@ there, the ladder is:
    10 min. For the iOS media player / native client only, the **one** identified
    device on that IP. Two or more there (a NAT, the Tailscale subnet router, so
    every remote phone) and nothing is guessed.
-3. **Anonymous**: `anon-<hash(ip|ua)>`. Old pages that predate the header, curl,
-   scripts.
+3. **Anonymous**: `anon-<hash(ip|kind of client)>` (`devactivity.anon_id`, where
+   the kind is `ua_summary`, e.g. "iOS app (native)" or "curl"). Old pages that
+   predate the header, curl, scripts, and the app's own `/api/discovery` probe,
+   which runs before any page has loaded. Until 20.16.6 the key was the raw
+   User-Agent, which carries the client's version, so every app build and every
+   curl upgrade became a new row. `DeviceStore.rekey_anonymous` merges rows keyed
+   the old way onto the new id each time the store opens.
+
+An anonymous row is an address and a kind of client, **not a device**. The tab
+counts them apart ("31 devices · 17 anonymous clients") and keeps them behind a
+**Show N anonymous** button; the filter box still searches them.
+
+### Which account
+
+`devices.profile_id` is the profile the device last used. It is the PIN-proved
+session (`_profile_session_id`) when the request has one, and otherwise the
+`profile_id` the request's query string names (`devactivity.claimed_profile`),
+checked against the real profiles. The fallback is what names a device on a
+profile **with no PIN**: such a profile never opens a session, so before 20.16.6
+its devices showed no account at all. A phone on a shared account then looked
+like one more unnamed "iPhone app". The claim is not proof, and this tab is not
+access control. `DeviceStore.backfill_profiles` fills in devices that have none
+from their kept requests when the store opens.
 
 Requests are held `_DEV_SETTLE_SEC` (2 s) before they are drained, and each
 batch learns its identities first. A first visit's document request (sent
