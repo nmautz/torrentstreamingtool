@@ -291,6 +291,56 @@ ok("releases: overridden soft blockers listed",
 ok("releases: biggest reclaimable first",
    [r["item_id"] for r in se.release_summary(man)] == ["a", "b"])
 
+# ── plan_volumes: a library on two disks (the box: C: and F:) ─────────────────
+vol = lambda path: path[:2]
+two = [cand("C:/hxh1.mkv", "hxh", 90, gb=30), cand("C:/hxh2.mkv", "hxh", 90, gb=30),
+       cand("F:/sb1.mkv", "sponge", 60, gb=40), cand("F:/sb2.mkv", "sponge", 60, gb=40),
+       cand("F:/new.mkv", "new", 1, gb=9, blockers=(se.BLOCK_NOT_AGED,))]
+
+# C: is nearly full, F: has room. The old rule read F: only (most bytes) and slept.
+pv = se.plan_volumes(two, {"C:": 20 * GIB, "F:": 223 * GIB}, pol(), vol)
+ok("volumes: one plan per disk", sorted(pv) == ["C:", "F:"])
+ok("volumes: the full disk triggers though the bigger one has room",
+   pv["C:"].triggered and not pv["F:"].triggered)
+ok("volumes: only files on the full disk are taken",
+   [c.path for c in pv["C:"].would_delete] == ["C:/hxh1.mkv", "C:/hxh2.mkv"]
+   and pv["F:"].would_delete == ())
+m = se.merge_plans(list(pv.values()), pol())
+ok("merge: triggered when any disk is", m.triggered)
+ok("merge: free space is the tightest disk's", m.free_bytes == 20 * GIB)
+ok("merge: takes nothing from the disk with room",
+   all(c.path.startswith("C:") for c in m.would_delete) and m.would_free_bytes == 60 * GIB)
+ok("merge: the eligible pool is the whole library's", len(m.eligible) == 4 and len(m.blocked) == 1)
+ok("merge: 60 of the 130 GiB deficit is not 'met'", m.met is False and m.deficit_bytes == 130 * GIB)
+
+# F: is short, C: is fine: nothing on C: goes, however old it is.
+pv = se.plan_volumes(two, {"C:": 300 * GIB, "F:": 90 * GIB}, pol(), vol)
+m = se.merge_plans(list(pv.values()), pol())
+ok("volumes: the older show on the roomy disk is left alone",
+   [c.path for c in m.would_delete] == ["F:/sb1.mkv", "F:/sb2.mkv"])
+ok("merge: met when every short disk reaches its target", m.met and m.free_bytes == 90 * GIB)
+
+pv = se.plan_volumes(two, {"C:": 300 * GIB, "F:": 223 * GIB}, pol(), vol)
+m = se.merge_plans(list(pv.values()), pol())
+ok("volumes: both above the floor, nothing taken",
+   not m.triggered and m.would_delete == () and m.free_bytes == 223 * GIB)
+
+pv = se.plan_volumes(two, {"C:": 10 * GIB, "F:": 10 * GIB}, pol(), vol)
+m = se.merge_plans(list(pv.values()), pol())
+ok("volumes: both short, both swept", len(m.would_delete) == 4 and not m.met)
+
+# A disk that could not be measured: weighed, never taken from.
+pv = se.plan_volumes(two, {"F:": 223 * GIB}, pol(), vol)
+ok("volumes: an unmeasured disk is planned but not triggered",
+   "C:" in pv and not pv["C:"].triggered and pv["C:"].would_delete == ())
+ok("volumes: ...and its files still count in the eligible pool", len(pv["C:"].eligible) == 2)
+ok("merge: no disks at all is not a trigger",
+   se.merge_plans([], pol()).triggered is False)
+one = se.plan_volumes(pool, {"/": 95 * GIB}, pol(), lambda p: "/")
+ok("volumes: one disk gives the plan it always did",
+   [c.path for c in se.merge_plans(list(one.values()), pol()).would_delete]
+   == [c.path for c in se.plan(pool, int(95 * GIB), pol()).would_delete])
+
 print("%d passed, %d failed" % (_PASS, len(_FAIL)))
 for f in _FAIL:
     print("  FAIL", f)

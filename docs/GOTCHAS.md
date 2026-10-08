@@ -5714,6 +5714,20 @@ tiles stacked over the film. `renderSkipOffer` no-ops in `TV_MODE` for that reas
 family as the "To TV" button the kiosk was offering itself: **the page that is the TV must
 opt out of the affordances aimed at the TV.**
 
+### Free space is a fact about a disk, and the library is on two
+
+The box's library is on `C:` and `F:`, 931 GB each. Source eviction read free space
+from one of them (the volume with the most library bytes) and planned against the
+whole library. Delete Watched freed 82 GB on `C:` on 2026-10-08 and the eviction dry
+run said 223.1 GB free before and after: it was reading `F:`. So `C:` could fill with
+no sweep ever running, and a sweep triggered by `F:` could delete sources on `C:`.
+Since 20.16.3 every volume is measured and planned separately (`_library_free_by_volume`,
+`srcevict.plan_volumes`). **Any new "is the disk full" check must say which disk.**
+
+Related, same day: the Storage tab counted a file it could not stat at its recorded
+size, so deleted episodes read as still on disk. A file that is not there occupies
+nothing; only an *un-stat'able existing* file falls back to `size_bytes`.
+
 ### On Windows, `unlink` fails on a file another process has open — so never swallow it
 
 POSIX lets you unlink a file that is still open; the directory entry goes and the bytes

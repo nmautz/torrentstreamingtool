@@ -1,5 +1,21 @@
 # Changelog
 
+## [20.16.3] — 2026-10-08
+### Source eviction watches every disk, and the Storage tab stops counting deleted episodes
+
+- **Source eviction read free space from one disk only.** The box's library is on C: and
+  F:. Only F: was checked, so C: could fill up without a sweep ever running, and a sweep
+  set off by F: could have deleted sources on C:, which frees nothing on F: (#51).
+- **Each disk is now checked against the floor by its own free space, and a sweep only
+  takes files from a disk that is below it.** With more than one disk, the admin card
+  lists each with its free space.
+- **The Storage tab counted deleted episodes at full size.** After Delete Watched removed
+  82 GB of Hunter x Hunter, the tab still showed the pack as 78 files and 155 GB. A file
+  that is not on the host now counts as zero and is left out of a show's file count (#50).
+- **Not checked:** an eviction run on the box (no disk is below the floor), and the admin
+  card in a browser. Checked locally: the per-disk plan, Windows drive and share paths,
+  and the storage count, in `tests/test_srcevict.py` and `tests/test_storage_volumes.py`.
+
 ## [20.16.2] — 2026-10-08
 ### Source eviction can take a file qBittorrent is still seeding
 

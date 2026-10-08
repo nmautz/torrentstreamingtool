@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextvars
 import copy
+import functools
 import gzip
 import hashlib
 import html as _html
@@ -35622,8 +35623,10 @@ async def _build_evict_plan() -> dict:
     admin dry run renders, and what the sweep itself consults.
     """
     lib, policy, now, candidates = await _gather_evict_candidates()
-    free_bytes = await asyncio.to_thread(_free_disk_bytes_for_library, lib)
-    p = srcevict.plan(candidates, free_bytes, policy)
+    free_by = await asyncio.to_thread(_library_free_by_volume, lib)
+    by_vol = await asyncio.to_thread(
+        srcevict.plan_volumes, candidates, free_by, policy, _volume_of)
+    p = srcevict.merge_plans(list(by_vol.values()), policy)
 
     def row(c) -> dict:
         return {
@@ -35655,6 +35658,21 @@ async def _build_evict_plan() -> dict:
         "eligible_bytes": p.eligible_bytes,
         "eligible_human": human_size(p.eligible_bytes),
         "blocked_count":  len(p.blocked),
+        # One row per disk the library is on. Each is judged against the floor
+        # by its own free space; the fields above are the whole-library view
+        # (`free_bytes` = the tightest disk). `free_bytes: null` = unmeasurable.
+        "volumes":        [{"volume": v,
+                            "free_bytes": free_by.get(v),
+                            "free_human": human_size(free_by[v]) if v in free_by else "",
+                            "triggered": vp.triggered, "met": vp.met,
+                            "deficit_bytes": vp.deficit_bytes,
+                            "would_free_bytes": vp.would_free_bytes,
+                            "would_free_human": human_size(vp.would_free_bytes),
+                            "would_delete_count": len(vp.would_delete),
+                            "eligible_count": len(vp.eligible),
+                            "eligible_bytes": vp.eligible_bytes,
+                            "eligible_human": human_size(vp.eligible_bytes)}
+                           for v, vp in by_vol.items()],
         "blockers":       [{"reason": r, "files": n, "bytes": b, "human": human_size(b)}
                            for (r, n, b) in srcevict.blocker_summary(candidates)],
         # The actionable half: files where this reason is the ONLY thing stopping
@@ -35670,31 +35688,47 @@ async def _build_evict_plan() -> dict:
     }
 
 
-def _free_disk_bytes_for_library(lib: dict) -> int:
-    """Free bytes on the volume the library lives on.
+@functools.lru_cache(maxsize=4096)
+def _volume_of_dir(d: str) -> str:
+    """The mount point `d` lives under: a drive root, a volume mounted in a folder,
+    a POSIX mount. Walks up, so a folder that no longer exists still resolves."""
+    while True:
+        parent = os.path.dirname(d)
+        if parent == d or os.path.ismount(d):
+            return d
+        d = parent
 
-    The library can span volumes; the one that matters is where the most bytes
-    are, since that is the disk a sweep would actually relieve. Falls back to the
-    repo's own volume when nothing can be stat'd.
+
+def _volume_of(path: str) -> str:
+    """Which disk a library file is on, as the path of its mount point."""
+    try:
+        return _volume_of_dir(os.path.dirname(os.path.abspath(path)))
+    except (OSError, ValueError):
+        return ""
+
+
+def _library_free_by_volume(lib: dict) -> dict:
+    """`{volume: free bytes}` for every volume that holds a library file.
+
+    The library can span disks (the box: C: and F:, 931 GB each), and each one
+    fills on its own. Until 20.16.3 this returned ONE number, for the volume with
+    the most bytes, so the other could fill without a sweep ever running. A volume
+    that can't be measured is left out, and `srcevict.plan_volumes` then takes
+    nothing from it.
     """
-    by_root: dict = {}
+    out: dict = {}
+    seen: set = set()
     for it in lib.get("items", []):
         for f in it.get("files", []):
-            p = f.get("path", "")
-            if not p:
+            vol = _volume_of(f.get("path", "")) if f.get("path") else ""
+            if not vol or vol in seen:
                 continue
+            seen.add(vol)
             try:
-                root = os.path.splitdrive(os.path.abspath(p))[0] or os.path.sep
-            except (OSError, ValueError):
-                continue
-            by_root[root] = by_root.get(root, 0) + int(f.get("size_bytes", 0) or 0)
-    candidates = sorted(by_root.items(), key=lambda kv: kv[1], reverse=True)
-    for root, _ in candidates + [(str(Path(__file__).resolve().parent), 0)]:
-        try:
-            return int(shutil.disk_usage(root or os.path.sep).free)
-        except OSError:
-            continue
-    return 0
+                out[vol] = int(shutil.disk_usage(vol).free)
+            except OSError:
+                pass
+    return out
 
 
 async def _evict_one_source(f_path: str, key: str, sig: str, *, attempts: int = 1,
@@ -35827,8 +35861,8 @@ async def _run_source_eviction(*, manual: bool = False) -> dict:
             se["error"] = "Source eviction is switched off."
             return se
         if not plan["triggered"]:
-            se["error"] = ("Free space is above the floor — nothing to do. "
-                           f"({plan['free_human']} free, floor {plan['floor_gb']} GB)")
+            se["error"] = ("Free space is above the floor on every disk — nothing to do. "
+                           f"(least: {plan['free_human']} free, floor {plan['floor_gb']} GB)")
             return se
         await _evict_paths([row["path"] for row in plan["would_delete"]], se, manual=manual)
     except asyncio.CancelledError:
@@ -35950,11 +35984,12 @@ async def _run_manual_reclaim(item_ids: list) -> dict:
 
 
 async def source_eviction_loop() -> None:
-    """Fire the sweep when the disk drops below the floor, and not otherwise.
+    """Fire the sweep when ANY disk the library is on drops below the floor, and
+    not otherwise.
 
     The expensive part (a stat per library file plus a segment walk per eligible
-    bundle) is gated behind a single `shutil.disk_usage` call, so the common case —
-    a disk with room — costs one syscall every five minutes. Idle-gated on top of
+    bundle) is gated behind one `shutil.disk_usage` call per disk, so the common
+    case — disks with room — costs a syscall or two every five minutes. Idle-gated on top of
     that: eviction is housekeeping and must never compete with viewing.
     """
     await asyncio.sleep(90)   # let startup settle; qBit needs to be up to be asked
@@ -35963,8 +35998,9 @@ async def source_eviction_loop() -> None:
             lib = await get_library()
             policy = _src_evict_cfg(lib)
             if policy.enabled and not state.source_eviction.get("running"):
-                free = await asyncio.to_thread(_free_disk_bytes_for_library, lib)
-                if free < policy.floor_bytes and not await _machine_in_use(300):
+                free_by = await asyncio.to_thread(_library_free_by_volume, lib)
+                if (any(free < policy.floor_bytes for free in free_by.values())
+                        and not await _machine_in_use(300)):
                     state.source_eviction_stop = False
                     await _run_source_eviction()
         except asyncio.CancelledError:
@@ -39708,8 +39744,9 @@ def _storage_breakdown_sync(lib: dict, bundle_by_path: dict[str, int]) -> dict:
     """Per-series storage breakdown for the admin Storage tab. Walks every library
     item and, for each video file, sums three components:
 
-      source  — the source media file's actual bytes on disk (falls back to the
-                stored `size_bytes` when the file can't be stat'd, e.g. mid-move)
+      source  — the source media file's actual bytes on disk: 0 when it is not
+                there, the stored `size_bytes` only when it exists but can't be
+                stat'd
       bundle  — its HLS / on-device bundle bytes, passed in as `bundle_by_path`
                 (already computed by the offline-cache inventory walk, so we don't
                 re-walk every bundle here)
@@ -39756,6 +39793,12 @@ def _storage_breakdown_sync(lib: dict, bundle_by_path: dict[str, int]) -> dict:
             else:
                 try:
                     sbytes = src.stat().st_size
+                except FileNotFoundError:
+                    # Not there: deleted (Delete Watched leaves the row, marked
+                    # Skip) or not downloaded yet. It occupies nothing. Counting
+                    # its recorded size showed 82 GB of deleted Hunter x Hunter
+                    # as still in use (#50).
+                    sbytes = 0
                 except OSError:
                     sbytes = int(f.get("size_bytes", 0) or 0)
             bbytes = int(bundle_by_path.get(p, 0) or 0)
@@ -39775,6 +39818,8 @@ def _storage_breakdown_sync(lib: dict, bundle_by_path: dict[str, int]) -> dict:
                     except OSError:
                         pass
             total = sbytes + bbytes + ebytes
+            if not total:
+                continue                  # nothing of this file is on the host
             files_out.append({
                 "name":         f.get("name", "") or src.name,
                 "path":         p,

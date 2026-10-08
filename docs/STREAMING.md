@@ -3250,9 +3250,19 @@ eviction therefore costs bandwidth, not the episode.
 ### The sweep (18.1.0)
 
 `source_eviction_loop` ticks every 5 minutes and costs **one `shutil.disk_usage`
-call** in the common case: the expensive walk only happens once free space is
-below `floor_gb`. When it is, and the box is idle, `_run_source_eviction` works
-down `plan.would_delete` until free space clears `target_gb`. `POST
+call per disk** in the common case: the expensive walk only happens once free space
+is below `floor_gb`. When it is, and the box is idle, `_run_source_eviction` works
+down `plan.would_delete` until free space clears `target_gb`.
+
+**Each disk is judged on its own (20.16.3).** A library can sit on several volumes
+(the box: `C:` and `F:`, 931 GB each). `_library_free_by_volume` measures every one
+that holds a library file, `srcevict.plan_volumes` makes one plan per volume, and a
+volume below the floor gives up only its own files: a source deleted from `C:` does
+nothing for a full `F:`. `merge_plans` folds them into the single plan the sweep and
+the dry run use, whose `free_bytes` is the tightest disk's. A volume is the mount
+point found by walking up from the file (`_volume_of`), so a drive mounted in a
+folder counts as its own disk. A disk that can't be measured is weighed and never
+taken from. Before this, one number was read, from the volume with the most bytes. `POST
 /api/admin/source-eviction/run` (Admin -> Storage -> **Reclaim Now**) skips the
 wait but not the conditions — it still refuses while the policy is off or the disk
 is above the floor.

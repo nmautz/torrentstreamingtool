@@ -314,6 +314,50 @@ def plan(candidates: Sequence[Candidate], free_bytes: int, policy: Policy) -> Pl
     )
 
 
+def plan_volumes(candidates: Sequence[Candidate], free_by_volume, policy: Policy,
+                 volume_of) -> dict:
+    """One plan per volume: `{volume: Plan}`, in volume order.
+
+    Free space is a fact about a DISK, and a library can sit on several. Each
+    volume is judged against the floor by its own free space, and only its own
+    files are taken: a source deleted from C: does nothing for a full F:.
+
+    `volume_of(path)` names a candidate's volume. A volume missing from
+    `free_by_volume` could not be measured; its files are still weighed (so the
+    eligible pool is whole) but nothing on it is taken -- missing evidence never
+    reads as permission.
+    """
+    groups: dict = {v: [] for v in free_by_volume}
+    for c in candidates:
+        groups.setdefault(volume_of(c.path), []).append(c)
+    out: dict = {}
+    for v in sorted(groups):
+        free = free_by_volume.get(v)
+        out[v] = plan(groups[v], policy.floor_bytes if free is None else free, policy)
+    return out
+
+
+def merge_plans(plans: Sequence[Plan], policy: Policy) -> Plan:
+    """The whole-library view of per-volume plans, for the one-number surfaces.
+
+    `free_bytes` is the TIGHTEST volume's, because that is the one the floor is
+    about. `met` needs every triggered volume to reach its target.
+    """
+    plans = list(plans)
+    hot = [p for p in plans if p.triggered]
+    return Plan(
+        triggered=bool(hot),
+        free_bytes=min((p.free_bytes for p in (hot or plans)), default=0),
+        floor_bytes=policy.floor_bytes, target_bytes=policy.target_bytes,
+        deficit_bytes=sum(p.deficit_bytes for p in plans),
+        would_delete=tuple(c for p in plans for c in p.would_delete),
+        would_free_bytes=sum(p.would_free_bytes for p in plans),
+        eligible=tuple(sorted((c for p in plans for c in p.eligible), key=_order_key)),
+        blocked=tuple(c for p in plans for c in p.blocked),
+        met=bool(hot) and all(p.met for p in hot),
+    )
+
+
 def blocker_summary(candidates: Sequence[Candidate]) -> list:
     """`[(reason, file_count, bytes)]` in BLOCKER_ORDER, for the dry-run readout.
 

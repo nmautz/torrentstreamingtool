@@ -6884,9 +6884,20 @@ function _seRenderPlan(d){
   // available, and what a sweep would take right now. They are usually very
   // different, and conflating them is how a disk-gated feature gets read as an
   // age-gated one.
+  // The library can be on several disks, and each is judged on its own free
+  // space. With one disk the rows below would only repeat the headline.
+  const vols = d.volumes || [];
+  const multi = vols.length > 1;
+  const low = vols.filter(v => v.triggered).map(v => v.volume);
   const trigger = d.triggered
-    ? `<span class="text-amber-300">Below the ${d.floor_gb} GB floor — a sweep would run and take ${_esc(d.would_free_human)}${d.met ? "" : " (not enough to reach the target)"}.</span>`
-    : `<span class="text-green-400">Above the ${d.floor_gb} GB floor — a sweep would take nothing.</span>`;
+    ? `<span class="text-amber-300">${multi && low.length ? _esc(low.join(", ")) + " is b" : "B"}elow the ${d.floor_gb} GB floor — a sweep would run and take ${_esc(d.would_free_human)}${d.met ? "" : " (not enough to reach the target)"}.</span>`
+    : `<span class="text-green-400">${multi ? "Every disk is above" : "Above"} the ${d.floor_gb} GB floor — a sweep would take nothing.</span>`;
+  const volRows = !multi ? "" : `<div class="pt-1">
+      <div class="text-[10px] uppercase tracking-widest text-gray-600 mb-1">Per Disk<span class="help-tip" tabindex="0" data-tip="Each disk is checked against the floor by its own free space, and a sweep only takes files from a disk that is below it.">?</span></div>
+      ${vols.map(v => `<div class="flex items-baseline justify-between gap-3 py-0.5">
+        <span class="font-mono text-gray-400">${_esc(v.volume)}</span>
+        <span class="font-mono ${v.triggered ? "text-amber-300" : "text-gray-500"}">${v.free_bytes == null ? "can't be measured" : _esc(v.free_human) + " free"} · ${v.triggered ? "would take " + _esc(v.would_free_human) : _esc(v.eligible_human) + " eligible"}</span>
+      </div>`).join("")}</div>`;
 
   const sole = (d.sole_blockers || []).map(b => `
     <div class="flex items-baseline justify-between gap-3 py-0.5">
@@ -6903,7 +6914,7 @@ function _seRenderPlan(d){
   return `
     <div class="px-5 py-4 space-y-3 text-[11px]">
       <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
-        <div><div class="text-[10px] uppercase tracking-widest text-gray-600">Free Now</div>
+        <div><div class="text-[10px] uppercase tracking-widest text-gray-600">${multi ? "Least Free Disk" : "Free Now"}</div>
              <div class="font-mono text-sm text-gray-200">${_esc(d.free_human)}</div></div>
         <div><div class="text-[10px] uppercase tracking-widest text-gray-600">Eligible Pool</div>
              <div class="font-mono text-sm text-gray-200">${_esc(d.eligible_human)}</div>
@@ -6913,6 +6924,7 @@ function _seRenderPlan(d){
              <div class="text-[10px] text-gray-600">${(d.would_delete||[]).length} file${(d.would_delete||[]).length!==1?"s":""}</div></div>
       </div>
       <div>${trigger}</div>
+      ${volRows}
       ${d.enabled ? "" : `<div class="text-gray-600">Policy is switched off, so a sweep would not run at all — the eligible pool above is what it <em>would</em> reach if you turned it on.</div>`}
       ${sole ? `<div class="pt-1">
         <div class="text-[10px] uppercase tracking-widest text-gray-600 mb-1">Waiting on one thing only<span class="help-tip" tabindex="0" data-tip="Files where this is the ONLY obstacle — clear it and they become eligible. A file also waiting on the clock isn't counted here, because fixing the other thing wouldn't release it.">?</span></div>
@@ -6971,7 +6983,7 @@ async function runSourceEvictionSweep(btn){
   document.getElementById("seResult").classList.remove("hidden");
   document.getElementById("seResult").innerHTML = _seRenderPlan(p);
   if(!p.enabled){ showToast("Switch the policy on first — the sweep refuses while it's off."); return; }
-  if(!p.triggered){ showToast(`Free space (${p.free_human}) is above the ${p.floor_gb} GB floor — nothing would be reclaimed.`); return; }
+  if(!p.triggered){ showToast(`Free space (${p.free_human}${(p.volumes||[]).length > 1 ? " on the fullest disk" : ""}) is above the ${p.floor_gb} GB floor — nothing would be reclaimed.`); return; }
   const n = (p.would_delete || []).length;
   if(!n){ showToast("Nothing is eligible — see the blockers below."); return; }
   if(!confirm(`Permanently delete ${n} source file${n!==1?"s":""} (${p.would_free_human})?
