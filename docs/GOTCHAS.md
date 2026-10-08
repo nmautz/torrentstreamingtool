@@ -1709,9 +1709,32 @@ The flip side of the HTTP health check: Jackett's mono/.NET web stack can **brie
 
 A non-elevated StreamLink (the normal install: Task Scheduler at logon, no `/RL HIGHEST`) **cannot** `sc stop`/`sc start` a LocalSystem `Jackett` service — Windows returns access-denied (you see a UAC prompt). So the watchdog can *detect* a hung Jackett but not recover it without rights. `setup.py`'s `grant_jackett_service_control()` additively grants Authenticated Users `SERVICE_START`+`SERVICE_STOP` via `sc sdset Jackett "(A;;RPWP;;;AU)…"` (one-time, elevated) and sets `sc failure` restart actions, so the non-elevated watchdog can recover Jackett with no UAC and no reboot. Re-run `setup.py` to apply. The access-denied paths log an actionable hint instead of failing silently. If Jackett runs as a **tray/user process** instead of a service, no grant is needed — the watchdog kills+relaunches it directly.
 
+### A slow indexer is not a failing one (20.17.0)
+
+"I added EZTV and 1337x and they are failing — is FlareSolverr broken?" It was not. FlareSolverr was installed, running and set in Jackett, and both sites returned results through it. **Our timeouts were shorter than a Cloudflare challenge.** Measured on the box, 2026-10-08:
+
+| | time |
+|---|---|
+| 1337x, every uncached search (12 of 12) | 11.4 - 19.9 s |
+| 1337x, Jackett's own Test | 10.2 - 36.9 s |
+| EZTV, its first Test (first challenge) | 44.8 s, then ~0.5 s a search: its cookie is kept |
+| TPB, TheRARBG, TorrentGalaxyClone, YTS, Nyaa | 0.03 - 3 s |
+
+Search gave each indexer 12 s and the admin Test 15 s, so 1337x "failed" every search and Test said "could not reach Jackett" for both. Jackett's log showed each of those searches completing a few seconds after we hung up.
+
+Three things to keep:
+
+1. **A timeout's message is the empty string.** `str(httpx.ReadTimeout())` is `""`, which is why the health list showed "Failing" with no reason at all. An empty error on a failing indexer means *we* stopped waiting. Use `ixwait.failure_text`, never `str(e)`.
+2. **Don't fix it by raising the timeout.** Twenty seconds on every search for one site is worse than not having the site. The request to Jackett is detached and shared (`_ix_fetch`, `_IX_INFLIGHT`, 75 s cap); a search waits for the quick indexers plus one second (`ixwait.more_wait`), reports the rest in `pending`, and the surfaces that show a list ask again with `wait=1` (`_searchLate` in `static/index.html`: the classic and grouped search, the show page's season and episode searches). **The one-press flows do not** — Get, Play now, the background run, Siri and the dead-swarm retry act on the first answer, so they see a slow indexer's results only when Jackett already has them cached (35 minutes). That is deliberate: none of them should take 20 s.
+3. **A slow indexer is a browser per search.** FlareSolverr opens Chrome for each one, on the box that is also transcoding. `ixwait.SLOW_PARALLEL` (3) bounds how many searches a known-slow indexer runs at once; the rest queue behind them.
+
+**Survey, 2026-10-08** (25 public indexers added to the box's Jackett one at a time, searched once, removed): quick — limetorrents, knaben, torrentdownloads, torrentdownload, torrentscsv, magnetz, animetosho-xyz, subsplease, aniRena, nekobt, bangumi-moe, shanaproject; 15-21 s behind Cloudflare — kickasstorrents-to, extratorrent-st, magnetdownload, uindex, btdirectory, damagnet, torrentkitty, tokyotosho; not working — kickasstorrents-ws (0 results, no error), torrentproject2 (TLS handshake EOF), filemood, magnetcat ("FlareSolverr was unable to process"), showrss (an RSS feed, nothing for a keyword). So 1337x is the usual case for a Cloudflare site, not an outlier. Adding an indexer is instant (~0.05 s); only Test and search pay for the challenge. limetorrents, torrentdownloads, torrentdownload, magnetz, magnetdownload, damagnet, aniRena and shanaproject return **no magnet**, only Jackett's `/dl/` link (see § Link-style results); those links were not followed in the survey.
+
+Which indexers are slow is learned per process (`ixwait.Pace`: any answer over 6 s in the last six). After a restart nothing is known, so the first search waits the old 12 s once.
+
 ### FlareSolverr must be wired into Jackett by hand — there's no API for it
 
-StreamLink can install + launch FlareSolverr (`/api/admin/components/install {component:"flaresolverr"}` → `_spawn_flaresolverr`) and report its status, but **Jackett's "FlareSolverr API URL" setting has no public API** — it lives in Jackett's `ServerConfig.json` / dashboard config and only the Jackett UI writes it cleanly. So the admin **must** paste the URL into Jackett's *Configure Jackett* dialog manually; the Indexers-tab card is deliberate about saying so (Copy button + Open-Jackett link). Don't try to "automate" it by poking Jackett's config file — it'll be clobbered and the format isn't stable.
+StreamLink can install + launch FlareSolverr (`/api/admin/components/install {component:"flaresolverr"}` → `_spawn_flaresolverr`) and report its status, but **Jackett's "FlareSolverr API URL" setting has no supported way to be written from outside** (it can be *read*: `GET /api/v2.0/server/config` → `flaresolverrurl`, which is what `jackett_uses` on the card shows since 20.17.0) — it lives in Jackett's `ServerConfig.json` / dashboard config and only the Jackett UI writes it cleanly. So the admin **must** paste the URL into Jackett's *Configure Jackett* dialog manually; the Indexers-tab card is deliberate about saying so (Copy button + Open-Jackett link). Don't try to "automate" it by poking Jackett's config file — it'll be clobbered and the format isn't stable.
 
 FlareSolverr binds via the **`HOST`/`PORT` environment variables**, not CLI flags — both `run.py`'s `start_flaresolverr()` and `main.py`'s `_spawn_flaresolverr()` set them from `FLARESOLVERR_URL` (loopback hostnames normalised to `127.0.0.1`). It is **not** watchdog-supervised (only VLC/qBit/Jackett are) and **not** VPN-gated (matches Jackett — only qBit is killed on a VPN drop). If it dies, the Start button (`POST /api/admin/flaresolverr/start`) relaunches it; otherwise it comes back on the next `run.py` startup.
 

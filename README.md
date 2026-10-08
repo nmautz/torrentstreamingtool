@@ -173,7 +173,21 @@ Some indexers sit behind a Cloudflare / DDoS-Guard browser challenge and fail in
 2. Copy the **FlareSolverr API URL** shown on that card (default **http://localhost:8191**).
 3. In Jackett, click the **cog (Configure Jackett)**, paste the URL into **FlareSolverr API URL**, and **Save**. StreamLink can't set this for you, because Jackett has no API for it.
 
-`run.py` relaunches FlareSolverr on every startup once it's installed.
+`run.py` relaunches FlareSolverr on every startup once it's installed. The card shows whether Jackett is using it.
+
+**An indexer behind Cloudflare is slow, and that is normal.** FlareSolverr opens a browser to get through the challenge, so such an indexer takes 10 to 45 seconds to test and some (1337x) take 11 to 20 seconds on every search. StreamLink shows the quick indexers' results straight away and adds the slow one's when they arrive; **Admin → Indexers** lists it in amber as "Responding slowly", not as failing.
+
+### Which public indexers work
+
+Checked from a Windows box behind a VPN on 2026-10-08, with Jackett v0.24.2806 and FlareSolverr. Sites come and go, so treat this as a starting point and use **Test** after adding one.
+
+| | Indexers |
+|---|---|
+| Quick (about a second) | The Pirate Bay, TheRARBG, TorrentGalaxyClone, YTS, EZTV (after its first test), Knaben, LimeTorrents, TorrentDownloads, TorrentDownload, Torrents.csv, MagnetZ. Anime: Nyaa.si, Anime Tosho, SubsPlease, AniRena, nekoBT, Bangumi Moe, Shana Project |
+| Work, but 15 to 20 seconds a search (need FlareSolverr) | 1337x, KickassTorrents.to, ExtraTorrent.st, MagnetDownload, UIndex, BT Directory, DaMagNet, TorrentKitty, Tokyo Toshokan |
+| Did not work | KickassTorrents.ws (no results), TorrentProject2 and FileMood (site errors), MagnetCat (FlareSolverr could not solve it) |
+
+Three or four quick general indexers plus Nyaa for anime cover almost everything. Each slow one adds a browser's worth of work on the PC for every search, so add those sparingly.
 
 ---
 

@@ -69,6 +69,7 @@ import racerules
 import relquality
 import stallrule
 import gpugate
+import ixwait
 import reltracks
 import srcevict
 import reaper
@@ -1740,8 +1741,11 @@ async def _jackett_login() -> str:
 
 
 @asynccontextmanager
-async def _jackett_admin():
-    """Yield an httpx client authenticated to Jackett's admin API."""
+async def _jackett_admin(timeout: float = 15.0):
+    """Yield an httpx client authenticated to Jackett's admin API. Testing an
+    indexer passes `ixwait.ADMIN`: Jackett runs a full search before it answers,
+    and behind Cloudflare that took 45 s (see ixwait.py). Saving one does too,
+    because a tracker with a login is logged into before Jackett answers."""
     global _jackett_cookie, _jackett_cookie_expiry
     cookies: dict[str, str] = {}
     if settings.jackett_password:
@@ -1750,7 +1754,7 @@ async def _jackett_admin():
                 _jackett_cookie = await _jackett_login()
                 _jackett_cookie_expiry = time.time() + 3600
         cookies = {"Jackett": _jackett_cookie}
-    async with _http_client(cookies=cookies, timeout=15.0) as c:
+    async with _http_client(cookies=cookies, timeout=timeout) as c:
         yield c
 
 
@@ -21954,7 +21958,7 @@ async def _record_indexer_health(idx_info: list) -> None:
         "id": it.get("ID", ""),
         "name": it.get("Name", it.get("ID", "Unknown")),
         "ok": not (it.get("Error") or "").strip(),
-        "error": (it.get("Error") or "").strip(),
+        "error": ixwait.jackett_error(it.get("Error")),
         "results": it.get("Results", 0),
     } for it in (idx_info or [])]
     await _apply_indexer_health(health)
@@ -22321,7 +22325,8 @@ async def search(q: str, limit: int = Query(30, ge=1, le=500),
                  categories: Optional[str] = None,
                  profile_id: Optional[str] = None,
                  year: int = 0,
-                 aka: Optional[str] = None) -> JSONResponse:
+                 aka: Optional[str] = None,
+                 wait: int = 0) -> JSONResponse:
     """Search configured indexers. ``indexers`` (comma-separated IDs) narrows the
     query to the user-chosen subset; ``categories`` (comma-separated content-type
     labels — movies/tv/music/…) narrows it to those Torznab category buckets so
@@ -22334,23 +22339,110 @@ async def search(q: str, limit: int = Query(30, ge=1, le=500),
     only** — they are *not* sent to the indexer. The show-detail page passes them
     so the year can rank releases without being baked into the indexer query
     (which would drop anime/TV releases that carry no year), and so a result under
-    an alias (e.g. an anime's romaji name) scores against that alias too."""
+    an alias (e.g. an anime's romaji name) scores against that alias too.
+
+    ``pending`` in the answer lists indexers still searching (the ones behind
+    Cloudflare). The same request with ``wait=1`` waits for them and returns
+    everything; it joins the running searches, it does not start new ones."""
     if not q.strip():
-        return JSONResponse({"results": [], "groups": []})
+        return JSONResponse({"results": [], "groups": [], "pending": []})
     akas = [a.strip() for a in (aka or "").split(",") if a.strip()]
     year_hint = year or None
 
     lib = await get_library()
+    pending: list = []
     shaped = await _indexer_query(q, lib, profile_id=profile_id or "",
-                                  categories=categories, indexers=indexers)
+                                  categories=categories, indexers=indexers,
+                                  patient=bool(wait), pending=pending)
     return JSONResponse({"results": shaped[:limit],
-                         "groups": _group_search_results(shaped, q, akas, year_hint)})
+                         "groups": _group_search_results(shaped, q, akas, year_hint),
+                         "pending": pending})
+
+
+# One request to Jackett per (indexer, query), shared by every search that asks
+# while it runs and never abandoned early: a search that stopped waiting for it
+# leaves it to finish, so the answer is in Jackett's cache for the next one.
+_IX_INFLIGHT: dict = {}
+_IX_PACE = ixwait.Pace()
+_IX_SLOW_GATES: dict = {}
+
+
+def _ix_fetch(ix: dict, params: dict) -> "asyncio.Task":
+    """The task fetching `ix`'s results for `params`; resolves to
+    `(results, health)` and never raises."""
+    key = (ix["id"], params.get("Query", ""), tuple(params.get("Category[]") or ()))
+    task = _IX_INFLIGHT.get(key)
+    if task is None:
+        task = asyncio.create_task(_ix_fetch_one(ix, params))
+        _IX_INFLIGHT[key] = task
+        task.add_done_callback(lambda _t, k=key: _IX_INFLIGHT.pop(k, None))
+    return task
+
+
+async def _ix_fetch_one(ix: dict, params: dict) -> tuple:
+    ixid, name = ix["id"], ix["name"]
+    # A slow indexer is a browser per search inside FlareSolverr, on the box that
+    # is also transcoding. Bound how many it runs at once; the rest queue.
+    gate = None
+    if _IX_PACE.is_slow(ixid):
+        gate = _IX_SLOW_GATES.setdefault(ixid, asyncio.Semaphore(ixwait.SLOW_PARALLEL))
+        await gate.acquire()
+    t0 = time.monotonic()
+    try:
+        async with _http_client(timeout=ixwait.HARD) as c:
+            r = await c.get(
+                f"{settings.indexer_url}/api/v2.0/indexers/{ixid}/results",
+                params=params,
+            )
+        secs = round(time.monotonic() - t0, 1)
+        _IX_PACE.note(ixid, secs)
+        if r.status_code >= 300:
+            return [], {"id": ixid, "name": name, "ok": False, "error": f"HTTP {r.status_code}",
+                        "results": 0, "secs": secs}
+        d = r.json()
+        res = d.get("Results", []) or []
+        # A single-indexer query echoes that indexer's own error in its block.
+        blk = (d.get("Indexers") or [{}])
+        err = ixwait.jackett_error(blk[0].get("Error")) if blk else ""
+        return res, {"id": ixid, "name": name, "ok": not err, "error": err,
+                     "results": len(res), "secs": secs}
+    except Exception as e:
+        secs = round(time.monotonic() - t0, 1)
+        _IX_PACE.note(ixid, secs)
+        return [], {"id": ixid, "name": name, "ok": False, "error": ixwait.failure_text(e),
+                    "results": 0, "secs": secs}
+    finally:
+        if gate is not None:
+            gate.release()
+
+
+def _ix_health_late(task: "asyncio.Task") -> None:
+    """An indexer a search stopped waiting for has answered: put its real status
+    in the health list in place of the 'still searching' row."""
+    if task.cancelled():
+        return
+    _res, h = task.result()
+    cur = list(state.indexer_health)
+    for i, row in enumerate(cur):
+        if row.get("id") == h["id"]:
+            if not row.get("pending"):
+                return
+            cur[i] = dict(h, slow=True)
+            asyncio.ensure_future(_apply_indexer_health(cur))
+            return
 
 
 async def _indexer_query(q: str, lib: dict, *, profile_id: str = "",
                          categories: Optional[str] = None,
-                         indexers: Optional[str] = None) -> list:
+                         indexers: Optional[str] = None,
+                         patient: bool = False,
+                         pending: Optional[list] = None) -> list:
     """Query every permitted indexer for `q` → shaped, de-duped, seeder-sorted.
+
+    An indexer behind Cloudflare takes 11-20 s a search (see `ixwait.py`). The
+    search does not wait for it once the quick ones are in, unless `patient`.
+    The ids it left running are appended to `pending`; asking again with
+    `patient` joins the same requests.
 
     The engine behind `GET /api/search`, factored out so server-side callers can
     search without a round trip through HTTP — currently the dead-swarm retry in
@@ -22374,7 +22466,8 @@ async def _indexer_query(q: str, lib: dict, *, profile_id: str = "",
     # Jackett's aggregate /indexers/all/results. The aggregate waits for the slowest
     # indexer, so a single hung/broken one would blow our client timeout and discard
     # ALL results — including the good ones. Per-indexer, a failing one only loses its
-    # own results (bounded by its own short timeout) and we still return the rest.
+    # own results and we still return the rest; how long each is waited for is
+    # `ixwait.more_wait`.
     configured = await _list_configured_indexers()
 
     if configured is None:
@@ -22405,34 +22498,38 @@ async def _indexer_query(q: str, lib: dict, *, profile_id: str = "",
         # to query, so don't fall through to the aggregate (which queries them all).
         return []
 
-    indexers = configured
-    PER_INDEXER_TIMEOUT = 12.0
+    tasks = {ix["id"]: (ix, _ix_fetch(ix, params)) for ix in configured}
+    slow = {ixid for ixid in tasks if _IX_PACE.is_slow(ixid)}
+    t0 = time.monotonic()
+    quick_done_at = None
+    while True:
+        waiting = {t for _ix, t in tasks.values() if not t.done()}
+        quick_left = sum(1 for ixid, (_ix, t) in tasks.items() if ixid not in slow and not t.done())
+        elapsed = time.monotonic() - t0
+        if len(slow) < len(tasks) and not quick_left and quick_done_at is None:
+            quick_done_at = elapsed
+        have = any(t.result()[0] for _ix, t in tasks.values() if t.done())
+        more = ixwait.more_wait(elapsed, quick_left, len(waiting) - quick_left,
+                                quick_done_at, have, patient=patient)
+        if not waiting or more <= 0:
+            break
+        await asyncio.wait(waiting, timeout=more, return_when=asyncio.FIRST_COMPLETED)
 
-    async def _query_one(ix: dict) -> tuple:
-        ixid, name = ix["id"], ix["name"]
-        try:
-            async with _http_client(timeout=PER_INDEXER_TIMEOUT) as c:
-                r = await c.get(
-                    f"{settings.indexer_url}/api/v2.0/indexers/{ixid}/results",
-                    params=params,
-                )
-            if r.status_code >= 300:
-                return [], {"id": ixid, "name": name, "ok": False, "error": f"HTTP {r.status_code}", "results": 0}
-            d = r.json()
-            res = d.get("Results", []) or []
-            # A single-indexer query echoes that indexer's own error in its block.
-            blk = (d.get("Indexers") or [{}])
-            err = (blk[0].get("Error") or "").strip() if blk else ""
-            return res, {"id": ixid, "name": name, "ok": not err, "error": err, "results": len(res)}
-        except Exception as e:
-            return [], {"id": ixid, "name": name, "ok": False, "error": str(e)[:200], "results": 0}
-
-    pairs = await asyncio.gather(*[_query_one(ix) for ix in indexers])
     items: list = []
     health: list = []
-    for res, h in pairs:
-        items.extend(res)
-        health.append(h)
+    for ixid, (ix, t) in tasks.items():
+        if t.done():
+            res, h = t.result()
+            items.extend(res)
+            health.append(dict(h, slow=True) if _IX_PACE.is_slow(ixid) else h)
+        else:
+            # Still running. Not a failure: it is reported when it lands.
+            health.append({"id": ixid, "name": ix["name"], "ok": True, "error": "",
+                           "results": 0, "slow": True, "pending": True,
+                           "secs": _IX_PACE.last(ixid)})
+            t.add_done_callback(_ix_health_late)
+            if pending is not None:
+                pending.append(ixid)
 
     await _apply_indexer_health(health)
 
@@ -27547,18 +27644,24 @@ async def admin_save_indexer_config(indexer_id: str, request: Request) -> JSONRe
     _require_admin(request)
     body = await request.json()
     try:
-        async with _jackett_admin() as c:
+        async with _jackett_admin(ixwait.ADMIN) as c:
             r = await c.post(
                 f"{settings.indexer_url}/api/v2.0/indexers/{indexer_id}/config",
                 json=body,
             )
         if r.status_code >= 300:
-            raise HTTPException(502, f"Jackett returned {r.status_code}")
+            # Jackett says why in the body ("Challenge detected but FlareSolverr
+            # is not configured"); "returned 500" tells the admin nothing.
+            try:
+                why = (r.json() or {}).get("error") or ""
+            except Exception:
+                why = ""
+            raise HTTPException(502, why[:400] or f"Jackett returned {r.status_code}")
         return JSONResponse({"ok": True})
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(502, f"Could not reach Jackett: {e}")
+        raise HTTPException(502, f"Could not reach Jackett: {ixwait.failure_text(e)}")
 
 
 @app.delete("/api/admin/indexers/{indexer_id}")
@@ -27682,6 +27785,20 @@ def _spawn_flaresolverr() -> bool:
         return False
 
 
+async def _jackett_flaresolverr_url() -> Optional[str]:
+    """The FlareSolverr URL Jackett itself is set to use ("" = none), or None when
+    Jackett can't be asked. Read-only: the setting is still made in Jackett's own
+    UI. This is what tells a solver that is running apart from one that is used."""
+    try:
+        async with _jackett_admin() as c:
+            r = await c.get(f"{settings.indexer_url}/api/v2.0/server/config")
+        if r.status_code != 200:
+            return None
+        return str((r.json() or {}).get("flaresolverrurl") or "").strip()
+    except Exception:
+        return None
+
+
 @app.get("/api/admin/flaresolverr")
 async def admin_flaresolverr(request: Request) -> JSONResponse:
     """Status of the optional FlareSolverr proxy for the Indexers tab: whether it's
@@ -27701,6 +27818,7 @@ async def admin_flaresolverr(request: Request) -> JSONResponse:
         "installable": sysname in ("Windows", "Linux"),
         "platform":    sysname,
         "jackett_url": await _jackett_dashboard_url(request),
+        "jackett_uses": await _jackett_flaresolverr_url(),   # None = couldn't ask
         "job": ({"status": job["status"], "progress": round(job.get("progress", 0.0), 3),
                  "error": job.get("error")} if job else None),
     })
@@ -27732,12 +27850,12 @@ async def _test_one_indexer(c, indexer_id: str) -> dict:
             return {"id": indexer_id, "ok": True, "error": ""}
         # Jackett returns the failure reason in the body on a non-2xx.
         try:
-            err = (r.json() or {}).get("error") or f"HTTP {r.status_code}"
+            err = ixwait.jackett_error((r.json() or {}).get("error")) or f"HTTP {r.status_code}"
         except Exception:
             err = (r.text or f"HTTP {r.status_code}")[:300]
         return {"id": indexer_id, "ok": False, "error": err}
     except Exception as e:
-        return {"id": indexer_id, "ok": False, "error": str(e)}
+        return {"id": indexer_id, "ok": False, "error": ixwait.failure_text(e)}
 
 
 @app.post("/api/admin/indexers/{indexer_id}/test")
@@ -27745,7 +27863,7 @@ async def admin_test_indexer(indexer_id: str, request: Request) -> JSONResponse:
     """Actively test a single configured indexer through Jackett."""
     _require_admin(request)
     try:
-        async with _jackett_admin() as c:
+        async with _jackett_admin(ixwait.ADMIN) as c:
             res = await _test_one_indexer(c, indexer_id)
     except HTTPException:
         raise
@@ -27760,7 +27878,7 @@ async def admin_test_all_indexers(request: Request) -> JSONResponse:
     snapshot (+ the degraded flag) from the live results."""
     _require_admin(request)
     try:
-        async with _jackett_admin() as c:
+        async with _jackett_admin(ixwait.ADMIN) as c:
             lr = await c.get(
                 f"{settings.indexer_url}/api/v2.0/indexers",
                 params={"configured": "true"},

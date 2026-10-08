@@ -15840,17 +15840,31 @@ function _renderTmdbResults(q, tmdb, grid, wrap, count){
 // size, seeders/peers/tracker, and Save (→ download modal) / Play (→ stream
 // picker) — with NO show grouping and NO TMDb. `live()` turns false once a
 // newer search has started; nothing is painted after that.
-async function doClassicSearch(q, grid, wrap, empty, count, live){
+// 20.17.0. An indexer behind Cloudflare (1337x) takes 11-20 s a search, so
+// /api/search answers without it and names it in `pending`. Asking again with
+// wait=1 joins that same search on the server and returns everything. `use`
+// gets the fuller answer; it must check for itself that it is still wanted.
+// The one-press flows (Get, Play now, the background run) do not use this:
+// they act on the first answer.
+function _searchLate(url, data, use){
+  if(!data || !(data.pending||[]).length) return;
+  fetch(url+"&wait=1").then(r=>r.ok?r.json():null).then(d=>{ if(d) use(d); }).catch(()=>{});
+}
+
+async function doClassicSearch(q, grid, wrap, empty, count, live, late){
   const srcParam=_selectedSourcesParam();
   const catParam=_selectedCategoriesParam();
   let url=`/api/search?q=${encodeURIComponent(q)}`;
   if(profile.id) url+=`&profile_id=${encodeURIComponent(profile.id)}`;
   if(srcParam!==null) url+=`&indexers=${encodeURIComponent(srcParam)}`;
   if(catParam!==null) url+=`&categories=${encodeURIComponent(catParam)}`;
-  const r=await fetch(url);
-  if(!r.ok){ const e=await r.json().catch(()=>({detail:"Search failed"})); throw new Error(e.detail||`HTTP ${r.status}`); }
-  const items=(await r.json()).results||[];
+  const r=late ? null : await fetch(url);
+  if(r && !r.ok){ const e=await r.json().catch(()=>({detail:"Search failed"})); throw new Error(e.detail||`HTTP ${r.status}`); }
+  const data=late || await r.json();
+  const items=data.results||[];
   if(live&&!live()) return;
+  if(late){ if(!items.length) return; grid.innerHTML=""; }
+  else _searchLate(url, data, d=>doClassicSearch(q, grid, wrap, empty, count, live, d).catch(()=>{}));
   empty.classList.add("hidden");
   count.textContent=items.length?`${items.length} results`:"";
   if(!items.length){
@@ -15914,7 +15928,7 @@ async function doClassicSearch(q, grid, wrap, empty, count, live){
 // Legacy Jackett-first grouped search: "one card per show" from raw indexer
 // results. Used only as the no-TMDb-key / no-TMDb-match fallback. The caller
 // (_exSearchIndexers) owns the outer try/catch; `live()` as in doClassicSearch.
-async function doJackettSearch(q, grid, wrap, empty, count, live){
+async function doJackettSearch(q, grid, wrap, empty, count, live, late){
   {
     const srcParam=_selectedSourcesParam();
     const catParam=_selectedCategoriesParam();
@@ -15922,10 +15936,12 @@ async function doJackettSearch(q, grid, wrap, empty, count, live){
     if(profile.id) url+=`&profile_id=${encodeURIComponent(profile.id)}`;
     if(srcParam!==null) url+=`&indexers=${encodeURIComponent(srcParam)}`;
     if(catParam!==null) url+=`&categories=${encodeURIComponent(catParam)}`;
-    const r=await fetch(url);
-    if(!r.ok){ const e=await r.json().catch(()=>({detail:"Search failed"})); throw new Error(e.detail||`HTTP ${r.status}`); }
-    const data=await r.json();
+    const r=late ? null : await fetch(url);
+    if(r && !r.ok){ const e=await r.json().catch(()=>({detail:"Search failed"})); throw new Error(e.detail||`HTTP ${r.status}`); }
+    const data=late || await r.json();
     if(live&&!live()) return;
+    if(late){ if(!(data.groups||[]).length) return; grid.innerHTML=""; }
+    else _searchLate(url, data, d=>doJackettSearch(q, grid, wrap, empty, count, live, d).catch(()=>{}));
     empty.classList.add("hidden");
     const groups=data.groups||[];
     count.textContent=groups.length?`${groups.length} show${groups.length===1?"":"s"}`:"";
@@ -16658,11 +16674,19 @@ async function ssSearchSeason(season, opts={}){
     if(profile.id) url+=`&profile_id=${encodeURIComponent(profile.id)}`;
     const r=await fetch(url);
     if(r.ok && _ssGroup===grp){
+      const take=data=>{
+        const out=[];
+        (data.groups||[]).forEach(g=>(g.results||[]).forEach(res=>out.push(res)));
+        return {packs:_ssMergePacks(out),
+                eps:_ssMergeEpisodes(out.filter(r2=>r2.kind==="episode" && r2.season===season))};
+      };
       const data=await r.json();
-      const out=[];
-      (data.groups||[]).forEach(g=>(g.results||[]).forEach(res=>out.push(res)));
-      packs=_ssMergePacks(out);
-      eps=_ssMergeEpisodes(out.filter(r2=>r2.kind==="episode" && r2.season===season));
+      ({packs, eps}=take(data));
+      _searchLate(url, data, d=>{
+        if(_ssGroup!==grp) return;
+        take(d);
+        if(!opts.silent) _ssRender();
+      });
     }
   }catch(_){}
   if(_ssGroup===grp && !opts.silent){ _ssPacksSearched=true; _ssRender(); }
@@ -17898,6 +17922,31 @@ async function ssSearchEpisode(season, episode, opts={}){
   const absNo=_animeAbsNo(_ssMeta, season, episode);
   const forms=_ssEpisodeQueries(season, episode);
   let found=[];
+  // The results of one answer that really are this episode.
+  const pick=(data, f)=>{
+    const hits=[];
+    (data.groups||[]).forEach(g=>(g.results||[]).forEach(res=>{
+      // An absolute-numbered anime release states the absolute number and
+      // whatever season its own grid uses (the parser files a bare number
+      // under season 1), so matching it on TMDb's (season, episode) would
+      // reject every real source. Match on the absolute number instead.
+      _reslot([res], _ssMeta);
+      if(f.name) _reslotCross([res], season, episode, _ssMeta);
+      const hit=absNo
+        ? (res.episode===absNo && res.season<=1)
+        : (res.season===season && _srcHolds(res).includes(episode));
+      if(res.kind==="episode" && hit
+         && _ssEpisodeAccept(res, season)) hits.push(res);
+    }));
+    return hits;
+  };
+  const keep=hits=>{
+    let e=_ssEpisodes.find(x=>x.season===season && x.episode===episode);
+    if(!e){ e={season,episode,sources:[]}; _ssEpisodes.push(e); _ssEpisodes.sort((a,b)=>(a.season-b.season)||(a.episode-b.episode)); }
+    const have=new Set(e.sources.map(s=>s.magnet));
+    hits.forEach(h=>{ if(!have.has(h.magnet)){ e.sources.push(h); have.add(h.magnet); } });
+    _ssSortSources(e.sources, season, episode);
+  };
   for(const f of forms){
     if(_ssGroup!==grp) break;
     try{
@@ -17909,30 +17958,20 @@ async function ssSearchEpisode(season, episode, opts={}){
       const r=await fetch(url);
       if(r.ok){
         const data=await r.json();
-        (data.groups||[]).forEach(g=>(g.results||[]).forEach(res=>{
-          // An absolute-numbered anime release states the absolute number and
-          // whatever season its own grid uses (the parser files a bare number
-          // under season 1), so matching it on TMDb's (season, episode) would
-          // reject every real source. Match on the absolute number instead.
-          _reslot([res], _ssMeta);
-          if(f.name) _reslotCross([res], season, episode, _ssMeta);
-          const hit=absNo
-            ? (res.episode===absNo && res.season<=1)
-            : (res.season===season && _srcHolds(res).includes(episode));
-          if(res.kind==="episode" && hit
-             && _ssEpisodeAccept(res, season)) found.push(res);
-        }));
+        found.push(...pick(data, f));
+        // A slow indexer's sources for this episode join the list when they land.
+        _searchLate(url, data, d=>{
+          if(_ssGroup!==grp) return;
+          const hits=pick(d, f);
+          if(!hits.length) return;
+          keep(hits);
+          _ssRenderBody();
+        });
       }
     }catch(_){}
     if(found.length){ if(!f.name) _ssEpFormWin.set(grp, `${f.bare?1:0}|${f.t}`); break; }
   }
-  if(_ssGroup===grp && found.length){
-    let e=_ssEpisodes.find(x=>x.season===season && x.episode===episode);
-    if(!e){ e={season,episode,sources:[]}; _ssEpisodes.push(e); _ssEpisodes.sort((a,b)=>(a.season-b.season)||(a.episode-b.episode)); }
-    const have=new Set(e.sources.map(s=>s.magnet));
-    found.forEach(f=>{ if(!have.has(f.magnet)){ e.sources.push(f); have.add(f.magnet); } });
-    _ssSortSources(e.sources, season, episode);
-  }
+  if(_ssGroup===grp && found.length) keep(found);
   _ssSearching.delete(key);
   if(_ssGroup===grp && !opts.silent){
     _ssRenderBody();
@@ -33215,6 +33254,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.16.6</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.17.0</div>
 </body>
 </html>

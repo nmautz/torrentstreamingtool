@@ -1,5 +1,49 @@
 # Changelog
 
+## [20.17.0] — 2026-10-08
+### An indexer behind Cloudflare is slow, not failing
+
+EZTV and 1337x were added on the box and both showed as failing. FlareSolverr was not
+the problem: it was installed, running and set in Jackett, and both sites returned
+results through it. StreamLink stopped waiting before they answered.
+
+- **Search no longer reports a slow indexer as failing.** 1337x takes 11 to 20 seconds
+  on every search, because FlareSolverr solves a Cloudflare challenge each time. Search
+  gave each indexer 12 seconds, so 1337x timed out on every search and its results
+  never reached the page. The request to Jackett now runs for as long as it needs
+  (75 seconds at most) and is shared by every search asking the same thing.
+- **Search answers when the quick indexers are in**, about a second later, instead of
+  waiting for the slow one. The search page and the show page's season and episode
+  searches then add the slow indexer's results when they land. The one-press actions
+  (Get, Play now, the background run, Siri, the dead-download retry) act on the first
+  answer and are not made to wait.
+- **Test waits up to two minutes.** It gave up at 15 seconds and said it could not reach
+  Jackett. The first test of EZTV took 45 seconds on the box.
+- **The Indexers tab shows "Responding slowly · 14 s"** in amber for an indexer that
+  works but is slow, and "Still searching" while one is running.
+- **A failing indexer always has a reason.** A timeout used to show "Failing" with
+  nothing under it, and a real failure showed Jackett's 25-line stack trace. Both are
+  now one readable line.
+- **The FlareSolverr card says whether Jackett is using it.** Running and in use are
+  different things, and the card could only show the first.
+- **Adding an indexer shows Jackett's own reason** when Jackett refuses, instead of
+  "Jackett returned 500".
+- A slow indexer runs at most three searches at once. Each one is a browser inside
+  FlareSolverr, on the box that is also transcoding.
+- **Checked against the box's Jackett (2026-10-08), from the dev Mac:** a first search
+  waited 12 seconds once and listed 1337x as pending; the next answered in 1.7 seconds
+  with 1337x pending; asking again with `wait=1` returned 13 more results from 1337x in
+  10 seconds; 1337x's health row read OK at 16.7 s once it landed.
+- **Which public indexers work is now in the README.** 25 were added to the box's
+  Jackett one at a time, searched and removed again: 12 answer in about a second, 8 work
+  but take 15 to 21 seconds behind Cloudflare like 1337x, and 5 do not work. The box's
+  own seven indexers were left as they were.
+- **Not checked:** eight of the surveyed indexers return a download link and no magnet;
+  the links were not followed.
+- **Not checked:** the new server code has not run on the box itself, and none of the
+  page changes (late results on the search and show pages, the amber rows, the
+  FlareSolverr line) have been seen in a browser.
+
 ## [20.16.6] — 2026-10-08
 ### The Devices tab names the account on a profile without a PIN, and stops counting app builds as devices
 

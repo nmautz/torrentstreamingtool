@@ -6285,9 +6285,14 @@ function _renderIndexerHealth(d){
   }
   el.innerHTML = list.map(h=>{
     const ok = !!h.ok;
-    const dot = ok ? "bg-emerald-500" : "bg-red-500";
-    const stat = ok ? `<span class="text-emerald-400">Responding</span>`
-                    : `<span class="text-red-400">Failing</span>`;
+    // Behind Cloudflare an indexer answers through FlareSolverr, 11-20 s a search.
+    // That is working, not failing: search shows the quick ones first.
+    const dot = !ok ? "bg-red-500" : (h.slow||h.pending) ? "bg-amber-500" : "bg-emerald-500";
+    const took = (typeof h.secs==="number" && h.secs>=1) ? `${Math.round(h.secs)} s` : "";
+    const stat = !ok ? `<span class="text-red-400">Failing</span>`
+               : h.pending ? `<span class="text-amber-400">Still searching${took ? ` · last answer took ${took}` : ""}</span>`
+               : h.slow ? `<span class="text-amber-400">Responding slowly${took ? ` · ${took}` : ""}</span><span class="text-gray-600"> · its results arrive after the others</span>`
+               : `<span class="text-emerald-400">Responding</span>`;
     const err = (!ok && h.error) ? `<div class="text-xs text-red-400/80 mt-0.5 truncate" title="${escHtml(h.error)}">${escHtml(h.error)}</div>` : "";
     return `
     <div class="flex items-center justify-between px-5 py-3 gap-3" id="ixh-${escHtml(h.id)}">
@@ -6431,6 +6436,9 @@ function _renderFlaresolverr(d){
           class="text-[11px] font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:text-white transition-colors flex-shrink-0">
           Copy</button>
       </div>
+      ${d.jackett_uses==null ? "" : d.jackett_uses
+        ? `<p class="text-xs text-emerald-400 leading-relaxed">Jackett is set to use <span class="font-mono">${escHtml(d.jackett_uses)}</span>. An indexer behind Cloudflare still takes 10 to 45 seconds to add or test, and some take that long on every search.</p>`
+        : `<p class="text-xs text-amber-300 font-semibold leading-relaxed">Jackett is not using FlareSolverr yet. Indexers behind Cloudflare will fail until the URL below is saved in Jackett.</p>`}
       <p class="text-xs text-gray-500 leading-relaxed">
         StreamLink can't configure Jackett for you — set this <span class="text-gray-300 font-semibold">by hand</span>:
         open Jackett, click the <span class="text-gray-300 font-semibold">cog (Configure Jackett)</span>, paste the URL above into

@@ -78,6 +78,7 @@ A card above the configured-indexers list that surfaces **resilience to a partly
 The card shows:
 - A degraded/all-OK summary banner (`X of Y indexers are failing` / `All Y indexers responding`).
 - A per-indexer **Responding** / **Failing** list (with the failure reason inline for failing ones). Populated from the last user search and refreshed by the Test buttons.
+- **Responding slowly** / **Still searching** (amber, 20.17.0) for an indexer that works but answers late, with how long its last answer took. An indexer behind Cloudflare (1337x) takes 11-20 s on every search; search shows the quick indexers first and adds its results when they land. It is not counted as failing. See [GOTCHAS.md](GOTCHAS.md) § A slow indexer is not a failing one.
 - **Test** (per indexer) and **Test All** buttons → `POST /api/admin/indexers/{id}/test` / `POST /api/admin/indexers/test-all`, which probe Jackett's per-indexer test endpoint live and refresh the snapshot + degraded flag.
 - An **Open Jackett Admin ↗** link (Jackett's `/UI/Dashboard`, returned by `/api/admin/indexers/health` as `jackett_url`) so the admin can log into Jackett directly to fix or remove the failing indexers. `_jackett_dashboard_url(request)` rewrites the server-internal loopback host in `INDEXER_URL` to the hostname the admin actually connected on (keeping Jackett's port), so the link works from a remote browser instead of pointing at `localhost`; a non-loopback `INDEXER_URL` (remote Jackett) is used as-is.
 
@@ -105,7 +106,7 @@ The card surfaces three states via a header badge — **Running** (emerald), **I
 
 `run.py`'s `start_flaresolverr()` launches it on every startup when `_FLARESOLVERR_BIN` is set (binding to the `FLARESOLVERR_URL` host/port via FlareSolverr's `HOST`/`PORT` env vars). Like Jackett, FlareSolverr is **not** VPN-gated — only qBittorrent is.
 
-- `GET /api/admin/flaresolverr` → `{installed, path, running, api_url, v1_url, installable, platform, jackett_url, job}`.
+- `GET /api/admin/flaresolverr` → `{installed, path, running, api_url, v1_url, installable, platform, jackett_url, jackett_uses, job}`. `jackett_uses` (20.17.0) is the FlareSolverr URL Jackett itself is set to (`""` = none, `null` = Jackett couldn't be asked), read from Jackett's `/api/v2.0/server/config`. The card says in green that Jackett is using it, or in amber that it is not yet — a solver that is running and one that is used are different things, and only the second makes an indexer work.
 - `POST /api/admin/flaresolverr/start` → `{ok, running, already_running?}` (404 if not installed).
 
 #### Jackett authentication
