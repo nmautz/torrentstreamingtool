@@ -40,9 +40,14 @@ results through it. StreamLink stopped waiting before they answered.
   own seven indexers were left as they were.
 - **Not checked:** eight of the surveyed indexers return a download link and no magnet;
   the links were not followed.
-- **Not checked:** the new server code has not run on the box itself, and none of the
-  page changes (late results on the search and show pages, the amber rows, the
-  FlareSolverr line) have been seen in a browser.
+- **Checked on the box after the update (2026-10-08):** the first search after the
+  reboot waited 13 seconds once, with 1337x and EZTV pending (Jackett had restarted, so
+  EZTV's challenge was solved again). The next search answered in 2.3 seconds with 1337x
+  pending, `wait=1` returned its result 11 seconds later, and the same search again took
+  0.6 seconds. No indexer was listed as failing. Test passed for 1337x in 13 seconds and
+  EZTV in 2. The FlareSolverr status reports that Jackett uses it.
+- **Not checked:** none of the page changes (late results on the search and show pages,
+  the amber rows, the FlareSolverr line) have been seen in a browser.
 
 ## [20.16.6] — 2026-10-08
 ### The Devices tab names the account on a profile without a PIN, and stops counting app builds as devices
