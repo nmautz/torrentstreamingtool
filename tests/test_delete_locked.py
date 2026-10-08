@@ -5,14 +5,15 @@
 On Windows an unlink fails (WinError 32) while another process holds the file,
 and a seeding torrent holds every file it has served. Dropping the file to
 priority 0 does not close it; stopping the torrent does. This drives the real
-`_delete_files_now` from main.py against a fake qBittorrent whose running
-torrents lock their files, the way Windows does.
+`_delete_files_now` and the source-eviction run (`_evict_paths`) from main.py
+against a fake qBittorrent whose running torrents lock their files, the way
+Windows does.
 
 main.py can't be imported without the whole dependency tree, so - like
 tests/test_race_rescue.py - the functions under test are lifted out of its
 source by name. The lift asserts every name was found.
 """
-import ast, asyncio, io, logging, os, stat, sys, tempfile
+import ast, asyncio, io, logging, os, stat, sys, tempfile, types
 from pathlib import Path
 from typing import Optional
 
@@ -20,7 +21,8 @@ ROOT = Path(__file__).resolve().parent.parent
 src = io.open(ROOT / "main.py", encoding="utf-8").read()
 tree = ast.parse(src)
 
-WANT = {"_delete_files_now", "_qbit_let_go", "_unlink_resilient", "_item_all_torrent_hashes"}
+WANT = {"_delete_files_now", "_qbit_let_go", "_unlink_resilient", "_item_all_torrent_hashes",
+        "_evict_paths", "_evict_one_source"}
 CONSTS = {"_RACE_PAUSED_STATES", "_QBIT_IDLE_STATES"}
 
 
@@ -93,7 +95,26 @@ ns = {
     "_file_holders": lambda paths: {p: ["vlc.exe"] for p in paths},
     "_invalidate_bundle_index": lambda: None,
     "_invalidate_offline_cache_inventory": lambda: None,
+    # source eviction
+    "OFFLINE_CACHE_DIRNAME": ".offline_cache", "hls_log": logging.getLogger("test"),
+    "state": types.SimpleNamespace(library_current_file=None, source_eviction_stop=False),
+    "_is_compressing": lambda p: False, "_offline_cache_path_active": lambda k: False,
+    "_norm_path": lambda p: p, "_od_sessions": {}, "_bundle_playable_sync": lambda b: True,
+    "_now_iso": lambda: "now", "_bundle_index_register": lambda k, b: None,
+    "human_size": lambda n: f"{n} B", "_file_sig": lambda p: "sig",
+    "_bundle_key_for_file": lambda f: "k-" + Path(f["path"]).stem,
 }
+
+
+async def _get_library():
+    return LIB
+
+
+async def _machine_in_use(_):
+    return False
+
+
+ns.update({"get_library": _get_library, "_machine_in_use": _machine_in_use})
 pieces, found = [], set()
 for node in tree.body:
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in WANT:
@@ -174,6 +195,36 @@ with tempfile.TemporaryDirectory() as tmp:
     paths = setup(tmp, 2, None)
     res = run(paths)
     check("plain delete still works", res["deleted"] == 2 and QB.calls == [])
+
+    print("source eviction of a seeding pack")
+    paths = setup(tmp, 4, "uploading")
+    for p in paths:
+        b = Path(tmp) / ".offline_cache" / ("k-" + Path(p).stem)
+        b.mkdir(parents=True, exist_ok=True)
+        (b / "master.m3u8").write_text("#EXTM3U")
+    se = {}
+    asyncio.run(ns["_evict_paths"](paths, se, manual=True))
+    files = LIB["items"][0]["files"]
+    check("all four sources reclaimed", se.get("deleted") == 4 and se.get("bytes_freed") == 400)
+    check("sources gone, bundles kept",
+          not any(os.path.exists(p) for p in paths)
+          and all((Path(tmp) / ".offline_cache" / ("k-" + Path(p).stem) / "master.m3u8").exists()
+                  for p in paths))
+    check("every file carries its eviction record",
+          all((f.get("bundle") or {}).get("source_evicted") for f in files))
+    check("stopped once for the whole run, started once",
+          QB.calls == [("stop", "aaa"), ("start", "aaa")])
+
+    print("eviction when something else holds a source")
+    paths = setup(tmp, 2, "stoppedUP")
+    QB.other.add(paths[1])
+    se = {}
+    asyncio.run(ns["_evict_paths"](paths, se, manual=True))
+    files = LIB["items"][0]["files"]
+    check("the free one is reclaimed", se.get("deleted") == 1)
+    check("the held one keeps its source and has no record",
+          os.path.exists(paths[1]) and "bundle" not in files[1])
+    check("the torrent is not touched", QB.calls == [])
 
 print()
 if fails:

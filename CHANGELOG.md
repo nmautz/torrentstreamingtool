@@ -1,5 +1,21 @@
 # Changelog
 
+## [20.16.2] — 2026-10-08
+### Source eviction can take a file qBittorrent is still seeding
+
+- **Source eviction deleted with a single try**, so it would have failed on a seeding pack
+  the same way Delete Watched did in 20.16.0: on Windows a file open in qBittorrent cannot
+  be deleted. It had not failed yet only because it has run once, on 13 small files; it
+  first runs for real when the disk is nearly full (#49).
+- **A run now stops the torrents holding the files it was refused, once for the whole run,
+  takes those files, and starts the torrents again.** A file something else holds (VLC, a
+  prep job) is left with its source, as before.
+- **20.16.1 is confirmed on the box:** Delete Watched removed 31 Hunter x Hunter episodes,
+  82.0 GB, none refused, in 13 seconds.
+- **Not checked:** an eviction run on the box. The box has 223 GB free and eviction only
+  runs under 100 GB. The test drives the real run against a stand-in qBittorrent that locks
+  files the way Windows does.
+
 ## [20.16.1] — 2026-10-07
 ### Delete Watched removes episodes qBittorrent is still seeding
 

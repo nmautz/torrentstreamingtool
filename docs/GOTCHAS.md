@@ -5746,7 +5746,11 @@ Three rules for any delete on this platform:
    stopping the torrent closes its files. `_delete_files_now` tries each file once, and if
    any is refused it stops the item's running torrents (`_qbit_let_go`), retries, and starts
    them again. The same quick first try also ended the ~2 s wait per locked file that made
-   that request take 49 s. `_evict_one_source` has the same exposure and no such step yet.
+   that request take 49 s. Seen working on the box on 2026-10-08 (31 files, 82.0 GB, none
+   refused, 13 s). Source eviction does the same since 20.16.2, once per run and not per
+   file: `_evict_paths` collects what `_evict_one_source` was refused, stops those torrents
+   together, retries, and starts them again. Eviction had run for real only once before
+   that (13 small files), so its clean record proved nothing.
 3. **Don't commit the bookkeeping until the bytes are actually gone.** Capture the prior
    state up front and roll it back for whatever survived, and purge derived artifacts (the
    HLS bundle) only for files that really went.

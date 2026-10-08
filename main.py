@@ -35697,8 +35697,13 @@ def _free_disk_bytes_for_library(lib: dict) -> int:
     return 0
 
 
-async def _evict_one_source(f_path: str, key: str, sig: str) -> int:
+async def _evict_one_source(f_path: str, key: str, sig: str, *, attempts: int = 1,
+                            refused: Optional[list] = None) -> int:
     """Reclaim ONE source file. Returns the bytes freed (0 if nothing happened).
+
+    A path the host would not unlink is appended to `refused`, so the caller can
+    stop its torrent and try again (`_evict_paths`); `attempts` is how patient
+    that unlink is.
 
     **The record is written BEFORE the file is deleted, and that order is not
     negotiable.** The two crash windows are not symmetric:
@@ -35750,12 +35755,13 @@ async def _evict_one_source(f_path: str, key: str, sig: str) -> int:
             return 0
 
     # 2) Delete second.
-    try:
-        await asyncio.to_thread(os.remove, str(src))
-    except OSError as exc:
+    exc = await _unlink_resilient(src, attempts)
+    if exc:
         # Roll the record back: the source is still there, so claiming otherwise
         # would strand a playable file behind a "Bundle Only" badge.
         hls_log.warning("evict: could not delete %s (%s) — reverting the record", src.name, exc)
+        if refused is not None:
+            refused.append(f_path)
         async with mutate_library() as lib:
             for it in lib.get("items", []):
                 for f in it.get("files", []):
@@ -35844,6 +35850,19 @@ async def _evict_paths(paths: list, se: dict, *, manual: bool) -> None:
     deleted = freed = 0
     lib = await get_library()
     files = {f.get("path", ""): f for it in lib.get("items", []) for f in it.get("files", [])}
+    owner = {f.get("path", ""): it for it in lib.get("items", []) for f in it.get("files", [])}
+    refused: list = []
+
+    async def _one(path: str, attempts: int = 1, into: Optional[list] = None) -> None:
+        nonlocal deleted, freed
+        n = await _evict_one_source(
+            path, _bundle_key_for_file(files.get(path) or {"path": path}),
+            await asyncio.to_thread(_file_sig, path), attempts=attempts, refused=into)
+        if n:
+            deleted += 1
+            freed += n
+            se["deleted"], se["bytes_freed"] = deleted, freed
+
     try:
         for path in paths:
             if state.source_eviction_stop:
@@ -35863,13 +35882,24 @@ async def _evict_paths(paths: list, se: dict, *, manual: bool) -> None:
             if not manual and await _machine_in_use(60):
                 se["stopped"] = True
                 break
-            n = await _evict_one_source(
-                path, _bundle_key_for_file(files.get(path) or {"path": path}),
-                await asyncio.to_thread(_file_sig, path))
-            if n:
-                deleted += 1
-                freed += n
-                se["deleted"], se["bytes_freed"] = deleted, freed
+            await _one(path, into=refused)
+        # What Windows refused is usually open in qBittorrent, which holds every
+        # file of a torrent it is seeding and does not let go on its own. Stop
+        # those torrents ONCE for the whole run, take the files, start them again
+        # (the same step as `_delete_files_now`; docs/GOTCHAS.md § unlink on Windows).
+        if refused and not se.get("stopped"):
+            hashes = list(dict.fromkeys(
+                h for p in refused for h in _item_all_torrent_hashes(owner.get(p) or {})))
+            stopped = await _qbit_let_go(hashes)
+            try:
+                for n, path in enumerate(refused):
+                    if state.source_eviction_stop:
+                        se["stopped"] = True
+                        break
+                    await _one(path, attempts=6 if n == 0 else 2)
+            finally:
+                for h in stopped:
+                    await qbit_resume(h)
     finally:
         if deleted:
             _invalidate_bundle_index()

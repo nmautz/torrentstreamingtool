@@ -3299,6 +3299,12 @@ against a library snapshot that can be seconds old, and a viewer can start an
 episode inside that window. The loop also aborts between files the moment
 `_machine_in_use` goes true: this is housekeeping and a viewer outranks it.
 
+**A source qBittorrent is seeding cannot be unlinked on Windows** (20.16.2). A run
+collects every path the host refused, stops the torrents that own them **once**
+(`_qbit_let_go`), retries those paths, and starts the torrents again. A torrent that
+was already stopped stays stopped; a source held by anything else keeps its record
+reverted, as before. See [GOTCHAS.md](GOTCHAS.md) § On Windows, `unlink` fails.
+
 ### Measured on the live library (18.0.1, 613 files)
 
 The first real dry run is the reason to be honest about what this feature is worth:
