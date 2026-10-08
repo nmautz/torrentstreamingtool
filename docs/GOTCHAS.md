@@ -3906,6 +3906,21 @@ both correct and stable in the app (no chrome to collapse). Browsers keep `dvh`.
 Same reasoning excludes the app from the browser-only "swipe to hide the URL bar"
 body-growth hack (`html:not(.is-app):has(#localPlayer.lp-active…)`).
 
+### `position:fixed; inset:0` can stop short of the screen in WKWebView (20.16.4)
+Seen on device 2026-10-08 (iPhone, landscape, on-device player): the player box ended
+28pt above the bottom of the screen, with page background showing under it, while the
+same player in element fullscreen filled the screen. `inset:0` is the **layout
+viewport**, and the web view had shrunk that by one bottom inset. The same screenshots
+show `env(safe-area-inset-bottom)` reading 0 in one play and 28pt in another. The cause
+is **not established** (element fullscreen exit and rotation are the suspects). The
+correction is page-side: `_lpFitViewport` compares the player's box with the screen
+(the web view is always the full screen on a phone), puts the shortfall in `--lp-short`,
+and `html.is-app #localPlayer.lp-active:not(.lp-tiny)` pushes `bottom` down by it. It is
+bounded at 80px so a genuinely smaller iPad window is left alone, and it logs
+`viewport-short` with the measured viewport sizes: read that row before changing this.
+`.lp-ctl-bottom` is pinned to 21px / 34px in the app for the same reason `.safe-bottom`
+is (below). Other `fixed inset-0` overlays are not corrected.
+
 ### Don't double up safe-area insets — `contentInset:"never"` when the CSS already uses `env(safe-area-inset-*)`
 The dashboard pads itself with `.safe-top`/`.safe-bottom` (`env(safe-area-inset-*)`),
 so the page already handles the notch/home-indicator. Capacitor's

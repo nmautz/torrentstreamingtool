@@ -1,5 +1,22 @@
 # Changelog
 
+## [20.16.4] — 2026-10-08
+### The player fills the screen in the app, and a tap hides the controls while paused
+
+- **In the iOS app the player sometimes stopped short of the bottom of the screen**,
+  leaving a dark strip under it with the picture and the controls sitting high. The web
+  view was laying the page out one bottom inset (28pt in landscape) short. The player now
+  measures that shortfall against the screen and covers it, and records a
+  `viewport-short` row in the client log when it does.
+- **The bottom control strip's padding no longer changes between plays in the app.** It
+  followed a live safe-area value that read 0 at some times and 28pt at others; it is now
+  the fixed 21pt (landscape) / 34pt (portrait) the rest of the app's chrome uses.
+- **Tapping the video while paused hides the controls**, as it does while playing, so a
+  paused frame can be screenshotted clean. Tap again to bring them back. They still never
+  hide by themselves while paused.
+- **Not checked:** nothing here has run on a phone. Why the web view shrinks its layout is
+  not known, so the strip fix is a correction on top of an unexplained cause.
+
 ## [20.16.3] — 2026-10-08
 ### Source eviction watches every disk, and the Storage tab stops counting deleted episodes
 

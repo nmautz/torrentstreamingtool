@@ -733,7 +733,9 @@ Don't re-add the `controls` attribute. Pieces:
   header + track rows) opacity-only, no reflow. Tap the video to toggle
   (`lpStageTap`, guarded so taps on buttons/selects/the overlay never
   double-act); auto-hides after 3 s of playback (`_lpCtlShow`/`_lpCtlIdle`) but
-  never while paused, scrubbing, buffering, or reconnecting. Desktop: mouse
+  never by itself while paused, scrubbing, buffering, or reconnecting. A tap
+  hides it in any state, paused included (20.16.4), except on the glasses
+  remote (`.lp-remote`), where the overlay is the screen. Desktop: mouse
   move reveals; keyboard Space/K, ←/→ (±10 s), F, M in the global `keydown`
   handler.
 - **Buffering** — `.lp-buffering` (set on `waiting`, cleared on `playing`)

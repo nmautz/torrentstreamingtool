@@ -214,10 +214,12 @@
     @media (orientation: portrait) {
       html.is-app .safe-top    { padding-top:    59px; }
       html.is-app .safe-bottom { padding-bottom: 34px; }
+      html.is-app .lp-ctl-bottom { padding-bottom: 34px; }
     }
     @media (orientation: landscape) {
       html.is-app .safe-top    { padding-top:    0px; }
       html.is-app .safe-bottom { padding-bottom: 21px; }
+      html.is-app .lp-ctl-bottom { padding-bottom: 21px; }
     }
     /* Library card action row — keep every primary button the same height and on
        a single line (no 2-line "Episodes" wrap) so the row reads as a clean
@@ -552,6 +554,11 @@
       flex-direction: column;
     }
     #localPlayer.lp-active { display: flex; }
+    /* iOS app: WKWebView sometimes lays the page out one bottom inset SHORT of
+       the screen (seen around element fullscreen and rotation), and `inset:0`
+       then stops above a strip of page background. _lpFitViewport measures the
+       shortfall and this pushes the box back down over it. 0 everywhere else. */
+    html.is-app #localPlayer.lp-active:not(.lp-tiny) { bottom: calc(-1 * var(--lp-short, 0px)); }
     /* Volume readout — flat Metro tile, no radius, matches the transport chrome. */
     #lpVolPill {
       position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
@@ -27066,6 +27073,7 @@ async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope, items
   const c = document.getElementById("localPlayer");
   c.classList.remove("lp-tiny");
   c.classList.add("lp-active");
+  _lpFitViewportSoon();
   // Announce the session NOW, not when the picture appears. A cold JIT start can
   // take seconds, and a session the household's other devices can't see yet is a
   // session they can't pull — the same reason the kiosk claims its surface from
@@ -29721,8 +29729,9 @@ function _lpSaveLocalTracks(what) {
 // on every OS/browser: same seek bar, same ±10 s tiles, same fullscreen, and
 // the subtitle/audio/quality selectors stay reachable in fullscreen. Overlay
 // visibility = the .lp-idle class on #localPlayer (opacity-only — no reflow);
-// it auto-hides 3 s into playback and never hides while paused, scrubbing,
-// buffering, or reconnecting.
+// it auto-hides 3 s into playback and never hides BY ITSELF while paused,
+// scrubbing, buffering, or reconnecting. A tap on the bare video hides it in
+// any of those states (a clean paused frame, for a screenshot).
 let _lpCtlTimer = null;   // auto-hide timeout handle
 let _lpScrub = null;      // {t} while the user is dragging the seek bar
 
@@ -29839,9 +29848,54 @@ async function lpExitShuffle(btn) {
   }
 }
 
+// iOS app only. The player is `fixed; inset:0`, which is the LAYOUT viewport,
+// and WKWebView sometimes leaves that one bottom inset (28pt in landscape on a
+// 15 Pro) short of the screen: the picture and the whole overlay sit high over
+// a strip of page background. The web view itself is the full screen, so the
+// screen's size is what the box should be; the shortfall goes into --lp-short
+// and the CSS pushes `bottom` down by it. Bounded, so an iPad window that is
+// honestly smaller than the screen is never stretched. Why the viewport shrinks
+// is not established: the `viewport-short` row carries what was measured.
+let _lpShortLogged = -1;
+function _lpFitViewport() {
+  if (!isApp) return;
+  const c = document.getElementById("localPlayer");
+  const root = document.documentElement;
+  const cur = parseFloat(root.style.getPropertyValue("--lp-short")) || 0;
+  let short = 0;
+  if (c.classList.contains("lp-active") && !c.classList.contains("lp-tiny")
+      && !_lpFsEl() && !_lpRotated()) {
+    const land = matchMedia("(orientation: landscape)").matches;
+    // screen.width/height stay portrait in some WebKit builds and turn in others.
+    const want = land ? Math.min(screen.width, screen.height)
+                      : Math.max(screen.width, screen.height);
+    const r = c.getBoundingClientRect();
+    const gap = want - (r.bottom - cur);
+    if (Math.abs(r.top) < 1 && gap > 1 && gap <= 80) short = Math.round(gap);
+  }
+  if (short !== cur) root.style.setProperty("--lp-short", short + "px");
+  if (short && short !== _lpShortLogged) {
+    const vv = window.visualViewport;
+    _npLog("viewport-short", { short, innerH: window.innerHeight,
+                               clientH: root.clientHeight,
+                               vvH: vv ? Math.round(vv.height) : null,
+                               vvTop: vv ? Math.round(vv.offsetTop) : null,
+                               screen: screen.width + "x" + screen.height,
+                               scrollY: Math.round(window.scrollY) }, "play");
+  }
+  _lpShortLogged = short;
+}
+// The shrink arrives with a fullscreen exit or a rotation and settles late.
+function _lpFitViewportSoon() {
+  _lpFitViewport();
+  setTimeout(_lpFitViewport, 350);
+  setTimeout(_lpFitViewport, 1200);
+}
+
 function _lpCtlShow() {
   const c = document.getElementById("localPlayer");
   c.classList.remove("lp-idle");
+  _lpFitViewport();
   if (_lpCtlTimer) { clearTimeout(_lpCtlTimer); _lpCtlTimer = null; }
   const v = _lpV();
   if (v && !v.paused && !lp.netDown && !_lpScrub && !_lpOptsOpen()) {
@@ -29859,8 +29913,9 @@ function _lpCtlIdle() {
 }
 
 // Tap anywhere on the player that isn't an interactive element: tiny mode →
-// maximize; options open → close them; otherwise toggle the control overlay
-// (hide only while playing).
+// maximize; options open → close them; otherwise toggle the control overlay,
+// paused or playing. The glasses remote is the one thing a tap never hides:
+// there the overlay IS the screen.
 function lpStageTap(e) {
   // Interactive elements (and anything inside the control overlay or the
   // options panel) never toggle visibility; only bare video areas do.
@@ -29868,8 +29923,7 @@ function lpStageTap(e) {
   const c = document.getElementById("localPlayer");
   if (c.classList.contains("lp-tiny")) { lpMaximize(); return; }
   if (_lpOptsOpen()) { c.classList.remove("lp-opts"); _lpCtlShow(); return; }
-  const v = _lpV();
-  if (c.classList.contains("lp-idle") || !v || v.paused) {
+  if (c.classList.contains("lp-idle") || c.classList.contains("lp-remote")) {
     _lpCtlShow();
   } else {
     if (_lpCtlTimer) { clearTimeout(_lpCtlTimer); _lpCtlTimer = null; }
@@ -32094,6 +32148,11 @@ function _lpAttachVideoEvents() {
   // Keep the fullscreen icon honest when the user exits via Esc / system UI.
   document.addEventListener("fullscreenchange", _lpCtlSync);
   document.addEventListener("webkitfullscreenchange", _lpCtlSync);
+  // …and the player the full height of the screen (iOS app, _lpFitViewport).
+  for (const ev of ["fullscreenchange", "webkitfullscreenchange"])
+    document.addEventListener(ev, _lpFitViewportSoon);
+  for (const ev of ["resize", "orientationchange"])
+    window.addEventListener(ev, _lpFitViewportSoon);
   // iPhone Safari can't fullscreen a non-<video> element — there the button
   // falls back to the <video>'s native fullscreen (lpToggleFullscreen), which
   // is the only true-fullscreen path on that platform. Hide the button only
@@ -33207,6 +33266,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.16.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.16.4</div>
 </body>
 </html>
