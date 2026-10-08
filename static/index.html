@@ -554,11 +554,6 @@
       flex-direction: column;
     }
     #localPlayer.lp-active { display: flex; }
-    /* iOS app: WKWebView sometimes lays the page out one bottom inset SHORT of
-       the screen (seen around element fullscreen and rotation), and `inset:0`
-       then stops above a strip of page background. _lpFitViewport measures the
-       shortfall and this pushes the box back down over it. 0 everywhere else. */
-    html.is-app #localPlayer.lp-active:not(.lp-tiny) { bottom: calc(-1 * var(--lp-short, 0px)); }
     /* Volume readout — flat Metro tile, no radius, matches the transport chrome. */
     #lpVolPill {
       position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
@@ -27073,7 +27068,6 @@ async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope, items
   const c = document.getElementById("localPlayer");
   c.classList.remove("lp-tiny");
   c.classList.add("lp-active");
-  _lpFitViewportSoon();
   // Announce the session NOW, not when the picture appears. A cold JIT start can
   // take seconds, and a session the household's other devices can't see yet is a
   // session they can't pull — the same reason the kiosk claims its surface from
@@ -29848,54 +29842,9 @@ async function lpExitShuffle(btn) {
   }
 }
 
-// iOS app only. The player is `fixed; inset:0`, which is the LAYOUT viewport,
-// and WKWebView sometimes leaves that one bottom inset (28pt in landscape on a
-// 15 Pro) short of the screen: the picture and the whole overlay sit high over
-// a strip of page background. The web view itself is the full screen, so the
-// screen's size is what the box should be; the shortfall goes into --lp-short
-// and the CSS pushes `bottom` down by it. Bounded, so an iPad window that is
-// honestly smaller than the screen is never stretched. Why the viewport shrinks
-// is not established: the `viewport-short` row carries what was measured.
-let _lpShortLogged = -1;
-function _lpFitViewport() {
-  if (!isApp) return;
-  const c = document.getElementById("localPlayer");
-  const root = document.documentElement;
-  const cur = parseFloat(root.style.getPropertyValue("--lp-short")) || 0;
-  let short = 0;
-  if (c.classList.contains("lp-active") && !c.classList.contains("lp-tiny")
-      && !_lpFsEl() && !_lpRotated()) {
-    const land = matchMedia("(orientation: landscape)").matches;
-    // screen.width/height stay portrait in some WebKit builds and turn in others.
-    const want = land ? Math.min(screen.width, screen.height)
-                      : Math.max(screen.width, screen.height);
-    const r = c.getBoundingClientRect();
-    const gap = want - (r.bottom - cur);
-    if (Math.abs(r.top) < 1 && gap > 1 && gap <= 80) short = Math.round(gap);
-  }
-  if (short !== cur) root.style.setProperty("--lp-short", short + "px");
-  if (short && short !== _lpShortLogged) {
-    const vv = window.visualViewport;
-    _npLog("viewport-short", { short, innerH: window.innerHeight,
-                               clientH: root.clientHeight,
-                               vvH: vv ? Math.round(vv.height) : null,
-                               vvTop: vv ? Math.round(vv.offsetTop) : null,
-                               screen: screen.width + "x" + screen.height,
-                               scrollY: Math.round(window.scrollY) }, "play");
-  }
-  _lpShortLogged = short;
-}
-// The shrink arrives with a fullscreen exit or a rotation and settles late.
-function _lpFitViewportSoon() {
-  _lpFitViewport();
-  setTimeout(_lpFitViewport, 350);
-  setTimeout(_lpFitViewport, 1200);
-}
-
 function _lpCtlShow() {
   const c = document.getElementById("localPlayer");
   c.classList.remove("lp-idle");
-  _lpFitViewport();
   if (_lpCtlTimer) { clearTimeout(_lpCtlTimer); _lpCtlTimer = null; }
   const v = _lpV();
   if (v && !v.paused && !lp.netDown && !_lpScrub && !_lpOptsOpen()) {
@@ -30850,6 +30799,10 @@ function _lpFsEl() {
   return document.fullscreenElement || document.webkitFullscreenElement || null;
 }
 function lpToggleFullscreen() {
+  // Never in the iOS app (20.16.5): the player already owns the whole screen
+  // there, and LEAVING WebKit's element fullscreen leaves the web view 28pt
+  // short until relaunch. See docs/GOTCHAS.md.
+  if (isApp && !_lpFsEl()) return;
   const el = document.getElementById("localPlayer");
   if (_lpFsEl()) {
     const exit = document.exitFullscreen || document.webkitExitFullscreen;
@@ -32148,11 +32101,6 @@ function _lpAttachVideoEvents() {
   // Keep the fullscreen icon honest when the user exits via Esc / system UI.
   document.addEventListener("fullscreenchange", _lpCtlSync);
   document.addEventListener("webkitfullscreenchange", _lpCtlSync);
-  // …and the player the full height of the screen (iOS app, _lpFitViewport).
-  for (const ev of ["fullscreenchange", "webkitfullscreenchange"])
-    document.addEventListener(ev, _lpFitViewportSoon);
-  for (const ev of ["resize", "orientationchange"])
-    window.addEventListener(ev, _lpFitViewportSoon);
   // iPhone Safari can't fullscreen a non-<video> element — there the button
   // falls back to the <video>'s native fullscreen (lpToggleFullscreen), which
   // is the only true-fullscreen path on that platform. Hide the button only
@@ -32160,8 +32108,9 @@ function _lpAttachVideoEvents() {
   // is dismissed (it fires webkitendfullscreen on the video, not the
   // document, and often exits paused).
   const lpv = document.getElementById("lpVideo");
-  if (!(c.requestFullscreen || c.webkitRequestFullscreen) &&
-      !(lpv && lpv.webkitEnterFullscreen)) {
+  // The iOS app has no button at all (see lpToggleFullscreen).
+  if (isApp || (!(c.requestFullscreen || c.webkitRequestFullscreen) &&
+      !(lpv && lpv.webkitEnterFullscreen))) {
     document.getElementById("lpFsBtn").classList.add("hidden");
   }
   if (lpv) lpv.addEventListener("webkitendfullscreen", () => { _lpCtlSync(); _lpCtlShow(); });
@@ -33266,6 +33215,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.16.4</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.16.5</div>
 </body>
 </html>

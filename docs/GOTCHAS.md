@@ -3906,20 +3906,25 @@ both correct and stable in the app (no chrome to collapse). Browsers keep `dvh`.
 Same reasoning excludes the app from the browser-only "swipe to hide the URL bar"
 body-growth hack (`html:not(.is-app):has(#localPlayer.lp-active…)`).
 
-### `position:fixed; inset:0` can stop short of the screen in WKWebView (20.16.4)
-Seen on device 2026-10-08 (iPhone, landscape, on-device player): the player box ended
-28pt above the bottom of the screen, with page background showing under it, while the
-same player in element fullscreen filled the screen. `inset:0` is the **layout
-viewport**, and the web view had shrunk that by one bottom inset. The same screenshots
-show `env(safe-area-inset-bottom)` reading 0 in one play and 28pt in another. The cause
-is **not established** (element fullscreen exit and rotation are the suspects). The
-correction is page-side: `_lpFitViewport` compares the player's box with the screen
-(the web view is always the full screen on a phone), puts the shortfall in `--lp-short`,
-and `html.is-app #localPlayer.lp-active:not(.lp-tiny)` pushes `bottom` down by it. It is
-bounded at 80px so a genuinely smaller iPad window is left alone, and it logs
-`viewport-short` with the measured viewport sizes: read that row before changing this.
-`.lp-ctl-bottom` is pinned to 21px / 34px in the app for the same reason `.safe-bottom`
-is (below). Other `fixed inset-0` overlays are not corrected.
+### Leaving element fullscreen shrinks the WKWebView viewport — the app never enters it (20.16.5)
+Seen on device 2026-10-08 (iPhone 393x852, landscape, on-device player). Before
+fullscreen the player filled the screen. After `#localPlayer.requestFullscreen()` and
+back out, the client log's `viewport-short` rows read `innerH 365, clientH 365, vvH 365,
+scrollY 0`: the web view lays out 28pt short of the screen, shows page background in the
+strip, and stays that way until the app is relaunched. Every `fixed inset-0` layer is
+affected, not only the player.
+
+It cannot be corrected from the page. 20.16.4 pushed the player's `bottom` down by the
+shortfall; the web view does not draw below its viewport, so the picture was cropped
+instead. A repair would have to be native (reset the web view when
+`WKWebView.fullscreenState` returns to `.notInFullscreen`) and which native value goes
+wrong is not known.
+
+So in the app `lpToggleFullscreen` refuses to enter and `#lpFsBtn` is hidden at init.
+Nothing is lost: the app has no browser chrome, so the player already owns the screen.
+Don't add another `requestFullscreen` call that can run in the app.
+`.lp-ctl-bottom` is pinned to 21px / 34px in the app for the reason `.safe-bottom` is
+(below): the same screenshots showed `env(safe-area-inset-bottom)` at 0 and at 28pt.
 
 ### Don't double up safe-area insets — `contentInset:"never"` when the CSS already uses `env(safe-area-inset-*)`
 The dashboard pads itself with `.safe-top`/`.safe-bottom` (`env(safe-area-inset-*)`),

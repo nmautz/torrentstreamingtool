@@ -728,7 +728,8 @@ Don't re-add the `controls` attribute. Pieces:
   never the bare `<video>` — so the header, transport, and track selectors stay
   usable inside fullscreen. iPhone Safari has no element-fullscreen API; the
   button is hidden there at init (the player is already a full-viewport
-  overlay). See [GOTCHAS.md](GOTCHAS.md).
+  overlay). **The iOS app never enters fullscreen and has no button** (20.16.5):
+  leaving it shrinks the web view's viewport until relaunch. See [GOTCHAS.md](GOTCHAS.md).
 - **Visibility** — `.lp-idle` on `#localPlayer` fades **all** chrome (overlay +
   header + track rows) opacity-only, no reflow. Tap the video to toggle
   (`lpStageTap`, guarded so taps on buttons/selects/the overlay never

@@ -1,5 +1,22 @@
 # Changelog
 
+## [20.16.5] — 2026-10-08
+### The app's player has no fullscreen button, because leaving fullscreen broke the screen
+
+- **The dark strip under the player came from leaving fullscreen.** The 20.16.4 client log
+  shows it: after WebKit's element fullscreen ends in the app, the web view reports a
+  365pt-tall viewport on a 393pt screen and draws nothing below it, until the app is
+  relaunched.
+- **In the iOS app the fullscreen button is gone.** The player already fills the screen
+  there, so the button only added WebKit's own close / PiP pill over the header. Browsers
+  keep it.
+- **The 20.16.4 correction is removed.** It stretched the player over the strip, but the
+  web view does not draw there, so it cut off the bottom of the picture instead.
+- **Kept from 20.16.4:** tap to hide the controls while paused, and the fixed bottom
+  padding on the control strip.
+- **Not checked on a phone.** A layout already broken by an earlier fullscreen stays
+  broken until the app is relaunched.
+
 ## [20.16.4] — 2026-10-08
 ### The player fills the screen in the app, and a tap hides the controls while paused
 
