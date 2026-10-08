@@ -17,8 +17,10 @@
   "31 devices · 17 anonymous clients", and the anonymous rows stay behind a **Show N
   anonymous** button. The filter box still finds them.
 - **The account is shown beside the device's name** in All Devices.
-- **Not checked on the box.** The rules have unit tests and the tab's rendering was run
-  against the box's own device list; the merge and the fill-in have not run there yet.
+- **Checked on the box (2026-10-08):** after the update the list went from 67 rows to
+  31 devices and 17 anonymous clients, and the phone on the House account reads House.
+  The tab itself was not opened in a browser; its rendering was run against the box's
+  device list.
 
 ## [20.16.5] — 2026-10-08
 ### The app's player has no fullscreen button, because leaving fullscreen broke the screen
