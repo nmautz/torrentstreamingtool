@@ -23,9 +23,16 @@ glasses, until the film was closed and opened again. (Issue #36.)
 
 Host only; the app does not need rebuilding.
 
-**Not checked:** nothing here has run on the box or a phone yet. The stored refusal
-was reproduced on a Mac with the same browser engine, not on the phone. The reopen
-logic has unit tests (`tests/test_od_revive.py`).
+**Checked on the box (2026-10-09, 20.18.1):** an instant-play stream of Hacks S01E01
+was started and left alone. The server closed it after 102 seconds; a request for it
+59 seconds later reopened it (`revived 59s after it was reaped`) and returned a
+segment it had to encode in 1.7 seconds. A stream stopped by the player, and the
+address from the 2026-10-05 failure, are both refused and marked not to be stored.
+The reopen logic also has unit tests (`tests/test_od_revive.py`).
+
+**Not checked:** a phone. The stored refusal was reproduced on a Mac with the same
+browser engine, not on the phone, and nobody has yet paused an un-prepped film, left
+the app for a few minutes and come back, with or without glasses attached.
 
 ## [20.18.0] — 2026-10-08
 ### An HDR film is tone-mapped when it is prepped, and stops claiming to be HDR
