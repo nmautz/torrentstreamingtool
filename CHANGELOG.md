@@ -1,5 +1,27 @@
 # Changelog
 
+## [20.18.5] — 2026-10-09
+### `make test` runs the release-language tests; dead code removed
+
+`tests/test_reltracks.py` was never in the Makefile, so `make test` passed without
+running it. It is now. (Issue #61.)
+
+Removed code nothing called (issue #62). No behaviour changes:
+
+- `main.py`: `_parse_release_audio` (search has called `reltracks.analyse` directly
+  for some time), `_prep_priority_num_for`, `_file_progress`, `_hhmm_to_min`, the
+  constants `_TMDB_LATIN_RE` and `_TEXT_SUB_CODECS`, and `import io`.
+- `watchdog.py`: `_wait_port`, `jackett_healthy`, `import sys`.
+- `netadapters.py`: `lan_ips`. `stt.py`: `ai_sub_model`.
+- Unused imports in `analyzer.py`, `diagnostics.py`, `refiner.py`, `subsync.py`.
+
+Kept: `stop_watchdog` (nothing calls it, but it is the only thing that sets the
+event the watchdog's back-off sleeps on) and `_env_bin` in `analyzer.py` (a marked
+re-export).
+
+Checked on the Mac: every changed module imports, `main` imports in the venv, and
+`make test` passes. Not run on the box or on Windows.
+
 ## [20.18.4] — 2026-10-09
 ### The subtitle eval kit no longer carries the admin password
 

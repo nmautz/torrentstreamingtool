@@ -55,7 +55,7 @@ import traceback
 from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 try:
     import psutil

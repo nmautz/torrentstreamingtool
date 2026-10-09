@@ -22,7 +22,6 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from math import exp
 from typing import Optional
 
 from mediabin import ffmpeg_bin, ffprobe_bin, run_capture

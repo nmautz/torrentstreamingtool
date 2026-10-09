@@ -32,7 +32,6 @@ import re
 import shutil
 import socket
 import subprocess
-import sys
 import threading
 import time
 from pathlib import Path
@@ -135,15 +134,6 @@ def _port_open(port: int, host: str = "127.0.0.1", timeout: float = 0.8) -> bool
 def _extract_port(url: str, default: int) -> int:
     m = re.search(r":(\d+)", url)
     return int(m.group(1)) if m else default
-
-
-def _wait_port(port: int, host: str, timeout: float) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if _port_open(port, host):
-            return True
-        time.sleep(0.5)
-    return False
 
 
 def _http_ok(url: str, timeout: float = 4.0) -> bool:
@@ -855,19 +845,6 @@ def start_watchdog() -> threading.Thread:
 def stop_watchdog() -> None:
     """Signal the watchdog loop to exit (used in tests / clean shutdown)."""
     _stop_event.set()
-
-
-def jackett_healthy() -> bool:
-    """True if a local Jackett is actually serving HTTP (not just port-open).
-
-    Returns True for a remote Jackett (we can't manage it, so don't report it as
-    locally unhealthy). Safe to call from the dashboard process.
-    """
-    plain_specs, _ = _build_specs()
-    for spec in plain_specs:
-        if spec.name == "Jackett":
-            return spec.is_alive()
-    return True   # Jackett isn't locally managed (remote URL) — nothing to report
 
 
 def restart_jackett() -> bool:

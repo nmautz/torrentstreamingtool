@@ -14,6 +14,7 @@ test:
 	python3 tests/test_tmdb_retention.py
 	python3 tests/test_animemap.py
 	python3 tests/test_http_clients.py
+	python3 tests/test_reltracks.py
 	python3 tests/test_watchrule.py
 	python3 tests/test_bundlecheck.py
 	python3 tests/test_srcevict.py

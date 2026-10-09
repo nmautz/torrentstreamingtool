@@ -119,7 +119,7 @@ Jackett is only added to plain_specs when `INDEXER_URL` points at localhost. Rem
 
 **Admin requirement.** Stopping/starting a LocalSystem `Jackett` service needs admin; a non-elevated watchdog gets access-denied and logs a clear hint. `setup.py`'s `grant_jackett_service_control()` grants the rights once so the watchdog can recover Jackett without elevation. See [GOTCHAS.md](GOTCHAS.md#controlling-the-localsystem-jackett-service-needs-admin).
 
-**Reusable restart.** `restart_jackett()` / `jackett_healthy()` ([watchdog.py:670](../watchdog.py#L670)) expose the same force-down+launch and HTTP-liveness logic so the dashboard process (`main.py`'s `jackett_health_monitor`) can use them as a backstop when no watchdog is running.
+**Reusable restart.** `restart_jackett()` in [watchdog.py](../watchdog.py) exposes the same force-down+launch logic so the dashboard process (`main.py`'s `jackett_health_monitor`) can use it as a backstop when no watchdog is running.
 
 ### FlareSolverr specifics
 

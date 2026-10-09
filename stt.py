@@ -187,17 +187,6 @@ def ai_subs_stale(src: Path) -> bool:
     return bool(subs) and any(m != cur for _, m in subs)
 
 
-def ai_sub_model(name: str, stem: str) -> str:
-    """Parse the model tag out of a sidecar filename stem (or '' if none/not AI)."""
-    if not name.startswith(stem + "."):
-        return ""
-    segs = name[len(stem) + 1:].split(".")
-    if AI_SUFFIX not in segs:
-        return ""
-    i = segs.index(AI_SUFFIX)
-    return segs[i + 1] if i + 1 < len(segs) else ""
-
-
 def _extract_wav(src: Path, out_wav: Path, *,
                  on_proc: Optional[Callable] = None,
                  cancel_check: Optional[Callable[[], bool]] = None) -> bool:

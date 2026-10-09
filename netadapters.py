@@ -73,12 +73,6 @@ def list_adapters() -> list[dict]:
     return out
 
 
-def lan_ips(adapters: list[dict] | None = None) -> set[str]:
-    """The set of all candidate LAN IPv4s across physical adapters."""
-    adapters = adapters if adapters is not None else list_adapters()
-    return {a["ip"] for a in adapters}
-
-
 def _route_ip(candidate_ips: set[str]) -> str:
     """Whichever candidate the OS routing table would use to reach the internet.
 

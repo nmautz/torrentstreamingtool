@@ -8,7 +8,6 @@ import functools
 import gzip
 import hashlib
 import html as _html
-import io
 import json
 import logging
 import math
@@ -3831,9 +3830,6 @@ async def _tmdb_match_show(item: dict) -> Optional[dict]:
     return None
 
 
-_TMDB_LATIN_RE = re.compile(r"[A-Za-z]")
-
-
 def _mostly_latin(t: str) -> bool:
     """True when a title is really written in Latin script, not just decorated
     with one Latin letter. "헌터x헌터" (Hunter x Hunter's Korean alias) passed a
@@ -6319,7 +6315,8 @@ def parse_torrent_title(title: str) -> dict:
 
 
 # ── Release audio-language classification ───────────────────────────
-# The classifier itself lives in `reltracks.py` (17.3.0). It moved out because a
+# Nothing here: callers use `reltracks.analyse` directly. The classifier
+# lives in `reltracks.py` (17.3.0). It moved out because a
 # SECOND reader arrived - `track_rank`, which scores how many audio/subtitle
 # tracks a release carries - and the two answers have to come off one parse or
 # they disagree: an Erai-raws "[Multiple Subtitle] [ENG][POR-BR]" language list
@@ -6327,11 +6324,6 @@ def parse_torrent_title(title: str) -> dict:
 # Keeping both in one pure leaf module is what makes that shareable, and it
 # finally puts the context rules in docs/GOTCHAS.md under test - `main` needs
 # fastapi to import, so nothing here could ever be covered by `make test`.
-
-
-def _parse_release_audio(title: str) -> tuple:
-    """``(audio, lang)`` for a release title - see `reltracks.classify_audio`."""
-    return reltracks.classify_audio(title)
 
 
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".m2ts", ".webm"}
@@ -6505,11 +6497,6 @@ def _effective_prep_priority(cfg: dict, path: str) -> str:
     item/series-level default → "mid"."""
     pp = cfg["priority"].get(path)
     return pp if pp in _PREP_PRIORITIES else cfg["priority_default"]
-
-
-def _prep_priority_num_for(item: dict, path: str) -> int:
-    """Numeric prep priority (0=low, 1=mid, 2=high) for one file of an item."""
-    return _PREP_PRIO_NUM.get(_effective_prep_priority(_prep_cfg(item), path), 1)
 
 
 def _file_mode_to_priority(mode: str, idle_open: bool) -> int:
@@ -7074,12 +7061,6 @@ def _pack_available(lib: dict, season: int, episode: int,
             return {"item_id": it["id"], "path": f.get("path", ""),
                     "title": it.get("title", ""), "hash": it.get("torrent_hash", "")}
     return None
-
-
-def _file_progress(item: dict, profile_id: str, file_path: str) -> Optional[dict]:
-    """Return per-file progress dict for a given profile and path, or None."""
-    prof = item.get("progress", {}).get(profile_id, {})
-    return prof.get("file_progress", {}).get(file_path)
 
 
 def _recency_rank(iso: str) -> float:
@@ -8926,18 +8907,6 @@ def _canon_lang(code: str) -> str:
     # without this a device-saved descriptor ("eng") never language-matches a
     # VLC embedded track, so series subtitle memory silently failed on the TV.
     return _LANG_NAME_TO_CODE.get(code, code)
-
-
-def _hhmm_to_min(s: str) -> Optional[int]:
-    """'HH:MM' → minutes-since-midnight, or None if malformed."""
-    try:
-        h, m = s.split(":")
-        h, m = int(h), int(m)
-    except (ValueError, AttributeError):
-        return None
-    if 0 <= h <= 23 and 0 <= m <= 59:
-        return h * 60 + m
-    return None
 
 
 # ── Download scheduling: idle/night window + reconcile + loop ───────────────────
@@ -32042,7 +32011,6 @@ async def _decode_hwaccel_args(sample: Optional[Path] = None,
 #     (PGS/VOBSUB/DVB) can't go into HTML5 video tracks; they're reported in
 #     meta.json as `skipped_image_subs` so the UI can flag them.
 _HLS_PROFILE_BAD = {"high 10", "high 4:2:2", "high 4:4:4 predictive"}
-_TEXT_SUB_CODECS  = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"}
 _IMAGE_SUB_CODECS = {"hdmv_pgs_subtitle", "pgssub", "dvd_subtitle", "dvdsub",
                      "dvb_subtitle", "vobsub", "xsub"}
 # ASS/SSA carry styling (karaoke, positioning, fonts, animation) that the
