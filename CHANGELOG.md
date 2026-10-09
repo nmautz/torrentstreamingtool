@@ -30,8 +30,12 @@ the same place.
 a stamp (`6ac88ee2`), its playlists are marked to be checked every time, and a
 request carrying the stamp is served as before.
 
-**Not checked:** the phone. Subtitles and the Chromecast are asked for without the
-stamp; neither was seen to go stale.
+**Checked on the phone (2026-10-09, app 20.13.3):** the owner resumed Project Hail
+Mary at 12 minutes on the phone's own screen and the picture matched the sound. The
+box's log shows the phone fetching the film's playlists again, with the stamp.
+
+**Not checked:** subtitles and the Chromecast are asked for without the stamp;
+neither was seen to go stale.
 
 ## [20.18.1] — 2026-10-09
 ### Instant play survives the app being left in the background
@@ -63,9 +67,18 @@ segment it had to encode in 1.7 seconds. A stream stopped by the player, and the
 address from the 2026-10-05 failure, are both refused and marked not to be stored.
 The reopen logic also has unit tests (`tests/test_od_revive.py`).
 
-**Not checked:** a phone. The stored refusal was reproduced on a Mac with the same
-browser engine, not on the phone, and nobody has yet paused an un-prepped film, left
-the app for a few minutes and come back, with or without glasses attached.
+**Checked on the phone (2026-10-09, app 20.13.3, server 20.18.2):** Night of the
+Living Dead, instant play only. Paused and left for 125 seconds on the phone alone:
+the server reopened the stream and the film played on return (297 frames in the
+first 10 seconds). With glasses, left for about 7 minutes: the server reopened the
+stream 335 seconds after closing it and the film played on the glasses, where on
+2026-10-05 the same return ended in "resource unavailable". No request was refused
+in either run.
+
+**Seen, not fixed:** on the glasses return the picture took about 13 seconds and a
+pause and play to start at the right place. The page's player and the glasses'
+player both asked the reopened stream for different parts of the film at once, and
+it can only make one part at a time.
 
 ## [20.18.0] — 2026-10-08
 ### An HDR film is tone-mapped when it is prepped, and stops claiming to be HDR
