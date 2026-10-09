@@ -12,7 +12,7 @@ point of this module is that they are answered off **one parse**:
 * **How many ways can you watch it?** (`track_rank`) A copy carrying two audio
   tracks and three subtitle tracks is a better thing to own than one carrying a
   single track of each, and nothing in a seeder count says so. This is a
-  **tiebreak**, sorted below availability — see `_pickCmp` in static/index.html.
+  **tiebreak**, sorted below availability — see `_pickCmpFor` in static/index.html.
 
 **They must never be parsed separately.** A second regex sweep for "does this
 look multi-track" loses the context the first pass established, and the context
@@ -197,6 +197,29 @@ def track_rank(facts: dict, audio: str) -> int:
     multi_sub = bool(facts.get("multi_sub")) or (
         bool(facts.get("sub_marked")) and len(langs) >= 2)
     return (2 if multi_aud else 0) + (1 if multi_sub else 0)
+
+
+def richness(audio: Any, tracks: Any, orig_english: Any = None) -> int:
+    """`tracks` as a picker may count it, for a title whose original language
+    is known.
+
+    `track_rank` cannot see what the SECOND audio track is. For an anime "Dual"
+    is the original plus an English dub, which is worth having. For a title
+    made in English it is English plus a foreign dub: nothing to watch in, and
+    the release it rides on is the kind cut for another market (a foreign
+    default track, on-screen text translated in the picture). A plain copy of
+    equal availability is the better one, so such a release scores below every
+    plain copy (-1) rather than above them.
+
+    `orig_english` is True only when TMDb says so. None (unknown) and False
+    change nothing: missing evidence is not permission to demote."""
+    try:
+        t = int(tracks or 0)
+    except (TypeError, ValueError):
+        t = 0
+    if orig_english is True and audio in ("dual", "other"):
+        return -1
+    return t
 
 
 def analyse(title: Any) -> tuple:

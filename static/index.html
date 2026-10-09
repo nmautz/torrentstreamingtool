@@ -8881,7 +8881,8 @@ async function grpGetFilm(tmdbId, btn){
     // year mismatch is what demotes them (see _title_relevance).
     const best=results.reduce((m,x)=>Math.max(m, typeof x.rel==="number"?x.rel:0), 0);
     const cands=results.filter(x=>(typeof x.rel==="number"?x.rel:0) >= Math.max(0.7, best-0.125));
-    const rc=cands.length ? _ssAutoPickRace(cands, _ssParseBulkFilters(), {})
+    const rc=cands.length ? _ssAutoPickRace(cands, _ssParseBulkFilters(),
+                                            {origEnglish:_metaOrigEnglish(f)})
                           : {pick:null, candidates:[]};
     const src=rc.pick;
     if(!src && _onlyCams(cands)){ showAlert(_camOnlyMsg(f.title, ""),"warn"); return; }
@@ -12597,7 +12598,7 @@ async function epPlayEpisode(season, episode, btn){
     ctx.packs=uniq(packs);
     const pack=_bgPackForEpisodes(ctx, season, [episode], filt);
     if(pack){
-      const rc=_ssAutoPickRace(ctx.packs, filt, {pick:pack, match:s=>_bgAudioMatch(ctx,s)});
+      const rc=_ssAutoPickRace(ctx.packs, filt, {pick:pack, match:s=>_bgAudioMatch(ctx,s), origEnglish:ctx.origEnglish});
       cands=rc.candidates.length ? rc.candidates : [slim(pack)];
       slice=true;
     }
@@ -12606,7 +12607,7 @@ async function epPlayEpisode(season, episode, btn){
     eps=uniq(eps);
     const pick=_bgAutoPick(ctx, eps, filt);
     if(pick){
-      const rc=_ssAutoPickRace(eps, filt, {pick, match:s=>_bgAudioMatch(ctx,s), meta:ctx.meta});
+      const rc=_ssAutoPickRace(eps, filt, {pick, match:s=>_bgAudioMatch(ctx,s), meta:ctx.meta, origEnglish:ctx.origEnglish});
       cands=rc.candidates.length ? rc.candidates : [slim(pick)];
     }
   }
@@ -16200,7 +16201,7 @@ const _AVAIL=[{txt:"Unavailable", cls:"text-red-400"},
               {txt:"Good",        cls:"text-yellow-400"},
               {txt:"Excellent",   cls:"text-green-400"}];
 // The ordinal behind the words. One ladder, two readings: _availLabel renders it
-// and the auto-pickers compare on it (see _pickCmp), so "Excellent" can never
+// and the auto-pickers compare on it (see _pickCmpFor), so "Excellent" can never
 // come to mean two different numbers in two places. Thresholds unchanged — these
 // are the ones the colour coding has always used.
 function _availRank(seeders){
@@ -18040,17 +18041,17 @@ function _packCmp(a,b,opts){
   if(rb!==ra) return rb-ra;
   const av=_availRank(b.seeders)-_availRank(a.seeders);
   if(av) return av;
-  const tk=(b.tracks||0)-(a.tracks||0);
+  const tk=_richness(b,opts.origEnglish)-_richness(a,opts.origEnglish);
   if(tk) return tk;
   return (b.seeders||0)-(a.seeders||0);
 }
 function _ssPackCmp(a,b){
-  return _packCmp(a,b,{match:_ssAudioMatch, prefOn:_ssAudioPref!=="any"});
+  return _packCmp(a,b,{match:_ssAudioMatch, prefOn:_ssAudioPref!=="any", origEnglish:_ssOrigEnglish()});
 }
 // The detached twin — same arithmetic, snapshot inputs.
 function _bgPackCmp(ctx){
   return (a,b)=>_packCmp(a,b,{match:s=>_bgAudioMatch(ctx,s),
-                              prefOn:ctx.audioPref!=="any"});
+                              prefOn:ctx.audioPref!=="any", origEnglish:ctx.origEnglish});
 }
 
 // Packs belonging to one season. `kind==="season"` with a matching number is the
@@ -18658,7 +18659,7 @@ function _bgPlanJobs(ctx, eps, filt){
 function _bgAutoPick(ctx, sources, filt){
   if(!sources||!sources.length) return null;
   const pref=sources.filter(s=>_bgAudioMatch(ctx,s));
-  return _ssAutoPickFrom(pref.length?pref:sources, filt, ctx.meta);
+  return _ssAutoPickFrom(pref.length?pref:sources, filt, ctx.meta, ctx.origEnglish);
 }
 
 // Make sure every episode in scope has had a genuine chance at a source.
@@ -19242,6 +19243,8 @@ function _ssAutoPick(sources, filt){
 //   2. availability BUCKET      (17.3.0) — Excellent / Good / Low, the very
 //      ladder _availLabel has always rendered.
 //   3. track richness           (17.3.0) — more audio tracks, then more subs.
+//      For a title made in English a second audio track is a foreign dub and
+//      counts AGAINST the copy (20.18.3, see _richness).
 //   4. exact seeders            — the original sort, now the tie-break.
 //
 // **Step 2 is the behaviour change, not step 3.** 31 seeders and 400 seeders
@@ -19265,13 +19268,30 @@ function _camOnlyMsg(title, digital){
        + (digital?` Digital release: ${_ssFmtDate(digital)}.`:"")
        + " You can still pick a copy by hand.";
 }
-function _pickCmp(a,b){
-  return ((a.dv_risk?1:0)-(b.dv_risk?1:0))
+// `tracks` as a picker may count it (20.18.3). The server cannot see what the
+// SECOND audio track is: for an anime "Dual" is the original plus an English
+// dub, for a title made in English it is English plus a foreign dub - nothing
+// to watch in, on a release cut for another market (foreign default track,
+// on-screen text translated in the picture). Such a copy sorts behind every
+// plain copy of equal availability. Only when TMDb SAYS the title is English:
+// unknown (null) changes nothing. reltracks.richness is the same rule for
+// Siri - change one, change both.
+function _richness(s, origEnglish){
+  const a=(s&&s.audio)||"";
+  if(origEnglish===true && (a==="dual"||a==="other")) return -1;
+  return (s&&s.tracks)||0;
+}
+function _metaOrigEnglish(m){
+  const ol=(m&&m.original_language)||"";
+  return ol?ol==="en":null;
+}
+function _pickCmpFor(origEnglish){
+  return (a,b)=>((a.dv_risk?1:0)-(b.dv_risk?1:0))
       || (_availRank(b.seeders)-_availRank(a.seeders))
-      || ((b.tracks||0)-(a.tracks||0))
+      || (_richness(b,origEnglish)-_richness(a,origEnglish))
       || ((b.seeders||0)-(a.seeders||0));
 }
-function _ssAutoPickFrom(sources, filt, meta){
+function _ssAutoPickFrom(sources, filt, meta, origEnglish){
   // A release that is really another episode is never an automatic answer,
   // however well seeded. None left means no pick: better than a wrong file.
   const m=meta===undefined?_ssMeta:meta;
@@ -19281,11 +19301,12 @@ function _ssAutoPickFrom(sources, filt, meta){
   if(!sources.length) return null;
   const okSeed=s=>(s.seeders||0)>=filt.minSeed;
   const okSize=s=>{ const z=s.size||0; return z>=filt.minBytes && z<=filt.maxBytes; };
-  let c=sources.filter(s=>okSeed(s)&&okSize(s)).sort(_pickCmp);
+  const cmp=_pickCmpFor(origEnglish===undefined?_metaOrigEnglish(m):origEnglish);
+  let c=sources.filter(s=>okSeed(s)&&okSize(s)).sort(cmp);
   if(c.length) return c[0];
-  c=sources.filter(okSeed).sort(_pickCmp);
+  c=sources.filter(okSeed).sort(cmp);
   if(c.length) return c[0];
-  return [...sources].sort(_pickCmp)[0];
+  return [...sources].sort(cmp)[0];
 }
 
 // The resolution a release title claims, or 0. A deliberately thin mirror of
@@ -19302,7 +19323,7 @@ function _ssRelHeight(t){
 // The best candidate at or below `ceiling` - the HQ track's target. Respects
 // the Auto-pick size/seeder limits, because a household that capped downloads
 // at 8 GB did not mean "except when we are racing".
-function _ssBestAtOrBelow(pool, ceiling, filt){
+function _ssBestAtOrBelow(pool, ceiling, filt, cmp){
   const ok=pool.filter(s=>{
     const h=_ssRelHeight(s.title);
     if(!h || h>ceiling) return false;
@@ -19311,8 +19332,8 @@ function _ssBestAtOrBelow(pool, ceiling, filt){
   });
   if(!ok.length) return null;
   // Resolution first — the HQ track exists to fetch a better PICTURE, so that
-  // question outranks the rest. _pickCmp settles everything below it.
-  return ok.sort((a,b)=>(_ssRelHeight(b.title)-_ssRelHeight(a.title))||_pickCmp(a,b))[0];
+  // question outranks the rest. The pick comparator settles everything below it.
+  return ok.sort((a,b)=>(_ssRelHeight(b.title)-_ssRelHeight(a.title))||cmp(a,b))[0];
 }
 
 // An ordered shortlist for the server to race, best first.
@@ -19325,8 +19346,19 @@ function _ssBestAtOrBelow(pool, ceiling, filt){
 // `opts.pick` / `opts.match` let a caller outside the search page (the library's
 // Play now) supply its own primary and audio test: `_ssAudioMatch` reads the
 // open show page's state, which isn't theirs.
+//
+// `opts.origEnglish` is for a caller whose title is not the open show page's
+// (a group's film, a detached Get): without it the language is read off `meta`.
 function _ssAutoPickRace(sources, filt, opts){
-  const pick=(opts&&opts.pick)||_ssAutoPick(sources, filt);
+  const oe=(opts&&opts.origEnglish!==undefined) ? opts.origEnglish
+          : _metaOrigEnglish((opts&&opts.meta!==undefined)?opts.meta:_ssMeta);
+  const cmp=_pickCmpFor(oe);
+  let pick=opts&&opts.pick;
+  if(!pick && sources && sources.length){
+    // _ssAutoPick, with the language this caller named.
+    const want=sources.filter(_ssAudioMatch);
+    pick=_ssAutoPickFrom(want.length?want:sources, filt, undefined, oe);
+  }
   if(!pick) return {pick:null, candidates:[]};
   if(!app.download_race || !sources || sources.length<2) return {pick, candidates:[]};
   const pref=sources.filter((opts&&opts.match)||_ssAudioMatch);
@@ -19341,9 +19373,9 @@ function _ssAutoPickRace(sources, filt, opts){
   const push=x=>{ if(!x||!x.magnet) return; const k=key(x);
                   if(k&&!seen.has(k)){ seen.add(k); out.push(x); } };
   push(pick);
-  const hq=_ssBestAtOrBelow(pool, (opts&&opts.ceiling)||app.download_race_ceiling||1080, filt);
+  const hq=_ssBestAtOrBelow(pool, (opts&&opts.ceiling)||app.download_race_ceiling||1080, filt, cmp);
   if(hq && _ssRelHeight(hq.title) > _ssRelHeight(pick.title)) push(hq);
-  [...pool].sort(_pickCmp).forEach(push);
+  [...pool].sort(cmp).forEach(push);
   // A release reporting no seeders can't win, it only takes a slot from one
   // that might. Kept only when the pick itself reports none (then nobody's
   // numbers can be trusted).
@@ -19727,7 +19759,7 @@ async function _bgStartPackSlice(ctx, ctl, report, pack, season, wanted, filt, f
   report(`Starting download — ${_ssPackLabel(pack)}`, pack.title, 0.95);
   const pool=(ctx.packs||[]).filter(p=>p===pack
     || _packCoversScope(p, +season, ctx.seasons||[]));
-  const rc=_ssAutoPickRace(pool, filt, {pick:pack, match:s=>_bgAudioMatch(ctx,s)});
+  const rc=_ssAutoPickRace(pool, filt, {pick:pack, match:s=>_bgAudioMatch(ctx,s), origEnglish:ctx.origEnglish});
   // `season` with episode 0 — the item is the PACK, and shaping it as one
   // episode would read wrong the moment a second is fetched out of it. Same
   // reasoning as _bgStartPack; don't "fix" it to the episode being requested.
@@ -19811,7 +19843,7 @@ async function _bgStartPack(ctx, ctl, report, pack, season, filt, foreign){
   const slice=foreign?null:_packSeasonSlice(ctx.meta, pack, +season);
   const pool=(ctx.packs||[]).filter(p=>p===pack||_packCoversScope(p, scope, ctx.seasons||[]));
   const rc=slice?{pick:pack, candidates:[]}
-                :_ssAutoPickRace(pool, filt, {pick:pack, match:s=>_bgAudioMatch(ctx,s)});
+                :_ssAutoPickRace(pool, filt, {pick:pack, match:s=>_bgAudioMatch(ctx,s), origEnglish:ctx.origEnglish});
   // `season` with episode 0, so the item is series-shaped from the moment it is
   // created whatever the release name looks like. Still right for a pack whose
   // season numbering disagrees with TMDb's (every long-running anime): this only
@@ -33271,6 +33303,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.18.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.18.3</div>
 </body>
 </html>

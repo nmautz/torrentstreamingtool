@@ -121,6 +121,22 @@ order = [x["title"] for x in vp.candidates(res)]
 eq("richer tracks win inside a bucket; green last; sequel, episode, linkless dropped",
    order, ["Star.Wars.1977.1080p.DUAL", "Star.Wars.1977.720p", "Star.Wars.1977.480p",
            "Star.Wars.1977.1080p.DV"])
+# 20.18.3: "Dual" on a film made in English is a foreign dub (Project Hail Mary).
+phm = [r("Project.Hail.Mary.2026.2160p.WEBrip.h265.Dual.YG", 1697, tracks=2, audio="dual"),
+       r("Project Hail Mary (2026) [1080p] [WEBRip] [5.1]", 16206, tracks=0, audio=""),
+       r("Project.Hail.Mary.2026.2160p.WEB-DL.DDP5.1.Atmos.H.265-RDNYB", 5983, tracks=0, audio=""),
+       r("Project Hail Mary (2026 ITA/ENG) [1080p x265] [Paso77]", 20, tracks=2, audio="dual"),
+       r("Project.Hail.Mary.2026.720p.WEB", 5, tracks=0, audio="")]
+eq("an English film: the foreign dub goes behind plain copies of its bucket, not below the next",
+   [x["title"].split()[-1][-6:] for x in vp.candidates(phm, True)],
+   ["[5.1]", "-RDNYB", "ual.YG", "aso77]", "0p.WEB"])
+eq("language unknown: the pick is what it was",
+   vp.candidates(phm)[0]["title"], "Project.Hail.Mary.2026.2160p.WEBrip.h265.Dual.YG")
+eq("a foreign film keeps the dual bonus",
+   vp.candidates(phm, False)[0]["title"], "Project.Hail.Mary.2026.2160p.WEBrip.h265.Dual.YG")
+eq("race: the shortlist follows the same order",
+   vp.shortlist(vp.candidates(phm, True), 1080, True)[0]["title"],
+   "Project Hail Mary (2026) [1080p] [WEBRip] [5.1]")
 cams = [r("Film.2026.HDTS", 9000, cam=True), r("Film.2026.HDCAM", 4000, cam=True)]
 eq("a cam is never a candidate, however well seeded",
    [x["title"] for x in vp.candidates(cams + [r("Film.2026.1080p.WEB-DL", 3)])],

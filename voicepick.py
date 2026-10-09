@@ -10,7 +10,7 @@ two choices a person normally makes on the search page are made here:
     are titles. The answer is always put back to the person ("Download Star
     Wars (1977)?") before anything starts, so a wrong guess costs a "no".
   * **Which release** (`candidates`, `shortlist`). A port of the dashboard's
-    one-press film Get (`grpGetFilm` → `_pickCmp` / `_ssAutoPickRace` in
+    one-press film Get (`grpGetFilm` → `_pickCmpFor` / `_ssAutoPickRace` in
     static/index.html): the strongest relevance tier only, then Dolby-Vision
     risk last, availability bucket, track richness, seeders. **Change one,
     change both** - a voice download that picks a different copy than the
@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import re
 
+import reltracks
 import voicestatus
 
 _TAIL = r"(?:\s+(?:one|version|movie|film))?\s*$"
@@ -144,9 +145,10 @@ def avail_rank(seeders) -> int:
     return 0 if n <= 0 else 1 if n <= 8 else 2 if n <= 30 else 3
 
 
-def _order_key(r: dict):
+def _order_key(r: dict, orig_english=None):
     return (1 if r.get("dv_risk") else 0, -avail_rank(r.get("seeders")),
-            -int(r.get("tracks") or 0), -int(r.get("seeders") or 0))
+            -reltracks.richness(r.get("audio"), r.get("tracks"), orig_english),
+            -int(r.get("seeders") or 0))
 
 
 def height(title: str) -> int:
@@ -172,14 +174,18 @@ def only_cams(results: list[dict]) -> bool:
     return bool(films) and all(r.get("cam") for r in films)
 
 
-def candidates(results: list[dict]) -> list[dict]:
+def candidates(results: list[dict], orig_english=None) -> list[dict]:
     """The releases that may be picked for a film, best first.
 
     `results` are grouped-search members (`magnet`, `kind`, `rel`, `seeders`,
     `tracks`, `dv_risk`). An episode is never a film; and only the strongest
     relevance tier counts, because every sequel shares the title's words and it
     is the year that tells them apart. A cinema recording (`cam`) is never one:
-    it outseeds everything while a film is in cinemas, and nobody asked for it."""
+    it outseeds everything while a film is in cinemas, and nobody asked for it.
+
+    `orig_english` (True when TMDb says the film was made in English) puts a
+    copy carrying a foreign dub behind plain copies of equal availability; see
+    `reltracks.richness`."""
     pool = [r for r in _films(results) if not r.get("cam")]
 
     def rel(r):
@@ -188,10 +194,11 @@ def candidates(results: list[dict]) -> list[dict]:
 
     best = max((rel(r) for r in pool), default=0.0)
     cut = max(REL_FLOOR, best - REL_BAND)
-    return sorted((r for r in pool if rel(r) >= cut), key=_order_key)
+    return sorted((r for r in pool if rel(r) >= cut),
+                  key=lambda r: _order_key(r, orig_english))
 
 
-def shortlist(ordered: list[dict], ceiling: int = 1080) -> list[dict]:
+def shortlist(ordered: list[dict], ceiling: int = 1080, orig_english=None) -> list[dict]:
     """What to race beside the pick, pick first (`_ssAutoPickRace`). The best
     higher-resolution copy at or below `ceiling` goes second, so the race can
     end on a better picture than the fastest start."""
@@ -208,7 +215,7 @@ def shortlist(ordered: list[dict], ceiling: int = 1080) -> list[dict]:
 
     push(pick)
     hq = sorted((r for r in ordered if 0 < height(r.get("title", "")) <= ceiling),
-                key=lambda r: (-height(r.get("title", "")),) + _order_key(r))
+                key=lambda r: (-height(r.get("title", "")),) + _order_key(r, orig_english))
     if hq and height(hq[0].get("title", "")) > height(pick.get("title", "")):
         push(hq[0])
     for r in ordered:

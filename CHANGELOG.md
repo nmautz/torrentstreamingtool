@@ -1,5 +1,24 @@
 # Changelog
 
+## [20.18.3] — 2026-10-09
+### Get no longer prefers a foreign-dubbed copy of an English film
+
+Get on Project Hail Mary took a copy labelled "Dual". Its second sound track was a
+Latino Spanish dub, set as the default, and the on-screen text in the picture was
+translated. (Issue #60.)
+
+Auto-pick treated "Dual" as a better copy, a rule made for anime, where the second
+track is an English dub. For a film or show TMDb lists as made in English, a copy
+with a foreign dub now sorts behind plain copies that are equally available. Anime
+and other foreign titles pick as before, and so does anything TMDb does not know.
+The same rule applies to season packs, the library's Get and Siri.
+
+Also: a film in a collection now carries its original language to the page.
+
+Checked: unit tests (`tests/test_reltracks.py`, `tests/test_voicepick.py`), and the
+dashboard's comparator run against the box's live search results for this film.
+Not checked: a Get pressed in a browser or by Siri.
+
 ## [20.18.2] — 2026-10-09
 ### A film that was prepped again plays the right picture on the phone
 

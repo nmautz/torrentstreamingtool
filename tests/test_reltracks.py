@@ -108,6 +108,23 @@ ok("richness is 0 whenever the title says nothing",
    rt.analyse("Show.S01E01.1080p.WEB-DL.x264-GRP")[2] == 0)
 
 
+# ── 3b. Richness once the title's language is known ─────────────────────────
+# One-press Get took "Project.Hail.Mary.2026.2160p.WEBrip.h265.Dual.YG" over
+# every plain English copy: for an English film "Dual" is a foreign dub.
+_a, _l, _k = rt.analyse("Project.Hail.Mary.2026.2160p.WEBrip.h265.Dual.YG")
+eq("the release that was picked reads as dual, two points", (_a, _k), ("dual", 2))
+eq("...and for an English film it sorts behind a plain copy",
+   rt.richness(_a, _k, True), -1)
+ok("a plain copy keeps its score", rt.richness("", 0, True) == 0
+   and rt.richness("sub", 1, True) == 1)
+eq("an anime keeps the dual bonus", rt.richness("dual", 2, False), 2)
+eq("unknown language changes nothing", rt.richness("dual", 2, None), 2)
+eq("a foreign-only copy of an English film is no richer",
+   rt.richness("other", 2, True), -1)
+eq("an English dub is not a foreign dub", rt.richness("dub", 0, True), 0)
+ok("richness never raises", rt.richness(None, "x", True) == 0
+   and rt.richness("dual", None, None) == 0)
+
 # ── 4. The one-parse contract ────────────────────────────────────────────────
 # Both readers must agree because they were handed the same facts. A future
 # refactor that gives `track_rank` its own regex sweep breaks this silently, so

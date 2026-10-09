@@ -162,12 +162,24 @@ And it is a **flag (`special`), not a failed match**. Dropping the match falls t
 
 ### The primary pick compares seeders in BUCKETS, not exactly (17.3.0)
 
-`_pickCmp` ([static/index.html](../static/index.html)) orders unattended picks by Dolby-Vision risk → **availability bucket** → track richness → exact seeders. The bucket is `_availRank`, the very same `0 / ≤8 / ≤30 / >30` ladder `_availLabel` has rendered as Unavailable/Low/Good/Excellent since the vocabulary rewrite — extracted, not invented, so "Excellent" can never come to mean two different numbers in two places.
+`_pickCmpFor` (was `_pickCmp` until 20.18.3; [static/index.html](../static/index.html)) orders unattended picks by Dolby-Vision risk → **availability bucket** → track richness → exact seeders. The bucket is `_availRank`, the very same `0 / ≤8 / ≤30 / >30` ladder `_availLabel` has rendered as Unavailable/Low/Good/Excellent since the vocabulary rewrite — extracted, not invented, so "Excellent" can never come to mean two different numbers in two places.
 
 **Why it matters:** 31 seeders and 400 seeders now compare *equal*, and the tie falls to richness. That is the point — past the threshold where a download arrives promptly, another 370 seeders buys nothing — but it does mean a 31-seeder dual-audio copy can beat a 400-seeder single-audio one. Two guards make that safe, and both must survive any future edit:
 
 - Richness is **capped at the bucket**. It can reorder two equally-available copies; it can never promote a Low one over a Good one. `pickdiff.py`'s `bucket downgrades` counter asserts this, and a non-zero reading is a comparator bug, not a judgement call.
 - There is **one comparator, not one per call site**. `epPlayEpisode`/`ssPlayEpisode` reach it through `_bgAutoPick`, so this changes *streaming* picks too. Splitting it by call site would be exactly the second implementation `DownloadReq.candidates` ([main.py](../main.py)) warns about — one that "would disagree with the one the user can actually see". `_streamHealth`'s badges and the `_streamHealthRisky` confirm are what handle a slow pick; a private comparator is not.
+
+
+### "Dual" is only richer when the second track is English (20.18.3)
+
+`track_rank` gives `Dual` / `MULTi` / `iTA EnG` two points, because for an anime the second audio track is an English dub. For a title **made in English** it is the opposite: English plus a foreign dub. One-press Get took `Project.Hail.Mary.2026.2160p.WEBrip.h265.Dual.YG` (1,697 seeders) over a 16,206-seeder plain copy on that bonus alone, every copy being "Excellent". The file had Latino Spanish as its default audio and, the owner reports, on-screen text translated in the picture. Nothing in a title says the picture is localised; a foreign dub on an English film is the only warning there is.
+
+So the pickers count `reltracks.richness(audio, tracks, orig_english)` (`_richness` in [static/index.html](../static/index.html)), not `tracks`: when TMDb's `original_language` is `en`, a `dual` or `other` copy scores **-1**, behind every plain copy **of equal availability**. Rules that must survive:
+
+- **Unknown is not English.** No TMDb match means `null`, and `null` changes nothing. Classic search and pasted magnets pick exactly as before.
+- **Still inside the bucket.** A Good dual copy still beats a Low plain one; this is a tiebreak, like the bonus it replaces.
+- **`tracks` on the wire is unchanged.** The server does not know the title at search time; the language is applied by the picker (`_pickCmpFor(origEnglish)`, `_packCmp`'s `opts.origEnglish`, `voicepick.candidates(results, orig_english)`). A caller whose title is not the open show page's passes `origEnglish` itself (`grpGetFilm` reads it off the group's film row, the detached Get off `ctx.origEnglish`).
+- English is the only household language this codebase knows (`classify_audio` is written around it). A second language needs that solved first.
 
 ### Ownership of an anime pack is an ABSOLUTE-number question, never a TMDb-season one (17.4.0)
 

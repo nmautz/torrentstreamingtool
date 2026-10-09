@@ -4958,6 +4958,8 @@ async def _tmdb_collection_parts(collection_id: int) -> Optional[list]:
                 "tmdb_id":      mid,
                 "title":        part.get("title") or det.get("title") or "",
                 "original_title": part.get("original_title") or "",
+                "original_language": (part.get("original_language")
+                                      or det.get("original_language") or ""),
                 "release_date": part.get("release_date") or det.get("release_date") or "",
                 "poster_path":  part.get("poster_path") or "",
                 "backdrop_path": part.get("backdrop_path") or "",
@@ -22266,7 +22268,7 @@ def _group_search_results(shaped: list, query: str,
         # One parse, three answers. `audio`/`audio_lang` filter (can this
         # household watch it); `tracks` ranks (how much choice does it give you)
         # and is a TIEBREAK below availability, never a language preference of
-        # its own - see reltracks.track_rank and `_pickCmp` in index.html.
+        # its own - see reltracks.track_rank and `_pickCmpFor` in index.html.
         aud, aud_lang, trk = reltracks.analyse(r["title"])
         er = dict(r)
         er.update({
@@ -26909,14 +26911,18 @@ async def _voice_download_film(request: Request, job: dict, det: dict) -> None:
         results = await search(title)
         if orig and orig != title and not any(float(m.get("rel") or 0) >= 1 for m in results):
             results += await search(orig)
-        cands = voicepick.candidates(results)
+        # TMDb's own word on the film's language; unknown stays None.
+        ol = str(det.get("original_language") or "")
+        orig_en = (ol == "en") if ol else None
+        cands = voicepick.candidates(results, orig_en)
         if not cands:
             job.update(state="failed",
                        reason="cam" if voicepick.only_cams(results) else "none")
             return
         pick = cands[0]
         rcfg = _download_race_cfg(lib)
-        short = voicepick.shortlist(cands, rcfg["quality_ceiling"]) if rcfg["enabled"] else []
+        short = (voicepick.shortlist(cands, rcfg["quality_ceiling"], orig_en)
+                 if rcfg["enabled"] else [])
         runtime = float(det.get("runtime") or 0)
         body = DownloadReq(
             magnet=pick["magnet"], title=pick.get("title", ""),
