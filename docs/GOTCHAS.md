@@ -7468,3 +7468,33 @@ got its `410`s from the cache, loaded segment 4, and sat at `t=0` with
 - The better fix is to not answer the error at all: see docs/STREAMING.md, a reaped
   session is remade when it is asked for.
 
+## A rebuilt bundle keeps its address (20.18.2)
+
+`_offline_cache_key` is the file's name and size, so a bundle that is re-prepped has
+the same key and every one of its URLs now serves a different file. Bundle files go
+out with `ETag` and `Last-Modified` and (until 20.18.2) no `Cache-Control`, and
+WebKit decides for itself how long to keep those.
+
+Measured 2026-10-09 on Project Hail Mary, re-prepped by 20.18.0 at 06:51 UTC. The
+phone's web player had fetched its playlists at 00:52 UTC, from the old bundle, and
+made **no playlist request at all** in three starts 14 hours later, while `AVPlayer`
+and the Chromecast fetched them every time. The old video playlist had segments of
+about 8.3 s, the new one exactly 6 s. hls.js looked up 588 s in the old playlist, got
+entry 71, and fetched the new `seg_video_480_00071.m4s`, which holds 426 s. Audio
+segmentation had not changed. Result: the right sound over a picture from minutes
+earlier, surviving an app kill, on the phone only. Casting was fine, which made it
+look like a cast hand-back bug. It was not.
+
+- **`stamp`** (`_bundle_stamp`: the mtime of `master.m3u8`) is returned with
+  `master_url`. The web player appends it to every request hls.js makes for the
+  bundle (`xhrSetup`, `?v=`). The server ignores it.
+- Playlists carry `Cache-Control: no-cache`. That protects clients with no stamp
+  from now on; it does nothing for a copy a device already holds.
+- **Not covered:** the subtitle `<track>` URLs (`lp.subBase + sub_<i>.vtt`), the
+  Safari-native `v.src` path (no hls.js, so no `xhrSetup`), `AVPlayer` and the Cast
+  receiver (neither was seen to keep a playlist).
+- When a report is "sound right, picture wrong" after any re-prep, check the request
+  log for playlist fetches from that client before looking at the player.
+- Related: § A 410 with no cache header is kept. Same cache, same lesson: a URL
+  whose answer can change must say so.
+

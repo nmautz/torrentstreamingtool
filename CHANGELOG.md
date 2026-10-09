@@ -1,5 +1,34 @@
 # Changelog
 
+## [20.18.2] — 2026-10-09
+### A film that was prepped again plays the right picture on the phone
+
+Project Hail Mary on the phone played the right sound over a picture from several
+minutes earlier, and went on doing it after the app was closed. Casting it was fine.
+(Issue #58.)
+
+The film had been prepped again that morning, at the same address as before. The
+phone was still holding the old prep's playlists, 14 hours later, and was using them
+to find its way around the new files. The old video was cut into pieces of about
+8 seconds and the new one into pieces of 6, so every lookup landed in the wrong place.
+
+- **Each prep now has a stamp, and the player asks for everything with it.** A film
+  that is prepped again is asked for at an address no phone has seen, so an old copy
+  cannot be used for it.
+- **Playlists are marked to be checked with the server every time.**
+
+Any film prepped again for 20.18.0 was open to this on a phone that had played it
+before. Nothing needs prepping again.
+
+Host only; the app does not need rebuilding.
+
+**Checked:** the dashboard's player, in desktop Chrome against the box, puts the
+stamp on all 19 requests of a resume into the film and loads picture and sound from
+the same place.
+
+**Not checked:** the phone. Subtitles and the Chromecast are asked for without the
+stamp; neither was seen to go stale.
+
 ## [20.18.1] — 2026-10-09
 ### Instant play survives the app being left in the background
 

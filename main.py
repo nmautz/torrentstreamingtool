@@ -37554,6 +37554,7 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
             "ready":             True,
             "needs_processing":  False,
             "master_url":        f"/api/library/offline-cache/{key}/master.m3u8",
+            "stamp":             _bundle_stamp(out_dir),
             # Same bundle, with the sidecar subs declared as HLS renditions, for
             # the iOS native-AVPlayer background/external-display path. Purely
             # additive — the web player ignores it. See _native_master.
@@ -37970,6 +37971,7 @@ async def offline_job_status(job_id: str) -> JSONResponse:
         key = out_dir.name
         meta = _read_meta(out_dir)
         out["master_url"]        = f"/api/library/offline-cache/{key}/master.m3u8"
+        out["stamp"]             = _bundle_stamp(out_dir)
         # Native-AVPlayer view (subs as HLS renditions) — see offline_prepare.
         out["native_master_url"] = f"/api/library/offline-cache/{key}/{_NATIVE_MASTER_NAME}"
         out["duration_sec"]      = meta.get("duration_sec", 0)
@@ -38267,6 +38269,27 @@ def _native_master(master_text: str, meta: dict,
     return "\n".join(_cap_variants(_pin_audio(out, audio, lang), maxh)) + "\n"
 
 
+# A bundle that is rebuilt keeps its key, so every one of its URLs keeps serving
+# under a new set of files. WebKit holds a playlist it fetched before the rebuild
+# (ETag and Last-Modified, no Cache-Control: it decides for itself how long) and
+# reads the NEW segments through the OLD playlist: Project Hail Mary, re-prepped
+# with 6 s video segments where it had ~8.3 s, played the picture from 426 s under
+# the sound from 588 s, on the phone only, for as long as its cache lasted.
+# The stamp changes when the bundle is rebuilt. The web player puts it on every
+# request it makes for the bundle (`?v=`, ignored here), so a rebuilt bundle is
+# an address no cache has seen. See docs/GOTCHAS.md § A rebuilt bundle keeps its address.
+def _bundle_stamp(bundle_dir: Path) -> str:
+    try:
+        return format(int((Path(bundle_dir) / "master.m3u8").stat().st_mtime), "x")
+    except OSError:
+        return ""
+
+
+# Playlists are asked for again every time. This is for the clients that carry no
+# stamp; it does nothing for a copy a device already holds.
+_BUNDLE_REVALIDATE = {"Cache-Control": "no-cache"}
+
+
 @app.get("/api/library/offline-cache/{cache_key}/{filename}")
 async def offline_cache_bundle_file(cache_key: str, filename: str,
                                     audio: Optional[int] = None,
@@ -38302,7 +38325,7 @@ async def offline_cache_bundle_file(cache_key: str, filename: str,
         # for it; see _pin_audio. `?maxh=` is the remote's quality cap; see
         # _cap_variants.
         return Response(content=_native_master(txt, meta, audio, lang, maxh),
-                        media_type=_HLS_MIME[".m3u8"])
+                        media_type=_HLS_MIME[".m3u8"], headers=_BUNDLE_REVALIDATE)
 
     sm = _SUB_PLAYLIST_RE.match(filename)
     if sm:
@@ -38312,7 +38335,7 @@ async def offline_cache_bundle_file(cache_key: str, filename: str,
         meta = await asyncio.to_thread(_read_meta, bundle_dir)
         return Response(content=_sub_wrapper_playlist(vtt.name,
                                                       meta.get("duration_sec", 0)),
-                        media_type=_HLS_MIME[".m3u8"])
+                        media_type=_HLS_MIME[".m3u8"], headers=_BUNDLE_REVALIDATE)
 
     p = bundle_dir / filename
     if not p.exists() or not p.is_file():
@@ -38335,7 +38358,8 @@ async def offline_cache_bundle_file(cache_key: str, filename: str,
             except OSError:
                 pass
         return Response(content=cleaned, media_type=media)
-    return FileResponse(str(p), media_type=media, filename=p.name)
+    return FileResponse(str(p), media_type=media, filename=p.name,
+                        headers=_BUNDLE_REVALIDATE if p.suffix.lower() == ".m3u8" else None)
 
 
 @app.get("/StreamLinkBundles/{cache_key}/{filename}")

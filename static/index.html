@@ -28153,7 +28153,17 @@ async function _lpLoadIndex(seekTo) {
 
   if (window.Hls && window.Hls.isSupported()) {
     // Chrome / Firefox / Edge / Android Chrome path — hls.js owns playback.
+    // A re-prepped bundle keeps its key, so its URLs are ones this browser may
+    // already hold: WebKit kept the OLD playlists of a re-prepped film for 14
+    // hours and read the new segments through them (picture from 426 s under
+    // sound from 588 s). The server's stamp changes with each build; on every
+    // request it makes the address one no cache has seen. Server bundles only:
+    // a device copy and an on-demand session carry none.
+    const bStamp = (lp.mode === "bundle" && prep.stamp) ? String(prep.stamp) : "";
     const hls = new window.Hls({
+      xhrSetup: bStamp ? (xhr, url) => {
+        xhr.open("GET", url + (url.indexOf("?") < 0 ? "?" : "&") + "v=" + bStamp, true);
+      } : undefined,
       // Default xhr-based loader is fine; we set lowLatencyMode off because
       // VOD playback gets no benefit from LL-HLS and it doubles fetch volume.
       lowLatencyMode: false,
@@ -33261,6 +33271,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.18.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.18.2</div>
 </body>
 </html>
