@@ -1,5 +1,37 @@
 # Changelog
 
+## [20.18.0] — 2026-10-08
+### An HDR film is tone-mapped when it is prepped, and stops claiming to be HDR
+
+Project Hail Mary would not cast to the Chromecast, three times in a row, on an evening
+when SpongeBob cast fine. The Chromecast fetched the film's first video segment and
+asked for nothing more. The film's prepped copy was ordinary 8-bit H.264, but its
+header still carried the 4K source's HDR labels (BT.2020, PQ, mastering metadata).
+None of the 42 other prepped copies that Chromecast had played, and that are still on the box, carried them.
+
+- **Prep tone-maps HDR10 and HLG sources to SDR.** The picture used to be squeezed to
+  8 bits with no colour conversion, which is why HDR films looked flat and washed out
+  on every device. Every quality level is now converted properly.
+- **The prepped copy is labelled as what it is.** Its header says BT.709 and holds no
+  HDR metadata. Prep checks the finished header itself and removes any that is left.
+- **If this ffmpeg cannot tone-map**, or the tone-map encode fails, the film is still
+  prepped: the picture stays flat, as before, and the header is corrected.
+- **HDR films prep more slowly.** The conversion runs on the CPU, so these films no
+  longer take the all-GPU path. On an 8-core Mac a 4K source converted at about the
+  speed it plays. Not timed on the box.
+- **A failed prep reports ffmpeg's own error again.** A variable in the failure path
+  was never set, so any failed encode stopped there with a Python error instead of
+  the reason, and the retry for a rejected H.264 level could never run.
+
+**Films prepped before this version are unchanged.** Delete the prep of an HDR film
+and prep it again to get the new picture and a copy that casts.
+
+**Not checked:** nothing here has run on the box or reached a Chromecast yet. The
+tone-map chain was run with ffmpeg 7.1 on a Mac against HDR10, HLG and partly-tagged
+test clips; the box runs a different build. The Chromecast's own error was never
+read, so the header being the cause rests on it being the one difference found.
+On-demand streaming, Clip and compression still flatten HDR and keep its labels.
+
 ## [20.17.0] — 2026-10-08
 ### An indexer behind Cloudflare is slow, not failing
 

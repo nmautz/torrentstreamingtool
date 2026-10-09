@@ -299,7 +299,7 @@ Surface these when deciding whether a given household wants the default:
 | | On-device | VLC |
 |---|---|---|
 | Audio | **AAC 160k stereo, always** (`-ac 2`) | native 5.1/7.1 bitstream |
-| HDR10 | **flattened** — prep is `scale` → `yuv420p`, no tone mapping | handed to the display |
+| HDR10 / HLG | **tone-mapped to SDR** (20.18.0, `hdrmap`); flat only when this ffmpeg lacks `zscale` / `tonemap`. Bundles prepped earlier stay flat until re-prepped | handed to the display |
 | Seek precision | **±6 s** (snaps to the fmp4 segment boundary) | frame-accurate |
 | Image subs (PGS/VOBSUB) | dropped (now *stated* in the menu) | rendered natively |
 | Quality menu (ABR) | yes | n/a |
@@ -646,6 +646,37 @@ only the scaled down-rungs hit the encoder.
 > A full path on `-hls_fmp4_init_filename` is **not** a fix (ffmpeg prepends the
 > playlist dir and the encode dies). Bare names + cwd is the only portable shape.
 > See [GOTCHAS.md](GOTCHAS.md).
+
+### HDR sources (20.18.0)
+
+A bundle is 8-bit H.264, so an HDR10 or HLG source has to become SDR on the way in.
+`hdrmap.mode` reads `color_transfer` off the probe (`smpte2084` or `arib-std-b67`;
+10-bit alone is not HDR) and picks one of two treatments for every rung:
+
+| Mode | When | `-filter:v` (`hdrmap.chain`) |
+|---|---|---|
+| `tonemap` | this ffmpeg lists `zscale` and `tonemap` (`_has_tonemap`, probed once) | `[scale,] setparams` (state the input) `, zscale=t=linear, format=gbrpf32le, zscale=p=bt709, tonemap=hable, zscale=t=bt709:m=bt709:r=tv, format=yuv420p, sidedata=mode=delete` |
+| `retag` | it does not, or the tone-map encode failed | `[scale,] setparams` (BT.709) `, sidedata=mode=delete`: the picture stays flat, the header stops claiming HDR |
+
+Both add `-color_primaries / -color_trc / -colorspace bt709` per output
+(`hdrmap.out_tags`). What follows from the choice:
+
+- **No rung is stream-copied and the all-GPU path is never taken.** The filters run on
+  the CPU (`scale_cuda` cannot tone-map), so decode may still be NVDEC and the encode
+  NVENC, with the mapping between them on the CPU.
+- **A down-rung scales first, then maps.** The mapping works in float RGB and costs by
+  the pixel. On an 8-core Mac the chain ran at about 25 fps at 3840x2072 and far above
+  real time at 480p. Not measured on the box.
+- **A failed tone-map encode retries once as `retag`**, so an HDR file can always be
+  prepped.
+- **The init segments are checked after the encode** (`_scrub_hdr_inits_sync`): any
+  `mdcv` / `clli` box the muxer still wrote is turned into a `free` box, and
+  `hls.log` gets one line saying what each init now claims.
+- `meta.json` gains `hdr: {source, mode}`. A bundle of an HDR source without it was
+  prepped before 20.18.0.
+
+Not covered: on-demand (JIT) streaming, Clip and source compression still flatten and
+keep the source's labels. See [GOTCHAS.md](GOTCHAS.md) § An HDR label on an SDR stream.
 
 Key decisions:
 

@@ -2143,7 +2143,7 @@ A release that plays with a lurid **green** cast in VLC *and* in the prepped HLS
 
 Do **not** generalise this to "Dolby Vision is broken". Every other profile carries a usable base layer — 8.1 → HDR10, 8.2 → SDR, 8.4 → HLG, 7 → an HDR10 BL — and plays fine. `dvprobe.is_green` therefore flags **only** `dv_profile == 5 && dv_compat == 0`; widening it would condemn a large slice of perfectly good releases and turn the warning into noise.
 
-Distinguish it from plain HDR10 by the symptom: un-tone-mapped HDR10 looks **washed out / flat**, never green. (The prep pipeline does no colour conversion at all — `scale` → `yuv420p` — so HDR10 sources do come out flat. Separate, milder, still open.)
+Distinguish it from plain HDR10 by the symptom: un-tone-mapped HDR10 looks **washed out / flat**, never green. (Until 20.18.0 the prep pipeline did no colour conversion at all — `scale` → `yuv420p` — so HDR10 sources came out flat. Prep now tone-maps them; see § An HDR label on an SDR stream.)
 
 **Why we don't fix it in ffmpeg.** Applying a DV RPU needs the `libplacebo` filter. `setup.py` installs gyan.dev's `ffmpeg-release-essentials.zip`, which doesn't carry it. Even with the full build it would only fix the *prepped* path: VLC plays the raw file on the TV and would still be green unless DV items were forced to on-demand-only and tone-mapped ahead of every watch. Swapping the release fixes it everywhere, instantly, at no CPU cost — which is why the feature detects and routes around P5 rather than trying to render it.
 
@@ -7190,6 +7190,43 @@ it is a reload at the playhead. It's the same lesson as the AirPlay audio pin (1
 anything the receiver chooses, you control by what you hand it, never by a setting on
 the phone. `LocalMediaServer` doesn't implement `maxh`: a downloaded master has one rung.
 If that ever changes, mirror `_cap_variants` there.
+
+## An HDR label on an SDR stream: a phone plays it, a Chromecast stops (20.18.0)
+
+Project Hail Mary (2160p HEVC, Dolby Vision profile 8 over HDR10) would not cast, three
+times in a row, on an evening when SpongeBob cast fine (2026-10-09). The box's request
+log for the Chromecast (the `Linux aarch64` user agent) showed the same thing each time:
+`master-native.m3u8`, both playlists, `init_video_480.mp4`, `seg_video_480_00000.m4s`,
+and then nothing. No audio init, no second segment, and the phone's own player took
+over a second or two later. A working cast goes straight on to `init_audio_0.mp4`.
+
+The bundle was 8-bit H.264 whose init segment said `colr nclx (9, 16, 9)` (BT.2020 /
+PQ) and carried `mdcv` and `clli` boxes. ffmpeg had copied the source's labels onto a
+re-encode that was no longer 10-bit, HEVC or HDR. Of the 42 other bundles that
+Chromecast had fetched and that were still on disk, every one was `(1, 1, 1)` with
+neither box. **The receiver's own error was never read** (the phone had not uploaded
+its log), so "the labels are why" rests on that one difference and on prep now
+producing a bundle without them. Check the next HDR film that is cast.
+
+- **Read the box's request log before the phone's.** A receiver that takes the first
+  video segment and asks for no audio has rejected the video track. The network, the
+  door and the playlists are all proven by the requests that did arrive.
+- **The labels live in three places and ffmpeg fills each a different way.** The
+  encoder's colour fields (`colr`, and the SPS) follow the frames, so they need the
+  filter chain to end in BT.709 *and* `-color_*` on the output. `mdcv` / `clli` come
+  from frame side data: on ffmpeg 7.1 a tone-mapped encode still wrote both until
+  `sidedata=mode=delete` was added to the chain. What 8.x does was not tested, which
+  is why `_scrub_hdr_inits_sync` checks the finished init segments instead of trusting
+  the muxer.
+- **`zscale` reads its input off the frame.** A source that tags only its transfer has
+  an unspecified matrix, and the chain dies with `code 3074: no path between
+  colorspaces`. `hdrmap.chain` puts a `setparams` first that states all three.
+- **Bundles prepped before 20.18.0 are unchanged.** `OFFLINE_CACHE_VERSION` did not
+  move. One from an HDR source has no `hdr` key in `meta.json` and still will not
+  cast; delete its prep and prep it again. The quality pick does not help: every rung
+  carries the labels.
+- **Not covered:** on-demand (JIT) streaming, Clip and compression. The JIT path has to
+  beat real time and a 4K tone-map on the CPU does not.
 
 ## A rung with one keyframe per segment freezes a TV that switches onto it (20.13.2)
 

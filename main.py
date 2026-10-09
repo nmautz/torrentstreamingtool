@@ -69,6 +69,7 @@ import racerules
 import relquality
 import stallrule
 import gpugate
+import hdrmap
 import ixwait
 import reltracks
 import srcevict
@@ -31917,6 +31918,40 @@ async def _has_cuda_scale() -> bool:
     return ok
 
 
+# Lazy-probed once per process: True if this ffmpeg has `zscale` (libzimg) and
+# `tonemap`, the two filters that turn an HDR picture into an SDR one. Without
+# them an HDR source is still prepped, with its header corrected and its picture
+# left flat (`hdrmap.RETAG`).
+_tonemap_probe: dict[str, bool] = {}
+
+
+async def _has_tonemap() -> bool:
+    """True if this ffmpeg lists the zscale and tonemap filters."""
+    if "result" in _tonemap_probe:
+        return _tonemap_probe["result"]
+    ffmpeg = analyzer.ffmpeg_bin()
+    if not ffmpeg:
+        _tonemap_probe["result"] = False
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            ffmpeg, "-hide_banner", "-filters",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        names = {ln.split()[1] for ln in (out or b"").decode("utf-8", "replace").splitlines()
+                 if len(ln.split()) > 2}
+        ok = {"zscale", "tonemap"} <= names
+    except Exception:
+        ok = False
+    _tonemap_probe["result"] = ok
+    if not ok:
+        print("[offline] zscale / tonemap filters absent — HDR sources will be "
+              "prepped with a corrected header but a flat picture.")
+    return ok
+
+
 def _source_nvdec_safe(info: dict) -> bool:
     """True if the source is a codec+pixfmt NVDEC decodes reliably, so it's safe
     to pin the decoder output to VRAM (`-hwaccel_output_format cuda`)."""
@@ -32360,6 +32395,11 @@ def _ffprobe_full(path: str) -> dict:
                 # the same frame size at 24fps. avg_frame_rate is "num/den".
                 "fps":     _parse_fps(s.get("avg_frame_rate")
                                       or s.get("r_frame_rate") or ""),
+                # What the source says its colour is. `hdrmap` reads these to
+                # tell an HDR10 / HLG source, which prep must tone-map.
+                "color_transfer":  (s.get("color_transfer", "") or "").lower(),
+                "color_primaries": (s.get("color_primaries", "") or "").lower(),
+                "color_space":     (s.get("color_space", "") or "").lower(),
             }
         elif kind == "audio":
             out["audios"].append({
@@ -32994,6 +33034,7 @@ def _build_hls_ffmpeg_args(
     hw_decode: bool = True,
     omit_level: bool = False,
     audio_pad_pts: Optional[float] = None,
+    hdr_mode: str = "",
 ) -> tuple[list[str], list[dict], list[dict], list[dict]]:
     """Construct the full ffmpeg invocation that emits one HLS bundle.
 
@@ -33008,6 +33049,11 @@ def _build_hls_ffmpeg_args(
     a 720p and/or 480p down-rung (capped at source height — see
     `_hls_video_variants`). All video variants share one audio group, so the
     player switches video quality without re-fetching audio.
+
+    `hdr_mode` (`hdrmap.mode`) is set for an HDR10 / HLG source: every rung is
+    then tone-mapped to SDR (or, as the fallback, only relabelled) and tagged
+    BT.709. The caller never combines it with `full_gpu`: the tone-map filters
+    run on the CPU and `scale_cuda` has no equivalent.
 
     Returns (args, kept_audios, kept_subs, video_variants) — audios/subs are the
     tracks (from `info`) included in the output in manifest order (image-based
@@ -33121,7 +33167,9 @@ def _build_hls_ffmpeg_args(
                 "-preset", "medium", "-rc", "vbr", f"-cq:v:{i}", "23",
             ]
         elif use_nvenc:
-            if v["scale"]:
+            if hdr_mode:
+                a += [f"-filter:v:{i}", hdrmap.chain(info.get("video"), hdr_mode, v["scale"] or 0)]
+            elif v["scale"]:
                 a += [f"-filter:v:{i}", f"scale=-2:{v['scale']}"]
             a += [
                 f"-c:v:{i}", "h264_nvenc",
@@ -33129,7 +33177,9 @@ def _build_hls_ffmpeg_args(
                 f"-pix_fmt:v:{i}", "yuv420p",
             ]
         else:
-            if v["scale"]:
+            if hdr_mode:
+                a += [f"-filter:v:{i}", hdrmap.chain(info.get("video"), hdr_mode, v["scale"] or 0)]
+            elif v["scale"]:
                 a += [f"-filter:v:{i}", f"scale=-2:{v['scale']}"]
             a += [
                 f"-c:v:{i}", "libx264",
@@ -33139,6 +33189,10 @@ def _build_hls_ffmpeg_args(
                 "-threads", str(OFFLINE_FFMPEG_THREADS),
                 f"-pix_fmt:v:{i}", "yuv420p",
             ]
+        if hdr_mode:
+            # The picture is SDR now; without these the encoder inherits the
+            # source's BT.2020 / PQ labels and the init segment repeats them.
+            a += hdrmap.out_tags(i)
         if v.get("maxrate"):
             a += [f"-maxrate:v:{i}", f"{v['maxrate']}k",
                   f"-bufsize:v:{i}", f"{v['bufsize']}k"]
@@ -33551,6 +33605,25 @@ async def _prep_validate_repair(job: dict, src: Path) -> str:
         job["_proc"] = None
 
 
+def _scrub_hdr_inits_sync(bundle_dir: Path) -> dict:
+    """Remove HDR boxes from every video init segment in a staging dir and report
+    what each one now claims: {name: {"removed": [...], "colr": (...), "hdr": bool}}.
+    Sync — call via to_thread."""
+    out: dict = {}
+    for init in sorted(bundle_dir.glob("init_video*.mp4")):
+        try:
+            data = init.read_bytes()
+            fixed, removed = hdrmap.scrub_init(data)
+            if removed:
+                init.write_bytes(fixed)
+            marks = hdrmap.init_marks(fixed)
+            out[init.name] = {"removed": removed, "colr": marks["colr"],
+                              "hdr": hdrmap.claims_hdr(marks)}
+        except OSError as exc:
+            out[init.name] = {"error": str(exc)}
+    return out
+
+
 async def _run_offline_job(job_id: str) -> None:
     """Build an HLS bundle for one source file. The output is a directory
     keyed by `_offline_cache_key(src)` inside the source file's co-located
@@ -33777,6 +33850,18 @@ async def _run_offline_job(job_id: str) -> None:
             elif copy_original and force_reencode:
                 hls_log.info("job %s: re-encoding original rung to correct A/V sync "
                              "(repair re-prep)", job_id)
+            # HDR SOURCE. An HDR10 / HLG picture is tone-mapped to SDR on every
+            # rung, and the output is labelled BT.709. Left alone, the bundle is
+            # 8-bit H.264 whose header still says BT.2020 / PQ with mastering
+            # metadata: flat on a phone, and a Chromecast refuses it at the first
+            # video segment. No rung of such a source may be stream-copied.
+            hdr_mode = hdrmap.mode(info.get("video"), await _has_tonemap())
+            if hdr_mode:
+                force_reencode = True
+                hls_log.info("job %s: %s source — %s", job_id,
+                             hdrmap.HDR_TRANSFERS[hdrmap.transfer(info.get("video"))],
+                             "tone-mapping to SDR" if hdr_mode == hdrmap.TONEMAP
+                             else "relabelling only (this ffmpeg has no zscale / tonemap)")
             copy_original = copy_original and not force_reencode
             # AUDIO PIN TARGET. Every audio rendition is silence-padded to start
             # at the VIDEO rung's first PTS (`aresample:first_pts`) so the bundle
@@ -33820,6 +33905,8 @@ async def _run_offline_job(job_id: str) -> None:
                 and await _has_cuda_scale()
                 and _source_nvdec_safe(info)
                 and hw_decode
+                # The tone-map filters run on the CPU; scale_cuda cannot do it.
+                and not hdr_mode
             )
             if full_gpu and not _GPU_GATE.allow():
                 full_gpu = False
@@ -33829,13 +33916,20 @@ async def _run_offline_job(job_id: str) -> None:
                     job_id, _GPU_GATE.state(),
                 )
 
+            # Set by the "Invalid Level" retry below. Until 20.18.0 it was neither
+            # initialised here nor passed to the builder, so any failed encode
+            # raised UnboundLocalError at that check instead of reporting ffmpeg's
+            # own error, and the retry it guards could never run.
+            omit_level = False
             while True:
                 args, kept_audios, kept_subs, kept_videos = _build_hls_ffmpeg_args(
                     ffmpeg, src, info, use_nvenc, full_gpu=full_gpu,
                     ladder_heights=ladder_heights,
                     force_reencode_original=force_reencode,
                     hw_decode=hw_decode,
+                    omit_level=omit_level,
                     audio_pad_pts=audio_pad_pts,
+                    hdr_mode=hdr_mode,
                 )
                 # Record encoder for admin/UI display. The original rung may copy
                 # while the ABR down-rungs (if any) still transcode, so reflect both.
@@ -34101,6 +34195,26 @@ async def _run_offline_job(job_id: str) -> None:
                     job["progress"] = 0.0
                     continue
 
+                # The tone-map chain failed (a zscale that cannot read this
+                # source's colour, a build whose filters differ). The file must
+                # still prep: run once more with the picture left alone and only
+                # the header corrected.
+                if hdr_mode == hdrmap.TONEMAP:
+                    hls_log.warning(
+                        "job %s tone-map encode failed rc=%s — retrying with the "
+                        "picture untouched and the header relabelled.\n"
+                        "  stderr tail:\n%s",
+                        job_id, proc.returncode,
+                        "\n".join(t for t in stderr_tail
+                                  if "' for writing" not in t).strip()[-800:]
+                        or "(no stderr captured)",
+                    )
+                    hdr_mode = hdrmap.RETAG
+                    await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
+                    tmp_dir.mkdir(parents=True, exist_ok=True)
+                    job["progress"] = 0.0
+                    continue
+
                 err = "\n".join(stderr_tail).strip()
                 elapsed = time.time() - job["started_at"]
                 hls_log.error(
@@ -34115,6 +34229,14 @@ async def _run_offline_job(job_id: str) -> None:
                 job["error"]  = f"ffmpeg failed: {err[-500:] or 'unknown error'}"
                 await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
                 return
+
+            # An HDR source: whether the muxer still writes the mastering-display
+            # and light-level boxes after the filters dropped that metadata
+            # depends on the ffmpeg version, so the init segments are checked and
+            # corrected here rather than trusted. See hdrmap.scrub_init.
+            if hdr_mode:
+                marks = await asyncio.to_thread(_scrub_hdr_inits_sync, tmp_dir)
+                hls_log.info("job %s hdr mode=%s init segments: %s", job_id, hdr_mode, marks)
 
             # Sanitise each emitted sub_<i>.vtt: ffmpeg's ASS→WebVTT conversion
             # of typeset fansub tracks leaves duplicate cues, `\p` drawing blobs,
@@ -34166,6 +34288,12 @@ async def _run_offline_job(job_id: str) -> None:
                 # re-prepping can't remove, so it needs the looser bound; a copied
                 # rung doesn't (measured residual ≈0.02s) and keeps the tight one.
                 "video_reencoded": not copy_original,
+                # Set for an HDR10 / HLG source: what it was, and whether the
+                # picture was tone-mapped ("tonemap") or only relabelled ("retag").
+                # Absent on a bundle of an HDR source ⇒ prepped before 20.18.0,
+                # flat picture and an HDR header (see GOTCHAS).
+                **({"hdr": {"source": hdrmap.transfer(info.get("video")), "mode": hdr_mode}}
+                   if hdr_mode else {}),
                 # ABR video ladder, master-playlist order (idx 0 = original).
                 # Informational for admin/API — the player builds its quality
                 # menu from hls.js `levels`, not from this ordering.
