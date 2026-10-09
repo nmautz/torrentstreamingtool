@@ -40,7 +40,7 @@ def main():
     corpus_f = collect.HERE / "corpus.json"
     corpus = json.loads(corpus_f.read_text(encoding="utf-8"))
     have = {t["cache_key"] for t in corpus}
-    tok = collect.req("/api/admin/login", "POST", {"password": collect.ADMIN_PW})["token"]
+    tok = collect.admin_token()
     cache = collect.req("/api/admin/offline-cache", tok=tok)["items"]
     key_of = {f["file_path"]: f["cache_key"] for it in cache for f in it.get("files") or []
               if f.get("status") == "cached"}

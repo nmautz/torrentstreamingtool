@@ -12,11 +12,12 @@ cannot drown the set. IMDb ids come from Wikidata (TMDb id -> IMDb id, no key),
 because the legacy OpenSubtitles API only searches by IMDb and the box never
 exposes its TMDb key.
 """
-import json, re, ssl, sys, time, urllib.parse, urllib.request
+import json, os, re, ssl, sys, time, urllib.parse, urllib.request
 from pathlib import Path
 
 B = "https://192.168.0.106"
-ADMIN_PW = "FantaFan43"
+# The box's admin password. Never written here: this repo is public.
+ADMIN_PW = os.environ.get("STREAMLINK_ADMIN_PW", "")
 PER_SHOW = 5
 HERE = Path(__file__).parent
 CACHE = HERE / ".cache"
@@ -33,6 +34,12 @@ def req(path, method="GET", body=None, tok=None, raw=False):
     with urllib.request.urlopen(r, context=CTX, timeout=120) as resp:
         data = resp.read()
     return data if raw else json.loads(data)
+
+
+def admin_token():
+    if not ADMIN_PW:
+        sys.exit("set STREAMLINK_ADMIN_PW to the box's admin password")
+    return req("/api/admin/login", "POST", {"password": ADMIN_PW})["token"]
 
 
 _NOT_FULL = re.compile(r"(?i)\b(sign|song|forced|karaoke|op/ed|commentary)")
@@ -81,7 +88,7 @@ def spread(xs, n):
 
 def main():
     REFS.mkdir(parents=True, exist_ok=True)
-    tok = req("/api/admin/login", "POST", {"password": ADMIN_PW})["token"]
+    tok = admin_token()
     items = req("/api/admin/library", tok=tok)["items"]
     cache = req("/api/admin/offline-cache", tok=tok)["items"]
     key_of = {f["file_path"]: f["cache_key"] for it in cache for f in it.get("files") or []

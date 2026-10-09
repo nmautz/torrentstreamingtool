@@ -59,7 +59,14 @@ python tests/subs_eval/grade.py                         # grade new candidates (
 ```
 
 `verify.py` needs `.cache/`; without it, collect + fetch_audio + grade first.
-The box's address and admin password are at the top of `collect.py`.
+The box's address is at the top of `collect.py`. The admin password is read from the
+environment and is never written in the repo, which is public:
+
+```bash
+STREAMLINK_ADMIN_PW='...' python tests/subs_eval/collect.py
+```
+
+On Windows (PowerShell): `$env:STREAMLINK_ADMIN_PW='...'` first, then run the script.
 
 ## Mind the download limit
 

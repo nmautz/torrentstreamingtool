@@ -1,5 +1,17 @@
 # Changelog
 
+## [20.18.4] — 2026-10-09
+### The subtitle eval kit no longer carries the admin password
+
+`tests/subs_eval/collect.py` had the box's admin password written at the top, and
+this repo is public. It now reads `STREAMLINK_ADMIN_PW` from the environment and
+stops with a message when that is not set. `collect_pgs.py` logs in the same way.
+
+The password is still in the history of this repo (since 17.7.0). It was not
+changed: the box is only reachable on the home network and the tailnet.
+
+Nothing the server or the app runs changed. Not run against the box.
+
 ## [20.18.3] — 2026-10-09
 ### Get no longer prefers a foreign-dubbed copy of an English film
 
