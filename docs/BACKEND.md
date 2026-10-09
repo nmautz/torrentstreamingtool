@@ -265,7 +265,8 @@ Separate from the bundle-prep job system above. When a non-prepped file is playe
 - `_od_build_ffmpeg_args(...)` — the JIT command: `-ss <start_seg*OD_SEGMENT_SECS>` (input seek), forced keyframes, mpegts segments, `-start_number`, bare names run with `cwd=<session dir>`. Always transcodes video (NVENC transparent tier via `_has_nvenc`, else libx264 veryfast); single rendition + one audio.
 - `_od_start_encode(session, start_seg)` — terminate any prior proc, wipe stale segments (`_od_wipe_segments`), launch ffmpeg seeked to `start_seg`, drain stderr. Called under `session["lock"]` from the segment endpoint when the running encode can't reach the requested segment (a seek). `_od_max_seg_on_disk` drives the "is it ahead of n / within `OD_LOOKAHEAD_SEGS`" decision.
 - `_od_media_playlist(duration)` — generates the virtual VOD playlist from duration alone (no encoding).
-- `_od_teardown(key)` / `_od_reaper()` — terminate ffmpeg + `rmtree` the dir; the reaper (a `lifespan` task) reaps sessions idle past `OD_SESSION_IDLE_SECS` and caps the live count at `OD_MAX_SESSIONS`. `POST …/close` (sendBeacon) tears down promptly; reaper is the backstop.
+- `_od_new_session(...)` / `_od_revive(key)` (20.18.1) — make and register a session; `_od_revive` remakes one the reaper took (`_od_gone`) when a request names it, so a player that was suspended does not get a `410`. Tests in `tests/test_od_revive.py`
+- `_od_teardown(key, revivable=False)` / `_od_reaper()` — terminate ffmpeg + `rmtree` the dir; the reaper (a `lifespan` task) reaps sessions idle past `OD_SESSION_IDLE_SECS` (`revivable=True`) and caps the live count at `OD_MAX_SESSIONS`. `POST …/close` (sendBeacon) tears down promptly; reaper is the backstop.
 - Reuses `hls_log` for START / rc / teardown lines (so JIT diagnostics also land in `logs/hls.log`). 503 when `HLS_AVAILABLE` is false (macOS).
 
 ## Logging

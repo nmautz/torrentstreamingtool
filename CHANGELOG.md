@@ -1,5 +1,32 @@
 # Changelog
 
+## [20.18.1] — 2026-10-09
+### Instant play survives the app being left in the background
+
+A film that had not been prepped yet would not resume after the app was left for a
+couple of minutes while paused: the picture never came back, on the phone or on
+glasses, until the film was closed and opened again. (Issue #36.)
+
+- **The server makes the stream again when the phone asks for it.** iOS suspends a
+  paused app, so the phone cannot keep its instant-play stream alive, and the server
+  closes it after 90 seconds. It used to refuse the phone on return. Now the first
+  request for a closed stream reopens it, for up to 24 hours.
+- **A refusal is no longer remembered by the phone.** When the server did refuse, the
+  phone's browser engine stored the refusal and kept answering itself with it, for
+  the same address, even after the stream was back. On 2026-10-05 it never asked for
+  the film's first 24 seconds again in eight tries, and sat at 0:00 with nothing to
+  play. Refusals are now marked not to be stored, and instant-play addresses have
+  changed so a refusal a phone already holds cannot match.
+- **The player starts over at the right place** if the server still cannot reopen a
+  stream (after a restart, say), instead of loading whatever comes after the part
+  that was refused.
+
+Host only; the app does not need rebuilding.
+
+**Not checked:** nothing here has run on the box or a phone yet. The stored refusal
+was reproduced on a Mac with the same browser engine, not on the phone. The reopen
+logic has unit tests (`tests/test_od_revive.py`).
+
 ## [20.18.0] — 2026-10-08
 ### An HDR film is tone-mapped when it is prepped, and stops claiming to be HDR
 

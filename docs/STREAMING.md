@@ -2686,6 +2686,18 @@ wins (on-demand is a supplement, never a replacement).
   `POST …/close` (a sendBeacon on stop/unload) tears a session down promptly; the
   reaper is the backstop.
 
+  **A reaped session is remade when it is asked for (20.18.1).** The reaper keeps
+  `{src, audio_idx, at}` for each session it takes (`_od_gone`, in memory, 24 h, 64
+  entries). A request that names a reaped key goes through `_od_revive`, which makes
+  the session again at the same URL and serves the request; the encode restarts at
+  whichever segment was asked for. So a player that could not keep its session warm
+  never sees a `410`. The case this exists for is the iOS app paused in the
+  background: iOS suspends it, no keepalive runs, and the native `AVPlayer` it returns
+  to holds only the session URL (measured 2026-10-05: away 143 s, `itemErr "resource
+  unavailable"`). A session ended by `…/close`, or torn down before a compress, is
+  not kept. `_od_revive` answers nothing (and the request gets `410`) when the source
+  is gone, has changed size, or is being compressed, and after a server restart.
+
   > **Reaping vs. a deliberately deep client buffer.** "Active playback refreshes
   > `last_access`" is necessary but **not sufficient** — the player buffers far ahead
   > (`maxBufferLength`, up to 180 s) and while **paused or fully buffered** can go
@@ -2764,6 +2776,11 @@ wins (on-demand is a supplement, never a replacement).
   deletes it `OD_SESSION_IDLE_SECS` after the last fetch), but the player buffers far
   ahead and — paused / fully buffered — can out-wait that window, so the session can be
   reaped mid-watch. Three client pieces keep that from wedging playback:
+  Since 20.18.1 the server remakes a reaped session on the next request for it (see
+  Lifecycle above), so these now cover what it cannot remake: a server restart, a
+  source that changed. Every error from the on-demand route carries
+  `Cache-Control: no-store`; without it WebKit answers the retry from its own cache
+  (see GOTCHAS.md § A 410 with no cache header is kept).
   - `_lpOdKeepAlive(force?)` (called from the 3 s `_lpStallWatch` tick, self-throttled to
     ~30 s) GETs the session's `master.m3u8` while `lp.mode==="ondemand"`, refreshing the
     server's `last_access` even when no segments are being fetched.
@@ -2801,7 +2818,10 @@ wins (on-demand is a supplement, never a replacement).
     GOTCHAS.md. That re-POSTs `/offline-prepare`: if
     the background full prep finished it **switches to the rich bundle**; otherwise it
     creates a fresh OD session (same deterministic `_od_session_key`) and resumes. The
-    hls.js path detects the 410 directly (`_lpIsOdSessionGone` → `data.response.code===410`);
+    hls.js path detects the 410 directly (`_lpIsOdSessionGone` → `data.response.code===410`),
+    **fatal or not (20.18.1)**: hls.js does not go fatal on the first `410`, it moves
+    on to the next fragment, and by the time the session is back the loader is ahead
+    of the playhead (`od-session-gone` in the client log);
     the Safari-native path (no HTTP status on the `<video>` `error`) escalates to the same
     reload once the reconnect backoff has grown past a couple of failed attempts. A
     re-entry guard (`_lpReloading`) collapses the burst of 410s from every queued fragment

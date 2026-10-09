@@ -114,6 +114,7 @@ make test                 # pure unit tests for the leaf modules (no deps, no ve
                           #   python tests/test_hdrmap.py
                           #   python tests/test_ixwait.py
                           #   python tests/test_race_rescue.py
+                          #   python tests/test_od_revive.py
                           #   python tests/test_reaper.py
                           #   python tests/test_epgroups.py
                           #   python tests/test_eplabel.py

@@ -38902,11 +38902,30 @@ _OD_SEG_RE = re.compile(r"^seg_(\d+)\.ts$")
 #                last_access, lock}
 _od_sessions: dict[str, dict] = {}
 
+# Sessions the REAPER took, by key: enough to make each one again. A player that
+# cannot keep its session warm is not a player that has gone: iOS suspends the
+# app when it is paused in the background, so no keepalive runs, and the native
+# AVPlayer it comes back to holds nothing but the session's URL. A request for a
+# reaped key remakes the session (`_od_revive`) instead of answering 410.
+# In memory only; a restart forgets them and the client's 410 path takes over.
+_od_gone: dict[str, dict] = {}
+OD_REVIVE_SECS = 24 * 3600            # a reaped session can be asked for this long
+OD_REVIVE_MAX  = 64                   # oldest dropped beyond this
+_od_revive_lock = asyncio.Lock()
+
+# Every error this route answers says so. WebKit keeps a 410 (and a 404) that
+# carries no cache header, on disk, and the session URL is the same one after the
+# session is remade: the player asks again and is answered from its own cache.
+# See docs/GOTCHAS.md § A 410 with no cache header is kept.
+_OD_NO_STORE = {"Cache-Control": "no-store"}
+
 
 def _od_session_key(src: Path, audio_idx: int) -> str:
     """Stable 24-hex key per (source bundle key + audio track). A different audio
-    selection is a different encode, hence a different session/dir."""
-    raw = f"{_offline_cache_key(src)}:{audio_idx}"
+    selection is a different encode, hence a different session/dir. The `:2` is
+    there so no URL made before errors were marked no-store is ever used again:
+    a phone may still hold a 410 for one of those."""
+    raw = f"{_offline_cache_key(src)}:{audio_idx}:2"
     return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
 
@@ -39245,11 +39264,21 @@ async def _od_start_encode(session: dict, start_seg: int) -> None:
     asyncio.create_task(_watch())
 
 
-async def _od_teardown(session_key: str) -> None:
-    """Terminate a session's ffmpeg and delete its segment dir (best-effort)."""
+async def _od_teardown(session_key: str, revivable: bool = False) -> None:
+    """Terminate a session's ffmpeg and delete its segment dir (best-effort).
+    `revivable` is the reaper's: the session went for being idle, not because
+    anyone stopped it, so a later request for it may make it again."""
     session = _od_sessions.pop(session_key, None)
+    if not revivable:
+        _od_gone.pop(session_key, None)
     if not session:
         return
+    if revivable:
+        _od_gone.pop(session_key, None)          # re-insert: newest last
+        _od_gone[session_key] = {"src": session["src"], "audio_idx": session["audio_idx"],
+                                 "at": time.time()}
+        while len(_od_gone) > OD_REVIVE_MAX:
+            _od_gone.pop(next(iter(_od_gone)))
     proc = session.get("proc")
     if proc is not None and proc.returncode is None:
         try:
@@ -39270,14 +39299,92 @@ async def _od_reaper() -> None:
             now = time.time()
             for key, s in list(_od_sessions.items()):
                 if now - s.get("last_access", 0) > OD_SESSION_IDLE_SECS:
-                    await _od_teardown(key)
+                    await _od_teardown(key, revivable=True)
             if len(_od_sessions) > OD_MAX_SESSIONS:
                 victims = sorted(_od_sessions.items(),
                                  key=lambda kv: kv[1].get("last_access", 0))
                 for key, _s in victims[:len(_od_sessions) - OD_MAX_SESSIONS]:
-                    await _od_teardown(key)
+                    await _od_teardown(key, revivable=True)
+            for key, g in list(_od_gone.items()):
+                if now - g.get("at", 0) > OD_REVIVE_SECS:
+                    _od_gone.pop(key, None)
         except Exception:
             hls_log.exception("ondemand reaper tick failed")
+
+
+async def _od_new_session(key: str, src: Path, info: dict, aidx: int,
+                          sub_idxs: list) -> dict:
+    """Make and register the session for `key`. Shared by `stream_ondemand` and
+    `_od_revive`, so a revived session is the one a fresh POST would have made."""
+    ONDEMAND_CACHE.mkdir(exist_ok=True)
+    session = {
+        "key":         key,
+        "src":         str(src),
+        "dir":         ONDEMAND_CACHE / key,
+        "duration":    float(info.get("duration_sec", 0) or 0),
+        "audio_idx":   aidx,
+        "has_audio":   aidx >= 0,
+        "start_seg":   0,
+        "proc":        None,
+        "last_access": time.time(),
+        "lock":        asyncio.Lock(),
+        "sub_idxs":    sub_idxs,
+        "fonts":       [],           # embedded fonts for styled ASS subs (libass)
+        "video":       info.get("video") or {},   # codec/pix_fmt for NVDEC probe
+    }
+    session["dir"].mkdir(parents=True, exist_ok=True)
+    _od_sessions[key] = session
+    _od_gone.pop(key, None)
+    # Styled subs need the fansub's embedded fonts. Extract them eagerly (once,
+    # cheap `-dump_attachment` pass, only when a styled sub exists) so the
+    # `fonts` list below is populated before the client's first libass apply;
+    # the raw `sub_<i>.ass` files stay lazy (extracted on first fetch). The
+    # reaper wipes the whole session dir, fonts included.
+    if any(s.get("styled") for s in _od_text_subs(info)):
+        try:
+            session["fonts"] = await asyncio.to_thread(
+                _extract_bundle_fonts, src, session["dir"], info)
+        except Exception as exc:
+            hls_log.warning("ondemand %s: font extraction skipped: %s", key, exc)
+    return session
+
+
+async def _od_revive(session_key: str) -> Optional[dict]:
+    """Remake a session the reaper took, for a request that still names it.
+    None when it can't be: never reaped (or forgotten), the source is gone, has
+    changed size, or is being compressed. The caller answers 410 and the client
+    re-POSTs /stream-ondemand, as it always has."""
+    if session_key not in _od_gone:
+        return None
+    # One lock for all keys: a player coming back asks for its playlist, a
+    # segment and every subtitle at once, and each would otherwise probe.
+    async with _od_revive_lock:
+        session = _od_sessions.get(session_key)
+        if session is not None:
+            return session
+        gone = _od_gone.get(session_key)
+        if gone is None:
+            return None
+        src, aidx = Path(gone["src"]), gone["audio_idx"]
+        try:
+            if _is_compressing(str(src)):
+                return None                       # still wanted once it finishes
+            # The key is made from the file's name and size, so this is also the
+            # check that the file is there and is the one the session was for.
+            if await asyncio.to_thread(_od_session_key, src, aidx) != session_key:
+                raise OSError("source changed")
+            info = await asyncio.to_thread(_ffprobe_full, str(src))
+            if not info.get("video") or float(info.get("duration_sec", 0) or 0) <= 0:
+                raise OSError("source no longer probes")
+        except OSError as exc:
+            _od_gone.pop(session_key, None)
+            hls_log.info("ondemand %s not revived: %s", session_key, exc)
+            return None
+        session = await _od_new_session(session_key, src, info, aidx,
+                                        [s["idx"] for s in _od_text_subs(info)])
+        hls_log.info("ondemand %s revived %.0fs after it was reaped src=%s",
+                     session_key, time.time() - gone.get("at", 0), src.name)
+        return session
 
 
 class OnDemandReq(BaseModel):
@@ -39348,35 +39455,7 @@ async def stream_ondemand(item_id: str, req: OnDemandReq) -> JSONResponse:
     key = _od_session_key(src, aidx)
     session = _od_sessions.get(key)
     if session is None:
-        ONDEMAND_CACHE.mkdir(exist_ok=True)
-        session = {
-            "key":         key,
-            "src":         str(src),
-            "dir":         ONDEMAND_CACHE / key,
-            "duration":    duration,
-            "audio_idx":   aidx,
-            "has_audio":   aidx >= 0,
-            "start_seg":   0,
-            "proc":        None,
-            "last_access": time.time(),
-            "lock":        asyncio.Lock(),
-            "sub_idxs":    sub_idxs,
-            "fonts":       [],           # embedded fonts for styled ASS subs (libass)
-            "video":       info.get("video") or {},   # codec/pix_fmt for NVDEC probe
-        }
-        session["dir"].mkdir(parents=True, exist_ok=True)
-        _od_sessions[key] = session
-        # Styled subs need the fansub's embedded fonts. Extract them eagerly (once,
-        # cheap `-dump_attachment` pass, only when a styled sub exists) so the
-        # `fonts` list below is populated before the client's first libass apply;
-        # the raw `sub_<i>.ass` files stay lazy (extracted on first fetch). The
-        # reaper wipes the whole session dir, fonts included.
-        if any(s.get("styled") for s in _od_text_subs(info)):
-            try:
-                session["fonts"] = await asyncio.to_thread(
-                    _extract_bundle_fonts, src, session["dir"], info)
-            except Exception as exc:
-                hls_log.warning("ondemand %s: font extraction skipped: %s", key, exc)
+        session = await _od_new_session(key, src, info, aidx, sub_idxs)
         hls_log.info("ondemand %s session created src=%s audio=%d dur=%.1fs",
                      key, src.name, aidx, duration)
     else:
@@ -39441,11 +39520,12 @@ async def ondemand_file(session_key: str, filename: str):
     """Serve a JIT session's master/media playlist or a segment (transcoding it
     on demand). See the module comment above for the full flow."""
     if not _CACHE_KEY_RE.match(session_key):
-        raise HTTPException(400, "Invalid session.")
-    session = _od_sessions.get(session_key)
+        raise HTTPException(400, "Invalid session.", headers=_OD_NO_STORE)
+    session = _od_sessions.get(session_key) or await _od_revive(session_key)
     if session is None:
-        # Reaped or never created — the client should re-POST /stream-ondemand.
-        raise HTTPException(410, "Streaming session expired.")
+        # Never created, stopped, or reaped and not remakeable — the client
+        # should re-POST /stream-ondemand.
+        raise HTTPException(410, "Streaming session expired.", headers=_OD_NO_STORE)
     session["last_access"] = time.time()
 
     if filename in ("master.m3u8", _NATIVE_MASTER_NAME):
@@ -39474,12 +39554,12 @@ async def ondemand_file(session_key: str, filename: str):
         i = int(sm.group(1))
         sub_idxs = session.get("sub_idxs") or []
         if i >= len(sub_idxs):
-            raise HTTPException(404, "No such subtitle.")
+            raise HTTPException(404, "No such subtitle.", headers=_OD_NO_STORE)
         out = session["dir"] / f"sub_{i}.vtt"
         if not out.exists():
             await _od_extract_sub(session["src"], sub_idxs[i], out)
         if not out.exists():
-            raise HTTPException(404, "Subtitle could not be extracted.")
+            raise HTTPException(404, "Subtitle could not be extracted.", headers=_OD_NO_STORE)
         return FileResponse(str(out), media_type="text/vtt")
 
     # Raw styled ASS/SSA sidecar for the libass-wasm overlay, extracted lazily on
@@ -39490,25 +39570,25 @@ async def ondemand_file(session_key: str, filename: str):
         i = int(am.group(1))
         sub_idxs = session.get("sub_idxs") or []
         if i >= len(sub_idxs):
-            raise HTTPException(404, "No such subtitle.")
+            raise HTTPException(404, "No such subtitle.", headers=_OD_NO_STORE)
         out = session["dir"] / f"sub_{i}.ass"
         if not out.exists():
             await _od_extract_ass(session["src"], sub_idxs[i], out)
         if not out.exists():
-            raise HTTPException(404, "Subtitle could not be extracted.")
+            raise HTTPException(404, "Subtitle could not be extracted.", headers=_OD_NO_STORE)
         return FileResponse(str(out), media_type=_HLS_MIME[".ass"])
 
     # Embedded font for styled ASS rendering (extracted eagerly at session create).
     if _OD_FONT_RE.match(filename):
         out = session["dir"] / filename
         if not out.exists() or not out.is_file():
-            raise HTTPException(404, "Font not found.")
+            raise HTTPException(404, "Font not found.", headers=_OD_NO_STORE)
         media = _HLS_MIME.get(out.suffix.lower(), "application/octet-stream")
         return FileResponse(str(out), media_type=media, filename=out.name)
 
     m = _OD_SEG_RE.match(filename)
     if not m:
-        raise HTTPException(400, "Invalid path.")
+        raise HTTPException(400, "Invalid path.", headers=_OD_NO_STORE)
     n = int(m.group(1))
     seg_path = _od_seg_path(session, n)
 
@@ -39544,7 +39624,7 @@ async def ondemand_file(session_key: str, filename: str):
                 and _od_max_seg_on_disk(session) < n:
             break
         await asyncio.sleep(0.15)
-    raise HTTPException(504, "Segment generation timed out.")
+    raise HTTPException(504, "Segment generation timed out.", headers=_OD_NO_STORE)
 
 
 @app.post("/api/library/ondemand/{session_key}/close")

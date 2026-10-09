@@ -7440,3 +7440,31 @@ separates nothing, and the "one identified device on this IP" inference never
 fires. The app's `/api/discovery` probe and its Siri requests send no
 `X-Device-Id`, so they stay anonymous; giving them the id needs an app release.
 
+## A 410 with no cache header is kept (20.18.1)
+
+WebKit stores an error response that says nothing about caching, and answers the next
+request for that URL from the store without asking the server. `410` and `404` both
+qualify. The store is on disk, so it outlives the page and the app.
+
+Checked 2026-10-09 with a `WKWebView` and a local server that answers `410` once and
+`200` after: four XHRs to one URL returned `410,410,410,410` and the server saw one
+request. A second run of the process got `410` again with no request at all. With
+`Cache-Control: no-store` on the `410` the same page got `410,200,200,200`.
+`URLSession` (what `AVPlayer` loads through) did not do this: `410,200,200`.
+
+This is what broke on-demand playback after a long background (2026-10-05). The
+session was reaped, segments 0 to 3 were answered `410`, and the session was then
+remade **at the same URL**, because `_od_session_key` is deterministic. Across eight
+rebuilds the phone never asked the server for segments 0 to 3 again; each new hls.js
+got its `410`s from the cache, loaded segment 4, and sat at `t=0` with
+`buffered 24.0-29.9` until `cold-kick` gave up.
+
+- **Any URL that can answer an error now and content later needs `no-store` on the
+  error.** The on-demand route sets it on every error (`_OD_NO_STORE`). Other routes
+  were not audited.
+- **A URL that was poisoned stays poisoned** on that device until WebKit drops it.
+  `_od_session_key` has a `:2` in it for this reason: no on-demand URL from before
+  20.18.1 is ever produced again.
+- The better fix is to not answer the error at all: see docs/STREAMING.md, a reaped
+  session is remade when it is asked for.
+

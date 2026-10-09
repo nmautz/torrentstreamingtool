@@ -28257,6 +28257,21 @@ async function _lpLoadIndex(seekTo) {
           httpCode: code, url,
         });
       }
+      // A 410 in on-demand mode is not a transient network drop — the session
+      // is gone and the server could not remake it from its URL. Retrying the
+      // same dead URL never recovers, so re-prepare instead (switches to the
+      // full bundle if it's ready now, else a fresh OD session). See
+      // _lpReloadOnDemand. BEFORE the fatal test: hls.js does not go fatal on
+      // the first one. It moves on to the next fragment, so by the time the
+      // session is back the loader is ahead of the playhead and the element
+      // sits at a position nothing is buffered for (measured 2026-10-05:
+      // seg 0-3 answered 410, seg 4 loaded, `buffered 24.0-29.9` at t=0).
+      if (_lpIsOdSessionGone(data)) {
+        _npLog("od-session-gone", { details: data.details || "", fatal: !!data.fatal,
+                                    url: url.split("/").pop() }, "play");
+        _lpReloadOnDemand(data.details || "410");
+        return;
+      }
       if (!data.fatal) { _lpNoteHlsWarn(hls, data); return; }
       // Fatal NETWORK_ERROR = the connection dropped (tunnel, Wi-Fi↔LTE swap,
       // host briefly unreachable). hls.js stops loading but the <video> keeps
@@ -28265,14 +28280,6 @@ async function _lpLoadIndex(seekTo) {
       // marks recovery. A real 404 (bad bundle) also lands here, but hls.js
       // only goes fatal after its own retries, and our loop backs off to a
       // slow poll — harmless, and the console.error above still diagnoses it.
-      // A 410 in on-demand mode is not a transient network drop — the server
-      // reaped the session. Retrying the same dead URL never recovers, so
-      // re-prepare instead (switches to the full bundle if it's ready now, else
-      // a fresh OD session). See _lpReloadOnDemand.
-      if (_lpIsOdSessionGone(data)) {
-        _lpReloadOnDemand(data.details || "410");
-        return;
-      }
       if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
         _lpNetLost();
         return;
@@ -33254,6 +33261,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.18.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.18.1</div>
 </body>
 </html>
