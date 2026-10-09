@@ -26,6 +26,10 @@ Host only; the app does not need rebuilding.
 stamp on all 19 requests of a resume into the film and loads picture and sound from
 the same place.
 
+**Checked on the box (2026-10-09, 20.18.2):** Project Hail Mary's prep answers with
+a stamp (`6ac88ee2`), its playlists are marked to be checked every time, and a
+request carrying the stamp is served as before.
+
 **Not checked:** the phone. Subtitles and the Chromecast are asked for without the
 stamp; neither was seen to go stale.
 
