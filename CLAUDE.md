@@ -241,6 +241,23 @@ has to say what was actually checked on a box and on a phone, in the user's word
 from evidence in this session, not a guess. Pushing a branch and publishing an app
 source are outward-facing: confirm with the user before `--go`.
 
+### Issues follow the channels
+
+An issue is not done when its fix is pushed: `alpha` is not what other people run.
+An open issue carries a label saying how far its fix has travelled.
+
+- **Fix pushed to `alpha`:** put `Closes #N` in the commit message and add the
+  `in-alpha` label (`gh issue edit N --add-label in-alpha`). Leave the issue open.
+- **Promoted to `beta`:** for each `in-alpha` issue whose fix is in the promoted
+  build, swap the label (`--remove-label in-alpha --add-label in-beta`). A fix from a
+  later alpha build stays `in-alpha`.
+- **Promoted to `main`:** GitHub closes every issue a `Closes #N` commit names when
+  `main` moves. Close by hand any labelled issue whose commit lacked the line.
+
+`in-alpha` / `in-beta` mean the fix has shipped to that channel, nothing more. Work
+that shipped but was never checked on a box or a device still gets its own `verify`
+issue. `gh issue list --label in-alpha` is what the next promotion will close.
+
 If a change makes the app stop working with older servers, raise `MIN_SERVER` in
 `ios-app/www/index.html` in the same patch. See docs/GOTCHAS.md § Release channels.
 
