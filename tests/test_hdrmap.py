@@ -75,7 +75,7 @@ eq("SDR, no filters -> nothing", hm.mode(SDR, False), "")
 
 # ── the filter chain ─────────────────────────────────────────────────────────
 c = hm.chain(PQ, hm.TONEMAP)
-ok("tonemap chain maps", "tonemap=tonemap=hable" in c and "zscale=t=linear" in c, c)
+ok("tonemap chain maps", "tonemap=tonemap=mobius" in c and "zscale=t=linear:npl=100" in c, c)
 ok("tonemap chain ends 8-bit 4:2:0", "format=yuv420p,sidedata=mode=delete" in c, c)
 ok("tonemap chain states its input", c.startswith(
     "setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,"), c)

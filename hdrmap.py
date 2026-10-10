@@ -83,7 +83,11 @@ def chain(video: Optional[dict], how: str, scale_h: int = 0) -> str:
             "zscale=t=linear:npl=100",
             "format=gbrpf32le",
             "zscale=p=bt709",
-            "tonemap=tonemap=hable:desat=0",
+            # mobius, not hable: hable pulls the whole picture down to make room
+            # for highlights (an SDR white lands near 55% video level), mobius
+            # leaves everything under its knee where it was and only compresses
+            # above it. Measured against an SDR grade of the same clip.
+            "tonemap=tonemap=mobius:desat=0",
             "zscale=t=bt709:m=bt709:r=tv",
             "format=yuv420p",
         ]

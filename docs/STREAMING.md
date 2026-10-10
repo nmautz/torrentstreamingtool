@@ -655,12 +655,20 @@ A bundle is 8-bit H.264, so an HDR10 or HLG source has to become SDR on the way 
 
 | Mode | When | `-filter:v` (`hdrmap.chain`) |
 |---|---|---|
-| `tonemap` | this ffmpeg lists `zscale` and `tonemap` (`_has_tonemap`, probed once) | `[scale,] setparams` (state the input) `, zscale=t=linear, format=gbrpf32le, zscale=p=bt709, tonemap=hable, zscale=t=bt709:m=bt709:r=tv, format=yuv420p, sidedata=mode=delete` |
+| `tonemap` | this ffmpeg lists `zscale` and `tonemap` (`_has_tonemap`, probed once) | `[scale,] setparams` (state the input) `, zscale=t=linear, format=gbrpf32le, zscale=p=bt709, tonemap=mobius, zscale=t=bt709:m=bt709:r=tv, format=yuv420p, sidedata=mode=delete` |
 | `retag` | it does not, or the tone-map encode failed | `[scale,] setparams` (BT.709) `, sidedata=mode=delete`: the picture stays flat, the header stops claiming HDR |
 
 Both add `-color_primaries / -color_trc / -colorspace bt709` per output
 (`hdrmap.out_tags`). What follows from the choice:
 
+- **The curve is `mobius` (20.18.6), not `hable`.** Hable darkens the whole picture to
+  keep highlight detail; mobius leaves everything under its knee alone and compresses
+  only what is above. On Jellyfin's 4K HDR10 test clip, average luma (8-bit, ffmpeg
+  9.0.2 on a Mac) was 84.5 with hable and 99.5 with mobius, against 107.6 for
+  Jellyfin's own SDR encode of the same clip. `npl` runs the other way from what its
+  name suggests: a LOWER value is brighter (hable at 50 gave 95.9, at 200 gave 72.2),
+  and below 100 it can push highlights past the peak the curve works to and clip them
+  (from reading ffmpeg's tonemap, not measured). Leave it at 100.
 - **No rung is stream-copied and the all-GPU path is never taken.** The filters run on
   the CPU (`scale_cuda` cannot tone-map), so decode may still be NVDEC and the encode
   NVENC, with the mapping between them on the CPU.

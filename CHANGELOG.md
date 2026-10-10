@@ -1,5 +1,23 @@
 # Changelog
 
+## [20.18.6] — 2026-10-09
+### A tone-mapped HDR film is no longer dimmer than an SDR copy
+
+Prep tone-mapped HDR sources with the `hable` curve, which darkens the whole picture
+to keep highlight detail. On a known-good HDR10 source the colours were right but the
+picture was plainly dimmer than an SDR encode of the same clip. Prep now uses
+`mobius`, which leaves ordinary brightness where it was and compresses only the
+highlights.
+
+Measured with ffmpeg 9.0.2 on a Mac, on Jellyfin's 4K HEVC HDR10 test clip (average
+luma, 8-bit): SDR reference 107.6, `hable` 84.5, `mobius` 99.5.
+
+**Films prepped before this version are unchanged.** Delete the prep of an HDR film
+and prep it again to get the brighter picture.
+
+Not checked: the new picture by eye on a phone or TV, a full-length film, dark
+scenes, and the box's own ffmpeg (8.1.1). (Issue #55.)
+
 ## [20.18.5] — 2026-10-09
 ### `make test` runs the release-language tests; dead code removed
 

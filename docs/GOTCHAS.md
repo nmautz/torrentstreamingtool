@@ -7240,6 +7240,17 @@ producing a bundle without them. Check the next HDR film that is cast.
 - **Not covered:** on-demand (JIT) streaming, Clip and compression. The JIT path has to
   beat real time and a 4K tone-map on the CPU does not.
 
+**The tone-map curve decides the brightness, and `npl` runs backwards (20.18.6).**
+`hable` made a correct-coloured but dim picture: it lowers everything to make room for
+highlights. `mobius` keeps ordinary brightness and compresses only the top. Do not
+"brighten" by changing `zscale`'s `npl`: a lower value is brighter, a higher one
+darker, and below 100 highlights can overshoot the peak the curve works to and clip
+(from reading ffmpeg's tonemap, not measured). The
+numbers are in [STREAMING.md](STREAMING.md) § HDR sources. To judge a change, use
+Jellyfin's HDR10 test clips (repo.jellyfin.org/test-videos), which come with an SDR
+encode of the same picture. Netflix Open Content's "HDR" mp4s are 8-bit H.264 with no
+colour signalling, so prep treats them as SDR and they test nothing.
+
 ## A rung with one keyframe per segment freezes a TV that switches onto it (20.13.2)
 
 A Chromecast showed a still picture for several seconds with the sound carrying on,
