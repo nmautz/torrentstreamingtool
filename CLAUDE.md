@@ -122,6 +122,7 @@ make test                 # pure unit tests for the leaf modules (no deps, no ve
                           #   python tests/test_retry_candidates.py
                           #   python tests/test_watchpurge.py
                           #   python tests/test_delete_locked.py
+                          #   python tests/test_prep_gate.py
                           #   python tests/test_storage_volumes.py
                           #   python tests/test_devactivity.py
                           #   python tests/test_bookmarks.py

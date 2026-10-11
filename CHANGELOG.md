@@ -1,5 +1,21 @@
 # Changelog
 
+## [20.18.7] — 2026-10-11
+### Automatic prep no longer retries an episode that was never downloaded
+
+In a season pack where one episode had been fetched, a skipped episode could still
+be on disk as an empty file. Automatic prep tried it every five minutes and aborted
+each time with "Source is unreadable": 44 times for South Park S06E04, 27 for S05E03.
+Nothing was damaged, the abort comes before any encode.
+
+- A file qBittorrent has not fetched is no longer queued for prep, even when the
+  torrent as a whole reads 100 % (qBittorrent counts only the selected files).
+- A source ffprobe cannot open is left alone for 15 minutes after the first abort,
+  doubling up to six hours, until the file changes. Pressing Prep still tries at once.
+
+Tests: `tests/test_prep_gate.py`. Not checked: why qBittorrent creates that one
+skipped file.
+
 ## [20.18.6] — 2026-10-09
 ### A tone-mapped HDR film is no longer dimmer than an SDR copy
 

@@ -2326,6 +2326,13 @@ So an unlucky 30-second overlap between the encode and the last piece produces a
 
 Gate on qBit's **per-file `progress`**, never on the filesystem: `_incomplete_download_paths` at enqueue time (`_enqueue_library_prep`) and `_src_still_downloading` immediately before the encode (`_run_offline_job`, so play-driven / interactive / admin jobs are covered too). Both fail *closed* — if the item is downloading and qBit can't confirm, everything is treated as incomplete. Existing damage does not self-heal: delete the bundle and re-prep.
 
+**A torrent at 100 % can still hold a file that was never fetched (20.18.7).** qBit's torrent-level `progress` counts only the SELECTED files, so a pack with one episode picked reads 1.0. The completeness check used to stop there, on the grounds that a skipped file "isn't on disk at all". It can be: *South Park S05E03* and *S06E04* each sat on disk full-length and all zeros in a pack where one other episode had been fetched (why qBit created just that one file is not known; both packs had just been through a download race). ffprobe failed on the zeros (`0x00 at pos 0 … EBML header parsing failed`), the job aborted with `Source is unreadable`, and auto-prep queued it again every five minutes: 44 aborts for one file, 27 for the other. Nothing was corrupted, because the abort comes before any encode. Two rules came out of it:
+
+- The whole-torrent short-circuit in `_incomplete_download_paths` only holds when nothing is deselected (`_torrent_fully_selected`: qBit's `size` == `total_size`). A partial selection is asked per file, where a skipped file reads `< 1.0`. A skipped file that had finished before it was skipped still reads 1.0 and is prepped.
+- An unreadable-source abort is remembered (`_PREP_UNREADABLE`) and automatic prep backs off from that file, 15 minutes doubling to six hours, until its `mtime:size` changes. Before this, a failed ffprobe left no mark at all; only a damaged *bundle* did (`bundle_check.unbuildable`).
+
+Tests: `tests/test_prep_gate.py`.
+
 ### Bundles live BESIDE the media now (v8) — resolve via `_offline_cache_dir`, never `OFFLINE_CACHE / key`
 
 As of `OFFLINE_CACHE_VERSION = "v8-colocated"` each bundle lives in

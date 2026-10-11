@@ -2927,8 +2927,11 @@ Two gates, because prep has more than one entry point:
 
 - **`_enqueue_library_prep`** calls `_incomplete_download_paths(item)` per item —
   qBit's **per-file** `progress < 1.0` — and skips those paths, so auto-prep
-  never queues them in the first place. An item that isn't `status="downloading"`
-  costs no qBit call.
+  never queues them in the first place. A settled item on a finished torrent
+  with **every file selected** costs no extra qBit call. A partial selection is
+  always asked file by file: the torrent reads 100 % (qBit counts only what is
+  selected) while a skipped file can still be on disk, full-length and empty
+  (20.18.7, `_torrent_fully_selected`).
 - **`_run_offline_job`** re-checks with `_src_still_downloading(src)` immediately
   before the encode, so play-driven (`play_prep`), interactive and admin
   force-prep jobs can't slip one past either. A job that hits this gate parks as
@@ -2937,6 +2940,13 @@ Two gates, because prep has more than one entry point:
 
 Both err towards *not* encoding: if the item is downloading and qBit can't
 confirm the files (torrent gone, qBit down), every file is treated as incomplete.
+
+**A source ffprobe cannot open at all** (`Source is unreadable`) aborts its job
+in under a second. Automatic prep then leaves that file alone for 15 minutes,
+doubling per abort up to six hours (`_prep_unreadable_note` /
+`_prep_unreadable_wait`, 20.18.7). The record is keyed on the file's `mtime:size`
+signature, so a re-download or repair is tried at once. It is per process and
+not persisted, and an explicit Prep press is never held back.
 
 **`progress == 1.0` is not the finish line.** qBit flips a file's per-file
 progress the moment its last piece *verifies*, then flushes to disk

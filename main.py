@@ -33745,7 +33745,12 @@ async def _run_offline_job(job_id: str) -> None:
                 len(info.get("audios") or []), len(info.get("subtitles") or []),
                 duration,
             )
+            if unreadable:
+                wait = _prep_unreadable_note(src)
+                hls_log.info("job %s: automatic prep will not retry this file for "
+                             "%d min unless it changes", job_id, int(wait // 60))
             return
+        _PREP_UNREADABLE.pop(_norm_path(str(src)), None)
 
         # Validate-and-repair-on-prep (settings.prep_validate). Bulk jobs only —
         # interactive play-on-device preps never validate so playback isn't
@@ -34673,15 +34678,67 @@ async def _incomplete_download_paths(item: dict, *,
     # Whole-torrent short-circuit, so the common case (a settled item on a
     # finished torrent) costs nothing beyond the info we already have. qBit's
     # `progress` counts only what is SELECTED, so it reaches 1.0 on a partial
-    # selection too — which is right here: a skipped file isn't on disk at all,
-    # so prep never reaches it (`p.exists()` fails first).
-    if not downloading and float(info.get("progress") or 0.0) >= 1.0:
+    # selection too. That used to be trusted on the grounds that a skipped file
+    # "isn't on disk at all". It can be: South Park S05E03 and S06E04 each sat
+    # on disk full-length and all zeros in a pack where one other episode had
+    # been fetched, and auto-prep tried each every five minutes. So the
+    # short-circuit only holds when nothing is deselected; a partial selection
+    # is asked file by file below, where a skipped file reads < 1.0.
+    if (not downloading and float(info.get("progress") or 0.0) >= 1.0
+            and _torrent_fully_selected(info)):
         return set()
     save_path = info.get("save_path", settings.qbit_download_path)
     qfiles = await qbit_files(h)
     if not qfiles:
         return all_paths if downloading else set()
     return await asyncio.to_thread(_incomplete_paths_sync, qfiles, save_path)
+
+
+def _torrent_fully_selected(info: dict) -> bool:
+    """True when every file of the torrent is selected for download. qBit's
+    `size` is the selected bytes and `total_size` all of them; either missing
+    reads as "not known to be whole", never as permission to skip the check."""
+    try:
+        size, total = int(info.get("size") or 0), int(info.get("total_size") or 0)
+    except (TypeError, ValueError):
+        return False
+    return total > 0 and size >= total
+
+
+# ── Unreadable sources ───────────────────────────────────────────────────────
+# A source ffprobe cannot open at all aborts its prep job in under a second and
+# leaves no mark, so the auto-prep timer used to queue it again on every sweep,
+# for as long as the file stayed that way. Each abort is remembered here against
+# the file's signature and automatic prep waits longer after each one. Per
+# process, never persisted: a restart tries once more, which is cheap. A changed
+# file (re-download, repair) has a new signature and is tried at once. Gates
+# AUTOMATIC prep only, like `_bundle_unbuildable`.
+_PREP_UNREADABLE: dict[str, dict] = {}
+PREP_UNREADABLE_FIRST_WAIT = 15 * 60
+PREP_UNREADABLE_MAX_WAIT   = 6 * 3600
+
+
+def _prep_unreadable_note(src) -> float:
+    """Record that ffprobe found nothing in `src`. Returns the wait in seconds."""
+    key, sig = _norm_path(str(src)), _file_sig(str(src))
+    rec = _PREP_UNREADABLE.get(key)
+    n = (rec["n"] + 1) if (rec and rec.get("sig") == sig) else 1
+    wait = min(PREP_UNREADABLE_MAX_WAIT, PREP_UNREADABLE_FIRST_WAIT * (2 ** (n - 1)))
+    _PREP_UNREADABLE[key] = {"sig": sig, "n": n, "until": time.monotonic() + wait}
+    return float(wait)
+
+
+def _prep_unreadable_wait(src) -> bool:
+    """True while automatic prep should leave `src` alone after an unreadable
+    abort. A file that changed since is never held back."""
+    key = _norm_path(str(src))
+    rec = _PREP_UNREADABLE.get(key)
+    if not rec:
+        return False
+    if rec.get("sig") != _file_sig(str(src)):
+        _PREP_UNREADABLE.pop(key, None)
+        return False
+    return time.monotonic() < rec["until"]
 
 
 async def _torrent_info_map() -> "Optional[dict]":
@@ -34788,6 +34845,9 @@ async def _enqueue_library_prep() -> int:
             # forever. The verdict is pinned to the file's signature, so a
             # re-download or a repair retires it and this resumes on its own.
             if _bundle_unbuildable(f, _offline_cache_key(p)):
+                continue
+            # ffprobe could not open it last time. Wait before asking again.
+            if _prep_unreadable_wait(p):
                 continue
             prio = _PREP_PRIO_NUM.get(_effective_prep_priority(prep_cfg, f.get("path", "")), 1)
             st = await _maybe_start_prep_job(p, item.get("id", ""), prep_prio=prio)
