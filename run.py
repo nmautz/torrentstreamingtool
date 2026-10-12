@@ -605,6 +605,13 @@ def start_flaresolverr() -> bool:
     child_env["HOST"] = fs_host
     child_env["PORT"] = str(fs_port)
     child_env.setdefault("LOG_LEVEL", "info")
+    # FlareSolverr writes its own log there (3.4.6 has the setting; older builds ignore it).
+    if not child_env.get("LOG_FILE"):
+        try:
+            import diagnostics as _diag
+            child_env["LOG_FILE"] = _diag.child_log(HERE / "logs", "flaresolverr")
+        except Exception:
+            pass
     launch_bg([fs_bin], env=child_env)
     return wait_for_port(fs_port, 30.0, "FlareSolverr", fs_host)
 

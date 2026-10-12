@@ -38,6 +38,8 @@ HARD = 75.0     # the request to Jackett itself (FlareSolverr's own cap is 55 s)
 ADMIN = 120.0   # Test (and saving a tracker with a login): Jackett searches first
 WINDOW = 6      # answers remembered per indexer
 SLOW_PARALLEL = 3   # searches a slow indexer runs at once (each is a browser)
+WARM_AFTER = 90.0   # after start, before the warm-up Test (the services settle)
+WARM_GIVE_UP = 600.0    # Jackett not answering by then: no warm-up this run
 
 
 class Pace:
@@ -82,13 +84,48 @@ def more_wait(elapsed, quick_pending, slow_pending, quick_done_at, have_results,
     return max(0.0, limit - elapsed)
 
 
-def failure_text(exc):
+def failure_text(exc, limit=HARD):
     """A reason a person can read. A timeout's own message is the empty string,
-    which is how a failing indexer came to be listed with no reason at all."""
+    which is how a failing indexer came to be listed with no reason at all.
+    `limit` is how long the caller waited (`ADMIN` for a Test)."""
     name = type(exc).__name__
     if "Timeout" in name:
-        return "no answer from Jackett in %d s" % HARD
+        return "no answer from Jackett in %d s" % limit
     return (str(exc) or name)[:200]
+
+
+def timed_out(text):
+    """Did Jackett give up waiting, as opposed to being told no?
+
+    Jackett gives FlareSolverr 55 s to solve a Cloudflare check and its own
+    request 5 s more. The first check after a restart can run past that and the
+    next one passes (box, 2026-10-11: no answer in 60 s, then 48 s, then 13 s),
+    so a Test that timed out is worth one more try. A refusal ("Cloudflare has
+    blocked this request", an SSL error, a 404) is not: it would refuse again.
+    """
+    t = str(text or "").lower()
+    if "httpclient.timeout" in t:
+        return True
+    return "flaresolverr" in t and ("timeout" in t or "timed out" in t)
+
+
+def twice(text):
+    """The reason shown for a Test that timed out on both tries."""
+    return ("Timed out twice. %s" % str(text or "").strip())[:300]
+
+
+def merge_row(health, row):
+    """`health` with the row for `row["id"]` replaced by `row`, keeping the name
+    the list already shows. None when the list has no such row: one Test is not
+    a health list, and a list of one would read as "1 of 1 indexers"."""
+    out, found = [], False
+    for h in health or []:
+        if h.get("id") == row.get("id"):
+            out.append(dict(row, name=h.get("name") or row.get("name") or row.get("id")))
+            found = True
+        else:
+            out.append(h)
+    return out if found else None
 
 
 def jackett_error(text):

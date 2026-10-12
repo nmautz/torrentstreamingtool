@@ -63,6 +63,44 @@ ok("report names the blocking function", "_culprit_blocking_call" in diag.state.
 ok("report shows the blocking line", "time.sleep" in diag.state.last_block,
    diag.state.last_block)
 
+# ── a request that waits on Jackett by design is not "stuck" ─────────────────
+# 2026-10-11: a Test-all waiting on a Cloudflare check wrote a CRITICAL stall
+# dump for a server that was idle.
+diag.state.inflight.clear()
+_now = time.monotonic()
+diag.state.inflight[1] = (_now - 80, "POST /api/admin/indexers/test-all")
+diag.state.inflight[2] = (_now - 70, "POST /api/admin/indexers/1337x/test")
+age, label = diag.oldest_inflight()
+ok("a Test in flight for 80 s is not the oldest request", (age, label) == (0.0, ""), repr((age, label)))
+diag.state.inflight[3] = (_now - 40, "GET /api/library")
+age, label = diag.oldest_inflight()
+ok("an ordinary request beside it still is", label == "GET /api/library" and age >= 40, repr((age, label)))
+diag.state.inflight[4] = (_now - diag.PATIENT_S - 5, "POST /api/admin/indexers/test-all")
+age, label = diag.oldest_inflight()
+ok("a Test past its allowance is stuck like any other",
+   label.endswith("/test-all") and age >= diag.PATIENT_S, repr((age, label)))
+diag.state.inflight.clear()
+diag.state.inflight[5] = (_now - 80, "POST /api/admin/indexers/1337x/config")
+ok("saving an indexer gets no allowance", diag.oldest_inflight()[1].endswith("/config"))
+diag.state.inflight.clear()
+
+# ── child_log: a helper process's own log ────────────────────────────────────
+import tempfile                                      # noqa: E402
+from pathlib import Path                             # noqa: E402
+with tempfile.TemporaryDirectory() as _d:
+    got = diag.child_log(Path(_d) / "logs", "flaresolverr")
+    ok("the log is logs/<name>.log", got == str(Path(_d) / "logs" / "flaresolverr.log"), got)
+    ok("the folder is made", (Path(_d) / "logs").is_dir())
+    Path(got).write_bytes(b"x" * 50)
+    diag.child_log(Path(_d) / "logs", "flaresolverr", cap=100)
+    ok("a small log is left alone", Path(got).stat().st_size == 50)
+    diag.child_log(Path(_d) / "logs", "flaresolverr", cap=10)
+    ok("a big one is rolled to .1", not Path(got).exists()
+       and Path(got + ".1").stat().st_size == 50)
+    Path(got).write_bytes(b"y" * 60)
+    diag.child_log(Path(_d) / "logs", "flaresolverr", cap=10)
+    ok("rolling again replaces the old .1", Path(got + ".1").stat().st_size == 60)
+
 
 print("%d passed, %d failed" % (_PASS, len(_FAIL)))
 for f in _FAIL:

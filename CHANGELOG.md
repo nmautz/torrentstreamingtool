@@ -1,5 +1,39 @@
 # Changelog
 
+## [20.19.0] — 2026-10-11
+### An indexer is not called failing over one slow Cloudflare check
+
+1337x showed as failing on the box. It was working. The box had rebooted at 13:31 and
+nothing searched after that, so a Test all at 18:25 was the first thing to use
+FlareSolverr. 1337x's Cloudflare check got no answer in the 60 seconds Jackett allows.
+Tested alone a few minutes later it passed in 48 seconds, then 13, and eight searches
+in a row returned results in 13 to 19 seconds.
+
+- **A Test that times out is tried once more** before the indexer is listed as failing.
+  A row that needed the second try says so. An indexer that refuses (blocked, a
+  certificate error) is still failing on the first try.
+- **One Test pass runs by itself 90 seconds after the server starts**, so the slow first
+  check after a restart is not somebody's search. It also means the Indexer Health list
+  is filled when you open it, and search knows from the start which indexers are slow.
+- **A single Test now updates its own row.** Before, a Test that passed said "Indexer
+  responding" and left the row reading "Failing" until the next search or Test all.
+- **FlareSolverr keeps a log**, `logs/flaresolverr.log`, listed with the other server
+  logs. Why those first two checks were slow is not known: its output was thrown away.
+  The next slow one will be on record. Needs FlareSolverr 3.4.6 or later and starts at
+  the next reboot.
+- A Test all that is waiting on Jackett no longer writes a "CRITICAL stall dump" into
+  the log. It did on the box, for a server that was idle.
+- A Test that ran out of our own time said "no answer in 75 s"; it waits 120.
+
+**Not changed:** Jackett's 55 second limit for FlareSolverr. Jackett sends FlareSolverr
+one request at a time (EZTV waited 60 seconds behind 1337x in that Test all), so a
+longer limit would make every other Cloudflare indexer wait longer behind a slow one.
+
+**Not checked:** none of this has run on the box. The retry and the warm-up were tested
+against a replay of what Jackett answered that afternoon, not against Jackett. That the
+first check after a restart is the slow one rests on this one reboot. Whether the box's
+FlareSolverr is new enough to write the log is not known until it restarts.
+
 ## [20.18.7] — 2026-10-11
 ### Automatic prep no longer retries an episode that was never downloaded
 

@@ -372,7 +372,7 @@
           <h2 class="text-sm font-black uppercase tracking-wide">Indexer Health<span class="help-tip" tabindex="0" data-tip="Statuses come from the last user search and from the Test buttons. A failing indexer never breaks search — its results are just missing. Users only see an error when every indexer fails at once.">?</span></h2>
           <p class="text-xs text-gray-500 mt-0.5">Whether each indexer is responding. Search keeps working as long as at least one is healthy.</p>
         </div>
-        <button onclick="testAllIndexers(this)" data-tip="Probes every configured indexer through Jackett right now — slow or Cloudflare-protected ones can take ~10 s each."
+        <button onclick="testAllIndexers(this)" data-tip="Probes every configured indexer through Jackett right now. One behind Cloudflare usually takes 10 to 20 seconds and can take a minute; a test that times out is tried once more."
           class="text-xs text-indigo-400 hover:text-indigo-300 uppercase tracking-wide font-bold transition-colors border border-indigo-800 hover:border-indigo-600 px-3 py-1.5 flex-shrink-0">
           Test All
         </button>
@@ -6293,6 +6293,9 @@ function _renderIndexerHealth(d){
                : h.pending ? `<span class="text-amber-400">Still searching${took ? ` · last answer took ${took}` : ""}</span>`
                : h.slow ? `<span class="text-amber-400">Responding slowly${took ? ` · ${took}` : ""}</span><span class="text-gray-600"> · its results arrive after the others</span>`
                : `<span class="text-emerald-400">Responding</span>`;
+    // Its first Test timed out and the second passed: the first Cloudflare check
+    // after a restart can run past the 60 s Jackett allows.
+    const again = (ok && h.retried) ? `<span class="text-gray-600"> · passed on the second try</span>` : "";
     const err = (!ok && h.error) ? `<div class="text-xs text-red-400/80 mt-0.5 truncate" title="${escHtml(h.error)}">${escHtml(h.error)}</div>` : "";
     return `
     <div class="flex items-center justify-between px-5 py-3 gap-3" id="ixh-${escHtml(h.id)}">
@@ -6300,7 +6303,7 @@ function _renderIndexerHealth(d){
         <span class="w-2 h-2 mt-1.5 flex-shrink-0 ${dot}"></span>
         <div class="min-w-0">
           <div class="text-sm font-bold text-gray-200 truncate">${escHtml(h.name||h.id)}</div>
-          <div class="text-xs text-gray-500 mt-0.5">${stat}</div>
+          <div class="text-xs text-gray-500 mt-0.5">${stat}${again}</div>
           ${err}
         </div>
       </div>
@@ -6350,7 +6353,8 @@ async function testOneIndexer(id, btn){
   }
   if(!r.ok){ showToast("Test failed — could not reach Jackett.", true); return; }
   const res = await r.json();
-  showToast(res.ok ? "Indexer responding." : `Failing: ${res.error||"unknown error"}`, !res.ok);
+  showToast(res.ok ? (res.retried ? "Indexer responding (on the second try)." : "Indexer responding.")
+                   : `Failing: ${res.error||"unknown error"}`, !res.ok);
   loadIndexerHealth();
 }
 

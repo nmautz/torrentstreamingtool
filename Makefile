@@ -24,6 +24,7 @@ test:
 	python3 tests/test_gpugate.py
 	python3 tests/test_hdrmap.py
 	python3 tests/test_ixwait.py
+	python3 tests/test_indexer_tests.py
 	python3 tests/test_race_rescue.py
 	python3 tests/test_od_revive.py
 	python3 tests/test_reaper.py

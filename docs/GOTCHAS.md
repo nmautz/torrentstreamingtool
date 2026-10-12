@@ -1742,13 +1742,35 @@ Three things to keep:
 
 **Survey, 2026-10-08** (25 public indexers added to the box's Jackett one at a time, searched once, removed): quick — limetorrents, knaben, torrentdownloads, torrentdownload, torrentscsv, magnetz, animetosho-xyz, subsplease, aniRena, nekobt, bangumi-moe, shanaproject; 15-21 s behind Cloudflare — kickasstorrents-to, extratorrent-st, magnetdownload, uindex, btdirectory, damagnet, torrentkitty, tokyotosho; not working — kickasstorrents-ws (0 results, no error), torrentproject2 (TLS handshake EOF), filemood, magnetcat ("FlareSolverr was unable to process"), showrss (an RSS feed, nothing for a keyword). So 1337x is the usual case for a Cloudflare site, not an outlier. Adding an indexer is instant (~0.05 s); only Test and search pay for the challenge. limetorrents, torrentdownloads, torrentdownload, magnetz, magnetdownload, damagnet, aniRena and shanaproject return **no magnet**, only Jackett's `/dl/` link (see § Link-style results); those links were not followed in the survey.
 
-Which indexers are slow is learned per process (`ixwait.Pace`: any answer over 6 s in the last six). After a restart nothing is known, so the first search waits the old 12 s once.
+Which indexers are slow is learned per process (`ixwait.Pace`: any answer over 6 s in the last six). After a restart nothing is known; since 20.19.0 the warm-up below teaches it, so only a search in the first minutes after a start waits the old 12 s.
+
+### The first Cloudflare check after a start can outlast Jackett (20.19.0)
+
+"1337x is failing again." It was not. Measured on the box, 2026-10-11, after a reboot at 13:31 that nothing searched after:
+
+| | 1337x |
+|---|---|
+| 18:25 Test all, the first thing to use FlareSolverr since the reboot | no answer in 60 s: **Failing** |
+| 18:29 Test, alone | 48.1 s |
+| 18:30 Test, alone | 12.8 s |
+| eight uncached searches | 13.3 - 19.0 s, all with results |
+
+Things to keep:
+
+1. **Jackett gives FlareSolverr 55 s and its own request 5 s more** (`flaresolverr_maxtimeout` in Jackett's server config, plus 5 s inside FlareSolverrSharp). Past that it reports `…HttpClient.Timeout of 60 seconds elapsing`, never FlareSolverr's own "Timeout after 55.0 seconds", because it hangs up before that answer is sent. `ixwait.timed_out` recognises both.
+2. **Jackett sends FlareSolverr one request at a time.** EZTV's Test in that same Test all took 82.7 s: 60 s queued behind 1337x, then 22.7 s of its own. So two cold Cloudflare indexers cost the sum, not the larger, and raising Jackett's limit makes every other Cloudflare indexer wait longer behind a slow one. That is why the limit was left alone.
+3. **A Test that timed out is tried once more** (`_test_one_indexer`); a refusal (blocked, SSL, 404) is not. Both tries timing out reads "Timed out twice."
+4. **One Test pass runs in the background 90 s after a start** (`indexer_warmup`), so the slow first check is nobody's search. Skipped when a search or a Test got there first; it waits for Jackett and, when installed, FlareSolverr, and gives up after ten minutes.
+5. **The health list is a memory, not a probe.** Nothing re-tests a failing row: it stays red until the next search or Test. A single Test did not even update its own row before 20.19.0, so a passing Test left "Failing" on screen.
+6. **Why those first two checks were slow is not known.** FlareSolverr's output went to `DEVNULL` and its port is loopback only, so no log on the box recorded it; "the first check after a start is slow" rests on this one reboot. Since 20.19.0 FlareSolverr keeps its own log (`logs/flaresolverr.log`, see below): read it before changing any of the above.
 
 ### FlareSolverr must be wired into Jackett by hand — there's no API for it
 
 StreamLink can install + launch FlareSolverr (`/api/admin/components/install {component:"flaresolverr"}` → `_spawn_flaresolverr`) and report its status, but **Jackett's "FlareSolverr API URL" setting has no supported way to be written from outside** (it can be *read*: `GET /api/v2.0/server/config` → `flaresolverrurl`, which is what `jackett_uses` on the card shows since 20.17.0) — it lives in Jackett's `ServerConfig.json` / dashboard config and only the Jackett UI writes it cleanly. So the admin **must** paste the URL into Jackett's *Configure Jackett* dialog manually; the Indexers-tab card is deliberate about saying so (Copy button + Open-Jackett link). Don't try to "automate" it by poking Jackett's config file — it'll be clobbered and the format isn't stable.
 
-FlareSolverr binds via the **`HOST`/`PORT` environment variables**, not CLI flags — both `run.py`'s `start_flaresolverr()` and `main.py`'s `_spawn_flaresolverr()` set them from `FLARESOLVERR_URL` (loopback hostnames normalised to `127.0.0.1`). It is **not** watchdog-supervised (only VLC/qBit/Jackett are) and **not** VPN-gated (matches Jackett — only qBit is killed on a VPN drop). If it dies, the Start button (`POST /api/admin/flaresolverr/start`) relaunches it; otherwise it comes back on the next `run.py` startup.
+FlareSolverr binds via the **`HOST`/`PORT` environment variables**, not CLI flags — both `run.py`'s `start_flaresolverr()` and `main.py`'s `_spawn_flaresolverr()` set them from `FLARESOLVERR_URL` (loopback hostnames normalised to `127.0.0.1`). It **is** watchdog-supervised when installed (see [DAEMON_WATCHDOG.md § FlareSolverr specifics](DAEMON_WATCHDOG.md)) and **not** VPN-gated (matches Jackett — only qBit is killed on a VPN drop). The Start button (`POST /api/admin/flaresolverr/start`) launches it by hand.
+
+**Its log is its own (20.19.0).** All three launch sites (`run.py`, `watchdog.py`, `_spawn_flaresolverr`) set `LOG_FILE` to `logs/flaresolverr.log`, which FlareSolverr opens and appends to itself. Its stdout is still discarded: a handle inherited from us is not an append handle on Windows, so clearing the logs would leave the file full of NULs up to where FlareSolverr had got to. `LOG_FILE` exists in FlareSolverr 3.4.6 and later (3.4.0 and the pinned fallback 3.3.21 ignore it, silently: no log, nothing breaks). A running FlareSolverr keeps the environment it was started with, so the log appears after the next reboot, not after an update that leaves it running. `diagnostics.child_log` rolls the file to `.1` past 5 MB, at launch only: that is the one moment nothing holds it, and Windows will not rename a file a live process has open. The log includes each request's URL, so search terms are in it, as they already are in `access.log`.
 
 ## Library
 

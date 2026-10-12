@@ -45,7 +45,7 @@ if _VENV_PY.exists() and Path(sys.prefix).resolve() != VENV.resolve():
 
 ### `start_flaresolverr()`
 - **Optional, no-op if not installed.** Only launches when `_FLARESOLVERR_BIN` is set (installed via the admin Indexers tab / Optional Components) and the file exists. Otherwise returns silently — most setups never use it.
-- Parses host/port from `FLARESOLVERR_URL` (default `http://localhost:8191`); loopback hostnames are normalised to `127.0.0.1`. If the port is already open, reports "already running" and returns. Otherwise `launch_bg([fs_bin], env=…)` with `HOST`/`PORT`/`LOG_LEVEL` env vars (the knobs FlareSolverr reads) and waits up to 30 s for the port. `launch_bg` gained an optional `env=` param for this.
+- Parses host/port from `FLARESOLVERR_URL` (default `http://localhost:8191`); loopback hostnames are normalised to `127.0.0.1`. If the port is already open, reports "already running" and returns. Otherwise `launch_bg([fs_bin], env=…)` with `HOST`/`PORT`/`LOG_LEVEL`/`LOG_FILE` env vars (the knobs FlareSolverr reads; `LOG_FILE` = `logs/flaresolverr.log` since 20.19.0, via `diagnostics.child_log`) and waits up to 30 s for the port. `launch_bg` gained an optional `env=` param for this.
 - Used by Jackett to solve Cloudflare / DDoS-Guard challenges. **Not VPN-gated** (same as Jackett — only qBit is). The admin still has to paste the API URL into Jackett by hand; see [ADMIN.md § FlareSolverr](ADMIN.md).
 
 ### `check_mullvad()`

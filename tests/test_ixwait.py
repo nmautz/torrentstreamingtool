@@ -99,7 +99,52 @@ eq("None stays empty", iw.jackett_error(None), "")
 eq("a plain message is kept", iw.jackett_error("Challenge detected"), "Challenge detected")
 ok("capped", len(iw.jackett_error("x" * 900)) == 300)
 
+eq("a Test's timeout names the Test's own limit",
+   iw.failure_text(ReadTimeout(), iw.ADMIN), "no answer from Jackett in 120 s")
+
+# ── timed_out: what the box's Jackett said on 2026-10-11 ──────────────────────
+# Test-all, five hours after a reboot, the first thing to use FlareSolverr.
+BOX = """Exception (1337x): Exception: System.Threading.Tasks.TaskCanceledException: The request was canceled due to the configured HttpClient.Timeout of 60 seconds elapsing.
+ ---> System.TimeoutException: The operation was canceled.
+ ---> System.Threading.Tasks.TaskCanceledException: The operation was canceled.
+ ---> System.IO.IOException: Unable to read data from the transport connection: The I/O operation has been aborted because of either a thread exit or an application request..
+   at System.Net.Http.HttpConnection.SendAsync(HttpRequestMessage request, Boolean async, CancellationToken cancellationToken)
+   at FlareSolverrSharp.Solvers.FlareSolverr.<>c__DisplayClass12_0.<<SendFlareSolverrRequest>b__0>d.MoveNext()"""
+ok("Jackett giving up on FlareSolverr is a timeout", iw.timed_out(BOX))
+ok("so is its first line alone", iw.timed_out(BOX.splitlines()[0]))
+ok("and the one-line form the health list shows", iw.timed_out(iw.jackett_error(BOX)))
+ok("FlareSolverr's own timeout is one too", iw.timed_out(
+    "FlareSolverr was unable to process the request, please check FlareSolverr logs. "
+    "Message: Error: Error solving the challenge. Timeout after 55.0 seconds."))
+ok("a refusal is not", not iw.timed_out(
+    "FlareSolverr was unable to process the request, please check FlareSolverr logs. "
+    "Message: Error: Error solving the challenge. Cloudflare has blocked this request. "
+    "Probably your IP is banned for this site, check in your web browser."))
+ok("a missing solver is not", not iw.timed_out(
+    "Challenge detected but FlareSolverr is not configured"))
+ok("an SSL failure is not", not iw.timed_out(TRACE))
+ok("nothing is not", not iw.timed_out("") and not iw.timed_out(None))
+
+got = iw.twice(iw.jackett_error(BOX))
+ok("twice says so first", got.startswith("Timed out twice. "), got)
+ok("twice keeps Jackett's reason", "HttpClient.Timeout of 60 seconds" in got, got)
+ok("twice is capped", len(iw.twice("x" * 900)) == 300)
+
+# ── merge_row: one Test updates one row ───────────────────────────────────────
+LIST = [{"id": "1337x", "name": "1337x", "ok": False, "error": "timed out", "results": 0},
+        {"id": "yts", "name": "YTS", "ok": True, "error": "", "results": 40}]
+got = iw.merge_row(LIST, {"id": "1337x", "name": "1337x", "ok": True, "error": "", "secs": 12.8})
+eq("a passing Test clears the failing row", [h["ok"] for h in got], [True, True])
+eq("the other row is untouched", got[1], LIST[1])
+eq("the list itself is not changed", LIST[0]["ok"], False)
+got = iw.merge_row(LIST, {"id": "yts", "name": "yts", "ok": False, "error": "HTTP 500"})
+eq("the row keeps the name the list shows", got[1]["name"], "YTS")
+eq("a failing Test marks its row", got[1]["ok"], False)
+eq("no such row: nothing to update", iw.merge_row(LIST, {"id": "eztv", "ok": True}), None)
+eq("no list: nothing to update", iw.merge_row([], {"id": "eztv", "ok": True}), None)
+
 ok("constants are ordered", iw.GRACE < iw.SLOW < iw.SOFT < iw.HARD <= iw.ADMIN)
+ok("the warm-up waits for the services, then gives up", 0 < iw.WARM_AFTER < iw.WARM_GIVE_UP)
 
 print("ixwait: %d passed, %d failed" % (_PASS, len(_FAIL)))
 for f in _FAIL:

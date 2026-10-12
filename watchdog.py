@@ -809,6 +809,14 @@ def _build_specs() -> tuple[list[ServiceSpec], ServiceSpec]:
         fs_env["HOST"] = fs_host
         fs_env["PORT"] = str(fs_port)
         fs_env.setdefault("LOG_LEVEL", "info")
+        # FlareSolverr writes its own log there (3.4.6 has the setting; older builds ignore it).
+        # Why a Cloudflare check ran long is in no other log on the box.
+        if not fs_env.get("LOG_FILE"):
+            try:
+                import diagnostics as _diag
+                fs_env["LOG_FILE"] = _diag.child_log(Path(__file__).parent / "logs", "flaresolverr")
+            except Exception:
+                pass
 
         plain_specs.append(ServiceSpec(
             name="FlareSolverr",

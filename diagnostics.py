@@ -78,6 +78,13 @@ VITALS_INTERVAL_S     = 30.0    # how often to sample
 THREADPOOL_WARN_FRAC  = 0.85    # default executor this saturated ⇒ to_thread calls are queuing
 STALL_DUMP_COOLDOWN_S = 300.0   # min gap between stack dumps, so a long outage writes a few not thousands
 LOOP_BLOCK_SAMPLE_S   = 2.0     # loop heartbeat this stale ⇒ start sampling the loop thread's stack
+CHILD_LOG_CAP         = 5 * 1024 * 1024   # a helper process's own log is rolled past this
+# Requests that wait on Jackett by design: a Test sits behind a Cloudflare check
+# (60 s a try, tried twice, and Jackett runs them one at a time). Not "stuck"
+# until they have had this long. On 2026-10-11 a Test-all that was simply
+# waiting wrote a CRITICAL stall dump for a server that was idle.
+PATIENT_S             = 300.0
+_PATIENT_PREFIX       = "POST /api/admin/indexers/"
 LOOP_BLOCK_POLL_S     = 0.25    # sampling interval while it is blocked
 LOOP_BLOCK_ONGOING_S  = 15.0    # still blocked this long ⇒ log what it is doing NOW, in case it never returns
 
@@ -367,13 +374,38 @@ def note_request_end(req_id: int, status: int) -> None:
         log.warning("SLOW REQUEST %.1fs status=%s %s", dur, status, label)
 
 
+def _is_patient(label: str) -> bool:
+    return label.startswith(_PATIENT_PREFIX) and (
+        label.endswith("/test") or label.endswith("/test-all"))
+
+
 def oldest_inflight() -> tuple[float, str]:
-    """Age and label of the longest-running in-flight request."""
-    if not state.inflight:
-        return 0.0, ""
+    """Age and label of the longest-running in-flight request. A request that
+    waits on Jackett by design is not counted until it is past `PATIENT_S`."""
     now = time.monotonic()
-    started, label = min(state.inflight.values(), key=lambda v: v[0])
+    live = [(started, label) for started, label in state.inflight.values()
+            if not (_is_patient(label) and now - started < PATIENT_S)]
+    if not live:
+        return 0.0, ""
+    started, label = min(live, key=lambda v: v[0])
     return now - started, label
+
+
+def child_log(log_dir: Path, name: str, cap: int = CHILD_LOG_CAP) -> str:
+    """Where a helper process we launch keeps its own log (`logs/<name>.log`).
+
+    Call it just before the launch: that is the one moment nothing holds the
+    file, and on Windows a file a live process has open cannot be renamed. Over
+    `cap` it is rolled to `<name>.log.1`. Never raises; a log that can't be
+    rolled keeps growing until the next update archives it."""
+    path = Path(log_dir) / (name + ".log")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.stat().st_size > cap:
+            os.replace(path, path.with_name(path.name + ".1"))
+    except OSError:
+        pass
+    return str(path)
 
 
 # ── Lock instrumentation ─────────────────────────────────────────────────────

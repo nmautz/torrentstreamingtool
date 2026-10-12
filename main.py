@@ -14898,6 +14898,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     dvbackfill  = asyncio.create_task(video_probe_backfill())
     animefill   = asyncio.create_task(anime_map_backfill())
     _spawn_bg(episode_group_backfill())
+    # One Test pass once the services are up, so the slow first Cloudflare check
+    # after a start is nobody's search. See `indexer_warmup`.
+    _spawn_bg(indexer_warmup())
     vlc_tracker = asyncio.create_task(vlc_progress_tracker())
     bg_loop     = asyncio.create_task(background_video_loop())
     jackett_mon = asyncio.create_task(jackett_health_monitor())
@@ -27746,6 +27749,9 @@ def _spawn_flaresolverr() -> bool:
     env["HOST"] = host
     env["PORT"] = str(parts.port or 8191)
     env.setdefault("LOG_LEVEL", "info")
+    # FlareSolverr writes its own log there (3.4.6 has the setting; older builds ignore it).
+    if not env.get("LOG_FILE"):
+        env["LOG_FILE"] = diag.child_log(LOG_DIR, "flaresolverr")
     kw: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "env": env}
     if os.name == "nt":
         kw["creationflags"] = (subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
@@ -27819,24 +27825,126 @@ async def admin_flaresolverr_start(request: Request) -> JSONResponse:
 
 
 async def _test_one_indexer(c, indexer_id: str) -> dict:
-    """POST Jackett's per-indexer test endpoint; normalise to {id, ok, error}."""
-    try:
-        r = await c.post(f"{settings.indexer_url}/api/v2.0/indexers/{indexer_id}/test")
-        if r.status_code < 300:
-            return {"id": indexer_id, "ok": True, "error": ""}
-        # Jackett returns the failure reason in the body on a non-2xx.
+    """POST Jackett's per-indexer test endpoint; normalise to
+    {id, ok, error, secs, retried}.
+
+    A Test that timed out is tried once more before the indexer is called
+    failing: the first Cloudflare check after a restart can run past the 60 s
+    Jackett allows, and the next one passes (see `ixwait.timed_out`). Our own
+    wait running out (`ixwait.ADMIN`) is not retried."""
+    err, secs, retried = "", 0.0, False
+    for attempt in (1, 2):
+        raw = ""
+        t0 = time.monotonic()
         try:
-            err = ixwait.jackett_error((r.json() or {}).get("error")) or f"HTTP {r.status_code}"
-        except Exception:
-            err = (r.text or f"HTTP {r.status_code}")[:300]
-        return {"id": indexer_id, "ok": False, "error": err}
+            r = await c.post(f"{settings.indexer_url}/api/v2.0/indexers/{indexer_id}/test")
+            if r.status_code < 300:
+                err = ""
+            else:
+                # Jackett returns the failure reason in the body on a non-2xx.
+                try:
+                    raw = str((r.json() or {}).get("error") or "")
+                    err = ixwait.jackett_error(raw) or f"HTTP {r.status_code}"
+                except Exception:
+                    raw = r.text or ""
+                    err = (raw or f"HTTP {r.status_code}")[:300]
+        except Exception as e:
+            err = ixwait.failure_text(e, ixwait.ADMIN)
+        secs = round(time.monotonic() - t0, 1)
+        _IX_PACE.note(indexer_id, secs)
+        if not err or attempt == 2 or not ixwait.timed_out(raw):
+            if err and attempt == 2 and ixwait.timed_out(raw):
+                err = ixwait.twice(err)
+            break
+        retried = True
+        log.info("Indexer test: %s timed out after %.0f s, trying once more.", indexer_id, secs)
+    return {"id": indexer_id, "ok": not err, "error": err, "secs": secs, "retried": retried}
+
+
+def _test_health_row(res: dict, name: str) -> dict:
+    """A Test result as a row of the health list."""
+    row = {"id": res["id"], "name": name or res["id"], "ok": res["ok"],
+           "error": res["error"], "results": 0}
+    if "secs" in res:
+        row["secs"] = res["secs"]
+    if res.get("retried"):
+        row["retried"] = True
+    if res["ok"] and _IX_PACE.is_slow(res["id"]):
+        row["slow"] = True
+    return row
+
+
+async def _run_indexer_tests() -> list:
+    """Test every configured indexer through Jackett and make the result the
+    health list (+ the degraded flag). Raises when Jackett can't be reached."""
+    async with _jackett_admin(ixwait.ADMIN) as c:
+        lr = await c.get(
+            f"{settings.indexer_url}/api/v2.0/indexers",
+            params={"configured": "true"},
+        )
+        configured = lr.json() if lr.status_code == 200 else []
+        results = await asyncio.gather(*[
+            _test_one_indexer(c, ix.get("id", "")) for ix in configured if ix.get("id")
+        ])
+
+    by_id = {r["id"]: r for r in results}
+    health = []
+    for ix in configured:
+        ixid = ix.get("id", "")
+        res = by_id.get(ixid, {"id": ixid, "ok": False, "error": "not tested"})
+        health.append(_test_health_row(res, ix.get("name", ixid)))
+
+    await _apply_indexer_health(health)
+    return health
+
+
+async def indexer_warmup() -> None:
+    """Pay for the first Cloudflare check after a start before a person does.
+
+    On the box, 2026-10-11, the first thing to use FlareSolverr after a reboot
+    was a Test five hours later: 1337x got no answer in the 60 s Jackett allows
+    and was listed as failing, the next try took 48 s, and every one after it
+    13-19 s. So one Test pass runs in the background once the services are up.
+    It also fills the health list and teaches `_IX_PACE` which indexers are
+    slow, so the first search no longer waits 12 s to find that out.
+
+    Skipped when a search or a Test got there first. Never raises."""
+    try:
+        await asyncio.sleep(ixwait.WARM_AFTER)
+        deadline = time.monotonic() + ixwait.WARM_GIVE_UP
+        while True:
+            if state.indexer_health:
+                return
+            try:
+                # FlareSolverr installed but not up yet: its indexers would fail
+                # for a reason that is about to go away.
+                if state.jackett_ok and (not _flaresolverr_bin_path()
+                                         or await _flaresolverr_running()):
+                    health = await _run_indexer_tests()
+                    break
+            except Exception as e:
+                log.info("Indexer warm-up: Jackett not ready (%s).",
+                         ixwait.failure_text(e, ixwait.ADMIN))
+            if time.monotonic() >= deadline:
+                log.info("Indexer warm-up: skipped, Jackett did not answer in time.")
+                return
+            await asyncio.sleep(30)
+        bad = [h["id"] for h in health if not h["ok"]]
+        took = ", ".join("%s %.0f s" % (h["id"], h.get("secs") or 0)
+                         for h in health if (h.get("secs") or 0) >= ixwait.SLOW)
+        log.info("Indexer warm-up: %d of %d responding%s%s.", len(health) - len(bad), len(health),
+                 ("; slow: " + took) if took else "",
+                 ("; failing: " + ", ".join(bad)) if bad else "")
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
-        return {"id": indexer_id, "ok": False, "error": ixwait.failure_text(e)}
+        log.warning("Indexer warm-up failed: %s", e)
 
 
 @app.post("/api/admin/indexers/{indexer_id}/test")
 async def admin_test_indexer(indexer_id: str, request: Request) -> JSONResponse:
-    """Actively test a single configured indexer through Jackett."""
+    """Actively test a single configured indexer through Jackett. Its row in the
+    health list takes the result: a Test that passes clears "Failing"."""
     _require_admin(request)
     try:
         async with _jackett_admin(ixwait.ADMIN) as c:
@@ -27844,7 +27952,10 @@ async def admin_test_indexer(indexer_id: str, request: Request) -> JSONResponse:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(502, f"Could not reach Jackett: {e}")
+        raise HTTPException(502, f"Could not reach Jackett: {ixwait.failure_text(e, ixwait.ADMIN)}")
+    merged = ixwait.merge_row(state.indexer_health, _test_health_row(res, indexer_id))
+    if merged is not None:
+        await _apply_indexer_health(merged)
     return JSONResponse(res)
 
 
@@ -27854,34 +27965,11 @@ async def admin_test_all_indexers(request: Request) -> JSONResponse:
     snapshot (+ the degraded flag) from the live results."""
     _require_admin(request)
     try:
-        async with _jackett_admin(ixwait.ADMIN) as c:
-            lr = await c.get(
-                f"{settings.indexer_url}/api/v2.0/indexers",
-                params={"configured": "true"},
-            )
-            configured = lr.json() if lr.status_code == 200 else []
-            results = await asyncio.gather(*[
-                _test_one_indexer(c, ix.get("id", "")) for ix in configured if ix.get("id")
-            ])
+        health = await _run_indexer_tests()
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(502, f"Could not reach Jackett: {e}")
-
-    by_id = {r["id"]: r for r in results}
-    health = []
-    for ix in configured:
-        ixid = ix.get("id", "")
-        res = by_id.get(ixid, {"ok": False, "error": "not tested"})
-        health.append({
-            "id": ixid,
-            "name": ix.get("name", ixid) or ixid,
-            "ok": res["ok"],
-            "error": res["error"],
-            "results": 0,
-        })
-
-    await _apply_indexer_health(health)
+        raise HTTPException(502, f"Could not reach Jackett: {ixwait.failure_text(e, ixwait.ADMIN)}")
 
     return JSONResponse({
         "degraded": state.indexers_degraded,

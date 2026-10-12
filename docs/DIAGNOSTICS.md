@@ -648,6 +648,7 @@ Logs** (and included in "Download All").
 | `stall_<ts>.txt` | `dump_stalled_state` | Full asyncio task + thread stack dump at the moment of a stall. |
 | `faulthandler.log` | `faulthandler` | Native-level stack if the interpreter dies hard (segfault in a C extension). |
 | `streamlink_app.log` | `streamlink` logger | App log. Anomalies escalate here at WARNING. |
+| `flaresolverr.log` | FlareSolverr itself (`LOG_FILE`, 20.19.0) | Every Cloudflare check: the request, "Challenge detected", "Challenge solved!", "Response in N s", or the error. **Read it when an indexer behind Cloudflare is slow or failing**; no other log says why. Rolled to `.1` past 5 MB when FlareSolverr is launched (`diagnostics.child_log`). Absent when FlareSolverr is not installed, is older than 3.4.6, or has not been restarted since 20.19.0. |
 
 > **One file, one handler.** `access.log` is owned exclusively by uvicorn's
 > dictConfig, and `uvicorn.error` deliberately writes to `uvicorn.log` rather
@@ -688,6 +689,7 @@ up in the file an operator opens first. Thresholds (all in `diagnostics.py`):
 | `LOCK_HELD_WARN_S` | 5.0 s | Library lock held this long ⇒ every waiter is stuck |
 | `REQUEST_SLOW_S` | 5.0 s | Individual request logged as `SLOW REQUEST` |
 | `REQUEST_STUCK_S` | 30 s | In-flight this long ⇒ anomaly |
+| `PATIENT_S` | 300 s | The same, for the two indexer Test routes (`POST /api/admin/indexers/{id}/test`, `…/test-all`). They wait on Jackett by design: a Cloudflare check is 60 s a try, tried twice, one at a time. On 2026-10-11 a Test all that was simply waiting wrote a CRITICAL stall dump for an idle server. `SLOW REQUEST` still logs them |
 | `THREADPOOL_WARN_FRAC` | 0.85 | Pool this full **and** work queued ⇒ saturated |
 | `STALL_DUMP_COOLDOWN_S` | 300 s | Minimum gap between stack dumps |
 
