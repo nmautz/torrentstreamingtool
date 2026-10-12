@@ -17877,8 +17877,17 @@ function _ssSourceTier(res, season, episode){
   if(v<0 && !_ssYearConfirms(res, season)) return -1;
   return (v>0 || _ssYearConfirms(res, season) || _ssCountryConfirms(res)) ? 1 : 0;
 }
+// Order of one episode's sources: tier, then language, then seeders. The
+// language step (20.19.1): for a show made in English a "Dual" copy carries a
+// foreign dub (see _richness), and inside its tier it goes behind the plain
+// copies. Without that it led the list whenever it was one of the few releases
+// to state the episode's name, and the top row is what Play now takes. Never
+// across tiers: a plain copy that confirms nothing may be another show.
 function _ssSortSources(list, season, episode){
+  const oe=_ssOrigEnglish();
+  const dub=s=>_richness(s,oe)<0?1:0;
   return list.sort((a,b)=>(_ssSourceTier(b,season,episode)-_ssSourceTier(a,season,episode))
+                          || (dub(a)-dub(b))
                           || ((b.seeders||0)-(a.seeders||0)));
 }
 
@@ -33303,6 +33312,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.19.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.19.1</div>
 </body>
 </html>

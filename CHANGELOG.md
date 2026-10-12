@@ -1,5 +1,32 @@
 # Changelog
 
+## [20.19.1] — 2026-10-11
+### An English show's source list no longer opens on a foreign-dubbed copy
+
+On Avatar: Seven Havens, the list behind an episode's row had an English + Italian
+"Dual" copy at the top, above a plain copy with ten times the seeders.
+
+20.18.3 taught Get to put such a copy behind the plain ones for a title made in
+English. The list of an episode's sources is ordered separately and did not have the
+rule. It puts releases that state the episode's name first, then sorts by seeders, and
+on S01E01 the dual copy was the better seeded of the two releases that did.
+
+- For a show TMDb lists as made in English, a "Dual" or foreign-language copy now sorts
+  behind the plain copies with the same standing in the list.
+- Play now takes the top row of that list, so it no longer starts the dubbed copy
+  either. The row's own badge follows.
+- Anime and other titles not made in English are listed as before, and so is anything
+  TMDb does not know.
+
+A dual copy still leads when it is the only release whose name confirms it is this
+version of the show. A plain copy that confirms nothing can be another show.
+
+Checked: the old and the new page in headless Chrome against the box's live results.
+Seven Havens S01E01 to E03 open on the plain copy where they opened on the dual one.
+Frieren and Jujutsu Kaisen (four episodes, English audio preferred) are identical
+before and after: the dual copy is still the top row, the headline and the automatic
+pick. Not checked: on the box, which was not updated, or by hand in the app.
+
 ## [20.19.0] — 2026-10-11
 ### An indexer is not called failing over one slow Cloudflare check
 

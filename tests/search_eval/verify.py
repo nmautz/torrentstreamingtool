@@ -125,7 +125,11 @@ def run(case):
         shown = [x for g in d.get("groups", []) for x in g.get("results", [])
                  if x.get("kind") == "episode" and x.get("season") == s and x.get("episode") == e and accept(m, x, s)]
         if shown:
-            shown.sort(key=lambda x: (-tier(m, x, s, e), -(x.get("seeders") or 0)))
+            # _ssSortSources: tier, then a foreign-dub copy of an English show
+            # behind the plain ones, then seeders.
+            dub = lambda x: int(m.get("original_language") == "en"
+                                and x.get("audio") in ("dual", "other"))
+            shown.sort(key=lambda x: (-tier(m, x, s, e), dub(x), -(x.get("seeders") or 0)))
             return {"case": case, "query": q, "shown": shown, "country": m.get("origin_country"),
                     "labels": [label.get(x["title"]) for x in shown]}
     return {"case": case, "query": None, "shown": [], "country": m.get("origin_country"), "labels": []}
