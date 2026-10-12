@@ -16699,6 +16699,21 @@ def _remember_show_labels(lib: dict, item: dict) -> None:
             _file_label(it, f)
 
 
+def _prepped_paths_sync(files: list[dict]) -> set[str]:
+    """Paths among `files` that have a finished bundle on disk. The same test as
+    `_peek_prep_state` (a `master.m3u8` in the bundle dir), and it finds a
+    source-evicted file's bundle too. Stats the disk: call it off the loop."""
+    out: set[str] = set()
+    for f in files:
+        try:
+            d = _bundle_dir_for_file(f)
+            if d is not None and (d / "master.m3u8").exists():
+                out.add(f.get("path", ""))
+        except OSError:
+            pass
+    return out
+
+
 async def _build_item_files(item: dict, profile_id: str) -> list[dict]:
     """Build the per-file payload (progress + live download/prep state) for one
     library item. Shared by the single-item `/files` endpoint and the merged
@@ -16739,6 +16754,7 @@ async def _build_item_files(item: dict, profile_id: str) -> list[dict]:
                 qbase[Path(name).name] = prog   # best-effort; collisions rare (SxxExx names)
 
     prep_cfg = _prep_cfg(item)
+    prepped = await asyncio.to_thread(_prepped_paths_sync, item.get("files") or [])
     out = []
     for f in item.get("files", []):
         path = f.get("path", "")
@@ -16843,6 +16859,10 @@ async def _build_item_files(item: dict, profile_id: str) -> list[dict]:
             # fingerprinting. The UI badges it so that trade is never a surprise.
             # See docs/STREAMING.md § Source eviction.
             "source_evicted": _file_evicted(f),
+            # A finished stream-prep bundle is on disk for this file. With
+            # `complete` it tells the episode page whether the show has any prep
+            # left to do, which is when its prep controls are worth showing.
+            "prepped": path in prepped,
         })
     return out
 

@@ -3072,7 +3072,10 @@ schedule. `item["prep"]["files"][path] ∈ {now, idle, never}` (read via `_prep_
   design (explicit "prep everything" override).
 
 The mode surfaces as `prep_mode` in the `/files` response so the bar can highlight
-the active segment. See [LIBRARY_DATA.md § `prep`](LIBRARY_DATA.md) and
+the active segment. The bar only offers these rows while the show has something
+left to download or prep (20.20.0; `prepped` on `/files`, `_epPrepWorkLeft` in the
+page): on a finished show `now` has nothing to start and `never` keeps the bundle,
+so neither changes anything. See [LIBRARY_DATA.md § `prep`](LIBRARY_DATA.md) and
 [FRONTEND.md](FRONTEND.md) (`epSchedPrep`, `_epPrepBtn`).
 
 #### Recheck file hashes (`POST /recheck`)

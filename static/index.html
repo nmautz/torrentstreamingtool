@@ -12688,13 +12688,14 @@ function epFindSeason(season){
 }
 
 // Compact per-episode priority row for the multi-episode card: DOWNLOAD order while
-// the file is still fetching, STREAM-PREP queue order once it's on disk. Hidden when
-// neither applies (nothing to prioritise). Mid is the default tier for both.
+// the file is still fetching, STREAM-PREP queue order once it's on disk and until
+// its bundle is built. Hidden when neither applies (nothing to prioritise). Mid is
+// the default tier for both.
 function _epCardPrioRow(f, _p, notDownloaded){
   const dl = (notDownloaded && epHasTorrent)
     ? `<span class="font-black text-gray-600 uppercase tracking-widest" title="Download order within the torrent — High fetches first.">DL</span>${_prioSeg(f.dl_priority||"mid",`epDlPrioFile(${_p},'%V%',this)`)}`
     : "";
-  const prep = (!notDownloaded && hlsAvailable && !epOndemandOnly)
+  const prep = (!notDownloaded && hlsAvailable && !epOndemandOnly && _epFilePrepLeft(f))
     ? `<span class="font-black text-gray-600 uppercase tracking-widest" title="Stream-prep queue order — High preps ahead of other auto-prep.">PREP</span>${_prioSeg(f.prep_priority||"mid",`epPrepPrioFile(${_p},'%V%',this)`)}`
     : "";
   if(!dl && !prep) return "";
@@ -12726,6 +12727,25 @@ function _visibleSeasonPaths(){ return _visibleSeasonFiles().map(f=>f.path); }
 function _visibleSeasonPrepMode(){
   const modes=new Set(_visibleSeasonFiles().map(f=>f.prep_mode||"idle"));
   return modes.size===1?[...modes][0]:"";
+}
+// Is there still prep to do for this file? Not downloaded yet (and not skipped)
+// counts: it will be prepped once it lands. Unknown counts as work left, so a
+// control is never hidden on a guess.
+function _epFilePrepLeft(f){
+  if(f.complete===false) return f.mode!=="skip";
+  const st=prepFileState.get(offKey(f.item_id||epItemId, f.path));
+  if(st==="prepping") return true;
+  if(st==="ready" || f.source_evicted) return false;
+  return f.prepped!==true;
+}
+// Does the open show still have anything to download or prep? The scheduling bar
+// only offers its stream-prep rows while it does: on a show that is all on disk
+// and all prepped they change nothing ("Never" keeps a built bundle, "Now" has
+// nothing to start). Judged over the whole show, not the visible season, like the
+// download rows.
+function _epPrepWorkLeft(){
+  if(epOndemandOnly) return false;            // an on-demand-only show is never prepped
+  return epFiles.some(_epFilePrepLeft);
 }
 // Set the download schedule (now/idle/skip) for the visible season's files.
 async function epSchedSeason(mode, btn){
@@ -13006,9 +13026,10 @@ function _epMoviePanel(f){
       ${_prioSeg(f.dl_priority||"mid",`epDlPrioFile(${_p},'%V%',this)`)}
     </div>`;
   }
-  // Per-episode stream-prep priority (queue order) for a downloaded file.
+  // Per-episode stream-prep priority (queue order) for a downloaded file that
+  // is not prepped yet.
   let prepPrioHtml="";
-  if(hlsAvailable && !notDownloaded && !epOndemandOnly){
+  if(hlsAvailable && !notDownloaded && !epOndemandOnly && _epFilePrepLeft(f)){
     prepPrioHtml = `<div class="flex items-center gap-1.5 flex-wrap mt-1" title="Stream-prep queue order — High preps ahead of other auto-prep. Default: Mid (series default).">
       <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest mr-0.5">Prep Prio:${helpTip("\"Prep\" converts a title so your phone/tablet/computer can play it directly (and download it for offline). This sets which titles get prepped first when several are queued.")}</span>
       ${_prioSeg(f.prep_priority||"mid",`epPrepPrioFile(${_p},'%V%',this)`)}
@@ -13335,7 +13356,8 @@ function renderEpList(){
   // torrent-backed item, with or without TMDb metadata. Three sub-sections:
   //   • Download (Now/Idle/Skip) — hidden once every episode is on disk (scheduling
   //     what to download is moot then).
-  //   • Stream-prep (Now/Idle/Never) — the HLS-prep sibling; hidden on macOS (no HLS).
+  //   • Stream-prep (Now/Idle/Never) — the HLS-prep sibling; hidden on macOS (no HLS),
+  //     and once the show has nothing left to download or prep (_epPrepWorkLeft).
   //   • Recheck — force a piece-hash verify of the checked episodes.
   // Not on TV: download/prep scheduling is host management, done from a phone.
   if(epHasTorrent && !TV_MODE && !SIMPLE && visibleFiles.length){
@@ -13363,8 +13385,9 @@ function renderEpList(){
         ${_prioSeg(_visibleSeasonDlPrio(),"epDlPrioSeason('%V%',this)")}
       </div>`;
     }
-    // Stream-prep row (only when HLS is available on this host).
-    if(hlsAvailable){
+    // Stream-prep rows (only when HLS is available on this host, and only while
+    // the show still has something to download or prep).
+    if(hlsAvailable && _epPrepWorkLeft()){
       rows += `<div class="flex items-center gap-1.5 flex-wrap">
         <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest mr-0.5">PREP · ${escHtml(scope)}:</span>
         ${_epPrepBtn("now",`${ic("bolt")} Now`,"text-emerald-300 hover:bg-emerald-950/40",prepCur)}
@@ -33312,6 +33335,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.19.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.20.0</div>
 </body>
 </html>

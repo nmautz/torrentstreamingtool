@@ -1,5 +1,37 @@
 # Changelog
 
+## [20.20.0] — 2026-10-11
+### A finished show no longer offers prep controls
+
+A show's page carried three rows of stream-prep controls (Prep Now / Idle / Never,
+Prep Prio, Series default) for as long as the show was in the library. On a show that
+is fully downloaded and fully prepped none of them does anything: there is nothing for
+"Now" to start, and "Never" keeps a bundle that is already built.
+
+- Those rows now appear only while the show has something left to download or prep:
+  an episode still downloading or waiting for the idle window, an episode on disk with
+  no prepped copy yet, or a prep that is running.
+- Recheck Hashes stays where it was.
+- An episode set to "Never" that has not been prepped still counts as something left,
+  so the rows stay and the choice can be undone.
+- A skipped episode does not count. Nothing is fetching it, so nothing will prep it.
+- Each episode's own Prep low / mid / high follows the same rule and goes once that
+  episode is prepped.
+- A show set to On-Demand Only is never prepped, so it does not get the rows either.
+
+The server now says for each file whether its prepped copy exists (`prepped` on
+`/files` and on a merged show's list). That needs the restart that comes with the
+update: after a files-only update, a show held as several downloads keeps the rows,
+because the page cannot tell what is prepped.
+
+Checked: the new page in headless Chrome against the box's live data. Regular Show and
+Mike Tyson Mysteries (all prepped) show Recheck Hashes alone. With one episode marked
+unprepped, prepping, downloading or idle-deferred in the page, the rows come back;
+skipped, source-evicted and On-Demand Only leave them hidden. The server's new field
+was checked on a temporary folder and, for the page, by filling it in from the box's
+own prep status. Not checked: on the box, which runs 20.18.7 and was not updated, or
+in the app.
+
 ## [20.19.1] — 2026-10-11
 ### An English show's source list no longer opens on a foreign-dubbed copy
 
