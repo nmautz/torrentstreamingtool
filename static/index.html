@@ -7835,6 +7835,31 @@ function _libNewSeasonChip(row){
     class="text-[10px] px-1.5 py-0.5 bg-emerald-950 text-emerald-300 border border-emerald-800 hover:bg-emerald-800 hover:text-white uppercase tracking-wide transition-colors flex items-center gap-1">
     ${ic("down")} ${escHtml(label)}</button>`;
 }
+// The library tile's air-date chip (20.21.0), in the bookmark badge's colours so
+// the two read as one thing: rose "New · S29E03" for an episode that has aired
+// and this profile has not watched, else an amber countdown to the next one.
+// One chip, and New wins: the countdown comes back once the episode is watched.
+// The server decides both (`air` on the coverage row, see _air_row in main.py);
+// `days` is counted there, from its own clock.
+function _libAirChip(row){
+  const a=row&&row.air;
+  if(!a) return "";
+  const code=e=>e.season>0?`S${pad2(e.season)}E${pad2(e.episode)}`:"Special";
+  const cls="text-[10px] px-1.5 py-0.5 font-black uppercase tracking-wide whitespace-nowrap";
+  if(a.new){
+    const tip=a.new.held?"A new episode you haven't watched yet":"A new episode has aired - it isn't downloaded yet";
+    return `<span class="${cls} bg-rose-600 text-white" title="${tip}">New · ${code(a.new)}</span>`;
+  }
+  const n=a.next;
+  if(!n) return "";
+  const d=+n.days||0;
+  const when=d<=0?"today":d===1?"tomorrow":`in ${d} days`;
+  const what=n.what==="premiere"?"Premieres":n.what==="season"?`Season ${n.season}`:code(n);
+  return `<span class="${cls} bg-amber-500/90 text-black" title="Airs ${escHtml(n.date||"")}">${escHtml(what)} ${when}</span>`;
+}
+// Everything the coverage row puts on a library tile.
+function _libCovChips(row){ return _libAirChip(row)+_libNewSeasonChip(row); }
+
 function libGetSeason(seriesKey, season){
   const row=_covForSeries(seriesKey);
   if(!row||!row.tmdb_id){ showAlert("No metadata for this show - can't search for it.","warn"); return; }
@@ -7913,7 +7938,7 @@ function _libShowTileHtml(seriesTitle, gItems){
   const badges=(anyDownloading
     ?`<span class="text-[10px] px-1.5 py-0.5 bg-yellow-900/50 text-yellow-400 border border-yellow-800 blink">↓ Downloading</span>`
     :anyError?`<span class="text-[10px] px-1.5 py-0.5 bg-red-900/50 text-red-400 border border-red-800">Error</span>`:"")
-    +_libNewSeasonChip(_covForSeries(key));
+    +_libCovChips(_covForSeries(key));
   const kAttr=escHtml(key), tAttr=escHtml(title);
   return `<div class="mb-6"><div class="space-y-2">
     <div class="bg-gray-900 border border-gray-800 border-l-4 ${accent} p-3">
@@ -8271,8 +8296,9 @@ function _libItemChrome(item){
   const borderAccent=isDownloading?"border-l-yellow-600":isError?"border-l-red-600":"border-l-indigo-800";
   const tileOpen=(isReady||isDownloading);
   // A show downloaded as one season pack is a single item, so it never reaches
-  // _libShowTileHtml - it still deserves to be told a later season exists.
-  const newSeasonChip=_libNewSeasonChip(_covForSeries(item.series_key));
+  // _libShowTileHtml - it still deserves to be told a later season exists
+  // (and when its next episode airs).
+  const newSeasonChip=_libCovChips(_covForSeries(item.series_key));
 
   return {isDownloading,isError,isReady,isMulti,hasProgress,pct,allDone,epPrefix,
     statusBadge,skipBadge,partialBadge,compressedBadge,greenBadge,newSeasonChip,buttons,iconBtns,progBar,
@@ -8392,7 +8418,7 @@ function _libShowCardHtml(seriesTitle, gItems){
   const badges=(anyDownloading
     ?`<span class="text-[10px] px-1.5 py-0.5 bg-yellow-900/50 text-yellow-400 border border-yellow-800 blink">↓ Downloading</span>`
     :anyError?`<span class="text-[10px] px-1.5 py-0.5 bg-red-900/50 text-red-400 border border-red-800">Error</span>`:"")
-    +_libNewSeasonChip(_covForSeries(key));
+    +_libCovChips(_covForSeries(key));
   const kAttr=escHtml(key), tAttr=escHtml(title);
   return `<div class="lib-cardv" data-item-id="${gItems[0].id}">
     <div class="lib-cardv-poster lib-show-open" data-series-key="${kAttr}" data-title="${tAttr}" role="button" tabindex="0" title="View episodes">
@@ -33335,6 +33361,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.20.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.21.0</div>
 </body>
 </html>

@@ -14926,6 +14926,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     evict_loop      = asyncio.create_task(source_eviction_loop())
     devact_loop     = asyncio.create_task(device_activity_loop())
     bookmark_loop   = asyncio.create_task(bookmark_release_loop())
+    air_loop        = asyncio.create_task(library_air_loop())
     # Finish any delete a restart interrupted, and clear qBit `.parts` files whose
     # torrent is long gone. See "The reaper".
     _reap_kick()
@@ -14970,7 +14971,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     for t in (guard, broadcaster, dl_monitor, dvbackfill, animefill, vlc_tracker, bg_loop,
               jackett_mon, reboot_loop, autoprep_loop, update_loop, dlsched_loop,
               sysmon_loop, cachepurge_loop, subupgrade_loop, od_reaper_loop,
-              maint_loop, evict_loop, devact_loop, bookmark_loop, tmdbkeep_loop, shotscan_task, tvui_task, rvol_guard,
+              maint_loop, evict_loop, devact_loop, bookmark_loop, air_loop, tmdbkeep_loop, shotscan_task, tvui_task, rvol_guard,
               diag_lag, diag_vitals, diag_probe):
         t.cancel()
     if remote_listener is not None:
@@ -16459,6 +16460,10 @@ async def library_coverage(request: Request, profile_id: str = "",
     is_elevated = _is_elevated(request, lib, profile_id)
     mc = _missing_content_cfg(lib)
     today = datetime.now(timezone.utc).date().isoformat()
+    # An episode has aired once its date is behind us in US Eastern time, the
+    # later clock: see bookmarks.air_state for why late beats early here.
+    air_today = _home_release_today()
+    air_unread: set[int] = set()
 
     groups: dict[str, list[dict]] = {}
     for it in lib["items"]:
@@ -16550,6 +16555,14 @@ async def library_coverage(request: Request, profile_id: str = "",
                 if sn not in owned and (mc["show_unaired"] or not unaired):
                     missing_seasons.append(sn)
 
+        # The tile's air-date chip. Same opt-out as the missing-season chip: an
+        # unaired episode is one more thing that is not on disk.
+        air = None
+        if mkind == "tv" and mid and mc["enabled"]:
+            if mid not in _AIR_FACTS:
+                air_unread.add(mid)
+            air = _air_row(members, mid, profile_id, air_today, missing_seasons)
+
         date = meta.get("first_air_date") or meta.get("release_date") or ""
         year = date[:4]
         title = (next((it.get("series") for it in members if (it.get("series") or "").strip()), "")
@@ -16570,11 +16583,16 @@ async def library_coverage(request: Request, profile_id: str = "",
             "in_pack":         in_pack,
             "seasons_total":   seasons_total,
             "missing_seasons": missing_seasons,
+            # {next, new} or None: what the show airs next (a countdown) and the
+            # episode that just aired and this profile has not watched. See _air_row.
+            "air":             air,
             # A movie has no season/episode numbers to match on — ownership is the
             # whole answer, so say it plainly rather than making the UI infer it.
             "movie_status":    ("downloading" if any(it.get("status") == "downloading" for it in members)
                                 else "ready") if mkind == "movie" else "",
         })
+    if air_unread:
+        _air_want(air_unread)
     return JSONResponse({"shows": shows, "missing_content": mc["enabled"]})
 
 
@@ -28486,6 +28504,138 @@ async def bookmark_release_loop() -> None:
         except Exception as exc:
             log.warning("bookmark_release_loop: %s", exc)
         await asyncio.sleep(_BOOKMARK_REFRESH_SEC)
+
+
+# ── Library air dates (the tile's countdown / new-episode chip) ──────────────
+# What each SHOW in the library airs next and what it last aired, from the same
+# `/tv/{id}` call the bookmarks and the show page make (so one disk-cache entry
+# serves all three). The rules are bookmarks.air_facts / air_state; this block
+# fetches the evidence and joins it to what one profile has watched.
+#
+# `_AIR_FACTS` is memory only. It is re-derived from the TMDb response cache on
+# every pass and dies with the process, so it is not a store of TMDb data and
+# carries no age of its own (docs/LIBRARY_DATA.md § TMDb retention).
+
+_AIR_REFRESH_SEC = 6 * 3600
+_AIR_FACTS: dict[int, list] = {}      # TMDb tv id → bookmarks.air_facts (dated episodes, oldest first)
+_air_asked: dict[int, float] = {}     # tv id → monotonic time /coverage last asked for it
+_air_lock = asyncio.Lock()            # one pass at a time
+
+
+def _library_tv_ids(lib: dict) -> set[int]:
+    out: set[int] = set()
+    for it in lib.get("items", []):
+        meta = it.get("metadata") or {}
+        if meta.get("tmdb_kind") != "tv":
+            continue
+        try:
+            tid = int(meta.get("tmdb_id") or 0)
+        except (TypeError, ValueError):
+            tid = 0
+        if tid > 0:
+            out.add(tid)
+    return out
+
+
+async def _refresh_air_facts(only: Optional[set] = None) -> bool:
+    """Read every library show's air dates (or just the `only` ids) and tell the
+    open pages when one moved. A show TMDb gave nothing for keeps what it had:
+    no answer is not "nothing is airing"."""
+    changed = False
+    async with _air_lock:
+        ids = _library_tv_ids(await get_library())
+        if only is None:
+            for gone in set(_AIR_FACTS) - ids:
+                del _AIR_FACTS[gone]
+        for tid in sorted(ids if only is None else ids & only):
+            d = await _tmdb_get(f"/tv/{tid}",
+                                {"append_to_response": "alternative_titles,videos,external_ids"})
+            facts = bookmarks.air_facts(d)
+            if facts is None:
+                continue
+            changed |= (_AIR_FACTS.get(tid) or []) != facts
+            _AIR_FACTS[tid] = facts
+            await asyncio.sleep(0.2)   # be gentle with TMDb on a long list
+    if changed:
+        # No item changed, so no item_id: the grid just refetches its coverage.
+        await broadcast("library_update", {})
+    return changed
+
+
+async def library_air_loop() -> None:
+    """Every six hours, re-read what the library's shows are about to air.
+    A running show's details keep 12 h in the TMDb cache and an ended one's a
+    week, so most of a pass is disk hits."""
+    await asyncio.sleep(90)   # let startup settle
+    while True:
+        try:
+            await _refresh_air_facts()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("library_air_loop: %s", exc)
+        await asyncio.sleep(_AIR_REFRESH_SEC)
+
+
+def _air_want(tids: set) -> None:
+    """/coverage met shows the pass has not read (added since the last one, or
+    the first call after a restart): read those now, behind the response."""
+    mono = time.monotonic()
+    need = {t for t in tids
+            if t not in _AIR_FACTS and mono - _air_asked.get(t, -1e9) > 1800}
+    if need:
+        _air_asked.update({t: mono for t in need})
+        _spawn_bg(_refresh_air_facts(need))
+
+
+def _slot_watch(members: list, profile_id: str, season: int, episode: int) -> tuple[bool, bool]:
+    """(held, watched) for one numbered episode of a show, for one profile.
+
+    Watched is read off every file row, a deleted one included: Delete Watched
+    leaves the row and its progress behind (`_delete_files_now`), and an episode
+    watched and then cleared away is not new. Held is the coverage rule: a
+    "skip" file is not on this box."""
+    held = watched = False
+    for it in members:
+        cfg = _download_cfg(it)
+        fp = ((it.get("progress") or {}).get(profile_id) or {}).get("file_progress") or {}
+        for f in it.get("files") or []:
+            if int(f.get("season") or 0) != season or (f.get("bucket") or ""):
+                continue
+            if episode not in titleslot.held(f):
+                continue
+            path = f.get("path", "")
+            if (fp.get(path) or {}).get("completed"):
+                watched = True
+            if _effective_file_mode(cfg, path) != "skip":
+                held = True
+    return held, watched
+
+
+def _air_row(members: list, tmdb_id: int, profile_id: str, today: str,
+             missing_seasons: list) -> Optional[dict]:
+    """A coverage row's `air`: `{next, new}` or None when there is nothing to say.
+
+    `next` is the countdown. `new` is the episode that just aired, and only for
+    a profile that has not watched it. Left out when:
+      * no profile asked (nobody to be unwatched for);
+      * it is a special: season 0 files sit in buckets with no reliable number,
+        so "watched" could never clear the badge;
+      * its whole season is missing: the "Season N available" chip already says so.
+    """
+    facts = _AIR_FACTS.get(tmdb_id)
+    if not facts:
+        return None
+    st = bookmarks.air_state(facts, today)
+    new = None
+    last = st["last"]
+    if last and profile_id and last["season"] > 0 and last["season"] not in missing_seasons:
+        held, watched = _slot_watch(members, profile_id, last["season"], last["episode"])
+        if not watched:
+            new = {**last, "held": held}
+    if not st["next"] and not new:
+        return None
+    return {"next": st["next"], "new": new}
 
 
 @app.get("/api/profiles/{profile_id}/bookmarks")

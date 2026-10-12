@@ -20,6 +20,11 @@ TMDb pushes back just moves the countdown. Missing evidence (TMDb unreachable, a
 empty payload) never reads as a release: the caller passes `None` and nothing
 changes.
 
+The same TMDb evidence also feeds the LIBRARY tile's chip for a show that is
+already downloaded (`air_facts` / `air_state`): a countdown to its next episode,
+and which episode just aired. That one is a state, not a transition: nothing is
+remembered, and "new" ends when the episode is watched or ages out.
+
 Pure: stdlib only, no `main` import. Tests in `tests/test_bookmarks.py`.
 """
 
@@ -137,6 +142,77 @@ def tv_status(details: dict, today: str) -> dict:
     if season >= 2 and ep == 1 and air and air > today:
         return {"state": UPCOMING, "date": air, "what": "season", "season": season}
     return {"state": OUT, "date": "", "what": ""}
+
+
+# ── A show already in the library: what it airs next, what it just aired ─────
+# The library tile's chip. A bookmark waits for a whole title or a whole season;
+# a show someone is following is waited for one EPISODE at a time, so this reads
+# both episodes `/tv/{id}` names and does not stop at season premieres.
+
+# How long an aired episode nobody has watched stays "new". Without a bound, a
+# show someone dropped would carry the badge for good.
+NEW_EPISODE_DAYS = 30
+
+
+def _air_ep(raw) -> Optional[dict]:
+    if not isinstance(raw, dict):
+        return None
+    try:
+        season = int(raw.get("season_number") or 0)
+        ep = int(raw.get("episode_number") or 0)
+    except (TypeError, ValueError):
+        return None
+    day = _day(raw.get("air_date"))
+    if season < 0 or ep <= 0 or not day:
+        return None
+    return {"season": season, "episode": ep, "date": day}
+
+
+def air_facts(details) -> Optional[list]:
+    """The dated episodes TMDb's `/tv/{id}` names (the last one aired and the
+    next one to air), oldest first. Holds no "today", so it can be kept and
+    judged again tomorrow. `None` when the payload isn't a show: no evidence,
+    which the caller must not read as "nothing is airing"."""
+    if not isinstance(details, dict) or not details.get("id"):
+        return None
+    eps = [e for e in (_air_ep(details.get("last_episode_to_air")),
+                       _air_ep(details.get("next_episode_to_air"))) if e]
+    first = _day(details.get("first_air_date"))
+    if not eps and first:
+        # Not premiered and no episode listed yet: the premiere is the release.
+        eps = [{"season": 1, "episode": 1, "date": first}]
+    return sorted(eps, key=lambda e: e["date"])
+
+
+def air_state(facts, today: str) -> dict:
+    """`facts` (from `air_facts`) judged on one day:
+
+      * `next`: the soonest episode airing today or later, with `days` to it and
+        `what` naming it ("premiere", "season" for a later season's first
+        episode, "special" for season 0, else "episode").
+      * `last`: the newest episode that aired BEFORE today, inside
+        `NEW_EPISODE_DAYS`. Whether anyone watched it is the caller's question.
+
+    An air date is a day with no time on it and most episodes air in the
+    evening, so the air day itself still counts down ("today") and an episode is
+    only called aired the day after. Early is the wrong way to be wrong: a "new"
+    badge hours before anything exists to watch."""
+    out = {"next": None, "last": None}
+    if not _day(today):
+        return out
+    for e in facts or []:
+        days = days_until(e.get("date"), today)
+        if days is None:
+            continue
+        if days >= 0:
+            if out["next"] is None:
+                s, n = e["season"], e["episode"]
+                what = ("special" if s == 0 else "premiere" if (s, n) == (1, 1)
+                        else "season" if n == 1 else "episode")
+                out["next"] = {**e, "days": days, "what": what}
+        elif -days <= NEW_EPISODE_DAYS:
+            out["last"] = dict(e)       # facts are oldest first: the newest wins
+    return out
 
 
 def _is_new_release(awaiting: dict, status: dict) -> bool:

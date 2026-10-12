@@ -152,6 +152,66 @@ eq("today", bm.days_until(T, T), 0)
 eq("past", bm.days_until("2026-09-27", T), -1)
 eq("no date", bm.days_until("", T), None)
 
+# ── air_facts / air_state: the library tile's chip ───────────────────────────
+def _ep(s, e, d): return {"season_number": s, "episode_number": e, "air_date": d}
+def _f(s, e, d): return {"season": s, "episode": e, "date": d}
+
+sp = {"id": 2190, "first_air_date": "1997-08-13",
+      "last_episode_to_air": _ep(29, 2, "2026-09-23"),
+      "next_episode_to_air": _ep(29, 3, "2026-10-07")}
+facts = bm.air_facts(sp)
+eq("both episodes, oldest first", facts, [_f(29, 2, "2026-09-23"), _f(29, 3, "2026-10-07")])
+eq("no payload is no evidence", bm.air_facts(None), None)
+eq("a payload with no id is no evidence", bm.air_facts({"status_code": 34}), None)
+eq("an ended show has nothing dated ahead",
+   bm.air_state(bm.air_facts({"id": 1, "first_air_date": "2008-01-20",
+                              "last_episode_to_air": _ep(5, 16, "2013-09-29")}), T),
+   {"next": None, "last": None})
+
+st = bm.air_state(facts, T)
+eq("counts down to the next episode",
+   st["next"], {"season": 29, "episode": 3, "date": "2026-10-07", "days": 9, "what": "episode"})
+eq("…and names the one that just aired", st["last"], _f(29, 2, "2026-09-23"))
+eq("the day before", bm.air_state(facts, "2026-10-06")["next"]["days"], 1)
+on_day = bm.air_state(facts, "2026-10-07")
+eq("the air day still counts down (today), it has not aired", (on_day["next"]["days"],
+   on_day["last"]["episode"]), (0, 2))
+after = bm.air_state(facts, "2026-10-08")
+eq("the day after, it has aired and nothing is ahead", (after["next"], after["last"]),
+   (None, _f(29, 3, "2026-10-07")))
+
+# TMDb moves an episode from `next` to `last` around its air date. Either way
+# round, the air day reads the same.
+flipped = bm.air_facts({"id": 2190, "last_episode_to_air": _ep(29, 3, "2026-10-07"),
+                        "next_episode_to_air": _ep(29, 4, "2026-10-21")})
+eq("already listed as last on its air day: still today, not new",
+   (bm.air_state(flipped, "2026-10-07")["next"]["episode"], bm.air_state(flipped, "2026-10-07")["last"]),
+   (3, None))
+
+old = bm.air_facts({"id": 1, "last_episode_to_air": _ep(3, 10, "2026-08-29")})
+eq("30 days on, an unwatched episode is still new", bm.air_state(old, T)["last"], _f(3, 10, "2026-08-29"))
+eq("31 days on, it is not", bm.air_state(old, "2026-09-29")["last"], None)
+
+eq("a later season's first episode is a season",
+   bm.air_state(bm.air_facts({"id": 1, "next_episode_to_air": _ep(2, 1, "2026-10-20")}), T)["next"]["what"],
+   "season")
+eq("season 1 episode 1 is a premiere",
+   bm.air_state(bm.air_facts({"id": 1, "next_episode_to_air": _ep(1, 1, "2026-10-20")}), T)["next"]["what"],
+   "premiere")
+eq("season 0 is a special",
+   bm.air_state(bm.air_facts({"id": 1, "next_episode_to_air": _ep(0, 7, "2026-10-20")}), T)["next"]["what"],
+   "special")
+eq("no episode listed yet: the first air date is the premiere",
+   bm.air_state(bm.air_facts({"id": 1, "first_air_date": "2026-11-05"}), T)["next"],
+   {"season": 1, "episode": 1, "date": "2026-11-05", "days": 38, "what": "premiere"})
+eq("an undated next episode says nothing",
+   bm.air_facts({"id": 1, "next_episode_to_air": _ep(2, 1, None)}), [])
+eq("junk numbers say nothing",
+   bm.air_facts({"id": 1, "next_episode_to_air": {"season_number": "x", "episode_number": 1,
+                                                  "air_date": "2026-10-20"}}), [])
+eq("no facts, no state", bm.air_state(None, T), {"next": None, "last": None})
+eq("no today, no state", bm.air_state(facts, ""), {"next": None, "last": None})
+
 # ── ordered ──────────────────────────────────────────────────────────────────
 lst = [
     {"id": 1, "added_at": "2026-09-01", "status": {"state": "out"}},

@@ -1,5 +1,39 @@
 # Changelog
 
+## [20.21.0] — 2026-10-11
+### A show in the library counts down to its next episode
+
+A bookmark on the Explore page counts down to a release. A show that was already
+downloaded said nothing about when its next episode airs, or that one had.
+
+- A library tile now carries the same amber countdown: `S29E03 in 10 days`,
+  `tomorrow`, `today`. A later season's first episode reads `Season 5 in 12 days`,
+  a show that has not started `Premieres in N days`.
+- Once the episode has aired the tile shows a rose `New · S29E03` badge instead,
+  for as long as you have not watched it. It goes when you watch the episode, when
+  the next one airs, or after 30 days.
+- The badge is per profile. It also shows when the new episode is not downloaded
+  yet (the tooltip says which).
+- One chip at a time. New wins, and the countdown returns once the episode is
+  watched.
+- An episode counts as aired the day after its air date, by US Eastern time. TMDb
+  gives a day with no time on it, and most episodes air in the evening.
+- Card view and list view both show it. Turning off "missing content" in the admin
+  panel turns it off too.
+
+The server reads each library show's air dates from TMDb every six hours (the same
+request the show page makes, so mostly from the cache on disk) and adds `air` to
+`/api/library/coverage`. Nothing is written to `library.json`. This needs the restart
+that comes with the update; after a files-only update the tiles show no chip.
+
+Checked: the rules in `tests/test_bookmarks.py`. The server's `air` field by running
+the real coverage endpoint over a made-up library with TMDb stubbed: watched,
+unwatched, not downloaded, deleted after watching, a missing season, a special, no
+profile, a date TMDb pushed back, TMDb not answering. The tiles in headless Chrome
+against the box's live library, in card, list and phone layouts, with `air` filled in
+by hand. Not checked: on the box, which runs 20.18.7 and was not updated, so no real
+TMDb air date has been through it; TV mode; the app.
+
 ## [20.20.0] — 2026-10-11
 ### A finished show no longer offers prep controls
 

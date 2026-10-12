@@ -7551,3 +7551,21 @@ look like a cast hand-back bug. It was not.
 - Related: § A 410 with no cache header is kept. Same cache, same lesson: a URL
   whose answer can change must say so.
 
+### An air date is not an air time (20.21.0)
+
+The library tile's "New" badge and countdown (`bookmarks.air_state`, `_air_row`).
+
+- TMDb gives an episode a day, with no time and no time zone. Judged against the
+  UTC date, an episode airing at 10 pm Eastern is "aired" 26 hours early. So the
+  clock is US Eastern, the air day itself reads `today`, and the badge turns to
+  New the day after. A streaming drop at midnight Pacific therefore reads `today`
+  for the rest of its first day. Late is the cheaper mistake.
+- Do not trust which field an episode came in. TMDb moves it from
+  `next_episode_to_air` to `last_episode_to_air` around the air date, and our copy
+  of `/tv/{id}` can be 18 hours old (12 h cache + 6 h pass). `air_state` sorts by
+  date and decides from the date alone.
+- "Unwatched" is read from the profile's `completed` flags at request time.
+  Nothing remembers that a badge was shown, so there is nothing to clear and
+  nothing to go stale, and a second profile gets its own answer.
+- `_AIR_FACTS` is empty for the first 90 seconds after a start. `/coverage` must
+  answer `air: null` then, never wait on TMDb: it runs on every search render.
