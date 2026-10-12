@@ -1,5 +1,33 @@
 # Changelog
 
+## [20.22.0] — 2026-10-11
+### A phone held sideways is shown how to hide the browser's address bar
+
+Watching in a phone's browser with the phone turned sideways, the address bar takes
+about 50 px of a picture that is only about 340 px tall. A swipe on the video
+already hides it, but nothing on screen said so.
+
+- While the address bar is out, the player shows a white ghost fingertip at the left
+  edge doing the swipe (up, then back down) with the words "Swipe up, then down".
+- It is there for the first eight seconds after the bar appears or the phone is
+  turned, and after that whenever the player's controls are on screen. It goes the
+  moment the bar is hidden.
+- Browser only, phone only, landscape only, and only in the full-screen player, which
+  is the one place a swipe can hide the bar. Never in the app, in OS fullscreen, in
+  the corner tile, or with the options panel open.
+- Touches pass through it, so it cannot take the swipe it asks for.
+
+Whether the bar is out is read from the difference between the browser's large and
+dynamic viewport heights (`100lvh - 100dvh`), which is the bar itself. A browser
+without those units never shows the hint.
+
+Checked: in headless Chrome at 844x340 with a touch screen, with the bar's height set
+by hand: shown, faded with the controls, hidden with the options panel, in the corner
+tile, in portrait, on a tablet, and once the bar is gone; a touch on it lands on the
+video. Not checked: on a real phone. Headless Chrome has no address bar, so whether
+iOS Safari and Android Chrome report the bar the way this reads it is unproven, and
+so is what the hint does on a phone where swiping back down brings the bar back.
+
 ## [20.21.0] — 2026-10-11
 ### A show in the library counts down to its next episode
 

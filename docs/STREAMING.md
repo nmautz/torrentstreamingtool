@@ -1419,7 +1419,8 @@ Two ways to populate the cache:
    resyncs the custom UI on exit; this is the only true-fullscreen path on
    iPhone, where browser chrome otherwise never fully leaves. A swipe up on
    the video also minimizes the browser bar (app-shell escape hatch — see
-   [FRONTEND.md](FRONTEND.md) § Layout). An **orientation-lock button**
+   [FRONTEND.md](FRONTEND.md) § Layout); on a phone in landscape a ghost
+   fingertip (`#lpBarHint`) shows the swipe while the bar is out. An **orientation-lock button**
    (`#lpRotBtn`, touch devices only) keeps playback landscape even when the
    phone auto-rotates to portrait. Three mechanisms (`_lpOrientApply`): the
    **iOS app** turns the real interface and pins one landscape side
