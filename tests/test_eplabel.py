@@ -90,6 +90,28 @@ L = el.label_file(F("Show OVA 2.mkv", 0, 2, bucket="OVA"), {"title": "Show", "tm
 eq("OVA bucket counted in its own word", L["code"], "OVA 2")
 L = el.label_file(F("Show - Special 3.mkv", 0, 3, bucket="Specials"), {"title": "Show", "tmdb_kind": "tv"}, "")
 eq("Specials bucket", L["line1"], "Show \u00b7 Special 3")
+# TMDb lists no specials (Eden of the East): the release's own number has gaps
+# (TheTVDB's S00E01 recap isn't in the pack), so the name stands alone.
+EOTE = {"tmdb_kind": "tv", "title": "Eden of the East",
+        "seasons": {"1": {"episodes": [{"episode": 1, "name": "I Picked Up a Prince"}]}},
+        "all_seasons": [{"season": 1, "episode_count": 11}]}
+L = el.label_file(F("Eden.of.the.East.S00E02.The.King.Of.Eden.v2.1080p-Hi10p.BluRay.FLAC5.1.x264-CTR.[A34C130E].mkv",
+                    0, 2), EOTE, "")
+eq("no TMDb specials: no number", L["code"], "")
+eq("no TMDb specials: name on line2", (L["line1"], L["line2"]), ("Eden of the East", "The King Of Eden"))
+eq("no TMDb specials: short", L["short"], "Eden of the East · The King Of Eden")
+L = el.label_file(F("Show.S00E01.v2.1080p.BluRay.mkv", 0, 1), EOTE, "")
+eq("no TMDb specials, no name: keeps the number", (L["code"], L["line2"]), ("Special 1", ""))
+L = el.label_file(F("Eden.of.the.East.S00E02.The.King.Of.Eden.1080p.mkv", 0, 2),
+                  {k: v for k, v in EOTE.items() if k != "all_seasons"}, "")
+eq("no season list is not 'no specials'", L["code"], "Special 2")
+L = el.label_file(F("Breaking.Bad.S00E05.Inside.mkv", 0, 5),
+                  dict(BB, all_seasons=[{"season": 0}, {"season": 1}]), "")
+eq("TMDb has specials: number kept", L["code"], "Special 5")
+eq("parsed: trailing revision tag", el.name_from_file("Show.S01E03.Pilot.v2.720p.mkv"), "Pilot")
+eq("parsed: revision glued to marker", el.name_from_file("Show.S01E03v2.Pilot.720p.mkv"), "Pilot")
+eq("parsed: revision alone is no name", el.name_from_file("Show.S00E01.v2.1080p.mkv"), "")
+eq("parsed: mid-name v-number kept", el.name_from_file("Show.S01E03.The.V2.Rocket.720p.mkv"), "The V2 Rocket")
 # Unplaced absolute number (no S00 marker) is the main run, not a special.
 L = el.label_file(F("[Grp] One Piece - 148.mkv", 0, 148), {"title": "One Piece", "tmdb_kind": "tv"}, "")
 eq("unplaced absolute is not a special", L["code"], "E148")

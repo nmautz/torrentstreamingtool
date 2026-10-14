@@ -1,5 +1,32 @@
 # Changelog
 
+## [20.22.1] — 2026-10-13
+### A special TMDb doesn't list is shown by its name, not a number with a gap in it
+
+Eden of the East showed "Special 2" and "Special 3" with no Special 1, which looked
+like a missing file. Nothing was missing. The pack names its two films `S00E02` and
+`S00E03` because it numbers specials after TheTVDB, where S00E01 is a recap film the
+pack doesn't include. TMDb lists no specials for the show, so those numbers were the
+release's own.
+
+- When TMDb's season list for a show has no specials season, a special is labelled by
+  its name alone: "The King Of Eden" and "Paradise Lost", not "Special 2" and
+  "Special 3". Order is unchanged.
+- It keeps its number when the file gives no name, and when the show's season list
+  isn't known (old metadata, no TMDb match). Shows TMDb does list specials for are
+  unchanged.
+- A release's "v2" revision tag no longer ends up in an episode's name ("The King Of
+  Eden v2"), for every show.
+- The episode page and the Downloads tab no longer make up "E02" for a label that has
+  a name and no number.
+
+A bundle prepped before this keeps its old label until it is prepped again.
+
+Checked: unit tests (`tests/test_eplabel.py`). Every season-0 file on the box was
+surveyed: Eden of the East's two films are the only labels that change (Attack on
+Titan's two finale specials are TMDb specials and keep their numbers). Not checked: the
+episode page on the box after deploy.
+
 ## [20.22.0] — 2026-10-11
 ### A phone held sideways is shown how to hide the browser's address bar
 

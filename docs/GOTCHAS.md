@@ -6780,7 +6780,7 @@ attributed yet), the `download=` / zip entry names of saved files (media servers
 subtitle sites parse those), the movie page's small grey release line (the one place to see
 which release you have), and hover tooltips in the admin panel.
 
-Three traps:
+Four traps:
 
 * **The server label memo is a cache, not a record.** `_LABEL_MEMO` fills when something
   labels a path (a `/files` or `/series` build, a library play). A box restarted mid-playback
@@ -6793,6 +6793,18 @@ Three traps:
   episode's `Show · S01E03` under `Show · S01E04` was the bug that distinction prevents.
 * **A film-bound item is a film whatever its file name says.** `Star.Wars.Episode.1.…`
   parses as episode 1; `label_file` checks `tmdb_kind == "movie"` before any number.
+* **A special's number is only worth showing when it is TMDb's (20.22.1).** Release groups
+  number specials after TheTVDB. Eden of the East's pack has `S00E02.The.King.Of.Eden` and
+  `S00E03.Paradise.Lost` because TheTVDB's S00E01 is a recap film the pack left out. TMDb
+  lists no specials for the show, so "Special 2 / Special 3" was the release's own count,
+  and its gap looked like a missing file. When `metadata.all_seasons` is in hand and has no
+  season 0, the label drops the number and the name stands alone (`code: ""`). It keeps
+  "Special N" when there is no name, and when there is no season list (old metadata, no
+  TMDb match): missing evidence is not "no specials". A label with a name and no code
+  means *no number*, so nothing may invent one from `f.episode`: `epLabel` and the
+  Downloads-tab row both used to fall back to `E02`. Order is unaffected (the Specials tab
+  sorts by the number). A bundle prepped earlier keeps the label it was built with until
+  it is prepped again.
 
 ### An episode group is a view, not a numbering (18.25.0)
 

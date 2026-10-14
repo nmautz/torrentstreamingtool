@@ -5328,6 +5328,9 @@ function _libRefreshDlStats(itemId){
 function pad2(n)      { return String(n).padStart(2,"0"); }
 function epLabel(f)   {
   if(f.label && f.label.code) return f.label.code;
+  // The server chose a name and no number (a special of a show TMDb lists no
+  // specials for, eplabel.py): don't make one up from the bare episode field.
+  if(f.label && f.label.kind==="episode" && f.label.name) return "";
   if(f.season && f.episode) return `S${pad2(f.season)}E${pad2(f.episode)}`;
   if(f.episode) return `E${pad2(f.episode)}`;
   return fileLabel(f).short;
@@ -24503,7 +24506,9 @@ function _dlShowsHtml({ shows, prog, sname, canPlay, here, live }) {
       const lab = _bundleLabel(m, ep.filePath, ep.itemId, ep.name);
       // Under a season divider the season is implicit — just the episode number
       // (the code's own "E01-E02" / "(148)" / "Special 5" kept).
-      const code = lab.code || ((m.season && m.episode) ? `S${pad2(m.season)}E${pad2(m.episode)}` : (m.episode ? `E${pad2(m.episode)}` : ""));
+      // A label with a name and no code chose no number (see epLabel); only a
+      // nameless one gets a code made up from season/episode.
+      const code = lab.code || (lab.name ? "" : (m.season && m.episode) ? `S${pad2(m.season)}E${pad2(m.episode)}` : (m.episode ? `E${pad2(m.episode)}` : ""));
       const num = code ? (divided ? code.replace(/^S\d+(?=E)/, "") : code) : "";
       // The show is the card; the row is code + name. The file name only when
       // neither is known.
@@ -33464,6 +33469,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.22.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.22.1</div>
 </body>
 </html>

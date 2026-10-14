@@ -304,6 +304,10 @@ No surface shows a file's release name as its title. The server attaches `label`
   and the glasses remote.
 - `_bundleLabel(meta, filePath, itemId, fallbackName)` — a downloaded bundle's label: its
   `meta.label`, else rebuilt from `series/season/episode/episode_name` (pre-18.24.0 bundles).
+- `code` is the label's number. A label with a `name` and an empty `code` deliberately has
+  no number (a special of a show TMDb lists no specials for, 20.22.1), so `epLabel` and the
+  Downloads tab's rows make up `SxxExx` / `Exx` from the file's fields only for a nameless
+  label.
 - Kept as file names on purpose: the pre-download torrent picker, `download=` / zip entry
   names, the movie page's grey release line. See [GOTCHAS.md](GOTCHAS.md) § A file's name
   is not what it is called.

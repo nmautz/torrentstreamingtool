@@ -20,6 +20,10 @@ The rules, as the user settled them (18.24.0):
   * The name                  -> TMDb's episode name, then one cleaned out of the
                                  file name. TMDb's placeholder "Episode 7" is no name.
   * A special (TMDb season 0) -> "Special 5"; a bucket's own word for an OVA/OAD/ONA.
+  * A special of a show TMDb
+    lists NO specials for     -> no number, just the name (the number is the
+                                 release's, and its gaps look like missing files).
+                                 Still "Special 2" when there is no name.
   * One file, two episodes    -> "S01E01-E02", both names joined with " / ".
   * Anime the release numbers
     absolutely                -> "S03E12 (148)" when the mapping table knows 148.
@@ -57,6 +61,10 @@ _TAG_RE = re.compile(
     re.IGNORECASE,
 )
 _PLACEHOLDER_RE = re.compile(r"^\s*(?:episode|ep\.?|chapter)\s*#?\s*\d+\s*$", re.IGNORECASE)
+# A release's revision tag ("v2": the group re-issued the file) standing at either
+# end of what follows the marker - "S00E02.The.King.Of.Eden.v2.1080p", "S01E03v2".
+# Only at an end: in the middle it may be part of the name.
+_REVISION_RE = re.compile(r"^v\d{1,2}\b\s*|\s*\bv\d{1,2}$", re.IGNORECASE)
 _SPECIAL_MARK_RE = re.compile(r"[Ss]0{1,2}[Ee]\d")
 
 # The singular a specials bucket is counted in: "Special 5", "OVA 2".
@@ -106,6 +114,7 @@ def name_from_file(file_name: str) -> str:
     rest = _TAG_RE.sub("", rest)
     rest = re.sub(r"[._\-]+", " ", rest)
     rest = re.sub(r"\s+", " ", rest).strip()
+    rest = _REVISION_RE.sub("", rest).strip()
     # Nothing left but a year, a number or a release group's leftovers.
     if not rest or re.fullmatch(r"[\d\s]+", rest) or len(rest) < 2:
         return ""
@@ -171,6 +180,16 @@ def _join_names(names: list) -> str:
     if not names or not all(names):
         return ""
     return " / ".join(names)
+
+
+def _no_tmdb_specials(meta: dict) -> bool:
+    """True only when TMDb's full season list is in hand and has no season 0.
+    Metadata from before `all_seasons`, or none at all, is not evidence."""
+    inventory = meta.get("all_seasons")
+    if not isinstance(inventory, list) or not inventory:
+        return False
+    return not any(isinstance(s, dict) and int(s.get("season") or 0) == 0
+                   for s in inventory)
 
 
 def _movie(title: str, file_name: str) -> dict:
@@ -268,6 +287,13 @@ def label_file(f: dict, meta: Optional[dict], fallback_show: str = "") -> dict:
         if isinstance(f.get("home"), dict) or _SPECIAL_MARK_RE.search(_stem(file_name)):
             eps = ((seasons.get("0") or {}).get("episodes")) or []
             name = _episode_names(eps, episode, episode)[0] or name_from_file(file_name)
+            # A number TMDb doesn't have is the release's own count, and its gaps
+            # read as files missing (Eden of the East's two films are "S00E02" and
+            # "S00E03" because TheTVDB's S00E01 is a recap the pack left out). So
+            # when TMDb says the show HAS no specials, the name stands alone - but
+            # only a name: with none, "Special 2" beats the raw file name.
+            if name and _no_tmdb_specials(meta):
+                return compose(show, "", name, file_name)
             return compose(show, f"Special {episode}", name, file_name)
         return compose(show, f"E{episode:02d}", name_from_file(file_name), file_name)
 
