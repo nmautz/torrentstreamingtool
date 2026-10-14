@@ -6803,8 +6803,8 @@ Four traps:
   TMDb match): missing evidence is not "no specials". A label with a name and no code
   means *no number*, so nothing may invent one from `f.episode`: `epLabel` and the
   Downloads-tab row both used to fall back to `E02`. Order is unaffected (the Specials tab
-  sorts by the number). A bundle prepped earlier keeps the label it was built with until
-  it is prepped again.
+  sorts by the number). A copy already on a phone keeps the label it was downloaded with:
+  `meta.label` is built when the phone fetches `bundle-manifest`, not at prep.
 
 ### An episode group is a view, not a numbering (18.25.0)
 

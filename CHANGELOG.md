@@ -20,12 +20,15 @@ release's own.
 - The episode page and the Downloads tab no longer make up "E02" for a label that has
   a name and no number.
 
-A bundle prepped before this keeps its old label until it is prepped again.
+A copy already downloaded to a phone keeps its old label until it is downloaded again;
+the label is attached when the phone downloads, not when the episode is prepped.
 
-Checked: unit tests (`tests/test_eplabel.py`). Every season-0 file on the box was
-surveyed: Eden of the East's two films are the only labels that change (Attack on
-Titan's two finale specials are TMDb specials and keep their numbers). Not checked: the
-episode page on the box after deploy.
+Checked: unit tests (`tests/test_eplabel.py`). Every label on the box was recomputed
+with the new rules: Eden of the East's two films are the only ones that change (Attack
+on Titan's two finale specials are TMDb specials and keep their numbers). On the box
+after the restart: `/files` and the download manifest give "The King Of Eden" /
+"Paradise Lost" with no number, and the episode page's Specials tab (headless Chrome)
+shows them by name with no "E02" on the thumbnail. Not checked: on the phone.
 
 ## [20.22.0] — 2026-10-11
 ### A phone held sideways is shown how to hide the browser's address bar
