@@ -22192,6 +22192,12 @@ function _npPayload() {
       name: s.label || ("Subtitles " + (i + 1)),
       lang: s.language || "und",
     })),
+    // Styled ASS on the glasses (20.23.0): native draws the picked track over
+    // its own picture with libass while the phone is unlocked (StyledSubOverlay
+    // in NativePlayback.swift). See _npStyledSub.
+    styledSub: _npStyledSub(sub),
+    libBase: _npAbs("/vendor/"),
+    keepAwake: !!_appPlaybackPrefs().awake,
     itemId: lp.itemId || "",
     filePath: lp.filePath || "",
     profileId: (profile && profile.id) || "",
@@ -22252,6 +22258,18 @@ function _npPayload() {
     // reader of a JIT encode would drag the encoder to a second position.
     autoPip: _appPlaybackPrefs().pip && lp.mode !== "ondemand",
   };
+}
+
+// The picked subtitle track as the glasses' libass overlay needs it: the bundle
+// directory this description is about, the track's `.ass` there ("" = a plain
+// track) and the fonts. `base` is what lets native spot a stale description:
+// after a native advance lp.subBase still names the episode before, and native
+// then reads the new bundle's meta.json itself. null = no bundle dir to describe.
+function _npStyledSub(sub) {
+  if (!lp.subBase) return null;
+  const s = sub >= 0 ? _lpStyledSubFor(String(sub)) : null;
+  return { base: _npAbs(lp.subBase), ass: s ? s.ass_file : "",
+           fonts: s ? (lp.fonts || []) : [] };
 }
 
 // Write a row into the app's on-device diagnostic transcript.
@@ -33469,6 +33487,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.22.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.23.0</div>
 </body>
 </html>

@@ -1,5 +1,31 @@
 # Changelog
 
+## [20.23.0] — 2026-10-14
+### Styled subtitles on the glasses while the phone is unlocked
+
+A wired display (the glasses) only ever showed the flattened WebVTT: no fansub fonts, no
+signs where they belong, no karaoke. Early mode puts the native player on the display
+from the first second, and that player draws only plain text. The phone's own libass
+renderer could not reach it.
+
+- While the phone is unlocked and showing the app, the glasses now show styled ASS
+  subtitles, drawn with the same libass renderer the phone uses, over the native
+  picture. Downloaded episodes work too: their subtitle files and fonts are already on
+  the phone.
+- Lock the phone or switch apps and the glasses switch to the plain subtitles, as
+  before. Unlock and the styled ones come back.
+- While styled subtitles are on the glasses and the episode is playing, the phone stays
+  awake (the "Keep the screen awake while playing" setting), so auto-lock doesn't end
+  them. The power button still locks it.
+- If the styled track can't be loaded or drawn, the plain subtitles stay on. You never
+  lose subtitles over it.
+- Chromecast and AirPlay are unchanged: plain WebVTT.
+
+Needs the new app build. Checked: the app builds (`./build-ipa.sh --fast`, no warnings in
+the changed file), and the overlay page draws, clears and reports a missing track in
+headless Chrome against the vendored libass. Not checked: anything on a device. Nothing
+has been run with the glasses (#82).
+
 ## [20.22.1] — 2026-10-13
 ### A special TMDb doesn't list is shown by its name, not a number with a gap in it
 

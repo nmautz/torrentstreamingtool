@@ -800,7 +800,9 @@ glue pre-arms the `NativePlayback` plugin so playback survives a lock:
 `_appPlaybackPrefs()` reads the two Settings toggles (`streamlink_app_bgplay`,
 `streamlink_app_tvmode`; default on); `_npOk()` gates everything on the app + plugin
 + a `lp._nativeMaster` for the current file; `_npPayload()` builds the state (using
-the project's trusted-playhead rule — `currentTime > 2 ? currentTime : lp.lastKnownT`);
+the project's trusted-playhead rule — `currentTime > 2 ? currentTime : lp.lastKnownT`),
+including `styledSub` (from `_npStyledSub()`), `libBase` and `keepAwake`, which feed
+the glasses' libass overlay (20.23.0, STREAMING.md § 2b "Styled subtitles on the glasses");
 `_npArm()` pushes it on load, play, pause, seeked, and every `_lpSaveLocalTracks`
 track pick; `_npTick()` refreshes position at 1 Hz from `_lpClockTick`; `_npDisarm()`
 runs in `lpUnloadCurrent`/`lpStop`. `lpUnloadCurrent` skips it while the page is a remote

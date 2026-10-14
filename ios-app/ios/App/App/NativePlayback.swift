@@ -69,6 +69,7 @@ import AVFoundation
 import AVKit
 import MediaPlayer
 import UIKit
+import WebKit
 
 /// The build stamp both the launch row and the external-display header carry.
 ///
@@ -77,7 +78,7 @@ import UIKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "20.13.3"
+let NP_BUILD = "20.23.0"
 
 // MARK: - Armed state
 
@@ -132,6 +133,19 @@ struct ArmedPlayback {
     /// previous episode, and castSubs(for:) falls back to the bundle's meta.json.
     var subs: [(url: URL, name: String, lang: String)] = []
     var subsFile = ""
+    /// The page's styled (ASS) track for `subIndex`, for the wired display's
+    /// overlay (see StyledSubOverlay): the bundle directory the description is
+    /// about, the `.ass` file in it ("" = the track is plain) and its fonts.
+    /// Empty `styledBase` = the page sent nothing (an older page).
+    var styledBase = ""
+    var styledAss = ""
+    var styledFonts: [String] = []
+    /// Where the page loads libass-wasm from: `/vendor/` on its own origin, the
+    /// box's or the offline snapshot's. nil from an older page, which turns the
+    /// overlay off.
+    var libBase: URL?
+    /// ☰ App → Settings → Playback → "Keep the screen awake while playing".
+    var keepAwake = true
     var handoffEnabled = true
     /// How to reach a wired monitor once locked: "window" (our own UIWindow on the
     /// display's UIWindowScene, replacing mirroring) or "route" (leave mirroring up and
@@ -878,6 +892,259 @@ final class ExternalPlayerView: UIView {
     var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
 }
 
+// MARK: - Styled subtitles on the wired display
+
+/// One styled track, as URLs the overlay page fetches itself.
+struct StyledSub: Equatable {
+    var sub: URL
+    var fonts: [URL]
+    var key: String { sub.absoluteString }
+}
+
+/// libass over OUR picture on the glasses (20.23.0).
+///
+/// Early mode puts a native AVPlayer on the display the moment an episode
+/// starts, and AVPlayer renders only the flattened WebVTT. So the glasses never
+/// showed styled ASS, not even with the phone unlocked and the page's own libass
+/// overlay running on the phone underneath. This is a second, transparent
+/// WKWebView laid over the AVPlayerLayer in our external window, running the
+/// same vendored SubtitlesOctopus the page uses, on the bundle's own
+/// `sub_<i>.ass` and fonts (a downloaded bundle carries both, so it works
+/// offline), clocked from the AVPlayer by NativePlaybackManager.subTick.
+///
+/// FOREGROUND ONLY. Its clock comes from this app, and a locked phone is the one
+/// state where the app cannot be relied on to draw (docs/STREAMING.md § 2b). So
+/// it is shown only while the phone's own scene is in front, and the lock hands
+/// the subtitles back to AVPlayer's WebVTT. See syncSubOverlay.
+///
+/// The page is loaded from a string with the page's `/vendor/` as its base URL,
+/// so the octopus worker is same-origin wherever the dashboard came from (the
+/// box, or the offline snapshot on the loopback). The `.ass` and fonts are
+/// fetched by the page and handed to the worker as content and blob: URLs, the
+/// same way the dashboard's device-copy path does it: the worker's own sync XHR
+/// to another origin is what WKWebView won't reliably allow.
+final class StyledSubOverlay: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
+    /// Container whose opacity carries the dead-man fade (keepSubOverlayAlive).
+    /// Not the web view's own layer: WebKit decides on its own what a web view
+    /// that looks invisible may skip.
+    let view: UIView
+    let libBase: URL
+    private let web: WKWebView
+    /// "boot", "ready", "error" and "terminated", for the manager.
+    var onEvent: ((String, [String: Any]) -> Void)?
+    /// The source last asked for, and the one whose renderer is up.
+    private(set) var loadedKey = ""
+    private(set) var readyKey = ""
+    private var booted = false
+    private var queued: String?
+
+    init(libBase: URL) {
+        self.libBase = libBase
+        let cfg = WKWebViewConfiguration()
+        let w = WKWebView(frame: .zero, configuration: cfg)
+        w.isOpaque = false
+        w.backgroundColor = .clear
+        w.scrollView.backgroundColor = .clear
+        w.scrollView.isScrollEnabled = false
+        w.scrollView.contentInsetAdjustmentBehavior = .never
+        w.isUserInteractionEnabled = false
+        w.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        // Safari's Develop menu on the Mac can attach to it, which is the only
+        // way to see the page's console.
+        if #available(iOS 16.4, *) { w.isInspectable = true }
+        web = w
+        // Not zero-sized: autoresizing grows the web view with the box, and a
+        // zero-sized pair has nothing to scale from.
+        let box = UIView(frame: CGRect(x: 0, y: 0, width: 160, height: 90))
+        box.backgroundColor = .clear
+        box.isUserInteractionEnabled = false
+        box.isHidden = true
+        box.layer.opacity = 0            // shown only while an animation says so
+        w.frame = box.bounds
+        box.addSubview(w)
+        view = box
+        super.init()
+        cfg.userContentController.add(WeakScriptHandler(self), name: "slsub")
+        w.navigationDelegate = self
+        boot()
+    }
+
+    private func boot() {
+        booted = false
+        web.loadHTMLString(Self.page, baseURL: libBase)
+    }
+
+    func load(_ s: StyledSub) {
+        loadedKey = s.key
+        readyKey = ""
+        let cfg: [String: Any] = [
+            "key": s.key,
+            "sub": s.sub.absoluteString,
+            "fonts": s.fonts.map { $0.absoluteString },
+            "lib": libBase.appendingPathComponent("subtitles-octopus.js").absoluteString,
+            "worker": libBase.appendingPathComponent("subtitles-octopus-worker.js").absoluteString,
+            "fallback": libBase.appendingPathComponent("libass-fallback-font.ttf").absoluteString,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: cfg),
+              let json = String(data: data, encoding: .utf8) else { return }
+        let js = "slsub.load(\(json))"
+        if booted { web.evaluateJavaScript(js) } else { queued = js }
+    }
+
+    /// Drop the renderer (a track turned off, a file with no styled track).
+    func clear() {
+        loadedKey = ""
+        readyKey = ""
+        queued = nil
+        if booted { web.evaluateJavaScript("slsub.clear()") }
+    }
+
+    /// Push the player's clock. `done(true)` only when the page's JS actually
+    /// ran, which is what keepSubOverlayAlive keys on: a page that has stopped
+    /// answering must not be kept on screen.
+    func clock(t: Double, rate: Double, paused: Bool, video: CGSize,
+               done: @escaping (Bool) -> Void) {
+        guard booted, t.isFinite, rate.isFinite else { done(false); return }
+        let js = "slsub.clock(\(String(format: "%.3f", t)),\(String(format: "%.3f", rate)),"
+            + "\(paused),\(Int(video.width)),\(Int(video.height)))"
+        web.evaluateJavaScript(js) { _, err in done(err == nil) }
+    }
+
+    func dispose() {
+        web.configuration.userContentController.removeScriptMessageHandler(forName: "slsub")
+        web.navigationDelegate = nil
+        web.stopLoading()
+        view.removeFromSuperview()
+    }
+
+    func userContentController(_ c: WKUserContentController, didReceive m: WKScriptMessage) {
+        guard let body = m.body as? [String: Any], let ev = body["ev"] as? String else { return }
+        let key = body["key"] as? String ?? ""
+        switch ev {
+        case "boot":
+            booted = true
+            if let q = queued { queued = nil; web.evaluateJavaScript(q) }
+        case "ready":
+            if key == loadedKey { readyKey = key }
+        case "error":
+            if key == loadedKey { readyKey = "" }
+        default:
+            break
+        }
+        onEvent?(ev, body)
+    }
+
+    /// The overlay's content process was killed (memory pressure, most likely).
+    /// Boot again; the manager reloads the track once it is up.
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        let was = loadedKey
+        loadedKey = ""
+        readyKey = ""
+        queued = nil
+        onEvent?("terminated", ["key": was])
+        boot()
+    }
+
+    /// The whole overlay page. Every function returns 1 so evaluateJavaScript
+    /// has a result it can serialise. A script that returns `undefined` can be
+    /// reported as an error, which would read as a dead page.
+    private static let page = """
+    <!doctype html><html><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>html,body{margin:0;padding:0;background:transparent;overflow:hidden}
+    canvas{position:fixed;left:0;top:0;width:100vw;height:100vh;pointer-events:none}</style>
+    </head><body><canvas id="c"></canvas><script>
+    (function () {
+      var c = document.getElementById("c");
+      var oct = null, seq = 0, blobs = [], rate = 1, vw = 0, vh = 0;
+      function post(m) { try { webkit.messageHandlers.slsub.postMessage(m); } catch (e) {} }
+      // The canvas covers the PICTURE, not the window: libass lays a track out
+      // against the frame it is given, so a 4:3 episode on a 16:9 display needs
+      // a 4:3 canvas in the middle (AVPlayerLayer letterboxes it the same way).
+      function fit() {
+        var W = innerWidth, H = innerHeight, w = W, h = H;
+        if (vw > 0 && vh > 0) { if (W / H > vw / vh) w = H * vw / vh; else h = W * vh / vw; }
+        c.style.width = w + "px"; c.style.height = h + "px";
+        c.style.left = ((W - w) / 2) + "px"; c.style.top = ((H - h) / 2) + "px";
+        if (oct) { var d = window.devicePixelRatio || 1; oct.resize(Math.round(w * d), Math.round(h * d)); }
+      }
+      function drop() {
+        if (oct) { try { oct.dispose(); } catch (e) {} oct = null; }
+        blobs.forEach(function (u) { try { URL.revokeObjectURL(u); } catch (e) {} });
+        blobs = [];
+        try { c.getContext("2d").clearRect(0, 0, c.width, c.height); } catch (e) {}
+      }
+      function lib(url) {
+        if (window.SubtitlesOctopus) return Promise.resolve();
+        return new Promise(function (ok, no) {
+          var s = document.createElement("script");
+          s.src = url; s.onload = ok;
+          s.onerror = function () { no(new Error("libass-wasm did not load")); };
+          document.head.appendChild(s);
+        });
+      }
+      function get(url, as) {
+        return fetch(url).then(function (r) {
+          if (!r.ok) throw new Error(r.status + " " + url.split("/").pop());
+          return as === "text" ? r.text() : r.blob();
+        });
+      }
+      window.slsub = {
+        load: function (cfg) {
+          var my = ++seq; drop();
+          lib(cfg.lib).then(function () {
+            return Promise.all([get(cfg.sub, "text"),
+                                Promise.all((cfg.fonts || []).map(function (u) { return get(u, "blob"); }))]);
+          }).then(function (r) {
+            if (my !== seq) return;
+            blobs = r[1].map(function (b) { return URL.createObjectURL(b); });
+            oct = new SubtitlesOctopus({
+              canvas: c, subContent: r[0], fonts: blobs,
+              fallbackFont: cfg.fallback, workerUrl: cfg.worker,
+              // js-blend for the same reason as the dashboard (_lpApplyStyledSub):
+              // wasm-blend leaves a stationary cue painted past its end.
+              renderMode: "js-blend",
+              onReady: function () { if (my === seq) post({ ev: "ready", key: cfg.key }); },
+              onError: function (e) {
+                if (my !== seq) return;
+                oct = null; post({ ev: "error", key: cfg.key, why: String(e) });
+              }
+            });
+            rate = 1; fit();
+          }).catch(function (e) {
+            if (my === seq) post({ ev: "error", key: cfg.key, why: String((e && e.message) || e) });
+          });
+          return 1;
+        },
+        clock: function (t, r, paused, w, h) {
+          if (w !== vw || h !== vh) { vw = w; vh = h; fit(); }
+          if (!oct) return 1;
+          try {
+            if (r > 0 && r !== rate) { rate = r; oct.setRate(r); }
+            oct.setIsPaused(paused, t);
+            oct.setCurrentTime(t);
+          } catch (e) {}
+          return 1;
+        },
+        clear: function () { seq++; drop(); return 1; }
+      };
+      addEventListener("resize", fit);
+      post({ ev: "boot" });
+    })();
+    </script></body></html>
+    """
+}
+
+/// WKUserContentController keeps its handlers, and the handler here owns the
+/// web view that owns the controller. The proxy breaks the cycle.
+private final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
+    weak var target: WKScriptMessageHandler?
+    init(_ t: WKScriptMessageHandler) { target = t }
+    func userContentController(_ c: WKUserContentController, didReceive m: WKScriptMessage) {
+        target?.userContentController(c, didReceive: m)
+    }
+}
+
 // MARK: - Manager
 
 /// Process-wide owner of the AVPlayer, the audio session, the Now Playing item
@@ -998,6 +1265,29 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     /// Whether we are currently holding the idle timer open. See setAwake.
     private(set) var awakeOn = false
 
+    /// Styled subtitles on the wired display (20.23.0). See StyledSubOverlay
+    /// and syncSubOverlay.
+    private var subOverlay: StyledSubOverlay?
+    /// The styled track the item now playing is drawn with (nil = AVPlayer's
+    /// WebVTT), and what that answer was worked out for, so it is resolved once
+    /// per file and track rather than on every arm.
+    private var subWant: StyledSub?
+    private var subWantFor = ""
+    private var subResolveGen = 0
+    /// A source the overlay page could not render. Not retried for this source;
+    /// AVPlayer's WebVTT stays on.
+    private var subFailed = ""
+    private var subLoadAt = Date.distantPast
+    private var subTimer: Timer?
+    /// The overlay is on screen and AVPlayer's own subtitles are off.
+    private var subShowing = false
+    /// The phone's OWN scene is in front. Not `applicationState`: a live
+    /// external-display scene keeps the app "active" while the phone is locked
+    /// (see appDidBecomeActive).
+    private var phoneVisible = true
+    /// The idle timer is held open so the overlay outlasts auto-lock.
+    private var subAwake = false
+
     /// "We are the transport" — an AVPlayer, or a Cast session driving a TV.
     var isNativeActive: Bool { player != nil || cast != nil }
 
@@ -1046,6 +1336,18 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
                        name: UIScene.willConnectNotification, object: nil)
         nc.addObserver(self, selector: #selector(sceneDidDisconnect),
                        name: UIScene.didDisconnectNotification, object: nil)
+        // The PHONE's scene, for the styled-subtitle overlay: it is shown only
+        // while the phone itself is unlocked and in front. See syncSubOverlay.
+        for n in [UIScene.didEnterBackgroundNotification,
+                  UIScene.willEnterForegroundNotification,
+                  UIScene.didActivateNotification] {
+            nc.addObserver(self, selector: #selector(phoneSceneChanged(_:)), name: n, object: nil)
+        }
+        if let s = UIApplication.shared.connectedScenes
+            .first(where: { $0.session.role == .windowApplication }) {
+            phoneVisible = s.activationState == .foregroundActive
+                || s.activationState == .foregroundInactive
+        }
 
         // NOBODY WAS WATCHING THE AUDIO SESSION. Measured 2026-09-23: the player
         // was handed off to the glasses, played for three seconds, and was found
@@ -1180,6 +1482,13 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             return (u, o["name"] as? String ?? "", o["lang"] as? String ?? "und")
         }
         a.subsFile = a.filePath
+        if let st = call.getObject("styledSub") {
+            a.styledBase  = st["base"] as? String ?? ""
+            a.styledAss   = st["ass"] as? String ?? ""
+            a.styledFonts = (st["fonts"] as? JSArray ?? []).compactMap { $0 as? String }
+        }
+        a.libBase        = URL(string: call.getString("libBase") ?? "")
+        a.keepAwake      = call.getBool("keepAwake") ?? true
         a.handoffEnabled = call.getBool("handoffEnabled") ?? true
         a.extMode        = call.getString("extMode") ?? "early"
         a.introStart       = call.getDouble("introStart") ?? -1
@@ -1412,6 +1721,8 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         onMain { ExternalDisplayAccessory.setEnabled(wantScene) }
         maybeClaimEarly()
         syncShadow("arm")
+        // A track pick, or the page's first description of a styled track.
+        syncSubOverlay("arm")
     }
 
     /// Idempotent. Records why it failed rather than swallowing it: a silent
@@ -1823,6 +2134,8 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             }
             DiagLog.shared.write(stalled ? "transport-stopped-itself" : "transport",
                                  row, cat: "play")
+            // The overlay holds the phone awake only while the episode plays.
+            self.onMain { self.syncSubAwake() }
         }
 
         NotificationCenter.default.addObserver(
@@ -1947,8 +2260,17 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
                 "airplay": airplayOn,
             ], cat: "play")
         }
-        if let group = asset.mediaSelectionGroup(forMediaCharacteristic: .legible) {
-            if armed.subIndex < 0 {
+        applyLegible(on: it)
+    }
+
+    /// The subtitle half of applyTrackSelection, on its own because it also
+    /// changes when the styled overlay comes and goes, and the audio pick must
+    /// not be re-applied for that.
+    private func applyLegible(on it: AVPlayerItem) {
+        if let group = it.asset.mediaSelectionGroup(forMediaCharacteristic: .legible) {
+            // While the overlay draws this track, AVPlayer's flattened copy of it
+            // under the overlay would be every line twice.
+            if armed.subIndex < 0 || subShowing {
                 it.select(nil, in: group)
             } else {
                 // Index first, checked against the language: one bundle can hold
@@ -2538,6 +2860,9 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         let swapAt = Date()
         let it = AVPlayerItem(url: url)
         item = it
+        // A new file has its own styled track, or none: the old one must not
+        // draw over it while the new one loads.
+        syncSubOverlay("item")
         statusObs = it.observe(\.status, options: [.new]) { [weak self] obs, _ in
             guard let self = self else { return }
             if obs.status == .failed {
@@ -2700,6 +3025,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         }
         detachExternalWindow()      // mirroring resumes; TV Mode gets its screen back
         detachFallbackLayer()
+        teardownSubOverlay()
         if let c = cast {
             // Stopping playback stops the TV too; the receiver would otherwise
             // play on with nothing on the phone that knows about it.
@@ -2865,9 +3191,20 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     /// bundled behind a mode the user has to remember to engage, and it is NOT
     /// wanted during a native handoff — there the AVPlayer owns the external
     /// window and playback survives a lock by design.
+    ///
+    /// The styled-subtitle overlay (20.23.0) is the one exception to "not during
+    /// a native handoff": it lasts only while the phone is unlocked, so an
+    /// auto-lock would quietly swap the glasses back to plain subtitles. It
+    /// holds the idle timer itself (syncSubAwake); this is the page's request.
     func setAwake(_ on: Bool) {
         guard on != awakeOn else { return }
         awakeOn = on
+        syncIdleTimer()
+    }
+
+    /// One owner of `isIdleTimerDisabled`, two reasons to hold it.
+    private func syncIdleTimer() {
+        let on = awakeOn || subAwake
         DispatchQueue.main.async { UIApplication.shared.isIdleTimerDisabled = on }
     }
 
@@ -2900,7 +3237,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // The ONLY clean way out. Everything else leaves the marker behind and
         // is reported as `prev-launch-dirty` on the next launch.
         DiagLog.shared.closeRun()
-        if awakeOn { UIApplication.shared.isIdleTimerDisabled = false }
+        if awakeOn || subAwake { UIApplication.shared.isIdleTimerDisabled = false }
         maybePostProgress(armed.position, force: true)
     }
 
@@ -3097,6 +3434,9 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // Our window IS the external presentation. Letting AVFoundation also try
         // to seize the screen would have the two fighting over it.
         p.usesExternalPlaybackWhileExternalScreenIsActive = false
+        // A new window (the display hotplugs at every lock) needs the overlay
+        // put back into it.
+        syncSubOverlayOnMain("layer")
     }
 
     private func detachExternalWindow() {
@@ -3115,6 +3455,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             self.extWindow?.windowScene = nil
             self.extWindow = nil
             self.player?.usesExternalPlaybackWhileExternalScreenIsActive = true
+            self.syncSubOverlayOnMain("window-gone")
         }
     }
 
@@ -3150,6 +3491,254 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             self.mainLayer?.player = nil
             self.mainLayer?.removeFromSuperlayer()
             self.mainLayer = nil
+        }
+    }
+
+    // MARK: Styled subtitles on the wired display (20.23.0)
+
+    // WHO DRAWS THE SUBTITLES ON THE GLASSES
+    // The overlay (StyledSubOverlay, styled ASS) while all of these hold; otherwise
+    // AVPlayer's own WebVTT, exactly as before:
+    //   - our window holds the display with our AVPlayer in it (not a cast,
+    //     AirPlay or PiP),
+    //   - the phone's own scene is in front (unlocked, this app showing),
+    //   - the picked track is a styled one, and the overlay page has it ready.
+    // Whatever is not yet true, the WebVTT carries on, so a slow font download or
+    // a page that fails to load costs the styling and never the subtitles.
+
+    @objc private func phoneSceneChanged(_ note: Notification) {
+        guard let s = note.object as? UIScene, s.session.role == .windowApplication else { return }
+        let visible = note.name != UIScene.didEnterBackgroundNotification
+        guard visible != phoneVisible else { return }
+        phoneVisible = visible
+        syncSubOverlay(visible ? "phone-visible" : "phone-hidden")
+    }
+
+    private func syncSubOverlay(_ why: String) {
+        onMain { [weak self] in self?.syncSubOverlayOnMain(why) }
+    }
+
+    /// Idempotent; main thread only. Everything that can change the answer
+    /// calls it: an arm, a new item, the window coming or going, the phone's
+    /// scene, the overlay page's own events.
+    private func syncSubOverlayOnMain(_ why: String) {
+        let host = extLayer == nil ? nil : extWindow?.rootViewController?.view as? ExternalPlayerView
+        let eligible = host != nil && player != nil && cast == nil && !airplayOn && !pipOn
+            && phoneVisible && armed.libBase != nil
+        if eligible { resolveStyledSub() }
+        guard eligible, let host = host, let lib = armed.libBase,
+              let want = subWant, want.key != subFailed else {
+            hideSubOverlay(why)
+            stopSubTimer()
+            // No styled track for this file (or the pick was turned off): free
+            // the renderer. Just ineligible (the lock) keeps it, so the unlock
+            // shows the styling again at once.
+            if eligible, subWant == nil, let o = subOverlay, !o.loadedKey.isEmpty { o.clear() }
+            syncSubAwake()
+            return
+        }
+        let ov: StyledSubOverlay
+        if let o = subOverlay, o.libBase == lib {
+            ov = o
+        } else {
+            subOverlay?.dispose()
+            ov = StyledSubOverlay(libBase: lib)
+            ov.onEvent = { [weak self] ev, body in self?.subOverlayEvent(ev, body) }
+            subOverlay = ov
+        }
+        if ov.view.superview !== host {
+            ov.view.frame = host.bounds
+            ov.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            host.addSubview(ov.view)
+        }
+        if ov.loadedKey != want.key {
+            hideSubOverlay("source")
+            subLoadAt = Date()
+            ov.load(want)
+            DiagLog.shared.write("sub-overlay-load", [
+                "sub": want.sub.lastPathComponent, "fonts": want.fonts.count, "why": why,
+            ], cat: "ext")
+        }
+        startSubTimer()
+        if ov.readyKey == want.key, !subShowing { showSubOverlay(why) }
+        syncSubAwake()
+    }
+
+    /// Which styled track, if any, the item now playing is drawn with.
+    ///
+    /// The page's description when it is about THIS bundle. After a native
+    /// advance it still describes the episode before (the page never loaded the
+    /// new one), so the bundle's own meta.json answers instead: the same
+    /// fallback castSubs(for:) uses. An on-demand session has no meta.json, so a
+    /// native advance INTO one keeps AVPlayer's WebVTT.
+    private func resolveStyledSub() {
+        guard armed.subIndex >= 0, let url = (item?.asset as? AVURLAsset)?.url else {
+            subWantFor = ""; subWant = nil; return
+        }
+        // Without the master's query: `?maxh=` (the quality cap) survives
+        // deletingLastPathComponent, and the page's `base` never carries it.
+        var dc = URLComponents(url: url.deletingLastPathComponent(), resolvingAgainstBaseURL: false)
+        dc?.query = nil
+        dc?.fragment = nil
+        let dir = dc?.url ?? url.deletingLastPathComponent()
+        let key = "\(dir.absoluteString)#\(armed.subIndex)#\(armed.styledBase)#\(armed.styledAss)"
+        guard key != subWantFor else { return }
+        subWantFor = key
+        subWant = nil
+        subResolveGen += 1
+        if armed.styledBase == dir.absoluteString {
+            if !armed.styledAss.isEmpty {
+                subWant = StyledSub(sub: dir.appendingPathComponent(armed.styledAss),
+                                    fonts: armed.styledFonts.map { dir.appendingPathComponent($0) })
+            }
+            return
+        }
+        guard Self.isFmp4(url) else { return }
+        let gen = subResolveGen
+        let idx = armed.subIndex
+        var req = URLRequest(url: dir.appendingPathComponent("meta.json"))
+        req.timeoutInterval = 5
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            let meta = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            let subs = meta?["subtitles"] as? [[String: Any]] ?? []
+            let s = idx < subs.count ? subs[idx] : nil
+            let ass = (s?["styled"] as? Bool == true) ? (s?["ass_file"] as? String ?? "") : ""
+            let fonts = meta?["fonts"] as? [String] ?? []
+            DispatchQueue.main.async {
+                guard let self = self, gen == self.subResolveGen else { return }
+                DiagLog.shared.write("sub-overlay-meta", ["ok": meta != nil, "sub": idx,
+                                                          "styled": !ass.isEmpty], cat: "ext")
+                if !ass.isEmpty {
+                    self.subWant = StyledSub(sub: dir.appendingPathComponent(ass),
+                                             fonts: fonts.map { dir.appendingPathComponent($0) })
+                }
+                self.syncSubOverlayOnMain("meta")
+            }
+        }.resume()
+    }
+
+    private func showSubOverlay(_ why: String) {
+        guard let ov = subOverlay else { return }
+        subShowing = true
+        // AVPlayer's subtitles off first: for a moment, neither beats both.
+        if let it = item, it.status == .readyToPlay { applyLegible(on: it) }
+        ov.view.isHidden = false
+        keepSubOverlayAlive()
+        DiagLog.shared.write("sub-overlay", ["on": true, "why": why], cat: "ext")
+    }
+
+    private func hideSubOverlay(_ why: String) {
+        guard subShowing else { return }
+        subShowing = false
+        if let v = subOverlay?.view {
+            v.layer.removeAnimation(forKey: "alive")
+            v.isHidden = true
+        }
+        if let it = item, it.status == .readyToPlay { applyLegible(on: it) }
+        DiagLog.shared.write("sub-overlay", ["on": false, "why": why], cat: "ext")
+    }
+
+    /// A DEAD-MAN'S SWITCH. The overlay's opacity is 0 in the model and held at
+    /// 1 by an animation that runs out two seconds after it was added, and every
+    /// clock tick the page answers adds a fresh one. If this app stops ticking
+    /// (suspended, or its commits no longer reaching the display), the render
+    /// server fades the subtitles out on its own instead of leaving the last
+    /// line frozen on the glasses for the rest of the episode. Hiding it on the
+    /// lock (phoneSceneChanged) is the normal path; this is for the lock whose
+    /// notification arrives too late to draw anything.
+    private func keepSubOverlayAlive() {
+        guard subShowing, let v = subOverlay?.view else { return }
+        let a = CAKeyframeAnimation(keyPath: "opacity")
+        a.values = [1, 1, 0]
+        a.keyTimes = [0, 0.8, 1]
+        a.duration = 2
+        a.isRemovedOnCompletion = false
+        a.fillMode = .forwards
+        v.layer.add(a, forKey: "alive")
+    }
+
+    private func startSubTimer() {
+        guard subTimer == nil else { return }
+        // A timer, not a periodic time observer: those follow the item's
+        // timeline and go quiet while paused, and a paused line must stay up.
+        let t = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in self?.subTick() }
+        RunLoop.main.add(t, forMode: .common)
+        subTimer = t
+    }
+
+    private func stopSubTimer() {
+        subTimer?.invalidate()
+        subTimer = nil
+    }
+
+    /// Feed the overlay the player's clock, 4 Hz (the dashboard's own libass
+    /// pump runs at the same rate, _lpOctopusPumpStart). The worker
+    /// interpolates between pushes from the rate, and a push every 250 ms
+    /// keeps its five-second "assume paused" watchdog from tripping.
+    private func subTick() {
+        // A transport that took over the display since the last sync.
+        if cast != nil || airplayOn || pipOn { syncSubOverlayOnMain("transport"); return }
+        guard let ov = subOverlay, let p = player else { return }
+        let playing = p.timeControlStatus == .playing
+        ov.clock(t: CMTimeGetSeconds(p.currentTime()), rate: Double(p.rate), paused: !playing,
+                 video: p.currentItem?.presentationSize ?? .zero) { [weak self] ok in
+            if ok { self?.keepSubOverlayAlive() }
+        }
+    }
+
+    private func subOverlayEvent(_ ev: String, _ body: [String: Any]) {
+        let key = body["key"] as? String ?? ""
+        switch ev {
+        case "ready":
+            DiagLog.shared.write("sub-overlay-ready", [
+                "sub": URL(string: key)?.lastPathComponent ?? "",
+                "ms": Int(Date().timeIntervalSince(subLoadAt) * 1000),
+            ], cat: "ext")
+            syncSubOverlayOnMain("ready")
+        case "error":
+            DiagLog.shared.write("sub-overlay-error", [
+                "sub": URL(string: key)?.lastPathComponent ?? "",
+                "why": body["why"] as? String ?? "",
+            ], cat: "ext")
+            if !key.isEmpty, key == subWant?.key { subFailed = key }
+            syncSubOverlayOnMain("error")
+        case "terminated":
+            DiagLog.shared.write("sub-overlay-terminated", [
+                "sub": URL(string: key)?.lastPathComponent ?? "", "showing": subShowing,
+            ], cat: "ext")
+            hideSubOverlay("terminated")
+        case "boot":
+            // After a termination the track is reloaded into the fresh page.
+            syncSubOverlayOnMain("boot")
+        default:
+            break
+        }
+    }
+
+    /// Hold the phone awake while the overlay is (or is about to be) on the
+    /// glasses and the episode is playing, if the page's keep-awake setting is
+    /// on. The phone locking would end the overlay; pressing the power button
+    /// still does, which is the way to get plain subtitles and a dark phone.
+    private func syncSubAwake() {
+        let want = subTimer != nil && armed.keepAwake
+            && player?.timeControlStatus != .paused && player != nil
+        guard want != subAwake else { return }
+        subAwake = want
+        DiagLog.shared.write("sub-overlay-awake", ["on": want], cat: "ext")
+        syncIdleTimer()
+    }
+
+    private func teardownSubOverlay() {
+        onMain { [weak self] in
+            guard let self = self else { return }
+            self.hideSubOverlay("stop")
+            self.stopSubTimer()
+            self.subOverlay?.dispose()
+            self.subOverlay = nil
+            self.subWant = nil
+            self.subWantFor = ""
+            self.subFailed = ""
+            self.syncSubAwake()
         }
     }
 
@@ -4025,6 +4614,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
                 self.extLayer?.player = nil
                 self.extLayer = nil
                 self.extWindow = nil
+                self.syncSubOverlayOnMain("scene-gone")
             }
             self.diagSnap("sceneDisconnect")
         }
@@ -4244,6 +4834,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             "pip":      pipOn,
             "pipShadow": shadowPlayer != nil,
             "pipSupported": AVPictureInPictureController.isPictureInPictureSupported(),
+            "styledSubs": subShowing,
         ]
     }
 

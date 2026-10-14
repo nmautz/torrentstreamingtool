@@ -1509,7 +1509,7 @@ switchable off in ☰ App → Settings → Playback (`streamlink_app_bgplay`,
 | Path | Trigger | Monitor | Styled ASS | Phone screen |
 |---|---|---|---|---|
 | **Mirroring** | a display connects, app stays foreground | mirroring | **yes** (libass + custom UI) | normal, but **never auto-locks** (`setAwake`) |
-| **Native handoff** | app backgrounds (lock / app switch), or a display arrives in Early mode | `AVPlayer` on a surface of its own | no — plain VTT | locked; the page becomes a remote |
+| **Native handoff** | app backgrounds (lock / app switch), or a display arrives in Early mode | `AVPlayer` on a surface of its own | on a wired display **while the phone is unlocked** (20.23.0, see "Styled subtitles on the glasses" below); otherwise plain VTT | locked, or awake while styled subs are up; the page becomes a remote |
 
 They're orthogonal: keep-awake doesn't disable the handoff, it just prevents the
 *auto-lock* that would trigger it. Pressing the power button still hands off.
@@ -1641,6 +1641,51 @@ locked**, `streamlink_app_extmode`, passed through `arm()` as `extMode`):
 > - The display hotplugs at every lock (`scr` 2→1→2), which is normal.
 > - `UIApplication.State`, `applicationState` and the page's `<video>.paused` all
 >   describe something other than what you are asking about.
+
+#### Styled subtitles on the glasses (20.23.0)
+
+Early mode puts the native `AVPlayer` on the display from the first second, and
+AVPlayer renders only the flattened `sub_<i>.vtt`. So the glasses never showed styled
+ASS, even with the phone unlocked. `StyledSubOverlay` (`NativePlayback.swift`) is a
+second, transparent `WKWebView` laid over the `AVPlayerLayer` in our external window.
+It runs the same vendored SubtitlesOctopus the dashboard uses, on the bundle's own
+`sub_<i>.ass` and `font_<n>` files (a downloaded bundle carries both, so it works
+offline too), clocked from the AVPlayer at 4 Hz.
+
+**When it is up** (`syncSubOverlayOnMain`): our window holds the display with our own
+player (not a cast, AirPlay or PiP), the **phone's own scene** is in front, the picked
+track is styled, and the overlay page reports the renderer ready. While it is up,
+AVPlayer's own subtitle selection is off (`applyLegible`). Whenever any of those stops
+holding, the overlay hides and the WebVTT comes back. That includes locking the phone or
+switching apps, which is what "foreground only" means here. A track the overlay page
+fails on (`sub-overlay-error`) is not retried for that playback; the WebVTT stays on.
+
+**What it is fed** (`resolveStyledSub`): the page's description when it is about the
+bundle now playing (`styledSub: {base, ass, fonts}` and `libBase` on the arm, from
+`_npStyledSub`). After a native advance the page still describes the episode before,
+because it never loaded the new one. So when `base` is not the playing item's
+directory, native reads that bundle's `meta.json` itself, as `castSubs` does. An
+on-demand session has no `meta.json`, so a native advance into one keeps the WebVTT.
+
+**The page** is loaded from a string with the dashboard's `/vendor/` as its base URL,
+so the octopus worker is same-origin wherever the dashboard came from: the box, or the
+offline snapshot on the loopback. The `.ass` and fonts are fetched by the page and
+handed to the worker as content and `blob:` URLs, as the dashboard's device-copy path
+does.
+
+**Keep-awake.** The overlay ends with the lock, so it holds the idle timer itself
+(`syncSubAwake`), on top of the page's own `setAwake`. It does so while the overlay is
+up or loading and the episode is playing, if ☰ App → Settings → "Keep the screen awake
+while playing" is on (`keepAwake` on the arm). Pressing the power button still locks
+the phone, and that is how to get plain subtitles and a dark phone.
+
+**Diagnostics** (cat `ext`): `sub-overlay-load`, `sub-overlay-ready {ms}`,
+`sub-overlay {on, why}`, `sub-overlay-error {why}`, `sub-overlay-meta`,
+`sub-overlay-awake`, `sub-overlay-terminated`, and `styledSubs` in `state()`. The page
+is `isInspectable`, so Safari's Develop menu on a Mac shows its console. The traps are
+in [GOTCHAS.md](GOTCHAS.md) § iOS background playback.
+
+**Not yet verified on a device** ([#82](https://github.com/nmautz/torrentstreamingtool/issues/82)). It builds, and the overlay page was checked in headless Chrome; it has never been run with the glasses. Styling for Chromecast and AirPlay is a separate question, [#81](https://github.com/nmautz/torrentstreamingtool/issues/81).
 
 **With no display connected, neither layer is attached** — deliberately. A main-screen
 `AVPlayerLayer` is the classic way to get AVFoundation to *suspend* video on background
@@ -1781,8 +1826,9 @@ playback — `AVVideoComposition` is unsupported for HLS assets — and renderin
 libass overlay to an external `UIScreen` while backgrounded, because a backgrounded
 app cannot **draw** at all. (That limit is about app-drawn content; an
 `AVPlayerLayer` is fed by the media server, which is why the Early mode above can
-still show video there.) Keeping the app foreground with mirroring alive is the answer
-to both.
+still show video there.) Keeping the app foreground is the answer to both: with
+mirroring, or (20.23.0) with the overlay the app draws into its own external window,
+"Styled subtitles on the glasses" above.
 
 **Verification sequence** (on-device; each is a go/no-go gate): bare background audio
 → position fidelity across a lock/unlock → wired HDMI unlocked → **wired HDMI locked**

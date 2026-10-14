@@ -2761,6 +2761,29 @@ Eleven constraints, each of which independently breaks the feature. See
   `AVPlayerLayer`**: its frames come from the media server, not the app's render loop,
   which is what lets the backgrounded handoff put video on an external window at all.
   Don't read this bullet as "nothing can appear on the monitor while locked".
+  **Nor as "no libass on the glasses" (20.23.0):** while the phone is UNLOCKED the app
+  can draw into its own external window, so `StyledSubOverlay` lays a transparent
+  libass web view over the AVPlayerLayer there. The lock is still the line: the overlay
+  hides and AVPlayer's WebVTT takes over (see the next entry).
+- **The glasses' styled subtitles follow the PHONE's scene, never `applicationState`
+  (20.23.0).** A live external-display scene keeps the app `active` with the phone
+  locked (the `app=act` trap in [STREAMING.md § 2b](STREAMING.md)), so "is the app in front" answers the wrong
+  question. `phoneSceneChanged` watches the `.windowApplication` scene's own
+  `didEnterBackground` / `willEnterForeground` / `didActivate`. Three more traps in the
+  same feature:
+  - **The display hotplugs at every lock** and our window is rebuilt, so the overlay is
+    re-parented into whatever window holds the AVPlayerLayer (`syncSubOverlayOnMain`
+    from `attachExternalLayer`), never built once.
+  - **A frozen last line is the failure to design against**, not a missing one. The
+    overlay's opacity is 0 in the model and held at 1 by a two-second animation that
+    each clock tick the page ANSWERS replaces (`keepSubOverlayAlive`). An app that
+    stops ticking, or whose commits stop reaching the display, fades it out from the
+    render server. Don't "simplify" it to `isHidden` on the lock alone.
+  - **Clock it from a `Timer`, not a periodic time observer**: those follow the item's
+    timeline, go quiet while paused, and the dead-man would then fade the line a paused
+    viewer is reading. Every overlay JS function returns `1`, because an
+    `evaluateJavaScript` whose result is `undefined` can come back as an error, which
+    reads as a dead page.
 - **`AVVideoComposition` is unsupported for HLS assets**, so the "burn the subtitles
   into the frames inside AVFoundation" idea is a dead end. Every StreamLink playback
   path is HLS.
