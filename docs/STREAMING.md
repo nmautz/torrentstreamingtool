@@ -1685,7 +1685,16 @@ the phone, and that is how to get plain subtitles and a dark phone.
 is `isInspectable`, so Safari's Develop menu on a Mac shows its console. The traps are
 in [GOTCHAS.md](GOTCHAS.md) § iOS background playback.
 
-**Not yet verified on a device** ([#82](https://github.com/nmautz/torrentstreamingtool/issues/82)). It builds, and the overlay page was checked in headless Chrome; it has never been run with the glasses. Styling for Chromecast and AirPlay is a separate question, [#81](https://github.com/nmautz/torrentstreamingtool/issues/81).
+**Verified on the glasses, 2026-10-14** (20.23.1, Eden of the East "The King Of Eden",
+17 fonts). The overlay loaded by itself at plug-in and was ready 112 ms later. Track
+switches reloaded in 20-33 ms. On the lock it hid and the glasses showed plain WebVTT
+with nothing frozen; on the unlock it was back at once, with no reload. Still unchecked
+([#82](https://github.com/nmautz/torrentstreamingtool/issues/82)): a native advance
+(the `meta.json` path), offline, and a 4:3 picture. Going home rather than locking drops
+the glasses altogether, overlay or not
+([#83](https://github.com/nmautz/torrentstreamingtool/issues/83)). Styling for Chromecast
+and AirPlay is a separate question,
+[#81](https://github.com/nmautz/torrentstreamingtool/issues/81).
 
 **With no display connected, neither layer is attached** — deliberately. A main-screen
 `AVPlayerLayer` is the classic way to get AVFoundation to *suspend* video on background

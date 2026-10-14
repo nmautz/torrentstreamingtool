@@ -19,8 +19,11 @@ only came up after a toggle.
 Checked on the glasses (20.23.0 dev build, 2026-10-14, Eden of the East "The King Of
 Eden"): once the track was toggled from the remote, the styled overlay came up 86 ms
 after the request with all 17 fonts and the 143 KB track, every track switch reloaded in
-20-33 ms, and keep-awake followed play and pause. Not yet checked: that the fix brings
-the subtitles up without the toggle; the lock and unlock.
+20-33 ms, and keep-awake followed play and pause. Then on the 20.23.1 page, with no
+toggle: the overlay loaded by itself at plug-in (ready in 112 ms). The lock switched the
+glasses to plain subtitles with nothing frozen, and the unlock brought the styled ones
+back with no reload. Published to the alpha SideStore source. Not checked: a native
+advance, offline, a 4:3 picture (#82).
 
 ## [20.23.0] — 2026-10-14
 ### Styled subtitles on the glasses while the phone is unlocked
