@@ -22161,8 +22161,13 @@ function _npPayload() {
   // The project's trusted-playhead rule: currentTime reads 0 after iOS resets
   // a suspended media element, so fall back to the last known good value.
   const t = (v && v.currentTime > 2) ? v.currentTime : (lp.lastKnownT || 0);
-  const sub = (typeof lp.pendingSubtitleIdx === "number" && lp.pendingSubtitleIdx >= 0)
-    ? lp.pendingSubtitleIdx : -1;
+  // The pick is a KEY, and its type depends on who set it: a number from the
+  // remote's track row, a string ("1") from the phone's <select> and from the
+  // remembered pick (_lpResolveSubSel). Until 20.23.1 only a number counted, so
+  // a remembered or menu pick reached every native player as "off". Only a
+  // bundle track has a native rendition: "sidecar:N" and "-1" are off here.
+  const subKey = String(lp.pendingSubtitleIdx);
+  const sub = /^\d+$/.test(subKey) ? Number(subKey) : -1;
   const aud = lp.audios && lp.audios[lp.pendingAudioIdx || 0];
   const sMeta = (sub >= 0 && lp.subtitles) ? lp.subtitles[sub] : null;
   const nx = lp._nextNative || null;
@@ -33487,6 +33492,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.23.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.23.1</div>
 </body>
 </html>

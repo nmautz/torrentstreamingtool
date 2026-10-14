@@ -78,7 +78,7 @@ import WebKit
 /// and the dashboard badge belongs to the host, not to the installed binary.
 /// It lived as two separate string literals until 18.7.1; a field that exists to
 /// answer "was this really rebuilt" must not be able to disagree with itself.
-let NP_BUILD = "20.23.0"
+let NP_BUILD = "20.23.1"
 
 // MARK: - Armed state
 
@@ -1091,10 +1091,18 @@ final class StyledSubOverlay: NSObject, WKScriptMessageHandler, WKNavigationDele
       }
       window.slsub = {
         load: function (cfg) {
-          var my = ++seq; drop();
+          var my = ++seq, t0 = Date.now(); drop();
+          // Each stage reports itself, so a load that never finishes says where
+          // it stopped (an on-demand .ass can take 9-23 s to be extracted).
+          function step(what, n) {
+            if (my === seq) post({ ev: "step", key: cfg.key, what: what, n: n || 0, ms: Date.now() - t0 });
+          }
           lib(cfg.lib).then(function () {
-            return Promise.all([get(cfg.sub, "text"),
-                                Promise.all((cfg.fonts || []).map(function (u) { return get(u, "blob"); }))]);
+            step("lib");
+            return Promise.all([
+              get(cfg.sub, "text").then(function (t) { step("sub", t.length); return t; }),
+              Promise.all((cfg.fonts || []).map(function (u) { return get(u, "blob"); }))
+                .then(function (b) { step("fonts", b.length); return b; })]);
           }).then(function (r) {
             if (my !== seq) return;
             blobs = r[1].map(function (b) { return URL.createObjectURL(b); });
@@ -3707,7 +3715,15 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
                 "sub": URL(string: key)?.lastPathComponent ?? "", "showing": subShowing,
             ], cat: "ext")
             hideSubOverlay("terminated")
+        case "step":
+            DiagLog.shared.write("sub-overlay-step", [
+                "what": body["what"] as? String ?? "", "n": body["n"] as? Int ?? 0,
+                "ms": body["ms"] as? Int ?? 0,
+            ], cat: "ext")
         case "boot":
+            DiagLog.shared.write("sub-overlay-boot", [
+                "ms": Int(Date().timeIntervalSince(subLoadAt) * 1000),
+            ], cat: "ext")
             // After a termination the track is reloaded into the fresh page.
             syncSubOverlayOnMain("boot")
         default:

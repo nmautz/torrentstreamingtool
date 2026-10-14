@@ -1,5 +1,27 @@
 # Changelog
 
+## [20.23.1] — 2026-10-14
+### Subtitles picked on the phone reach the glasses, a locked phone, AirPlay and Chromecast
+
+A subtitle track turned on from the phone's subtitle menu, or remembered from the last
+episode, reached the native player as "subtitles off". The page records a pick as a key,
+and only picks made from the remote's track row were stored as numbers; the menu and the
+remembered pick store a string (`"1"`). The arm counted only numbers. So the glasses, a
+locked phone, AirPlay and Chromecast showed no subtitles until the track was picked
+again from the remote. Found testing 20.23.0 on the glasses (#82): its styled subtitles
+only came up after a toggle.
+
+- A bundle track picked any way now reaches every native player. A sidecar subtitle
+  (`sidecar:N`) is still off there, as before: it has no native rendition.
+- The glasses' subtitle overlay now logs each loading step (`sub-overlay-boot`,
+  `sub-overlay-step`), so a load that stalls says where.
+
+Checked on the glasses (20.23.0 dev build, 2026-10-14, Eden of the East "The King Of
+Eden"): once the track was toggled from the remote, the styled overlay came up 86 ms
+after the request with all 17 fonts and the 143 KB track, every track switch reloaded in
+20-33 ms, and keep-awake followed play and pause. Not yet checked: that the fix brings
+the subtitles up without the toggle; the lock and unlock.
+
 ## [20.23.0] — 2026-10-14
 ### Styled subtitles on the glasses while the phone is unlocked
 
