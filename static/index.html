@@ -16239,7 +16239,7 @@ function ssOpenInLibrary(){
 // ── Audio-language preference ────────────────────────────────────────────────
 // Anime (and foreign content) results mix audio variants — original+subs
 // fansubs, English DUBBED, Dual/Multi-Audio, foreign dubs (ArabicDub, VOSTFR…).
-// The backend classifies each release (`audio` ∈ dual|dub|sub|other|"" +
+// The backend classifies each release (`audio` ∈ dual|dub|sub|other|multi|"" +
 // `audio_lang`); this device-local preference steers source ordering, the bulk
 // Auto picker and pack ranking so a dub household never bulk-grabs a language
 // lottery. "any" = off; "eng" = English audio; "sub" = original audio + subs.
@@ -16259,11 +16259,15 @@ function _ssOrigEnglish(){
 // never say "English" because it's implied — while for anime untagged means
 // original audio. Unknown original language falls back to English (the common
 // case outside anime, and anime virtually always has TMDb metadata here).
+// A bare MULTi ("multi") is the original audio plus French: English only when
+// TMDb SAYS the show was made in English, never on a guess. It never satisfies
+// "sub" either: the French scene's subtitles are French.
 function _ssAudioMatch(s){
   const a=(s&&s.audio)||"";
   if(_ssAudioPref==="any") return true;
   if(_ssAudioPref==="eng")
-    return a==="dual"||a==="dub"||((a===""||a==="sub")&&_ssOrigEnglish()!==false);
+    return a==="dual"||a==="dub"||((a===""||a==="sub")&&_ssOrigEnglish()!==false)
+      ||(a==="multi"&&_ssOrigEnglish()===true);
   return a==="dual"||a==="sub"||a==="";
 }
 
@@ -16281,6 +16285,13 @@ function _ssAudioBadgeHtml(s){
   if(a==="dub")   return `<span class="${base} bg-sky-900/60 text-sky-300">Eng Dub</span>`;
   if(a==="sub")   return `<span class="${base} bg-gray-800 text-gray-400">Subs</span>`;
   if(a==="other") return `<span class="${base} bg-amber-900/60 text-amber-300">${escHtml((s.audio_lang||"Other"))}</span>`;
+  // Never green: MULTi is not Dual Audio. It is the ORIGINAL audio plus French,
+  // so what it says depends on the show (every caller is the open show page).
+  if(a==="multi"){
+    const oe=_ssOrigEnglish();
+    const txt=oe===true?"English + French":oe===false?"Multi, no Eng":"MULTi";
+    return `<span class="${base} bg-amber-900/60 text-amber-300" title="MULTi: the show's original audio plus another language, usually French. English only if the show was made in English.">${txt}</span>`;
+  }
   return "";
 }
 
@@ -16362,7 +16373,7 @@ function _streamHealthSubtitle(h){
 // Chips only appear when the loaded results actually mix audio variants —
 // a plain English show never shows them (nothing to choose).
 function _ssHasAudioVariety(){
-  const tagged=s=>s.audio==="dual"||s.audio==="dub"||s.audio==="other";
+  const tagged=s=>s.audio==="dual"||s.audio==="dub"||s.audio==="other"||s.audio==="multi";
   return _ssPacks.some(tagged)||_ssEpisodes.some(e=>e.sources.some(tagged));
 }
 
@@ -18751,7 +18762,8 @@ function _bgAudioMatch(ctx, s){
   const a=(s&&s.audio)||"";
   if(ctx.audioPref==="any") return true;
   if(ctx.audioPref==="eng")
-    return a==="dual"||a==="dub"||((a===""||a==="sub")&&ctx.origEnglish!==false);
+    return a==="dual"||a==="dub"||((a===""||a==="sub")&&ctx.origEnglish!==false)
+      ||(a==="multi"&&ctx.origEnglish===true);
   return a==="dual"||a==="sub"||a==="";
 }
 // Turn a scope's episodes into download jobs. One release can hold two
@@ -19307,7 +19319,7 @@ function _ssRenderBulkManual(){
     // Default each dropdown to what Auto would pick (audio-pref aware), and
     // label options with their audio class so the language is visible in-list.
     const def=e.sources.indexOf(_ssAutoPick(e.sources,filt));
-    const audTag=s=>{ const a=s.audio||""; return a==="dual"?"[DUAL] ":a==="dub"?"[DUB] ":a==="sub"?"[SUB] ":a==="other"?`[${(s.audio_lang||"OTHER").toUpperCase()}] `:""; };
+    const audTag=s=>{ const a=s.audio||""; return a==="dual"?"[DUAL] ":a==="dub"?"[DUB] ":a==="sub"?"[SUB] ":a==="multi"?"[MULTI] ":a==="other"?`[${(s.audio_lang||"OTHER").toUpperCase()}] `:""; };
     const opts=e.sources.map((s,i)=>
       `<option value="${i}"${i===def?" selected":""}>${escHtml(audTag(s)+(s.size_human||"")+" · "+s.seeders+"↑ · "+(s.title.length>48?s.title.slice(0,48)+"…":s.title))}</option>`).join("");
     return `<div class="flex items-center gap-2">
@@ -19403,7 +19415,7 @@ function _camOnlyMsg(title, digital){
 // Siri - change one, change both.
 function _richness(s, origEnglish){
   const a=(s&&s.audio)||"";
-  if(origEnglish===true && (a==="dual"||a==="other")) return -1;
+  if(origEnglish===true && (a==="dual"||a==="other"||a==="multi")) return -1;
   return (s&&s.tracks)||0;
 }
 function _metaOrigEnglish(m){
@@ -33492,6 +33504,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.23.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.23.2</div>
 </body>
 </html>

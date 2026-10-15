@@ -24,8 +24,10 @@ The three traps that shape the ladder, all of them real releases:
 * a foreign tag fused to "dub" (``ArabicDub``, ``Korean Dub``) must not read as
   an English dub;
 * a multi-SUB marker means the language tokens describe subtitles, not audio;
-* ``MULTi`` does NOT imply English — the French scene uses it for FR+original
-  (Tsundere-Raws) — while explicit ``Dual/Multi-Audio`` and bare ``DUAL`` do.
+* ``MULTi`` does NOT imply English — it is the French scene's tag for the
+  ORIGINAL language plus French (KAF, AMB3R, T3KASHi, Tsundere-Raws), so it is
+  English only for a show made in English — while explicit ``Dual/Multi-Audio``
+  and bare ``DUAL`` do imply English.
 
 Pure and dependency-free (stdlib only), like `relquality.py` and `episodes.py`.
 No I/O, no clock, no `main` import.
@@ -48,8 +50,9 @@ from typing import Any
 # Explicit dual/multi-AUDIO, plus bare "DUAL". All three imply English is one of
 # the tracks, which is why they short-circuit the ladder below.
 _AUD_DUAL_RE = re.compile(r"\b(?:dual|multi)[ ._-]?audio\b|\bdual\b", re.IGNORECASE)
-# Bare "MULTi" — a multi-LANGUAGE scene tag with no promise about which
-# languages. The lookahead keeps "Multi-Subs" out of it.
+# Bare "MULTi" — the French scene's tag for original audio + French. It
+# promises the ORIGINAL track and nothing about English. The lookahead keeps
+# "Multi-Subs" out of it.
 _AUD_MULTI_RE = re.compile(r"\bmulti\b(?![ ._-]?subs?)", re.IGNORECASE)
 _AUD_DUB_RE = re.compile(r"\bdub(?:bed|s)?\b", re.IGNORECASE)
 # The multi-SUBTITLE marker on its own. Split out of `_AUD_SUB_RE` so "was this
@@ -122,12 +125,15 @@ def classify_audio(title: Any, facts: dict = None) -> tuple:
         "dual"  - carries original *and* English audio (Dual/Multi-Audio, DUAL,
                   or an explicit English token alongside foreign ones: ENG-ITA)
         "other" - non-English language tag(s), no English audio; ``lang`` names it
+        "multi" - bare ``MULTi``: the original audio plus another language
+                  (French, in the scene that uses the tag). English only if the
+                  show was MADE in English, which the title cannot say
         "dub"   - English dub
         "sub"   - explicitly subtitled (original audio)
         ""      - no language markers (plain English content, or an untagged
                   fansub release — original audio + English subs for anime)
 
-    Precedence: dual > other > dub > sub, with two context rules: a foreign tag
+    Precedence: dual > other > multi > dub > sub, with two context rules: a foreign tag
     next to "dub" ("ArabicDub", "Korean Dub") must not read as an English dub,
     and a multi-SUB marker means the language tokens describe subtitles
     (Erai-raws "[Multiple Subtitle] [ENG][POR-BR]..." is original audio + subs,
@@ -151,10 +157,15 @@ def classify_audio(title: Any, facts: dict = None) -> tuple:
             return "dual", "/".join(langs)   # multi-language incl. English
         return "other", "/".join(langs)
     if f["multi"]:
-        # Bare "MULTi" with no language context: multi-audio from an English-
-        # facing scene (ToonsHub) — treat as dual. (Foreign MULTi carries its
-        # own language tokens/group names and is caught above.)
-        return "dual", ""
+        # Bare "MULTi": original audio + French (the French scene's tag), so
+        # English is promised only when the title names it. This used to read
+        # as "dual" and put a green Dual Audio badge on KAF's Haikyu!! S01,
+        # which is French + Japanese. The English-facing groups that also say
+        # MULTi (ToonsHub, VARYG) write "Multi-Audio" or list "English" beside
+        # it, and those are caught as dual above / here.
+        if f["eng_audio"]:
+            return "dual", ""
+        return "multi", ""
     if f["dub"]:
         return "dub", ""
     if f["sub_marked"]:
@@ -187,10 +198,11 @@ def track_rank(facts: dict, audio: str) -> int:
     if not isinstance(facts, dict):
         return 0
     langs = facts.get("langs") or []
-    # "dual" already absorbs Dual-Audio, bare DUAL, bare MULTi and the ENG-ITA
-    # shape — classify_audio resolved all four to it, so there is nothing to
-    # re-test here. "other" with two distinct languages is a genuine two-track
-    # release that simply has no English in it.
+    # "dual" already absorbs Dual-Audio, bare DUAL and the ENG-ITA shape —
+    # classify_audio resolved all three to it, so there is nothing to re-test
+    # here. "other" with two distinct languages is a genuine two-track release
+    # that simply has no English in it. Bare MULTi ("multi") scores 0 for the
+    # same reason Tsundere-Raws does: its second track is French.
     multi_aud = (audio == "dual") or (audio == "other" and len(langs) >= 2)
     # A bare "subbed" or "ENG SUBS" is ONE subtitle track and must not score.
     # Only the explicit multi-sub marker counts, or that marker's language list.
@@ -207,7 +219,8 @@ def richness(audio: Any, tracks: Any, orig_english: Any = None) -> int:
     is the original plus an English dub, which is worth having. For a title
     made in English it is English plus a foreign dub: nothing to watch in, and
     the release it rides on is the kind cut for another market (a foreign
-    default track, on-screen text translated in the picture). A plain copy of
+    default track, on-screen text translated in the picture). A bare ``MULTi``
+    of an English show is the same thing: English plus a French dub. A plain copy of
     equal availability is the better one, so such a release scores below every
     plain copy (-1) rather than above them.
 
@@ -217,7 +230,7 @@ def richness(audio: Any, tracks: Any, orig_english: Any = None) -> int:
         t = int(tracks or 0)
     except (TypeError, ValueError):
         t = 0
-    if orig_english is True and audio in ("dual", "other"):
+    if orig_english is True and audio in ("dual", "other", "multi"):
         return -1
     return t
 

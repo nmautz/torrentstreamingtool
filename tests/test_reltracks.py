@@ -83,8 +83,28 @@ case("explicit Dual-Audio",
      "[Judas] Hunter x Hunter (2011) - 063 [1080p][HEVC][Dual-Audio]", "dual", "", 2)
 case("bare DUAL",
      "Show.S01.1080p.BluRay.DUAL.x265-GRP", "dual", "", 2)
-case("bare MULTi with no language context is English-facing multi-audio",
-     "[ToonsHub] Solo Leveling S01 1080p MULTi AAC", "dual", "", 2)
+# Bare MULTi is the French scene's "original + French". It was "dual" until
+# 20.23.2, which put a green Dual Audio badge on the first row of Haikyu!!
+# season 1: KAF's French + Japanese copy, picked because of that badge.
+case("bare MULTi promises the original audio, not English (KAF)",
+     "Haikyu.S01.MULTi.1080p.BluRay.x265-KAF", "multi", "", 0)
+case("...the same for every French-scene group",
+     "Haikyu S03E03 MULTi 1080p WEB x264-AMB3R", "multi", "", 0)
+case("...and for an English show, whose original IS English",
+     "Mr.Bates.vs.The.Post.Office.S01E01.MULTi.1080p.WEB.H264-AMB3R", "multi", "", 0)
+eq("a MULTi copy of an English show is English plus a French dub",
+   rt.richness("multi", 0, True), -1)
+eq("an anime MULTi is no richer than a plain copy", rt.richness("multi", 0, False), 0)
+# The English-facing groups that say MULTi also say what is in it.
+case("MULTi beside Multi-Audio is dual (ToonsHub, real title)",
+     "[ToonsHub] One Piece S01E01-16 1080p NF WEB-DL MULTi AAC2.0 H.264 "
+     "(REMASTERED, Multi-Audio, Multi-Subs) [BATCH]", "dual", "", 3)
+case("MULTi that names English is dual (ToonsHub, real title)",
+     "[ToonsHub] Berserk: The Golden Age Arc - Memorial Edition - S01E01 "
+     "(MULTi 1080p x264 AAC) (English, Spanish, French, Portuguese Dubs) [Multi-Subs]",
+     "dual", "French/Portuguese/Spanish", 3)
+case("bare MULTi beside a plain ENG token is dual",
+     "Show.S01.1080p.WEB.MULTi.ENG.JPN.x264-GRP", "dual", "", 2)
 case("English token beside a foreign one is dual",
      "Movie.2024.1080p.WEB-DL.ENG-ITA.x264", "dual", "Italian", 2)
 case("English dub, no other language tag",

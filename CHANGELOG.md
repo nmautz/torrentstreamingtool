@@ -1,5 +1,28 @@
 # Changelog
 
+## [20.23.2] — 2026-10-14
+### A MULTi release is no longer labelled Dual Audio
+
+Search labelled a bare `MULTi` release **Dual Audio**, the label that means "original
+plus English". `MULTi` is the French scene's tag for the show's original language plus
+French. On Haikyu!! the first season pack, `Haikyu.S01.MULTi.1080p.BluRay.x265-KAF`,
+wore the green Dual Audio badge and was downloaded for it. It holds French and Japanese
+audio, no English.
+
+- A bare `MULTi` is its own audio class now, `multi`, with an amber badge that depends on
+  the show: **English + French** for a show made in English, **Multi, no Eng** otherwise
+  (**MULTi** when TMDb doesn't say).
+- The English audio preference counts a `MULTi` copy only when TMDb says the show was
+  made in English. The Original + Subs preference never counts one: its subtitles are
+  French.
+- A `MULTi` copy no longer gets the two-track tiebreak bonus, so a real Dual Audio copy of
+  equal availability sorts above it. Siri's film picker (`reltracks.richness`) follows
+  the same rule.
+- `MULTi` beside `Multi-Audio`, or beside a title that names English (ToonsHub, VARYG),
+  is still Dual Audio.
+- On the box: the KAF copy was deleted and season 1 re-fetched from
+  `[Anime Time] Haikyuu!! … [BD] [Dual Audio][1080p] … [Eng Sub]`, sliced to season 1.
+
 ## [20.23.1] — 2026-10-14
 ### Subtitles picked on the phone reach the glasses, a locked phone, AirPlay and Chromecast
 
