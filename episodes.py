@@ -18,6 +18,10 @@ So attribution happens in two passes:
    Where the episode number might be series-absolute rather than within-season,
    the slot is flagged `abs`.
 
+1b. **Season folders named by title** (`name_seasons`, 20.24.0) — once TMDb's
+   seasons are known, a spin-off folder that is just the show's name is
+   season 1 and one stating a TMDb season's name ("To The Top") is that season.
+
 2. **TMDb-aware** (`resolve_absolute`) — run once the show's season inventory is
    known. Only `abs` slots are touched. It compares each season's numbers
    against that season's real episode count and, when they instead line up with
@@ -112,6 +116,14 @@ _DIR_RANGE_RE = re.compile(
 # episode, handled by the basename) nor "S05E…"-style folder names.
 _DIR_WORD_SEASON_RE = re.compile(r"\b[Ss]e(?:ason|ries)s?\s*(\d{1,2})\b")
 _DIR_BARE_SEASON_RE = re.compile(r"\b[Ss](\d{1,2})(?![\dEe])")
+# The ordinal form anime packs use: "Haikyu!! 2nd Season", "Second Season".
+# Only with the word "season" right after it, so "2nd Stage" or "Third Movie"
+# never reads as one.
+_ORDINALS = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
+             "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10}
+_DIR_ORD_SEASON_RE = re.compile(
+    r"\b(\d{1,2})(?:st|nd|rd|th)\s+season\b|\b(" + "|".join(_ORDINALS) + r")\s+season\b",
+    re.IGNORECASE)
 
 # Folders that hold something other than the numbered run. Matched only at the
 # END of the component ("Attack On Titan OAD", "Extras") so a release root that
@@ -121,10 +133,10 @@ _BUCKET_WORDS: tuple[tuple[str, str], ...] = (
     (r"extras?", "Extras"),
     (r"bonus(?:\s+features?)?", "Extras"),
     (r"movies?|films?", "Movies"),
-    (r"ova|oav", "OVA"),
-    (r"oad", "OAD"),
-    (r"ona", "ONA"),
-    (r"nc(?:op|ed)|creditless|openings?|endings?", "Extras"),
+    (r"ovas?|oavs?", "OVA"),
+    (r"oads?", "OAD"),
+    (r"onas?", "ONA"),
+    (r"nc(?:op|ed)?|creditless|openings?|endings?", "Extras"),
 )
 _BUCKET_RES = tuple(
     (re.compile(rf"(?:^|[\s._\-\](}}])(?:{pat})\s*$", re.IGNORECASE), label)
@@ -151,6 +163,8 @@ def dir_season(component: str) -> Optional[int]:
         return None
     found = {int(m) for m in _DIR_WORD_SEASON_RE.findall(component)}
     found |= {int(m) for m in _DIR_BARE_SEASON_RE.findall(component)}
+    for num, word in _DIR_ORD_SEASON_RE.findall(component):
+        found.add(int(num) if num else _ORDINALS[word.lower()])
     if len(found) != 1:
         return None
     season = found.pop()
@@ -427,6 +441,124 @@ def resolve_absolute(slots: list[dict], all_seasons: list[dict]) -> bool:
                     changed = True
                     break
     return changed
+
+
+# ── Season folders named by title (20.24.0) ──────────────────────────────────
+# A complete-series pack can name its season folders by TITLE rather than by
+# number: Anime Time's Haikyu!! has "[Anime Time] Haikyuu!!" (season 1),
+# "... Karasuno High VS Shiratorizawa Academy" (TMDb season 3, "Karasuno High
+# School vs Shiratorizawa Academy") and "... To The Top" (season 4, "TO THE
+# TOP"). Pass 1 cannot read those, so each became a spin-off section and a
+# request for "Season 1" out of the pack had nothing to keep.
+
+_WORD_RE = re.compile(r"[a-z0-9]+")
+# A season TMDb names only by its number says nothing a folder could match.
+_GENERIC_SEASON_RE = re.compile(r"^(?:season|series|specials?)(?: \d+)?$")
+
+
+def _words(text: str) -> list[str]:
+    """Lower-case words of a name, release brackets dropped ("[Anime Time]")."""
+    return _WORD_RE.findall(_BRACKETS_RE.sub(" ", text or "").lower())
+
+
+def _folder_rest(folder: str, show_names: Iterable[str]) -> Optional[list[str]]:
+    """The folder's words once the show's own name is taken off the front, or
+    None when no name of the show starts it.
+
+    The SHORTEST name that matches is the one taken off. TMDb's aliases carry
+    season titles ("Haikyuu!! TO THE TOP"), and taking off the longest would
+    turn the season-4 folder into "just the show", which reads as season 1.
+    """
+    words = _words(folder)
+    best = None
+    for name in show_names or ():
+        nw = _words(name)
+        if nw and words[:len(nw)] == nw and (best is None or len(nw) < best):
+            best = len(nw)
+    return None if best is None else words[best:]
+
+
+def _season_by_name(rest: list[str], all_seasons: list[dict]) -> int:
+    """The one TMDb season whose name the folder states, else 0.
+
+    The same words in order, or (folders shorten names: "Karasuno High VS
+    Shiratorizawa Academy") a set of words that is most of the name and shares
+    at least two words of four letters or more with it. Two seasons that fit
+    is no answer."""
+    if not rest:
+        return 0
+    want = " ".join(rest)
+    hits = set()
+    for s in all_seasons or []:
+        num = int(s.get("season", 0) or 0)
+        nw = _words(s.get("name") or "")
+        if num <= 0 or not nw or _GENERIC_SEASON_RE.match(" ".join(nw)):
+            continue
+        if " ".join(nw) == want:
+            hits.add(num)
+            continue
+        a, b = set(rest), set(nw)
+        long_shared = [w for w in a & b if len(w) >= 4]
+        if len(long_shared) >= 2 and len(a & b) / len(a | b) >= 0.6:
+            hits.add(num)
+    return hits.pop() if len(hits) == 1 else 0
+
+
+def name_seasons(slots: list[dict], all_seasons: list[dict],
+                 show_names: Iterable[str]) -> bool:
+    """Pass 1b: give a season to a folder that names one by title. In place;
+    True if anything moved. Runs BEFORE `resolve_absolute`, so a folder's
+    numbers are still checked against the season it was given.
+
+    Only a spin-off bucket (a subfolder pass 1 could make nothing of) is read.
+    A folder is:
+
+    * **season N** when, with the show's name taken off, what is left is
+      TMDb's name for season N (`_season_by_name`);
+    * **season 1** when nothing is left (the folder is just the show's name),
+      no other file of the item is in season 1, and every numbered file in it
+      fits season 1's episode count. A whole absolute run in one folder
+      (One Piece - 1068) does not fit, and stays where it was.
+
+    A folder holding no numbered file, a show with no TMDb seasons, and a
+    folder whose leftover words name no season all move nothing. The answer is
+    derived from the bucket label each time, so it survives the rebuild the
+    download monitor does every tick.
+    """
+    counts = {int(s.get("season", 0) or 0): int(s.get("episode_count", 0) or 0)
+              for s in all_seasons or [] if int(s.get("season", 0) or 0) > 0}
+    if not counts:
+        return False
+    names = [n for n in (show_names or ()) if n]
+    by_bucket: dict[str, list[dict]] = {}
+    for sl in slots:
+        b = sl.get("bucket") or ""
+        if b and section_kind(b) == "spinoff":
+            by_bucket.setdefault(b, []).append(sl)
+    plan: dict[str, int] = {}
+    for bucket, group in by_bucket.items():
+        rest = _folder_rest(bucket, names)
+        if rest is None:
+            continue
+        nums = [int(s.get("episode", 0) or 0) for s in group]
+        if not any(nums):
+            continue
+        season = _season_by_name(rest, all_seasons) if rest else 1
+        if not season:
+            continue
+        if not rest and (any(int(s.get("season", 0) or 0) == 1 for s in slots)
+                         or not all(0 < n <= counts.get(1, 0) for n in nums if n)):
+            continue
+        plan[bucket] = season
+    if list(plan.values()).count(1) > 1:
+        plan = {b: n for b, n in plan.items() if n != 1}   # two "just the show" folders
+    for bucket, season in plan.items():
+        for sl in by_bucket[bucket]:
+            sl["season"] = season
+            sl["bucket"] = ""
+            # As for a "Season N" folder: the number may be series-absolute.
+            sl["abs"] = bool(sl.get("episode")) and season > 1
+    return bool(plan)
 
 
 def apply_slot(file_dict: dict, slot: dict) -> bool:

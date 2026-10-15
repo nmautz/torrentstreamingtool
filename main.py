@@ -4301,7 +4301,13 @@ def _reattribute_item_files(item: dict, metadata: Optional[dict]) -> bool:
               "abs_no": int(f.get("abs_no", 0) or 0),
               "rel_season": int(f.get("rel_season", 0) or 0),
               "rel_episode": int(f.get("rel_episode", 0) or 0)} for f in files]
-    moved = episodes.resolve_absolute(slots, all_seasons)
+    # **Pass 1b** (`episodes.name_seasons`, 20.24.0): a folder that names its
+    # season by title. Anime Time's Haikyu!! pack holds "[Anime Time] Haikyuu!!"
+    # (season 1) and "... To The Top" (TMDb's season 4, "TO THE TOP"); pass 1
+    # made each a spin-off, so `want_seasons` had nothing to keep. Before pass 2,
+    # so a folder's numbers are checked against the season it was given.
+    moved = episodes.name_seasons(slots, all_seasons, _show_names(item, metadata))
+    moved |= episodes.resolve_absolute(slots, all_seasons)
     moved |= animemap.remap_slots(slots, all_seasons, _anime_entries(metadata))
     changed = bool(rewound)
     if moved:
@@ -4333,6 +4339,16 @@ def _reattribute_item_files(item: dict, metadata: Optional[dict]) -> bool:
     if changed:
         files.sort(key=episodes.sort_key)
     return changed
+
+
+def _show_names(item: dict, metadata: Optional[dict]) -> list:
+    """Every name a release folder might open with: TMDb's title, original
+    title and aliases, and the item's own series name. `episodes.name_seasons`
+    takes the shortest that matches off the front of a folder's name."""
+    md = metadata or {}
+    names = [md.get("title"), md.get("original_title"), item.get("series")]
+    names += [a for a in (md.get("aka") or []) if isinstance(a, str)]
+    return [n for n in names if isinstance(n, str) and n.strip()]
 
 
 def _item_want(item: dict) -> Optional[tuple]:

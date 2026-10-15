@@ -1922,6 +1922,23 @@ walking up into the root and inheriting its lies. That shared-root computation d
 out of a trailing season/bucket component**: an item whose files all sit in one `Season 2` folder
 would otherwise have the only statement of its season stripped as "the release root".
 
+**1b. A season folder can be named by title, not number (20.24.0, #84).** Anime Time's
+complete Haikyu!! pack holds `[Anime Time] Haikyuu!!` (season 1), `… Haikyu!! 2nd Season`,
+`… Karasuno High VS Shiratorizawa Academy` (TMDb season 3) and `… To The Top` (season 4). Pass 1
+made every one a spin-off section, so `want_seasons: [1]` found nothing to keep and stopped with
+"Couldn't tell which files in this pack are Season 1". Pass 1 now reads the ordinal form
+(`2nd Season`, `Second Season`: only with the word *season* right after it) and the plural bucket
+words (`OADs`, `OVAs`, and a bare `NC` folder as Extras). `episodes.name_seasons` handles the
+rest once TMDb's seasons are known. Two traps in it:
+* **Take the SHORTEST show name off the front of the folder, never the longest.** TMDb's aliases
+  carry season titles (`Haikyuu!! TO THE TOP`). Taking that off the season-4 folder leaves nothing,
+  and "just the show's name" is the season-1 rule.
+* **"Just the show's name" is season 1 only when nothing else is.** It needs no other file
+  already in season 1, every number in the folder within season 1's count (One Piece's absolute
+  `- 1068` stays put), and no second such folder. A season TMDb names only `Season 2` is never
+  matched by name. Folders shorten names (`Karasuno High VS …` drops TMDb's "School"), so a match
+  is the exact words, or most of them (Jaccard ≥ 0.6) with two shared words of 4+ letters.
+
 **2. The episode number is frequently series-absolute, and no filename parser can tell.**
 `…/Attack on Titan Season 2/[Anime Time] Attack on Titan - 26.mkv` is **S02E01**. Reading it as
 S02E26 is worse than not parsing at all: the season looks 25 episodes short *and* every episode

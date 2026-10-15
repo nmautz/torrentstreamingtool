@@ -734,7 +734,7 @@ Per file, in priority order:
 | Read | Yields | Example |
 |------|--------|---------|
 | `SxxExx` / `NxNN` on the basename | season + episode, **authoritative** | `Hacks.S05E01.…mkv`, `Death Note - 01x02 - …mkv` |
-| Nearest enclosing directory naming a season, + an episode marker on the basename (`- 07`, `E07`, `Ep07`, `#07`, or a guarded bare number) | season + episode, possibly **absolute** | `…/Attack on Titan Season 2/[Anime Time] Attack on Titan - 26.mkv` |
+| Nearest enclosing directory naming a season (`Season 2`, `S02`, or an ordinal: `2nd Season`, `Second Season`), + an episode marker on the basename (`- 07`, `E07`, `Ep07`, `#07`, or a guarded bare number) | season + episode, possibly **absolute** | `…/Attack on Titan Season 2/[Anime Time] Attack on Titan - 26.mkv` |
 | Nearest enclosing directory naming a **bucket** (`Specials`, `Extras`, `Movies`, `OVA`, `OAD`, `ONA`, `NCOP`/`NCED`…) | season 0 + `bucket` label + a bucket-local index | `…/Attack On Titan OAD/… - 03.mkv` |
 | No season and no known bucket, but the file sits in its **own subfolder** | season 0 + `bucket` = that folder's name | `…/Attack On Titan Junior High/… - 04.mkv` |
 | No season anywhere, strong episode marker only | season 0 + episode, flagged `abs_episode` | `[Grp] One Piece - 1068.mkv` |
@@ -745,6 +745,27 @@ other seasons or buckets in its blurb can never override the real folder. A fold
 (`…(S01-S04+OVA+Movies+Junior High)…`) or two different seasons is rejected outright — it is not one
 season. Bucket words match only at the **end** of a component, so that same root isn't read as
 "Movies" either. See [GOTCHAS.md](GOTCHAS.md) § season/episode attribution.
+
+**Pass 1b — season folders named by title (20.24.0)** (`episodes.name_seasons`, first thing in
+`_reattribute_item_files`). Some complete-series packs name a season's folder after the show or the
+season's title, not its number: Anime Time's Haikyu!! has `[Anime Time] Haikyuu!!` (season 1) and
+`[Anime Time] Haikyuu!! To The Top` (TMDb's season 4, "TO THE TOP"). Pass 1 makes such a folder a
+spin-off bucket. Once TMDb's seasons are known, a spin-off bucket whose name starts with one of the
+show's names (`_show_names`: TMDb title, original title, aliases, the item's series; the
+**shortest** matching one is taken off, because aliases carry season titles) becomes:
+
+* **season N** when what is left is TMDb's name for season N: the same words, or most of them
+  (Jaccard ≥ 0.6, two shared words of four letters or more), and no other season fits. A season TMDb
+  names only by number (`Season 2`) is never matched;
+* **season 1** when nothing is left, no other file of the item is in season 1, every numbered
+  file in the folder fits season 1's episode count, and no other folder is also just the show's name.
+
+The files lose the bucket and take the season; those of a season past 1 are flagged `abs_episode`,
+like a `Season N` folder, so pass 2 still checks their numbers. Derived from the bucket label every
+time, so it survives the monitor's per-tick rebuild. A folder with no numbered file, or whose words
+name no season (`Riku vs. Kuu`, `Junior High`), stays a spin-off. Measured: the Haikyu!! pack (120
+files) lands 25/25/10/25 in seasons 1-4; over the box's other 201 items (806 files) it moves nothing.
+Tests: `tests/test_seasonfolders.py`, over the real file list and TMDb data.
 
 **Pass 2 — TMDb-aware** (`episodes.resolve_absolute`, via `_reattribute_item_files` /
 `_settle_attribution` in [main.py](../main.py)). Anime batches number episodes across the whole run:

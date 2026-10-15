@@ -1,5 +1,30 @@
 # Changelog
 
+## [20.24.0] — 2026-10-14
+### A season folder named by title is that season
+
+Some complete-series packs name a season's folder after the show or the season's title instead
+of its number. Anime Time's Haikyu!! pack holds `[Anime Time] Haikyuu!!` (season 1),
+`… 2nd Season`, `… Karasuno High VS Shiratorizawa Academy` (season 3) and `… To The Top`
+(season 4). The box made each one a spin-off section, so all 120 files had no season, and
+asking for Season 1 out of the pack stopped with "Couldn't tell which files in this pack are
+Season 1" (#84).
+
+- A folder named `2nd Season` or `Second Season` is season 2, as `Season 2` always was.
+- Once TMDb's seasons are known, a folder that is just the show's name is season 1, and a
+  folder that states a TMDb season's name (`To The Top` = "TO THE TOP") is that season. A
+  shortened name still counts (`Karasuno High VS Shiratorizawa Academy` without TMDb's
+  "School"). The rules that keep this safe:
+  - a season TMDb names only by number is never matched by name;
+  - a folder whose numbers don't fit season 1 (an absolute run) stays put;
+  - a folder that names no season (`Riku vs. Kuu`, `Junior High`) stays a spin-off.
+- `OADs` and `OVAs` folders are the OAD and OVA buckets, and an `NC` folder (creditless
+  openings and endings) is Extras.
+- Measured: the Haikyu!! pack lands 25 / 25 / 10 / 25 episodes in seasons 1-4. Across the
+  box's other 201 items (806 files) nothing moves.
+- On the box: the Haikyu!! season 1 download (picked by file index as a workaround) moves
+  from a spin-off section into Season 1 once this runs.
+
 ## [20.23.2] — 2026-10-14
 ### A MULTi release is no longer labelled Dual Audio
 
