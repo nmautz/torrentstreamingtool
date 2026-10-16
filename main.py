@@ -23457,6 +23457,14 @@ def _launch_kiosk_browser(url: str, profile_dir: Path, label: str) -> bool:
         "--kiosk",
         f"--app={url}",
     ]
+    if platform.system() == "Windows":
+        # A fullscreen <video> is promoted to its own DirectComposition overlay
+        # plane, with the page (subtitle cues, badges, tiles) on a plane above
+        # it. On the box's NVIDIA driver that upper plane drops out for seconds
+        # at a time while the picture plays on, so subtitles and the version
+        # badge vanish and return together. Compositing the video with the page
+        # costs a little GPU and keeps them on one surface. See docs/GOTCHAS.md.
+        args.insert(-1, "--disable-direct-composition-video-overlays")
     kw: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     if platform.system() == "Windows":
         kw["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]

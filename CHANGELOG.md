@@ -1,5 +1,18 @@
 # Changelog
 
+## [20.24.5] — 2026-10-15
+
+### Fixed
+- **Subtitles on the TV no longer blink out for a few seconds at a time.**
+  They vanished mid-line and came back at the same moment as the version
+  number in the corner, which says the whole page layer was dropping out,
+  not the subtitles. Edge on Windows draws a fullscreen video on its own
+  hardware plane with the page on top, and on the box's NVIDIA driver that
+  top plane kept disappearing. The kiosk now starts with that turned off
+  (`--disable-direct-composition-video-overlays`). The subtitle timing was
+  checked too: the re-timed copy sits within 0.2 s of the speech for the
+  whole film, while the original drifts to 9 s late.
+
 ## [20.24.4] — 2026-10-15
 
 ### Fixed

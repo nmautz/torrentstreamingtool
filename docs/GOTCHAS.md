@@ -3676,6 +3676,10 @@ Windows can't share a listening socket (no usable `SO_REUSEADDR` for this — it
 
 Feeding a YouTube watch URL to VLC's `in_play` looks like it works for ~8 s then dies: `status.json` reports `state: playing` but `length: -1` and the now-playing stays the raw `watch?v=…` filename (a successful resolve would set the real title), then it stops. That's the bundled `youtube.luac` failing to extract the stream — it breaks every time YouTube changes its page, and the shipped script always lags. yt-dlp-into-VLC is more reliable but adds a fragile Python dep and caps at 720p muxed without an `:input-slave` audio hack. So YouTube-on-TV plays in a **browser** (Chrome kiosk + IFrame API), not VLC. Don't "simplify" it back to `vlc("in_play", input=<youtube url>)`. See [YOUTUBE.md](YOUTUBE.md).
 
+### On Windows the kiosk's subtitles vanish with the version badge: the video overlay plane (20.24.5)
+
+Edge/Chrome on Windows promotes a fullscreen `<video>` to its own DirectComposition overlay (MPO) plane and draws the rest of the page — native `<track>` cues, the version badge, any tile — on a plane above it. On the box's NVIDIA driver that upper plane dropped out for seconds at a time while the picture played on, so the subtitles disappeared mid-line and came back **at the same instant as the version badge**. That pairing is the tell: nothing in the page hides both, so look below the page. The subtitle file and the bundle timeline were fine (checked cue-by-cue against the audio). `_launch_kiosk_browser` now passes `--disable-direct-composition-video-overlays` on Windows. The flag only takes effect on a fresh kiosk process: a second launch against the same `--user-data-dir` hands off to the running one and its flags are ignored.
+
 ### The kiosk needs `--autoplay-policy=no-user-gesture-required`
 
 The TV has no mouse/keyboard, so the IFrame player must autoplay **with sound** on a fresh page load. Chrome blocks that by default. `_launch_tv_browser` passes `--autoplay-policy=no-user-gesture-required`; without it the kiosk loads but sits paused/muted with no way to start it. (The page also calls `playVideo()` in `onReady` as a belt-and-braces.)

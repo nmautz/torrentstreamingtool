@@ -135,6 +135,10 @@ chrome --user-data-dir=<repo>/.tv_chrome_profile \
 - **`--kiosk --app=`** → borderless fullscreen, no browser chrome.
 - **`--autoplay-policy=no-user-gesture-required`** → the IFrame player can
   autoplay with sound (no click on the TV, which has no mouse/keyboard).
+- **`--disable-direct-composition-video-overlays`** (Windows only, 20.24.5) →
+  the video is composited with the page instead of on its own hardware plane,
+  which on the box's NVIDIA driver kept dropping subtitles and badges. See
+  [GOTCHAS.md](GOTCHAS.md).
 - **dedicated `--user-data-dir`** → isolates the kiosk from the user's normal
   Chrome and lets `_kill_tv_browser` kill *only* this instance (matched by the
   profile path in the process cmdline). The dir is git-ignored.
