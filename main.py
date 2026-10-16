@@ -3184,6 +3184,12 @@ async def _auto_subtitle_fetch(video: Path, lang: str, item_id: str,
         fmeta = next((f for f in (item or {}).get("files", []) if f.get("path") == file_path), None)
         if not (item and fmeta):
             return
+        # The disk, not VLC's track list, says whether we already have one: a
+        # sidecar VLC failed to load used to read as "none", and every play
+        # fetched another copy of the same subtitle.
+        on_disk = await asyncio.to_thread(_discover_local_subs, video)
+        if any(_parse_sub_lang(p.name) == lang for p in on_disk if not _is_ai_sub_file(p)):
+            return
         target = await _subtitle_target(item, fmeta)
         cands = await _subtitle_search(target, lang)
         cands = [c for c in cands if c.get("_match")]
@@ -32884,7 +32890,57 @@ def _discover_local_subs(video: Path) -> list[Path]:
     # Stable order so loaded-sidecar ES IDs don't drift between replays
     # (iterdir/rglob order is filesystem-dependent).
     found.sort(key=lambda p: str(p).lower())
-    return found
+    return _dedupe_subs(found)
+
+
+_SUB_TS_RE = re.compile(r"\d{1,2}:\d{2}:\d{2}[.,:]\d{1,3}|-->")
+# OpenSubtitles injects a different ad cue into each download of one subtitle.
+_SUB_AD_RE = re.compile(r"opensubtitles|osdb\.|www\.", re.I)
+
+
+def _sub_text_key(p: Path) -> str:
+    """A subtitle's words with its timing and download ads removed: two files
+    with the same key are the same subtitle, however each was re-timed. ""
+    when unreadable."""
+    try:
+        t = p.read_bytes().decode("utf-8", "replace")
+    except OSError:
+        return ""
+    t = t.replace("\r\n", "\n").replace("\r", "\n")
+    words: list[str] = []
+    for blk in re.split(r"\n\s*\n", _SUB_TS_RE.sub("", t)):
+        if _SUB_AD_RE.search(blk):
+            continue
+        words += [ln.strip() for ln in blk.split("\n") if ln.strip() and not ln.strip().isdigit()]
+    body = "\n".join(words)
+    return hashlib.sha1(body.encode("utf-8")).hexdigest() if body else ""
+
+
+def _dedupe_subs(paths: list[Path]) -> list[Path]:
+    """List a subtitle once however many copies of it sit on disk, keeping the
+    newest copy in the slot of the first.
+
+    Before 20.24.4 VLC could not read our own downloads (`_heal_sub_newlines`),
+    saw no preferred-language track, and the auto-fetch saved another copy on
+    every play: one film had four identical English tracks. Text-only `.sub`
+    is skipped, since it may be binary VobSub."""
+    out: list[Path] = []
+    slot: dict[str, int] = {}
+    for p in paths:
+        k = _sub_text_key(p) if p.suffix.lower() != ".sub" else ""
+        if not k:
+            out.append(p)
+            continue
+        if k not in slot:
+            slot[k] = len(out)
+            out.append(p)
+            continue
+        try:
+            if p.stat().st_mtime > out[slot[k]].stat().st_mtime:
+                out[slot[k]] = p
+        except OSError:
+            pass
+    return out
 
 
 def _list_sidecar_subs(src: Path, item_id: str) -> list[dict]:

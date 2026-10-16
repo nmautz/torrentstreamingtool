@@ -1,5 +1,15 @@
 # Changelog
 
+## [20.24.4] — 2026-10-15
+
+### Fixed
+- **A film no longer lists the same subtitle four times.** While VLC could not
+  read our downloaded subtitles (fixed in 20.24.3) it saw no English track,
+  so every VLC play fetched another copy from OpenSubtitles. The auto-fetch
+  now checks the disk before it searches, and copies of one subtitle (same
+  words, whatever their timing or the ad line OpenSubtitles adds) are listed
+  once, newest copy kept. Closes #86.
+
 ## [20.24.3] — 2026-10-15
 
 ### Fixed
