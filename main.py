@@ -23464,7 +23464,11 @@ def _launch_kiosk_browser(url: str, profile_dir: Path, label: str) -> bool:
         # at a time while the picture plays on, so subtitles and the version
         # badge vanish and return together. Compositing the video with the page
         # costs a little GPU and keeps them on one surface. See docs/GOTCHAS.md.
+        # The overlay switch alone did not stop it (20.24.5): Edge still changes
+        # composition path whenever a cue appears over fullscreen video, so
+        # DirectComposition is turned off entirely. Video decode stays on the GPU.
         args.insert(-1, "--disable-direct-composition-video-overlays")
+        args.insert(-1, "--disable-direct-composition")
     kw: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     if platform.system() == "Windows":
         kw["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]

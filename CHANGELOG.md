@@ -1,5 +1,15 @@
 # Changelog
 
+## [20.24.6] — 2026-10-15
+
+### Fixed
+- **TV subtitles blinking out with the version badge, second attempt.**
+  20.24.5's switch (no video overlay plane) did not stop it. Edge on Windows
+  still changes how it draws the screen whenever a subtitle appears over a
+  fullscreen video, so the kiosk now also starts with DirectComposition off
+  altogether (`--disable-direct-composition`). The video is still decoded on
+  the GPU. Needs the kiosk relaunched (a reboot) to take effect.
+
 ## [20.24.5] — 2026-10-15
 
 ### Fixed
