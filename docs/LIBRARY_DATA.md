@@ -1327,7 +1327,17 @@ three places TMDb data rests:
 | `item["metadata"]` | re-fetched from the **same binding** (`_fetch_item_metadata(refresh=True)`) | emptied to a stub, if TMDb still could not be asked |
 
 In normal running nothing reaches 180 days: metadata is refreshed at 150, which leaves 30 days
-of TMDb being unreachable before anything is lost. The age is `fetched_at`; metadata with no
+of TMDb being unreachable before anything is lost.
+
+**A show still airing is re-read much sooner (20.24.8).** TMDb fills in an episode's overview,
+still and runtime around its air date, after most items took their copy. `tmdbcache.behind_airing`
+is true when a TV copy is at least 12 h old (`AIRING_RECHECK`) and one of its episodes is dated
+today or earlier but no more than 7 days (`AIRING_SETTLE_DAYS`) before the copy was taken.
+`_nudge_metadata_health` (condition 6) then re-reads it from the same binding with
+`refresh=True, cached_ok=True`, which goes through `.tmdb_cache/` (an airing season keeps 12 h
+there) instead of past it. Throttled to once an hour per item (`_TMDB_AIRING_RETRY_SEC`). Like
+every refresh it re-stamps `fetched_at`. A weekly show is re-read about twice a day while it airs,
+and only when its page is opened. The age is `fetched_at`; metadata with no
 readable `fetched_at` counts as expired.
 
 **The stub.** `expire_metadata` keeps only what is ours, the matching decision:

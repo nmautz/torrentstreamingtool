@@ -196,6 +196,28 @@ eq("its own fields stay", out["title"], "Home video")
 eq("its tmdb sections go", out["sections"], {"mine": {"source": "custom", "title": "Mine"}})
 eq("then nothing more to do", tc.expire_metadata(out), None)
 
+# behind_airing: an airing show's copy is re-read once its episodes air.
+def _airing(fetched_days_ago, air_offsets, kind="tv"):
+    eps = [{"episode": i + 1, "air_date": day(o)} for i, o in enumerate(air_offsets)]
+    return {"tmdb_id": 284833, "tmdb_kind": kind, "source": "picked",
+            "fetched_at": _iso(fetched_days_ago), "seasons": {"1": {"episodes": eps}}}
+# Avatar: Seven Havens. Copy taken 4 days ago, E04-E06 aired today.
+eq("aired since the copy -> re-read", tc.behind_airing(_airing(4, [-7, -7, -7, 0, 0, 0, 7]), NOW), True)
+eq("aired before the copy, within a week -> re-read",
+   tc.behind_airing(_airing(1, [-3, 7]), NOW), True)
+eq("copy under 12 h old -> not yet", tc.behind_airing(_airing(0.25, [-1, 0]), NOW), False)
+eq("nothing aired in the window", tc.behind_airing(_airing(1, [-30, 7]), NOW), False)
+eq("copy a week past the last air date -> settled",
+   tc.behind_airing(_airing(1, [-9, 14]), NOW), False)
+eq("only future episodes", tc.behind_airing(_airing(3, [2, 9]), NOW), False)
+eq("undated episodes don't count", tc.behind_airing(
+   {**_airing(3, []), "seasons": {"1": {"episodes": [{"episode": 1, "air_date": ""}]}}}, NOW), False)
+eq("films are not airing", tc.behind_airing(_airing(4, [0], kind="movie"), NOW), False)
+eq("custom metadata left alone",
+   tc.behind_airing({**_airing(4, [0]), "source": "custom", "tmdb_id": None}, NOW), False)
+eq("an expired stub is the retention loop's", tc.behind_airing({**_airing(4, [0]), "expired": True}, NOW), False)
+eq("no stamp -> no guess", tc.behind_airing({**_airing(4, [0]), "fetched_at": ""}, NOW), False)
+
 print("tmdbcache: %d passed, %d failed" % (_PASS, len(_FAIL)))
 for f in _FAIL:
     print("  FAIL " + f)

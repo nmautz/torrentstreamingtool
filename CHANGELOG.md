@@ -1,5 +1,16 @@
 # Changelog
 
+## [20.24.8] — 2026-10-16
+
+### Fixed
+- **New episodes of a show you're watching get their overview and picture.**
+  Each download keeps its own copy of the show's TMDb details, and the show
+  page read the oldest one. Avatar: Seven Havens E01-E03 were downloaded before
+  TMDb had filled in E04-E06, so those episodes showed blank even after they
+  were downloaded. The page now reads the newest copy. A show that is still
+  airing re-reads its copy (through the TMDb cache) once its episodes air,
+  instead of waiting 150 days.
+
 ## [20.24.7] — 2026-10-16
 
 ### Fixed

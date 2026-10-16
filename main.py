@@ -3254,6 +3254,10 @@ _tmdb_fetch_tasks: dict[str, "asyncio.Task[Optional[dict]]"] = {}
 # match stays unbound, so without this every page open would re-ask.
 _tmdb_unbound_tried: dict[str, float] = {}
 _TMDB_UNBOUND_RETRY_SEC = 600
+# Condition 6 of _nudge_metadata_health: an airing re-read that TMDb didn't
+# answer leaves the copy as old as it was, so the same open would ask again.
+_tmdb_airing_tried: dict[str, float] = {}
+_TMDB_AIRING_RETRY_SEC = 3600
 
 # Fire-and-forget tasks need a strong reference until they finish — a bare
 # asyncio.create_task() result can be garbage-collected mid-flight.
@@ -4533,24 +4537,30 @@ def _roam_seasons_wanted(item: dict, meta: Optional[dict]) -> list[int]:
 async def _fetch_item_metadata(item_id: str, force: bool = False,
                                 override_tmdb_id: Optional[int] = None,
                                 override_kind: Optional[str] = None,
-                                refresh: bool = False) -> Optional[dict]:
+                                refresh: bool = False,
+                                cached_ok: bool = False) -> Optional[dict]:
     """Match an item against TMDb and cache the result on the item. Coalesces
     concurrent fetches for the same item via a per-id lock.
 
     `refresh` re-fetches the entry the item is ALREADY bound to: no re-match,
     the binding's `source` kept, and nothing written unless TMDb really
     answered. It is how metadata stays under the six months TMDb's terms allow
-    (`tmdb_retention_loop`); returns None when TMDb didn't answer."""
+    (`tmdb_retention_loop`); returns None when TMDb didn't answer.
+
+    `cached_ok` lets a refresh read through the TMDb response cache instead of
+    past it: the airing re-read (`tmdbcache.behind_airing`) wants what TMDb
+    added since the item's copy was taken, and an airing season's cache entry
+    is never more than 12 h old (`tmdbcache.ttl_for`)."""
     if not await _tmdb_effective_key():
         return None
     # A plain refresh (the Refresh button, a rename) means "ask TMDb again", so
     # it skips the fresh-response cache. A re-bind to a picked id doesn't need
     # to: the cached copy of that entry is as good as a new one.
-    if (force or refresh) and not override_tmdb_id and not _tmdb_fresh.get():
+    if (force or refresh) and not cached_ok and not override_tmdb_id and not _tmdb_fresh.get():
         token = _tmdb_fresh.set(True)
         try:
             return await _fetch_item_metadata(item_id, force, override_tmdb_id,
-                                              override_kind, refresh)
+                                              override_kind, refresh, cached_ok)
         finally:
             _tmdb_fresh.reset(token)
 
@@ -5439,6 +5449,13 @@ def _nudge_metadata_health(item: dict) -> None:
     can only look where it has names, and the cache holds the seasons the files
     sit in. `_roam_seasons_wanted` lists the rest; `_settle_attribution`
     fetches them and marks the item tried for this run.
+
+    **6 - episodes aired since the copy was taken (20.24.8).** TMDb fills in an
+    episode's overview, still and runtime around its air date, and the item's
+    copy was usually taken before: Avatar: Seven Havens E01-E03, downloaded on
+    the 12th, showed E04-E06 blank on the day they aired. `tmdbcache.behind_airing`
+    decides; the re-read goes through the response cache, and is throttled per
+    item like condition 0 so a TMDb outage doesn't re-ask on every open.
     """
     meta = item.get("metadata") or {}
     if not meta:
@@ -5465,6 +5482,11 @@ def _nudge_metadata_health(item: dict) -> None:
             or _title_slots_pending(item, meta)
             or _roam_seasons_wanted(item, meta)):
         _spawn_metadata_fetch(item["id"])
+    elif tmdbcache.behind_airing(meta):
+        now = time.monotonic()
+        if now - _tmdb_airing_tried.get(item["id"], -1e9) >= _TMDB_AIRING_RETRY_SEC:
+            _tmdb_airing_tried[item["id"]] = now
+            _spawn_metadata_fetch(item["id"], refresh=True, cached_ok=True)
 
 
 def _title_slots_pending(item: dict, meta: dict) -> bool:
@@ -5491,7 +5513,7 @@ def _ep_groups_pending(item: dict, meta: dict) -> bool:
     return epgroups.place_files(trial, homes, meta.get("title") or "")
 
 
-def _spawn_metadata_fetch(item_id: str) -> "asyncio.Task[Optional[dict]]":
+def _spawn_metadata_fetch(item_id: str, **kw) -> "asyncio.Task[Optional[dict]]":
     """Start (or join) a background `_fetch_item_metadata` for an item. The GET
     /metadata endpoint waits on this only briefly — on a slow/dead internet link
     it returns `pending` and the task keeps running; when the fetch eventually
@@ -5502,7 +5524,7 @@ def _spawn_metadata_fetch(item_id: str) -> "asyncio.Task[Optional[dict]]":
 
     async def _run() -> Optional[dict]:
         try:
-            return await _fetch_item_metadata(item_id)
+            return await _fetch_item_metadata(item_id, **kw)
         finally:
             _tmdb_fetch_tasks.pop(item_id, None)
 
@@ -17248,6 +17270,11 @@ async def delete_library_group(group_id: str) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+def _meta_age_or_inf(meta: dict) -> float:
+    age = tmdbcache.metadata_age(meta)
+    return float("inf") if age is None else age
+
+
 @app.get("/api/library/series/{series_key}")
 async def get_series_files(request: Request, series_key: str,
                             profile_id: str = "") -> JSONResponse:
@@ -17269,8 +17296,13 @@ async def get_series_files(request: Request, series_key: str,
         files.extend(await _build_item_files(it, profile_id))
     files.sort(key=episodes.sort_key)
 
-    # Title + metadata: prefer a member that already has cached TMDb metadata.
-    meta_item = next((it for it in members if it.get("metadata")), None)
+    # Title + metadata: the member whose cached TMDb metadata is newest. Each
+    # member holds its own copy, taken when it was fetched, and the oldest one
+    # predates whatever TMDb filled in since (an episode that aired after the
+    # first download showed with no overview or still). An unstamped copy ranks
+    # last; ties keep library order.
+    meta_item = min((it for it in members if it.get("metadata")),
+                    key=lambda it: _meta_age_or_inf(it["metadata"]), default=None)
     # TMDb's name for the show, never a member's torrent name (_item_display_names).
     title = _item_display_names(meta_item or members[0])[0]
     meta = meta_item.get("metadata") if meta_item else None

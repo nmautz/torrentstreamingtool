@@ -217,6 +217,14 @@ unbound and un-remapped for good. Hunter x Hunter S3 showed S03E01-12 beside TMD
 `_nudge_metadata_health` now binds an item with no metadata (condition 0, throttled per item),
 and the series endpoint nudges every member. See [LIBRARY_DATA.md](LIBRARY_DATA.md) § Metadata cache migration.
 
+**Which member it borrows from matters too (20.24.8).** Each member holds its own copy, taken when
+it was fetched. The endpoint used to take the first member with any, the OLDEST download.
+Avatar: Seven Havens E01-E03 were fetched on the 12th, before TMDb had E04-E06's overviews or
+stills, and nothing re-read them, so the page showed those episodes blank even after E04-E06 were
+downloaded with fresh copies. It now takes the member with the newest `fetched_at`
+(`_meta_age_or_inf`), and an airing show's copies are re-read as episodes air
+(`tmdbcache.behind_airing`, LIBRARY_DATA § TMDb retention).
+
 ### An anime's `SxxExx` can be authoritative and still wrong — the season grids don't agree
 
 `SxxExx` on the basename is the strongest signal attribution has, and for anime it is routinely a

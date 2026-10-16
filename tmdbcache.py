@@ -278,6 +278,37 @@ def metadata_state(meta, now: Optional[float] = None) -> str:
     return age_state(metadata_age(meta, now))
 
 
+# A show still airing gets each episode's overview, still and runtime filled in
+# on TMDb around its air date, usually after the item's copy was taken (an item
+# downloaded a week before E04 aired holds E04's name and nothing else). Only
+# the six-month retention refresh used to re-read that copy, so the episode stayed
+# blank on the page. `behind_airing` says when to re-read it sooner.
+AIRING_RECHECK = 12 * HOUR      # matches ttl_for's airing season, so each re-read can see news
+AIRING_SETTLE_DAYS = 7          # how long after an air date TMDb is still filling it in
+
+
+def behind_airing(meta, now: Optional[float] = None) -> bool:
+    """Should this TV item's metadata be re-read because episodes aired since it
+    was taken? True when the copy is at least `AIRING_RECHECK` old and one of its
+    episodes is dated today or earlier but no more than `AIRING_SETTLE_DAYS`
+    before the day the copy was taken. It stops once the copy postdates the last
+    aired episode by more than that, and starts again when the next one airs."""
+    if not is_tmdb_metadata(meta) or meta.get("expired") or meta.get("tmdb_kind") != "tv":
+        return False
+    age = metadata_age(meta, now)
+    if age is None or age < AIRING_RECHECK:
+        return False
+    t = now if now is not None else time.time()
+    today = date.fromtimestamp(t)
+    taken = date.fromtimestamp(t - age) - timedelta(days=AIRING_SETTLE_DAYS)
+    for s in (meta.get("seasons") or {}).values():
+        for e in (s or {}).get("episodes") or [] if isinstance(s, dict) else []:
+            d = _parse_day((e or {}).get("air_date") or "") if isinstance(e, dict) else None
+            if d and taken <= d <= today:
+                return True
+    return False
+
+
 def _has_tmdb_sections(meta) -> bool:
     secs = meta.get("sections") if isinstance(meta, dict) else None
     return isinstance(secs, dict) and any(
