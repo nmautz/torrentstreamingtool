@@ -1,5 +1,18 @@
 # Changelog
 
+## [20.24.3] — 2026-10-15
+
+### Fixed
+- **Downloaded subtitles show again, on the phone and on the TV.** On Windows
+  every subtitle fetched from OpenSubtitles was saved with each line ending
+  `\r\r\n` (`write_text` adds a CR to text that already had one). Read back,
+  that is a blank line after every line: the phone's converter lost every
+  timestamp, so selecting the track said "loading subs" and nothing appeared,
+  and VLC on the TV listed no subtitle track at all. Seen on The Ballad of
+  Songbirds & Snakes. Subtitles are now written with plain line endings, an
+  existing file is repaired the first time it is read or loaded into VLC, and
+  a copy mirrored into a prepped bundle is rebuilt from the repaired file.
+
 ## [20.24.2] — 2026-10-15
 
 ### Fixed

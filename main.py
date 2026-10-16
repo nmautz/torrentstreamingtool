@@ -3072,11 +3072,17 @@ async def _save_subtitle_file(video: Path, text: str, fmt: str, lang: str,
     Keeps the file's own format (ASS stays ASS, styling intact) and always writes
     UTF-8. The pre-17.7 code wrote the raw bytes under a `.srt` name whatever
     they were — which made cp1252 subs mojibake and ASS files (about half of
-    what the API serves for anime) unreadable to every non-VLC surface."""
+    what the API serves for anime) unreadable to every non-VLC surface.
+
+    Line endings are normalised to LF and written as bytes: OpenSubtitles serves
+    CRLF, and `write_text` on Windows turns each `\\n` into `\\r\\n`, so every line
+    ended `\\r\\r\\n` — a blank line after every line, which no reader parses as
+    SRT (see `_heal_sub_newlines`)."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     if fn is not None or fmt == "sub":
         text, fmt = subsearch.retime(text, fn or (lambda t: t))
     dest = subsearch.sidecar_name(video, lang, fmt)
-    await asyncio.to_thread(dest.write_text, text, encoding="utf-8")
+    await asyncio.to_thread(dest.write_bytes, text.encode("utf-8"))
     return dest, fmt
 
 
@@ -7933,6 +7939,7 @@ async def _load_all_local_subs(video: Path) -> list[dict]:
     for sub in await asyncio.to_thread(_discover_local_subs, video):
         guess = _parse_sub_lang(sub.name)
         is_ai = _is_ai_sub_file(sub)
+        await asyncio.to_thread(_heal_sub_newlines, sub)
         await vlc("addsubtitle", val=str(sub))
         await asyncio.sleep(0.3)
         after = await _vlc_subtitle_tracks()
@@ -26559,6 +26566,25 @@ async def _mirror_sub_into_bundle(src: Path, sidecar: Path, lang: str, label: st
         hls_log.info("could not mirror %s into bundle %s: %s", sidecar.name, bundle.name, exc)
 
 
+async def _remirror_bundle_vtt(bundle: Path, name: str) -> Optional[str]:
+    """Re-convert a bundle's mirrored `sub_<n>.vtt` from its sidecar, which sits
+    beside the source (two levels above the bundle). Returns the new WebVTT, or
+    None when `name` is not a mirror or the sidecar still yields no cues."""
+    meta = await asyncio.to_thread(_read_meta, bundle)
+    ent = next((s for s in (meta or {}).get("subtitles") or []
+                if s.get("file") == name and s.get("sidecar")), None)
+    if not ent:
+        return None
+    sidecar = bundle.parent.parent / str(ent["sidecar"])
+    if not sidecar.is_file():
+        return None
+    try:
+        vtt = await _sub_to_vtt(sidecar)
+    except Exception:
+        return None
+    return vtt if "-->" in vtt else None
+
+
 async def _announce_subtitle(item_id: str, file_path: str, dest: Path) -> None:
     """Tell the surfaces that a new sidecar exists: the kiosk rebuilds its
     subtitle list and selects it, dashboards refresh theirs."""
@@ -32929,6 +32955,28 @@ def _needs_stt_subs(info: dict, default_lang: str = "") -> bool:
     return False
 
 
+def _heal_sub_newlines(path: Path) -> None:
+    """Rewrite a sidecar whose lines end `\\r\\r\\n` with plain `\\r\\n`.
+
+    Before 20.24.3 `_save_subtitle_file` wrote OpenSubtitles' CRLF text through
+    `write_text`, which on Windows doubles the CR. Read back, every line is
+    followed by a blank one, so the SRT→WebVTT conversion lost every timestamp
+    (a phone shows "loading subs" forever) and VLC lists no track at all. Healed
+    in place the first time anything reads or loads the file. Text formats only:
+    a `.sub` may be binary VobSub."""
+    if path.suffix.lower() not in (".srt", ".vtt", ".ass", ".ssa"):
+        return
+    try:
+        data = path.read_bytes()
+        if b"\r\r\n" not in data:
+            return
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_bytes(data.replace(b"\r\r\n", b"\r\n"))
+        os.replace(str(tmp), str(path))
+    except OSError as exc:
+        log.info("could not heal line endings of %s: %s", path.name, exc)
+
+
 def _srt_to_vtt(srt: str) -> str:
     """Convert SRT cues to WebVTT. SRT timestamps use a comma; VTT uses a period."""
     body = re.sub(r"(\d\d:\d\d:\d\d),(\d\d\d)", r"\1.\2", srt)
@@ -33018,6 +33066,7 @@ async def _sub_to_vtt(path: Path) -> str:
     `_clean_webvtt` then strips the artefacts that downgrade leaves behind
     (duplicate cues, leaked `\\p` drawings / `\\h` escapes).
     """
+    await asyncio.to_thread(_heal_sub_newlines, path)
     ext = path.suffix.lower()
     if ext == ".vtt":
         return _clean_webvtt(path.read_text(encoding="utf-8", errors="replace"))
@@ -38689,6 +38738,10 @@ async def offline_cache_bundle_file(cache_key: str, filename: str,
         # heal also reaches the iOS download path, which fetches via this route.
         raw = await asyncio.to_thread(p.read_text, encoding="utf-8", errors="replace")
         cleaned = _clean_webvtt(raw)
+        if "-->" not in cleaned:
+            # A mirrored sidecar converted from a `\r\r\n` file has no cues left
+            # (see `_heal_sub_newlines`); rebuild it from the healed sidecar.
+            cleaned = await _remirror_bundle_vtt(bundle_dir, p.name) or cleaned
         if cleaned != raw:
             try:
                 tmp = p.with_suffix(p.suffix + ".tmp")
