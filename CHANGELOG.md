@@ -1,5 +1,20 @@
 # Changelog
 
+## [20.24.2] — 2026-10-15
+
+### Fixed
+- **Haikyu!!'s second season is Season 2 again, not a section of its own.**
+  20.24.0 taught the folder parse to read "2nd Season", "OADs" and a bare "NC"
+  folder, but an item already in the library never had that parse re-run: it
+  only re-reads files with no episode number and no section, and these had
+  both. So the pack 20.24.0 was written for kept "[Anime Time] Haikyu!! 2nd
+  Season" as a spin-off. A one-time migration (`attrib_v` 3,
+  `episodes.reread_spinoffs`) now re-reads season-0 files in a spin-off
+  section and moves one only when the parse states a season or a known
+  section (Specials / OVA / Movies / Extras). Over the box's 208 items (931
+  files) it moves 53, all in this pack: 25 to Season 2, 26 creditless OP/ED
+  clips to Extras, 2 OADs to OAD.
+
 ## [20.24.1] — 2026-10-15
 ### The Hunger Games shelf is in order again
 

@@ -312,6 +312,14 @@ and the result is stamped `attrib_v` on the item so the regex work is once per i
 once per library load (`_load_lib_raw` runs on every load). Bucketed files are exempt:
 `Specials/Behind the Scenes.mkv` has no episode number because there isn't one.
 
+The same exemption hid a **new pass-1 rule from the items it was written for** (20.24.2).
+A spin-off file has an episode AND a bucket, so 20.24.0's "2nd Season" / "OADs" / bare
+"NC" reading never reached the Haikyu!! pack that prompted it: the box kept season 2 as
+a section named "[Anime Time] Haikyu!! 2nd Season" while the test, which runs pass 1
+fresh, passed. Bumping `_ATTRIB_VERSION` alone re-runs nothing for such files. A rule
+added to pass 1 needs `episodes.reread_spinoffs` (or its own migration) to reach stored
+items, and the check is the box's stored files, not a fresh parse of the same paths.
+
 ### `/search/movie` needs the same scoring — and an empty file list is not evidence of a movie
 
 Two halves of the same 2026-09-15 report ("I downloaded Regular Show and the library showed *Regular Show: The Movie*; the first option in the swap dialog was the right one").

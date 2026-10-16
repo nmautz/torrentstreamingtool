@@ -365,6 +365,36 @@ def attribute_paths(paths: list[str]) -> list[dict]:
     return out
 
 
+def reread_spinoffs(files: list[dict]) -> bool:
+    """Re-run pass 1 over the files an older pass 1 made a spin-off (20.24.2).
+
+    Pass 1 only ever re-runs on an existing item for a file with no episode and
+    no bucket. A spin-off file has both, so a rule added to pass 1 later (20.24.0:
+    "2nd Season", "OADs", a bare "NC") never reached an item downloaded before
+    it: Anime Time's Haikyu!! pack kept its whole second season as a section
+    called "[Anime Time] Haikyu!! 2nd Season".
+
+    Only a season-0 file in a spin-off section is looked at, and it moves only
+    when today's pass 1 states something better: a season, or a known bucket
+    (Specials / OVA / Movies / Extras). A bare season 0 with no bucket is not
+    better, it is what a shifted item root reads (one folder left, so the folder
+    became the root). A file a later pass put in a season (1b, 2, 3) is in
+    season > 0 and never touched. In place; True if anything changed.
+    """
+    if not any(not int(f.get("season", 0) or 0)
+               and section_kind(f.get("bucket") or "") == "spinoff" for f in files):
+        return False
+    slots = attribute_paths([f.get("path", "") for f in files])
+    changed = False
+    for f, slot in zip(files, slots):
+        if int(f.get("season", 0) or 0) or section_kind(f.get("bucket") or "") != "spinoff":
+            continue
+        if int(slot.get("season", 0) or 0) \
+                or section_kind(slot.get("bucket") or "") not in ("spinoff", "main"):
+            changed |= apply_slot(f, slot)
+    return changed
+
+
 def season_offsets(all_seasons: list[dict]) -> dict[int, int]:
     """Cumulative episode count BEFORE each season — the amount to subtract to
     turn a series-absolute number into a within-season one. Season 0 is excluded

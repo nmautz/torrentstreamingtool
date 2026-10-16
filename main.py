@@ -804,7 +804,7 @@ _analysis_gate: asyncio.Semaphore  # initialised in lifespan
 # Bump to re-run the structural attribution pass over every existing item once.
 # Stamped onto the item as `attrib_v` so the (regex-heavy) pass costs one run per
 # item rather than one per library load — and `_load_lib_raw` runs on every load.
-_ATTRIB_VERSION = 2
+_ATTRIB_VERSION = 3
 
 
 def _needs_attrib(f: dict) -> bool:
@@ -867,6 +867,11 @@ def _migrate_item(item: dict) -> dict:
     # seconds), so the result is stamped with `attrib_v`: the regex work happens
     # once per item, not once per load, and an item whose files genuinely can't
     # be numbered stops being retried forever.
+    #
+    # 20.24.2 (v3): a spin-off file has an episode AND a bucket, so the rule above
+    # never re-reads one, and 20.24.0's new pass-1 rules ("2nd Season", "OADs",
+    # "NC") never reached the pack they were written for. See
+    # episodes.reread_spinoffs.
     files = item.get("files") or []
     if files and int(item.get("attrib_v", 0) or 0) < _ATTRIB_VERSION:
         if any(_needs_attrib(f) for f in files):
@@ -874,6 +879,8 @@ def _migrate_item(item: dict) -> dict:
             for f, slot in zip(files, slots):
                 if _needs_attrib(f):
                     episodes.apply_slot(f, slot)
+            files.sort(key=episodes.sort_key)
+        if episodes.reread_spinoffs(files):
             files.sort(key=episodes.sort_key)
         item["attrib_v"] = _ATTRIB_VERSION
     # 20.24.1: a film's story number was once read off "Part N" / "Chapter N",

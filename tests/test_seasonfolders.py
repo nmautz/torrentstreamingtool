@@ -124,6 +124,51 @@ again = settle(FIX["paths"], FIX["all_seasons"], NAMES)
 eq("the same files give the same answer", again, slots)
 
 
+# ── 4. An item downloaded before 20.24.0 (reread_spinoffs, 20.24.2) ──────────
+# The box's own copy of this pack after 20.24.0 shipped: pass 1b had put seasons
+# 1, 3 and 4 in place, but the files 20.24.0's NEW pass-1 rules were for still
+# carried the old answer, because pass 1 never re-reads a file with a bucket.
+def stored_before(paths):
+    files = []
+    for p, s in zip(paths, settle(paths, FIX["all_seasons"], NAMES)):
+        f = {"path": p}
+        ep.apply_slot(f, s)
+        folder = os.path.basename(os.path.dirname(p.replace("\\", "/")))
+        if "2nd Season" in folder or folder == "NC" or folder.endswith("OADs"):
+            ep.apply_slot(f, {"season": 0, "episode": s["episode"], "bucket": folder})
+        files.append(f)
+    return files
+
+
+old = stored_before(FIX["paths"])
+eq("the stale state: season 2 is a spin-off",
+   sum(1 for f in old if f.get("bucket", "").endswith("2nd Season")), 25)
+ok("reread_spinoffs reports a change", ep.reread_spinoffs(old))
+by = collections.Counter((f.get("season", 0), f.get("bucket", "")) for f in old)
+eq("season 2 is season 2", by[(2, "")], 25)
+eq("seasons 1, 3, 4 are left where pass 1b put them",
+   (by[(1, "")], by[(3, "")], by[(4, "")]), (25, 10, 25))
+eq("the NC folders are Extras", by[(0, "Extras")], 26)
+eq("the OADs folder is OAD", by[(0, "OAD")], 2)
+eq("a real spin-off stays one", by[(0, "[Anime Time] Haikyuu!! Riku vs. Kuu")], 2)
+eq("season 2 is numbered 1-25",
+   sorted(f["episode"] for f in old if f.get("season") == 2), list(range(1, 26)))
+ok("a second run changes nothing", not ep.reread_spinoffs(old))
+
+jh_files = [{"path": "X/[Anime Time] Attack On Titan Junior High/[Anime Time] Attack on Titan Junior High - 04.mkv",
+             "season": 0, "episode": 4, "bucket": "[Anime Time] Attack On Titan Junior High"}]
+ok("a lone spin-off folder (now the item root) is not read as the main run",
+   not ep.reread_spinoffs(jh_files))
+jh_two = [{"path": "X/[Anime Time] Attack on Titan Season 1/[Anime Time] Attack on Titan - 01.mkv",
+           "season": 1, "episode": 1},
+          dict(jh_files[0])]
+ok("a spin-off pass 1 still calls one is not touched", not ep.reread_spinoffs(jh_two))
+placed = [{"path": "R/[A] Show 2nd Season/[A] Show 2nd Season - 01.mkv",
+           "season": 3, "episode": 1, "bucket": "[A] Show 2nd Season"}]
+ok("a file a later pass put in a season is not touched", not ep.reread_spinoffs(placed))
+eq("... and keeps its season", placed[0]["season"], 3)
+
+
 # ---------------------------------------------------------------- report
 if _FAIL:
     print("FAILED %d of %d" % (len(_FAIL), _PASS + len(_FAIL)))
