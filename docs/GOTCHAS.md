@@ -2071,16 +2071,26 @@ lookup). Unguarded, Junior High kept its hero title but lost every episode title
 Titan's. Both now check `epSection` — the top-up returns, and `_epApplyMetadata` re-applies the
 section over the fresh `metadata.sections` map instead.
 
-### "Not out yet" runs THROUGH the air date
+### "Not out yet": the air date's own day is decided by the torrent, not the clock
 
-TMDb air dates are calendar days with no time. An episode dated today airs this evening, so a
-`Date.parse(date) < now` test calls it aired from midnight — precisely when a fake pre-release
-is sitting on the indexers (South Park S29E01, a lone `.exe`, the morning it aired). Both
-`_tmdbEpUnaired`/`_airInfo` (client) and `_unreleased_gate` (server) treat `air_date >= today`
-as not out, box/viewer-local. Trade-off: a same-day simulcast needs "Download anyway" and a
-passing contents check (any profile, since 15.5.0). Since 15.5.0 the server accepts the override
+TMDb air dates are calendar days with no time. On the day itself an episode may already be out
+(a streaming show drops at midnight Pacific: Avatar: Seven Havens E04-E06 had 8,000-seeder WEB
+releases by 9 am) or may air that evening (a broadcast show), and that same day is when a fake
+pre-release sits on the indexers (South Park S29E01, a lone `.exe`, the morning it aired). No
+time-of-day cutoff separates the two. Until 20.24.7 the whole day counted as not out, so a
+streaming drop showed "Airs today" with no Find button until midnight.
+
+Now (20.24.7): dated **after** today → not out, refused without looking. Dated **today** →
+`_tmdbEpUnaired` says aired (Find, counts, gap fill), the chip is a sky "Out today", and
+`_unreleased_gate` marks the 409 payload `today: true`. `library_download` then runs
+`_today_release_verified` (the `/api/torrent/inspect` file-list read, `_inspect_files`) and lets
+the release through when it holds a video of at least `_TODAY_MIN_VIDEO_BYTES` (50 MB). A fake,
+or a torrent whose file list no peer sends within 30 s, still gets the 409 (with `checked`
+saying why) and the not-out-yet dialog. So a download of a today-dated episode can take up to
+~30 s longer to answer. Stream-now runs the same check in the page (`_todayReleaseHasVideo` in
+`_ssConfirmOut`). Films are unchanged: a film dated today is still not out. Since 15.5.0 the server accepts the override
 from anyone and trusts the dashboard to have run `/api/torrent/inspect`, so a direct API call can
-skip the check. The gate is enforced on `POST /api/library/download` only — the stream
+skip the check (a today-dated episode is checked server-side regardless). The gate is enforced on `POST /api/library/download` only — the stream
 endpoints receive just a magnet and title, so stream-now asks in the UI (`_ssConfirmOut`) and
 is not server-enforced.
 

@@ -528,7 +528,7 @@ makes it `epIsMovie`. **Guards:** `_epApplyMetadata` and `_epTopUpSeasons` must 
 
 ### Not-out-yet releases (15.2.0)
 
-`_airInfo(date, verb)` → `{out, label}` and `_releaseBadge(date)` (amber chip) mark unreleased
+`_airInfo(date, verb)` → `{out, today, label}` and `_releaseBadge(date)` (amber chip; a sky "Out today" chip for an episode dated today, which `_tmdbEpUnaired` counts as aired since 20.24.7 — the server checks the torrent, see GOTCHAS) mark unreleased
 episodes/films: `_ssEpRowHtml`, `_ssMissingRowHtml`, `_epMissingCardHtml`, collection missing
 films. **All** library downloads go through `postLibraryDownload(body, {silent})`: on a 409
 `unreleased` it shows `#unreleasedModal` via `_unreleasedPrompt(info)` (big Cancel; small

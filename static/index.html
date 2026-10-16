@@ -11588,13 +11588,16 @@ function _tmdbSeasonEpisodes(meta, season){
   return (s && Array.isArray(s.episodes)) ? s.episodes : [];
 }
 
-// True when an episode isn't out yet — none announced, or dated today or later.
-// TMDb dates are calendar days with no time: an episode dated TODAY airs this
-// evening, and the old `midnight < now` test called it aired from 00:00 — which
-// is exactly the window a fake "S29E01" sits in. Matches the server's
-// _unreleased_gate, which refuses the download through the air date.
+// True when an episode isn't out yet — none announced, or dated after today.
+// TMDb dates are calendar days with no time, so an episode dated TODAY may be out
+// (a streaming show drops at midnight Pacific) or may air this evening (a
+// broadcast one) — and that day is exactly the window a fake "S29E01" sits in.
+// So today counts as findable, and the server's _unreleased_gate decides per
+// release: it lets one through when its file list holds a real video, and
+// refuses everything dated tomorrow or later.
 function _tmdbEpUnaired(te){
-  return !_airInfo((te&&te.air_date)||"").out;
+  const a=_airInfo((te&&te.air_date)||"");
+  return !a.out && !a.today;
 }
 
 function _localISODate(d){
@@ -11608,7 +11611,7 @@ function _airInfo(date, verb){
   if(!d) return {out:false, label:`${v} TBA`};
   const now=new Date(), today=_localISODate(now);
   if(d<today) return {out:true, label:""};
-  if(d===today) return {out:false, label:`${v} today`};
+  if(d===today) return {out:false, today:true, label:`${v} today`};
   const tm=new Date(now.getFullYear(), now.getMonth(), now.getDate()+1);
   if(d===_localISODate(tm)) return {out:false, label:`${v} tomorrow`};
   const [y,m,dd]=d.split("-").map(Number);
@@ -11624,6 +11627,11 @@ function _airInfo(date, verb){
 function _releaseBadge(date, verb){
   const a=_airInfo(date, verb);
   if(a.out) return "";
+  // An episode dated today is probably out; its sources are checked for a real
+  // video before downloading (see _tmdbEpUnaired), so it isn't the amber warning.
+  if(a.today && !verb)
+    return `<span class="text-[9px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-sky-950/60 text-sky-300 border border-sky-900 whitespace-nowrap"
+               title="TMDb dates this episode today. A release is checked for a real video before it downloads.">Out today</span>`;
   return `<span class="text-[9px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-amber-950/70 text-amber-400 border border-amber-900 whitespace-nowrap"
                title="Not released yet. Anything posted before release is almost always fake.">${escHtml(a.label)}</span>`;
 }
@@ -12255,7 +12263,7 @@ function _epMissingCardHtml(season, te){
          <span class="w-1.5 h-1.5 bg-sky-400"></span>In a pack you have</span>`
     : `<span class="text-[10px] text-orange-400 font-bold uppercase tracking-widest flex items-center gap-1"
              title="This episode exists but isn't on this box.">
-         <span class="w-1.5 h-1.5 ${dot}"></span>Not downloaded</span>
+         <span class="w-1.5 h-1.5 ${dot}"></span>Not downloaded</span>${_releaseBadge(air)}
        ${pack?`<span class="text-[10px] text-gray-500 font-bold uppercase tracking-widest"
              title="TMDb counts this as season ${season}, but releases of this show put it in the ${escHtml(pack.label.toLowerCase())} pack.">
          In the ${escHtml(pack.label)} pack</span>`:""}`;
@@ -17415,7 +17423,8 @@ function _ssEpRowHtml(e){
   const own=_ssOwnedBadge(e.season,e.episode);
   const te=_tmdbSeasonEpisodes(_ssMeta,e.season).find(x=>+x.episode===+e.episode);
   const rel=te?_releaseBadge(te.air_date):"";
-  return `<div class="w-full flex items-stretch${own?" bg-emerald-950/20 border-l-2 border-l-emerald-800":rel?" border-l-2 border-l-amber-700":""}">
+  const relWarn=rel&&_tmdbEpUnaired(te);
+  return `<div class="w-full flex items-stretch${own?" bg-emerald-950/20 border-l-2 border-l-emerald-800":relWarn?" border-l-2 border-l-amber-700":""}">
     <button onclick="ssOpenSourceSheet(${e.season},${e.episode})"
       class="flex-1 min-w-0 text-left px-3 sm:px-5 py-3 hover:bg-gray-800/50 transition-colors flex items-center gap-3">
       <div class="text-[11px] font-mono font-bold text-indigo-400 w-14 flex-shrink-0">${code}</div>
@@ -17453,11 +17462,26 @@ async function _ssConfirmOut(season, episode, magnet){
   if(!te) return true;
   const a=_airInfo(te.air_date);
   if(a.out) return true;
+  // Dated today: play it when the torrent holds a real video, the same test the
+  // server's _unreleased_gate applies to a download. Otherwise ask, as before.
+  if(a.today && magnet && await _todayReleaseHasVideo(magnet)) return true;
   return _unreleasedPrompt({
     title:`${(_ssGroup&&_ssGroup.title)||""} S${pad2(season)}E${pad2(episode)}`.trim(),
     label:a.label, can_override:!!(profile&&profile.elevated&&_profileToken),
     magnet:magnet||"", alternatives:_ssAlternativeSources(season, episode),
   });
+}
+
+// True when /api/torrent/inspect finds a video of episode size in the torrent
+// (the server's _TODAY_MIN_VIDEO_BYTES). False when it can't tell.
+async function _todayReleaseHasVideo(magnet){
+  try{
+    const r=await fetch("/api/torrent/inspect",{method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({magnet, profile_id:(profile&&profile.id)||""})});
+    const d=r.ok?await r.json():null;
+    return !!(d&&d.known&&d.has_video&&(d.files||[]).some(f=>
+      VIDEO_RE.test(f.name||"") && (+f.size||0)>=50*1024*1024));
+  }catch(_){ return false; }
 }
 
 async function ssPlayEpisode(season,episode,btn){
@@ -33504,6 +33528,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.24.6</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.24.7</div>
 </body>
 </html>

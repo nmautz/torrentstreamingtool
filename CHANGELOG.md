@@ -1,5 +1,18 @@
 # Changelog
 
+## [20.24.7] — 2026-10-16
+
+### Fixed
+- **Episodes dated today can be found and downloaded on the day.** TMDb gives
+  an air date but no time, and the whole day counted as "not out yet", so a
+  streaming show that drops at midnight (Avatar: Seven Havens E04-E06, with
+  thousands of seeders by morning) said "Airs today" with no Find button until
+  midnight. An episode dated today now gets Find and a blue "Out today" chip.
+  The server opens the torrent's file list and lets the download through when
+  it holds a real video (50 MB or more). A fake still gets the not-out-yet
+  dialog. Stream-now runs the same check. Anything dated tomorrow or later,
+  and any film dated today, is refused as before.
+
 ## [20.24.6] — 2026-10-15
 
 ### Fixed

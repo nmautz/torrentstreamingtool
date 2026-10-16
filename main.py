@@ -18629,14 +18629,15 @@ async def _unreleased_gate(lib: dict, req: "DownloadReq") -> Optional[dict]:
             return None
         return {"kind": "episode", "title": f"{show} S{season:02d}E{episode:02d}".strip(),
                 "season": season, "episode": episode, "air_date": date,
-                "label": _air_label(date, today)}
+                "today": date == today, "label": _air_label(date, today)}
     # A season pack: not out until the season's last episode is.
     last = max(eps, key=lambda e: int(e.get("episode") or 0))
     date = (last.get("air_date") or "").strip()
     if date and date < today:
         return None
     return {"kind": "season", "title": f"{show} Season {season}".strip(), "season": season,
-            "air_date": date, "label": "finishes airing" + _air_label(date, today)[4:]
+            "air_date": date, "today": date == today,
+            "label": "finishes airing" + _air_label(date, today)[4:]
             if date else "air dates not announced"}
 
 
@@ -18769,6 +18770,46 @@ async def _inspect_magnet(magnet: str) -> tuple[Optional[list[dict]], str]:
     return [{"name": f.get("name", ""), "size": f.get("size", 0)} for f in files], ""
 
 
+async def _inspect_files(link: str) -> tuple[Optional[list[dict]], str]:
+    """File list for a magnet or indexer link → (files, reason); files is None
+    when it couldn't be read, and reason says why."""
+    link = (link or "").strip()
+    try:
+        if link.lower().startswith(("http://", "https://")):
+            files, magnet, reason = await _inspect_link(link)
+            if files is None and magnet:
+                files, reason = await _inspect_magnet(magnet)
+            return files, reason
+        if link.lower().startswith("magnet:"):
+            return await _inspect_magnet(link)
+        return None, "that isn't a torrent link or magnet"
+    except Exception as exc:
+        log.warning("torrent inspect failed for %s: %s", link[:120], exc)
+        return None, "the file list couldn't be read"
+
+
+# An episode TMDb dates TODAY may already be out: TMDb has no time of day, and a
+# streaming show drops at midnight Pacific while a broadcast one airs that evening.
+# The clock can't tell them apart, so the torrent does. A release whose file list
+# holds a real video is let through; a fake (the 15.1.1 South Park S29E01 was a
+# lone .exe) is not, and gets the not-out-yet dialog as before. Anything dated
+# tomorrow or later is refused without looking.
+_TODAY_MIN_VIDEO_BYTES = 50 * 1024 * 1024
+
+
+async def _today_release_verified(link: str) -> tuple[bool, str]:
+    """→ (ok, why) for a release of something TMDb dates today."""
+    files, reason = await _inspect_files(link)
+    if files is None:
+        return False, reason
+    videos = [f for f in files if Path(f["name"]).suffix.lower() in VIDEO_EXTS]
+    if not videos:
+        return False, "the torrent holds no video"
+    if max(f["size"] for f in videos) < _TODAY_MIN_VIDEO_BYTES:
+        return False, "the torrent's video is too small to be an episode"
+    return True, ""
+
+
 @app.post("/api/torrent/inspect")
 async def torrent_inspect(request: Request, req: TorrentInspectReq) -> JSONResponse:
     # Open to every profile (15.5.0): this check is what lets a non-elevated
@@ -18777,21 +18818,7 @@ async def torrent_inspect(request: Request, req: TorrentInspectReq) -> JSONRespo
     # any profile's own download does.
     if not state.vpn_secure:
         raise HTTPException(403, "VPN not connected — can't fetch torrent metadata.")
-    link = (req.magnet or "").strip()
-    files: Optional[list[dict]] = None
-    reason = ""
-    try:
-        if link.lower().startswith(("http://", "https://")):
-            files, magnet, reason = await _inspect_link(link)
-            if files is None and magnet:
-                files, reason = await _inspect_magnet(magnet)
-        elif link.lower().startswith("magnet:"):
-            files, reason = await _inspect_magnet(link)
-        else:
-            reason = "that isn't a torrent link or magnet"
-    except Exception as exc:
-        log.warning("torrent inspect failed for %s: %s", link[:120], exc)
-        files, reason = None, "the file list couldn't be read"
+    files, reason = await _inspect_files(req.magnet)
     if files is None:
         return JSONResponse({"ok": True, "known": False, "reason": reason})
     videos = [f for f in files if Path(f["name"]).suffix.lower() in VIDEO_EXTS]
@@ -18817,6 +18844,15 @@ async def library_download(request: Request, req: DownloadReq) -> JSONResponse:
     except Exception:
         log.exception("unreleased gate failed; allowing download")
         _gate = None
+    if _gate and _gate.get("today") and not req.allow_unreleased:
+        _ok, _why = await _today_release_verified(req.magnet)
+        if _ok:
+            log.info("Dated-today release verified, allowing: %s (%s)",
+                     _gate.get("title"), req.title)
+            _gate = None
+        else:
+            log.info("Dated-today release not verified (%s): %s", _why, req.title)
+            _gate["checked"] = _why
     if _gate:
         _can = _is_elevated(request, _snap, req.profile_id)
         if not req.allow_unreleased:
