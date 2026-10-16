@@ -1228,7 +1228,7 @@ is deliberately **dropped** rather than migrated; see [GOTCHAS.md](GOTCHAS.md)
   },
   "collection":   {"id": 10, "name": "Star Wars Collection",   // movie only (15.0.0): TMDb belongs_to_collection;
                    "poster_path": "…", "backdrop_path": "…"}, //   {} when none. Drives automatic groups
-  "story_index":  4,                       // movie only (15.0.0): saga number mined from every title (_story_index); 0 = unknown
+  "story_index":  4,                       // movie only (15.0.0): "Episode N" mined from every title (_story_index); 0 = unknown. Never "Part"/"Chapter" (20.24.1)
   "sections": {                            // 15.0.0 — per-section bindings, _fetch_section_metadata
     "attack on titan junior high": {       // spin-off: its OWN show
       "source": "tmdb", "kind": "spinoff", "tmdb_id": 63510, "tmdb_kind": "tv",

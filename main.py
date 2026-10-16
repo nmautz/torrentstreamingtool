@@ -876,6 +876,18 @@ def _migrate_item(item: dict) -> dict:
                     episodes.apply_slot(f, slot)
             files.sort(key=episodes.sort_key)
         item["attrib_v"] = _ATTRIB_VERSION
+    # 20.24.1: a film's story number was once read off "Part N" / "Chapter N",
+    # which put Mockingjay Part 1 and 2 first on The Hunger Games shelf. Clear a
+    # number that can only have come from there; a refetch would set it to 0 too,
+    # but nothing refetches a film's metadata on its own. Idempotent: a cleared
+    # number is 0 and skipped. See _story_index.
+    meta = item.get("metadata")
+    if isinstance(meta, dict) and meta.get("tmdb_kind") == "movie" \
+            and int(meta.get("story_index") or 0):
+        titles = [meta.get("title") or "", meta.get("original_title") or ""]
+        if any(_SPLIT_TITLE_RE.search(t) for t in titles) \
+                and not _story_index(*titles, *(meta.get("aka") or [])):
+            meta["story_index"] = 0
     return item
 
 
@@ -4196,7 +4208,12 @@ async def _tmdb_fetch_tv(show_id: int, seasons: Optional[list[int]]) -> dict:
 _ROMAN = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6, "vii": 7,
           "viii": 8, "ix": 9, "x": 10, "xi": 11, "xii": 12}
 _EPISODE_TITLE_RE = re.compile(
-    r"\b(?:episode|chapter|part)\s+([ivx]{1,4}|\d{1,2})\b", re.IGNORECASE)
+    r"\bepisode\s+([ivx]{1,4}|\d{1,2})\b", re.IGNORECASE)
+# What the rule used to read as well, and must not: "Part 1" splits ONE story
+# into two films, and "Chapter 2" follows a first film that carries no number.
+# Kept only so _migrate_item can clear the numbers it once stored.
+_SPLIT_TITLE_RE = re.compile(
+    r"\b(?:chapter|part)\s+([ivx]{1,4}|\d{1,2})\b", re.IGNORECASE)
 
 
 def _story_index(*titles: str) -> int:
@@ -4213,6 +4230,13 @@ def _story_index(*titles: str) -> int:
     Hope"), which the details call already appends. So every title we know gets
     scanned, and the first episode number found wins. Harry Potter has none
     anywhere, so it keeps release order — which for Harry Potter is story order.
+
+    Only "Episode" counts. "Part" and "Chapter" used to as well, and both put a
+    saga out of order: "Mockingjay - Part 1" / "Part 2" became films 1 and 2 of
+    The Hunger Games, ahead of the two films before them (Deathly Hallows did the
+    same to Harry Potter), and "John Wick: Chapter 2" ran ahead of "John Wick".
+    A prequel released later (The Ballad of Songbirds and Snakes) carries no
+    number anywhere on TMDb, so it stays in release order: nothing here can place it.
     """
     for t in titles:
         m = _EPISODE_TITLE_RE.search(t or "")

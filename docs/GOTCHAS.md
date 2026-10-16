@@ -2036,6 +2036,16 @@ entry** (already appended on the details call) for `Episode|Chapter|Part <roman|
 Harry Potter carries none anywhere and keeps release order, which is also its story order;
 the group page only offers the Story/Release toggle when some film has a number.
 
+**Only "Episode" is a saga number** (20.24.1). The rule used to read `Part N` and `Chapter N`
+too, and both broke the order they were meant to set. "Mockingjay - Part 1" / "Part 2" became
+films 1 and 2 of The Hunger Games and sorted ahead of the two films before them (Deathly Hallows
+did the same to Harry Potter). A number counts as a story position only if *every* film in the
+saga has one, and the first film rarely does: "John Wick: Chapter 2" sorted ahead of "John Wick".
+`_migrate_item` clears a number stored under the old rule. A prequel released later (The Ballad
+of Songbirds and Snakes) carries no number anywhere on TMDb, so it sorts by release date. Only an
+explicit member order (`POST /api/library/groups/{id}` with `members`, which sets
+`member_order_pinned`) can put it first, and the shelf has no control for that yet.
+
 ### Late metadata must not overwrite an open section
 
 The episode page renders a section by narrowing `epFiles` and swapping `epMetadata` for the

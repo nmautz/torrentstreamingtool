@@ -1,5 +1,20 @@
 # Changelog
 
+## [20.24.1] — 2026-10-15
+### The Hunger Games shelf is in order again
+
+In story order the shelf listed Mockingjay Part 1 and Part 2 first, then The Hunger Games and
+Catching Fire. TMDb wasn't the problem. Our rule for a film's place in its saga read "Part 1" and
+"Part 2" as films 1 and 2, and every film without a number sorted after them.
+
+- Only "Episode N" counts now (Star Wars, the case the rule exists for). "Part N" splits one story
+  into two films, and "Chapter N" follows a first film with no number (John Wick), so neither
+  says where a film sits. Harry Potter's Deathly Hallows Part 1/2 had the same problem.
+- A number stored under the old rule is cleared when the library loads, so no refetch is needed.
+- The Hunger Games has no Episode numbers, so its shelf now lists the films in release order and
+  shows no Story/Release toggle. TMDb gives The Ballad of Songbirds and Snakes no story position,
+  so it sorts by its 2023 release date, after Mockingjay Part 2.
+
 ## [20.24.0] — 2026-10-14
 ### A season folder named by title is that season
 
