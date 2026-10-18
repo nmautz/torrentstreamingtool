@@ -1,5 +1,19 @@
 # Changelog
 
+## [20.24.9] — 2026-10-18
+
+### Fixed
+- **The server no longer freezes for seconds at a time while something plays.**
+  Every status update (every 2 s, plus every TV state post) re-read the whole
+  library file to check whether the TMDb key had been set in admin. On a busy
+  disk each read took seconds, and on Oct 17 the server stopped answering for
+  2-14 s at a time over ten minutes of TV playback; saving watch progress waited
+  up to 19 s. The answer is now kept in memory. The video-segment route also
+  checks its file off the main thread.
+- **A phone log upload that stalls is dropped after 2 minutes.** A phone
+  suspended mid-upload left the request open for 6 hours, until the nightly
+  reboot, and the stall watchdog wrote a report every 5 minutes for all of it.
+
 ## [20.24.8] — 2026-10-16
 
 ### Fixed

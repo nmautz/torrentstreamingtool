@@ -117,6 +117,8 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 # `DELETE /api/admin/client-logs`.
 CLIENT_LOG_DIR = LOG_DIR / "client"
 CLIENT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+# The whole upload (at most 8 MB) must arrive within this; see diag_client_log.
+CLIENT_LOG_BODY_TIMEOUT = 120.0
 
 # Devices whose stored transcript a reader has cleared. The server cannot reach a
 # phone, so the clear is finished by the NEXT upload: that response carries
@@ -494,16 +496,9 @@ def _missing_env_keys() -> list[dict]:
         val = getattr(settings, feat["attr"], "") or ""
         if feat["attr"].startswith("windows_admin_") and _power_buttons_applied():
             continue
-        if not val and feat["attr"] == "tmdb_api_key":
-            # Honour the admin override (set via /api/admin/settings) — the
-            # library file is the runtime source of truth for that key.
-            try:
-                lib_raw = _load_lib_raw()
-                ov = (lib_raw.get("settings", {}) or {}).get("admin_overrides", {}) or {}
-                if ov.get("tmdb_api_key"):
-                    continue
-            except Exception:
-                pass
+        if not val and feat["attr"] == "tmdb_api_key" and _tmdb_override_present():
+            # Honour the admin override (set via /api/admin/settings).
+            continue
         if val:
             continue
         out.append({
@@ -3416,6 +3411,30 @@ async def _tmdb_effective_key() -> str:
 
 _TMDB_KEY_TTL = 60.0
 _tmdb_key_memo: Optional[tuple[float, str]] = None
+
+
+def _tmdb_override_present() -> bool:
+    """Whether an admin TMDb key is set, for the callers that only ask when the
+    .env has none (`_missing_env_keys`, the admin env-key form).
+
+    Answered from `_tmdb_key_memo` at any age, never from a fresh read: the
+    missing-key check rides in `state_snapshot()`, which runs on the event loop
+    every 2 s and on every TV state post. It used to read and parse the whole
+    library.json each time, and on 2026-10-17, with the disk busy, those reads
+    blocked the loop for 2-14 s at a time while the TV was playing. The memo is
+    read from disk only while it is empty (start-up, or just after
+    `admin_update_settings` cleared it); `_tmdb_effective_key` refreshes it on
+    every TMDb use past its TTL."""
+    global _tmdb_key_memo
+    if _tmdb_key_memo is None:
+        try:
+            lib_raw = _load_lib_raw()
+        except Exception:
+            return False
+        ov = (lib_raw.get("settings", {}) or {}).get("admin_overrides", {}) or {}
+        key = (ov.get("tmdb_api_key") or settings.tmdb_api_key or "").strip()
+        _tmdb_key_memo = (time.monotonic(), key)
+    return bool(_tmdb_key_memo[1])
 
 
 # On-disk cache of TMDb API responses (see tmdbcache.py). Fresh entries are
@@ -29557,7 +29576,13 @@ async def diag_client_log(request: Request) -> JSONResponse:
     next upload as `clear_local`. Without that, the device would keep re-sending
     rows the reader has dealt with and the merge would faithfully restore them.
     """
-    raw = await request.body()
+    # A phone suspended mid-upload leaves its connection open and never sends
+    # the rest of the body. Without a limit that request stayed in flight for 6
+    # hours (until the nightly reboot) and the stall watchdog dumped every 5 min.
+    try:
+        raw = await asyncio.wait_for(request.body(), timeout=CLIENT_LOG_BODY_TIMEOUT)
+    except asyncio.TimeoutError:
+        raise HTTPException(408, "Upload stalled.")
     if len(raw) > 8 * 1024 * 1024:
         raise HTTPException(413, "Log too large.")
     incoming = raw.decode("utf-8", "replace")
@@ -31882,13 +31907,7 @@ async def admin_get_env_keys(request: Request) -> JSONResponse:
         present = bool(val)
         # tmdb_api_key has the live admin-overrides path too — reflect that.
         if feat["attr"] == "tmdb_api_key" and not present:
-            try:
-                lib_raw = _load_lib_raw()
-                ov = (lib_raw.get("settings", {}) or {}).get("admin_overrides", {}) or {}
-                if ov.get("tmdb_api_key"):
-                    present = True
-            except Exception:
-                pass
+            present = _tmdb_override_present()
         out.append({
             "key":         feat["key"],
             "label":       feat["label"],
@@ -38862,7 +38881,9 @@ async def offline_cache_bundle_file(cache_key: str, filename: str,
                         media_type=_HLS_MIME[".m3u8"], headers=_BUNDLE_REVALIDATE)
 
     p = bundle_dir / filename
-    if not p.exists() or not p.is_file():
+    # Off the loop: this is the segment route every player polls, and a stat on
+    # a busy disk held the event loop 2.5-3 s on 2026-10-17.
+    if not await asyncio.to_thread(p.is_file):
         raise HTTPException(404, "Cached file not found.")
     media = _HLS_MIME.get(p.suffix.lower(), "application/octet-stream")
     if p.suffix.lower() == ".vtt":
