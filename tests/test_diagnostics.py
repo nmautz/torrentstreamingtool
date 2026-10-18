@@ -102,6 +102,52 @@ with tempfile.TemporaryDirectory() as _d:
     ok("rolling again replaces the old .1", Path(got + ".1").stat().st_size == 60)
 
 
+# ── allocated_bytes: a sparse file is long and empty ─────────────────────────
+with tempfile.TemporaryDirectory() as _d:
+    sp = Path(_d) / "sparse.bin"
+    with open(sp, "wb") as fh:
+        fh.seek(64 * 1024 * 1024 - 1)
+        fh.write(b"\0")
+    a = diag.allocated_bytes(sp)
+    ok("allocated bytes is a number here", isinstance(a, int), repr(a))
+    # A filesystem that cannot hold sparse files allocates it all; that is a
+    # fact about the disk, not a failure, so only check the sparse case where
+    # the filesystem keeps the hole.
+    if a is not None and a < sp.stat().st_size:
+        ok("a sparse file allocates less than its length", a < 1024 * 1024, str(a))
+    dense = Path(_d) / "dense.bin"
+    dense.write_bytes(b"x" * 200_000)
+    a = diag.allocated_bytes(dense)
+    ok("a written file allocates at least its bytes", a is not None and a >= 200_000, repr(a))
+    ok("a missing file is None", diag.allocated_bytes(Path(_d) / "nope") is None)
+    ok("file_holders never raises", isinstance(diag.file_holders([dense]), list))
+
+
+# ── access lines carry the device that sent them ─────────────────────────────
+import contextvars                                    # noqa: E402
+import logging                                        # noqa: E402
+
+_flt = diag._AccessTagFilter()
+
+
+def _access_line(tag):
+    rec = logging.LogRecord("uvicorn.access", logging.INFO, "", 0,
+                            '%s - "%s %s HTTP/%s" %d',
+                            ("192.168.0.106:5000", "GET", "/api/x", "1.1", 200), None)
+
+    def run():
+        diag.set_access_tag(tag)
+        _flt.filter(rec)
+    contextvars.Context().run(run)
+    return rec.getMessage()
+
+
+ok("a request with a device id is tagged",
+   _access_line("3f2a9c1e-aaaa-bbbb").endswith(' 200 dev=3f2a9c1e'), _access_line("3f2a9c1e-aaaa"))
+ok("one without is left alone", _access_line("").endswith(' 200'), _access_line(""))
+ok("a percent sign cannot break the line", "dev=ab" in _access_line("a%b"), _access_line("a%b"))
+
+
 print("%d passed, %d failed" % (_PASS, len(_FAIL)))
 for f in _FAIL:
     print("FAIL:", f)

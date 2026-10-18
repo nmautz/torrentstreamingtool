@@ -6804,6 +6804,31 @@ display drops constantly and returns in seconds, so forced posts now retry three
 times at 2 s / 6 s / 18 s. Routine beats deliberately do not — a stale beat
 arriving late is worse than one that never arrives.
 
+## A client-log field named `t` or `src` is silently replaced (20.25.0)
+
+The log writer owns two keys. `DiagLog.write` sets `t` to the timestamp and the
+app's `log` plugin method sets `src: "js"` on every row the page writes, each
+**over** a field of the same name. The web player passed its playhead as `t` and
+its stream source as `src`, so for months every `hls-warn`, `play-start`,
+`stutter`, `seek-stuck` and `video-error` row on the phone arrived with no
+position and no source, and nothing complained. `_npLog` now passes every row
+through `_npRowFields`, which renames them `pos` and `source`. Don't name a field
+`t`, `src`, `ev` or `cat`; the kiosk's queue (`_kioskLogPush`) stamps the same
+keys the same way.
+
+## The access log's peer address names nobody; read `dev=` (20.25.0)
+
+The box is its own Tailscale subnet router, so a phone on the tailnet arrives
+from `192.168.0.106` like everything else (#18). `access.log` lines now end with
+` dev=<8 chars>` when the request named a device. It is a context variable set
+in `diag_track_requests` and read back by a filter on the `uvicorn.access`
+**logger**, which works because uvicorn starts each request in a fresh context
+and writes its access line from that request's task. Two things still key on
+the peer address and so treat every remote client as one: the PIN retry throttle
+(`_pin_client_key`) and the Devices tab's IP inference. The throttle was left as
+is, because keying it on a device id the client chooses would let a guesser
+reset it.
+
 ## A client log the server can wipe on its own is a log you cannot finish reading (18.8.0)
 
 The first version of the client-log upload wrote each send over the previous one.

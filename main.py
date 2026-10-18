@@ -1037,11 +1037,14 @@ def _load_lib_raw() -> dict:
             break
         except FileNotFoundError:
             return {"profiles": [], "items": []}      # fresh install
-        except OSError:
+        except OSError as exc:
             # A scanner lock is transient. If it persists, raise rather than
             # return empty: an empty result inside mutate_library() gets SAVED.
             if attempt == len(_SAVE_RETRY_DELAYS):
                 raise
+            if not attempt:
+                log.info("library.json read retrying: %s%s", _lock_failure_desc(exc),
+                         _lock_holders_note())
             time.sleep(_SAVE_RETRY_DELAYS[attempt])
     raw = _parse_library_bytes(blob)
     if raw is None:
@@ -1087,6 +1090,31 @@ def _fold_item_hides(raw: dict) -> None:
 # place. library.json is rewritten every ~15 s during playback, so the hot path
 # is also the exposed one.
 _SAVE_RETRY_DELAYS = (0.05, 0.12, 0.25, 0.5, 1.0)   # ~1.9 s total, then give up
+# Asking Windows who holds the file costs a few ms on a write that is already
+# retrying; once a minute is plenty to name the culprit (#22).
+_LOCK_HOLDER_EVERY_S = 60.0
+_lock_holder_last = 0.0
+
+
+def _lock_failure_desc(exc: OSError) -> str:
+    """`[WinError 32] replace library.json.tmp -> library.json` — which step lost.
+    `open` failing names only the .tmp; `os.replace` names both."""
+    code = getattr(exc, "winerror", None) or exc.errno
+    a = Path(exc.filename).name if exc.filename else "?"
+    b = Path(exc.filename2).name if getattr(exc, "filename2", None) else ""
+    step = ("replace %s -> %s" % (a, b)) if b else ("write %s" % a)
+    return "[%s %s] %s" % ("WinError" if getattr(exc, "winerror", None) else "errno", code, step)
+
+
+def _lock_holders_note() -> str:
+    """` held by: MsMpEng.exe pid=4120` at most once a minute; '' otherwise."""
+    global _lock_holder_last
+    now = time.monotonic()
+    if now - _lock_holder_last < _LOCK_HOLDER_EVERY_S:
+        return ""
+    _lock_holder_last = now
+    who = diag.file_holders([LIBRARY_FILE, LIBRARY_FILE.with_name(LIBRARY_FILE.name + ".tmp")])
+    return (" held by: " + ", ".join(who)) if who else " held by: (nobody by then)"
 
 
 def _save_lib_raw(data: dict) -> None:
@@ -1095,6 +1123,8 @@ def _save_lib_raw(data: dict) -> None:
     # power cut. library.json is rewritten every ~15 s during playback.
     blob = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
     last: Optional[OSError] = None
+    fails: list[str] = []
+    t0 = time.monotonic()
     for attempt in range(len(_SAVE_RETRY_DELAYS) + 1):
         try:
             # The temp write is retried too: the previous tick's .tmp can still be
@@ -1102,11 +1132,18 @@ def _save_lib_raw(data: dict) -> None:
             # completely as failing on the replace.
             _write_durable(LIBRARY_FILE, blob)
             if attempt:
-                log.info("library.json write succeeded on attempt %d", attempt + 1)
+                # What failed and who held it, so #22 can name the holder instead
+                # of counting retries.
+                log.info("library.json write succeeded on attempt %d after %.2fs; %s",
+                         attempt + 1, time.monotonic() - t0, "; ".join(fails))
             _maybe_snapshot_library(data, blob)
             return
         except PermissionError as exc:      # WinError 5 / 32 both surface here
             last = exc
+            note = _lock_failure_desc(exc)
+            if not fails:
+                note += _lock_holders_note()
+            fails.append(note)
         except OSError as exc:
             # Anything else (disk full, path gone) is not a lock; don't spin on it.
             raise
@@ -1114,8 +1151,8 @@ def _save_lib_raw(data: dict) -> None:
             time.sleep(_SAVE_RETRY_DELAYS[attempt])
     # Out of retries. Raise — the caller's 500 is the honest answer, and the
     # client now treats it as a failed save rather than a successful one.
-    log.error("library.json write failed after %d attempts: %s",
-              len(_SAVE_RETRY_DELAYS) + 1, last)
+    log.error("library.json write failed after %d attempts (%.2fs): %s",
+              len(_SAVE_RETRY_DELAYS) + 1, time.monotonic() - t0, "; ".join(fails))
     raise last if last is not None else OSError("library.json write failed")
 
 
@@ -2194,14 +2231,134 @@ async def qbit_add_magnet(
     return None
 
 
-async def qbit_set_file_priority(h: str, indices: list[int], priority: int) -> None:
-    """Set qBit file priority for a list of file indices. priority 0=skip, 1=normal, 6=high."""
+async def qbit_set_file_priority(h: str, indices: list[int], priority: int,
+                                 why: str = "") -> None:
+    """Set qBit file priority for a list of file indices. priority 0=skip, 1=normal, 6=high.
+
+    `why` names the caller in the log line (#74). A skip also starts
+    `_skip_watch`, which reports any skipped file that turns up on disk."""
     if not indices:
         return
     await qreq(
         "POST", "/api/v2/torrents/filePrio",
         data={"hash": h, "id": "|".join(str(i) for i in indices), "priority": str(priority)},
     )
+    log.info("filePrio %s prio=%d n=%d why=%s", (h or "")[:8], priority, len(indices),
+             why or "?")
+    if priority == 0:
+        _skip_watch_start(h, why or "?")
+
+
+# ── Skipped files that exist anyway (#74) ─────────────────────────────────────
+# A season pack fetched for one episode left ANOTHER, skipped episode on disk,
+# full length and all zeros, twice, both right after a download race. Nothing
+# said when it appeared or why. After a skip, look at the torrent's skipped files
+# a few times over half an hour and log each one found on disk: its length, what
+# it really allocates (sparse or not), qBit's progress, how many of its pieces
+# are on disk, its piece range and how long after the skip it was first seen.
+# The first look also says whether it was already there when the skip landed,
+# i.e. whether something selected it first.
+_SKIP_WATCH_AT = (3, 30, 120, 600, 1800)     # seconds after the first skip (3: let qBit apply it)
+_SKIP_WATCH: dict[str, dict] = {}
+_SKIP_WATCH_TASKS: set = set()
+_SKIP_WATCH_MAX = 24                          # torrents watched at once
+_qbit_prealloc: Optional[bool] = None         # qBit "pre-allocate all files", read once
+
+
+def _skip_watch_start(h: str, why: str) -> None:
+    h = (h or "").lower()
+    if not h:
+        return
+    w = _SKIP_WATCH.get(h)
+    if w is not None:
+        if why not in w["why"]:
+            w["why"].append(why)
+        return
+    if len(_SKIP_WATCH) >= _SKIP_WATCH_MAX:
+        return
+    _SKIP_WATCH[h] = {"why": [why], "t0": time.time(), "seen": set()}
+    try:
+        t = asyncio.get_running_loop().create_task(_skip_watch_run(h))
+    except RuntimeError:
+        _SKIP_WATCH.pop(h, None)
+        return
+    _SKIP_WATCH_TASKS.add(t)
+    t.add_done_callback(_SKIP_WATCH_TASKS.discard)
+
+
+async def _skip_watch_run(h: str) -> None:
+    global _qbit_prealloc
+    w = _SKIP_WATCH[h]
+    try:
+        if _qbit_prealloc is None:
+            prefs = await qbit_get_preferences() or {}
+            _qbit_prealloc = bool(prefs.get("preallocate_all"))
+        for i, at in enumerate(_SKIP_WATCH_AT):
+            wait = w["t0"] + at - time.time()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            if not await _skip_watch_look(h, w, first=(i == 0)):
+                return
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.info("skip-watch %s: stopped (%s)", h[:8], exc)
+    finally:
+        _SKIP_WATCH.pop(h, None)
+
+
+async def _skip_watch_look(h: str, w: dict, first: bool) -> bool:
+    """One look. False = nothing more to watch (torrent gone, nothing skipped)."""
+    info = await qbit_info(h)
+    qfiles = await qbit_files(h) if info else []
+    if not info or not qfiles:
+        return False
+    sp = info.get("save_path") or ""
+    skipped = [(q.get("index", i), q) for i, q in enumerate(qfiles)
+               if q.get("priority", 1) == 0]
+    if not skipped:
+        return False
+    # A skipped file qBit HAS fetched (a schedule pausing a half-done episode)
+    # is expected on disk. The anomaly is one it says it never fetched.
+    unfetched = [(idx, q) for idx, q in skipped if float(q.get("progress") or 0) < 0.01]
+
+    def stat_them() -> list:
+        out = []
+        for idx, q in unfetched:
+            p = Path(sp) / q.get("name", "")
+            try:
+                size = p.stat().st_size
+            except OSError:
+                continue
+            out.append((idx, q, size, diag.allocated_bytes(p)))
+        return out
+
+    found = await asyncio.to_thread(stat_them)
+    age = time.time() - w["t0"]
+    if first:
+        added = float(info.get("added_on") or 0)
+        log.info("skip-watch %s: %d of %d files skipped (why=%s) %.0fs after add, "
+                 "torrent %.1f%%, %d unfetched skipped file(s) already on disk, "
+                 "qBit preallocate_all=%s — %s",
+                 h[:8], len(skipped), len(qfiles), ",".join(w["why"]),
+                 (time.time() - added) if added else -1,
+                 100.0 * float(info.get("progress") or 0), len(found), _qbit_prealloc,
+                 info.get("name") or "?")
+    new = [f for f in found if f[0] not in w["seen"]]
+    if new:
+        pieces = await qbit_piece_states(h)
+        for idx, q, size, alloc in new:
+            w["seen"].add(idx)
+            pr = q.get("piece_range") or [0, -1]
+            have = sum(1 for s in pieces[pr[0]:pr[1] + 1] if s == 2) if pieces else -1
+            log.warning(
+                "skip-watch %s: skipped file ON DISK %s — %s at +%.0fs: length %s, "
+                "allocated %s, qBit progress %.1f%%, pieces on disk %d of %d (range %s)",
+                h[:8], "already" if first else "appeared", q.get("name", "?"), age,
+                size, "?" if alloc is None else alloc,
+                100.0 * float(q.get("progress") or 0), have,
+                max(0, pr[1] - pr[0] + 1), pr)
+    return True
 
 
 async def qbit_set_torrent_dl_limit(h: str, limit_bytes: int) -> None:
@@ -9037,7 +9194,7 @@ def _download_idle_configured(lib: dict) -> bool:
     return _auto_prep_cfg(lib)["mode"] != "off"
 
 
-async def _reconcile_item_downloads(item: dict, idle_open: bool) -> bool:
+async def _reconcile_item_downloads(item: dict, idle_open: bool, why: str = "schedule") -> bool:
     """Apply an item's download schedule to qBittorrent: set each managed file's
     priority from its effective mode + the idle window, then pause/resume the torrent
     so it only fetches when something is allowed to download right now.
@@ -9097,7 +9254,7 @@ async def _reconcile_item_downloads(item: dict, idle_open: bool) -> bool:
         if qf.get("priority", 1) != want:
             by_priority.setdefault(want, []).append(idx)
     for prio, ids in by_priority.items():
-        await qbit_set_file_priority(h, ids, prio)
+        await qbit_set_file_priority(h, ids, prio, why=why + ("+focus" if focus_on else ""))
     # Torrent-level pause is the coarse gate (only touch download-phase states so we
     # never pause a torrent that's already finished + seeding): don't leave a torrent
     # "downloading" with every file at priority 0 (some qBit builds error/auto-pause
@@ -9537,7 +9694,7 @@ async def _heal_freed_torrents(lib: dict, idle_open: bool) -> None:
         freed = sum(1 for f in facts if not f["present"])
         log.info("freed-heal: %s is %s only because %d freed file(s) are gone — rechecking",
                  it.get("title", h), qstate, freed)
-        await _reconcile_item_downloads(it, idle_open)   # freed files → priority 0 first
+        await _reconcile_item_downloads(it, idle_open, why="freed-heal")   # freed files → priority 0 first
         await qbit_recheck(h)
         await qbit_resume(h)
 
@@ -12896,12 +13053,14 @@ async def library_download_monitor() -> None:
                     if verdict == "ok":
                         if item.get("metadata"):
                             _pack_slice_settle(item)
-                        await _reconcile_item_downloads(item, state.download_idle_open)
+                        await _reconcile_item_downloads(item, state.download_idle_open,
+                                                        why="pack-slice")
                     elif verdict == "pending":
                         # Everything is at priority 0 meanwhile, so this costs nothing
                         # but time — and past the grace window it is time spent on a
                         # pack that is not going to answer the question.
-                        await _reconcile_item_downloads(item, state.download_idle_open)
+                        await _reconcile_item_downloads(item, state.download_idle_open,
+                                                        why="pack-slice-pending")
                         # A season slice only gives up once the file list has
                         # actually been SEEN: its failure is an error, and a
                         # magnet that is merely slow to resolve is not one.
@@ -14256,7 +14415,7 @@ async def stream_pipeline(
             skip_ids = [f.get("index", i) for i, f in enumerate(all_files)
                         if f.get("index", i) != file_index]
             if skip_ids:
-                await qbit_set_file_priority(h, skip_ids, 0)
+                await qbit_set_file_priority(h, skip_ids, 0, why="stream-file-select")
             await broadcast("stream_status", {
                 "status": "buffering", "message": "File selected. Buffering first pieces…",
             })
@@ -14760,7 +14919,7 @@ async def library_download_pipeline(
             # it runs fine (and cheaply) outside the lock on the snapshot above.
             if target is not None:
                 idle_open = await _download_idle_open(lib)
-                await _reconcile_item_downloads(target, idle_open)
+                await _reconcile_item_downloads(target, idle_open, why="download-select")
 
         await broadcast("library_update", {"item_id": item_id, "status": "downloading"})
 
@@ -15109,6 +15268,12 @@ async def diag_track_requests(request: Request, call_next):
     """
     rid = next(_req_seq)
     diag.note_request_start(rid, request.method, request.url.path)
+    # Every client arrives from the box's own address (the Tailscale subnet
+    # router), so access.log names the device instead: ` dev=<first 8>`.
+    try:
+        diag.set_access_tag(_dev_request_device_id(request))
+    except Exception:
+        pass
     status = 0
     t0 = time.perf_counter()
     try:
@@ -15882,6 +16047,10 @@ class TvLocalStateReq(BaseModel):
     # build its tail; without it the handoff carries one file and auto-advance
     # dies at the end of the episode.
     playlist: Optional[list[str]] = None
+    # Waiting for data mid-episode, and seconds buffered ahead (20.25.0, #94).
+    # Logged as it changes; `playback` stays "playing" through a stall.
+    stalled: Optional[bool] = None
+    fwd: Optional[float] = None
     # The media element's own gain as 0-100, so the dashboard's volume slider
     # reflects the surface actually making the sound.
     volume: Optional[float] = None
@@ -19691,7 +19860,7 @@ async def queue_play(item_id: str, profile_id: str = "", file_path: str = "") ->
     h = item.get("torrent_hash")
     if h:
         idle_open = await _download_idle_open(lib)
-        await _reconcile_item_downloads(item, idle_open)
+        await _reconcile_item_downloads(item, idle_open, why="queue-play")
         if not file_path:
             await qreq("POST", "/api/v2/torrents/topPrio", data={"hashes": h})
     return JSONResponse({"ok": True})
@@ -22965,7 +23134,8 @@ async def _stream_race_run(cands: list, season: int, episode: int,
                     if len(qfiles) > 1 and r["hash"] not in lib_hashes:
                         others = [q.get("index", i) for i, q in enumerate(qfiles)
                                   if str(Path(sp) / q.get("name", "")) != picked.get("path")]
-                        await qbit_set_file_priority(r["hash"], others, 0)
+                        await qbit_set_file_priority(r["hash"], others, 0,
+                                                     why="stream-race-narrow")
                 target = r["file"]
                 qf = next((q for q in qfiles
                            if str(Path(sp) / q.get("name", "")) == target.get("path")), None)
@@ -23351,7 +23521,7 @@ async def save_stream_to_library(request: Request, req: SaveToLibraryReq) -> JSO
     all_files = await qbit_files(h)
     if all_files:
         all_ids = [f.get("index", i) for i, f in enumerate(all_files)]
-        await qbit_set_file_priority(h, all_ids, 1)
+        await qbit_set_file_priority(h, all_ids, 1, why="save-to-library")
 
     info = await qbit_info(h)
     save_path = (req.save_path.strip() or (info.get("save_path") if info else None)
@@ -24450,6 +24620,29 @@ async def _tv_local_clear(reason: str, reset_status: bool = True) -> None:
         state.vlc_duration = 0
 
 
+_tv_stall_since = 0.0
+
+
+def _tv_local_note_stall(req: "TvLocalStateReq") -> None:
+    """Log the kiosk's buffering as it starts and ends (#94), at the heartbeat's
+    2-4 s resolution. The exact waits are `buffer-wait` rows in the `tv-kiosk`
+    client log; this puts the TV's stalls in streamlink_app.log next to the loop
+    blocks and slow requests that may explain them."""
+    global _tv_stall_since
+    stalled = bool(req.active and req.stalled)
+    t = int(req.time or 0)
+    pos = "%d:%02d:%02d" % (t // 3600, t // 60 % 60, t % 60) if req.time is not None else "?"
+    if stalled and not _tv_stall_since:
+        _tv_stall_since = time.time()
+        log.info("tv-local: buffering at %s (%.1fs buffered ahead) — %s",
+                 pos, req.fwd or 0.0, Path(req.file_path or state.tv_local_file_path or "?").name)
+    elif not stalled and _tv_stall_since:
+        log.info("tv-local: %s after %.1fs at %s",
+                 "playing again" if req.active else "stopped while buffering",
+                 time.time() - _tv_stall_since, pos)
+        _tv_stall_since = 0.0
+
+
 @app.post("/api/tv-local/state")
 async def tv_local_state(req: TvLocalStateReq) -> JSONResponse:
     """Heartbeat + playback report from the ?tv=1 kiosk's own <video>.
@@ -24463,6 +24656,7 @@ async def tv_local_state(req: TvLocalStateReq) -> JSONResponse:
     """
     state.tv_local_seen_at = time.time()
     state.tv_local_ack_at = state.tv_local_seen_at   # this beat is from the page
+    _tv_local_note_stall(req)
     if not req.active:
         await _tv_local_clear("page reported inactive")
         await broadcast("state", state_snapshot())
@@ -38037,6 +38231,41 @@ class OfflinePrepareReq(BaseModel):
     bulk: bool = False
 
 
+_PREP_404_SEEN: dict[tuple, float] = {}
+
+
+def _prep_404_note(lib: dict, item_id: str, item: Optional[dict],
+                   req: "OfflinePrepareReq", why: str) -> None:
+    """Say which of offline-prepare's three 404s this was, and what the library
+    holds instead (#24: the access log showed only the status, twice for one item
+    on different days). Once per item/file/reason per 10 min: bulk prep repeats."""
+    key = (item_id, req.file_path, why)
+    now = time.time()
+    if now - _PREP_404_SEEN.get(key, 0.0) < 600:
+        return
+    _PREP_404_SEEN[key] = now
+    name = Path(req.file_path).name if req.file_path else "?"
+    if item is None:
+        # Merged, re-added or deleted? Whoever holds this file now is the answer.
+        owner = next((it for it in lib.get("items", [])
+                      if any(f.get("path") == req.file_path for f in it.get("files", []))),
+                     None)
+        extra = ("file now in item %s (%s)" % (owner.get("id"), owner.get("title") or "?")
+                 if owner else "no item holds this file")
+    elif why == "file not in item":
+        same = [f.get("path") for f in item.get("files", [])
+                if Path(f.get("path") or "").name == name]
+        extra = ("%s (%d files); same name at %s" % (item.get("title") or "?",
+                 len(item.get("files", [])), same[0]) if same
+                 else "%s (%d files); no file of that name" % (
+                     item.get("title") or "?", len(item.get("files", []))))
+    else:
+        extra = "%s; folder %s" % (item.get("title") or "?",
+                                   "exists" if Path(req.file_path).parent.exists() else "MISSING")
+    log.warning("offline-prepare 404 (%s): item=%s file=%s bulk=%s — %s",
+                why, item_id, name, req.bulk, extra)
+
+
 @app.post("/api/library/{item_id}/offline-prepare")
 async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
     """Decide what processing a file needs for HLS browser playback.
@@ -38052,9 +38281,11 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
     lib = await get_library()
     item = next((it for it in lib["items"] if it["id"] == item_id), None)
     if not item:
+        _prep_404_note(lib, item_id, None, req, "item not found")
         raise HTTPException(404, "Item not found.")
     target = next((f for f in item.get("files", []) if f["path"] == req.file_path), None)
     if not target:
+        _prep_404_note(lib, item_id, item, req, "file not in item")
         raise HTTPException(404, "File not found in this item.")
     src = Path(target["path"])
     # Source eviction: the media file is gone but its bundle is intact and is the
@@ -38069,6 +38300,7 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
                 410, "This episode's source was reclaimed and its bundle is gone. "
                      "Re-download the same release to restore it.")
     elif not src.exists():
+        _prep_404_note(lib, item_id, item, req, "file not on disk")
         raise HTTPException(404, "File not on disk.")
     _assert_not_compressing(str(src))
 

@@ -43,6 +43,7 @@ Design rules, learned from the outage:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import faulthandler
 import io
 import logging
@@ -231,6 +232,136 @@ def attach_access_log(log_dir: Path) -> None:
                 continue
         lg.setLevel(logging.INFO)
         lg.propagate = False
+    acc = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _AccessTagFilter) for f in acc.filters):
+        acc.addFilter(_AccessTagFilter())
+
+
+# ── Device id on access lines ────────────────────────────────────────────────
+# Every client reaches the box from its own LAN address once the box is its own
+# Tailscale subnet router, so the peer column of access.log names nobody (85,246
+# requests from 192.168.0.106 and no other address, 2026-10-04). The request
+# middleware sets this to the client's device id; uvicorn writes the access line
+# from inside the same request task (it gives each request a fresh context), so
+# the filter below can read it back and append ` dev=<first 8>`.
+_access_tag: contextvars.ContextVar[str] = contextvars.ContextVar("access_tag", default="")
+
+
+def set_access_tag(device_id: str) -> None:
+    """Name the device the current request came from. Empty = say nothing."""
+    if device_id:
+        _access_tag.set(device_id[:8])
+
+
+class _AccessTagFilter(logging.Filter):
+    """Appends ` dev=<id>` to a uvicorn access line. A filter on the LOGGER, not a
+    formatter on a handler, so it works whichever launcher configured the file."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        tag = _access_tag.get()
+        if tag:
+            try:
+                record.msg = str(record.msg) + " dev=" + tag.replace("%", "")
+            except Exception:
+                pass
+        return True
+
+
+# ── Disk facts for "what is this file, really?" ──────────────────────────────
+
+def allocated_bytes(path: Path) -> Optional[int]:
+    """Bytes the file actually occupies on disk, or None when it can't be told.
+
+    qBittorrent writes sparse files: a file it has never fetched a byte of can
+    still report its full length, and only the allocation says it is empty.
+    Windows: `GetCompressedFileSizeW` (it answers for sparse files too). POSIX:
+    `st_blocks`. Never raises."""
+    try:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            fn = k32.GetCompressedFileSizeW
+            fn.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD)]
+            fn.restype = wintypes.DWORD
+            high = wintypes.DWORD(0)
+            low = fn(str(path), ctypes.byref(high))
+            if low == 0xFFFFFFFF and ctypes.get_last_error() != 0:
+                return None
+            return (high.value << 32) + low
+        blocks = getattr(os.stat(path), "st_blocks", None)
+        return None if blocks is None else int(blocks) * 512
+    except Exception:
+        return None
+
+
+def file_holders(paths: list, limit: int = 8) -> list[str]:
+    """Which processes have these files open, as `name pid=N [svc=X]` strings.
+
+    Windows only (the Restart Manager, the API Explorer's "file in use" dialog
+    uses); [] elsewhere, or when nothing holds them. A lock that makes
+    `os.replace` fail usually clears within milliseconds, so ask straight after
+    the failure. Never raises: an error comes back as one `? (...)` entry."""
+    if os.name != "nt" or not paths:
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _UniqueProcess(ctypes.Structure):
+            _fields_ = [("dwProcessId", wintypes.DWORD),
+                        ("ProcessStartTime", wintypes.FILETIME)]
+
+        class _ProcessInfo(ctypes.Structure):
+            _fields_ = [("Process", _UniqueProcess),
+                        ("strAppName", wintypes.WCHAR * 256),          # CCH_RM_MAX_APP_NAME + 1
+                        ("strServiceShortName", wintypes.WCHAR * 64),  # CCH_RM_MAX_SVC_NAME + 1
+                        ("ApplicationType", ctypes.c_int),
+                        ("AppStatus", wintypes.ULONG),
+                        ("TSSessionId", wintypes.DWORD),
+                        ("bRestartable", wintypes.BOOL)]
+
+        rm = ctypes.WinDLL("rstrtmgr")
+        rm.RmStartSession.argtypes = [ctypes.POINTER(wintypes.DWORD), wintypes.DWORD,
+                                      wintypes.LPWSTR]
+        rm.RmRegisterResources.argtypes = [wintypes.DWORD, wintypes.UINT,
+                                           ctypes.POINTER(wintypes.LPCWSTR), wintypes.UINT,
+                                           ctypes.c_void_p, wintypes.UINT, ctypes.c_void_p]
+        rm.RmGetList.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.UINT),
+                                 ctypes.POINTER(wintypes.UINT), ctypes.POINTER(_ProcessInfo),
+                                 ctypes.POINTER(wintypes.DWORD)]
+        rm.RmEndSession.argtypes = [wintypes.DWORD]
+        for f in (rm.RmStartSession, rm.RmRegisterResources, rm.RmGetList, rm.RmEndSession):
+            f.restype = wintypes.DWORD
+
+        session = wintypes.DWORD(0)
+        key = ctypes.create_unicode_buffer(33)                         # CCH_RM_SESSION_KEY + 1
+        if rm.RmStartSession(ctypes.byref(session), 0, key) != 0:
+            return []
+        try:
+            names = (wintypes.LPCWSTR * len(paths))(*[str(p) for p in paths])
+            if rm.RmRegisterResources(session, len(paths), names, 0, None, 0, None) != 0:
+                return []
+            infos = (_ProcessInfo * limit)()
+            needed, count, reasons = wintypes.UINT(0), wintypes.UINT(limit), wintypes.DWORD(0)
+            rc = rm.RmGetList(session, ctypes.byref(needed), ctypes.byref(count),
+                              infos, ctypes.byref(reasons))
+            if rc == 234:                                             # ERROR_MORE_DATA
+                return ["%d processes (more than %d)" % (needed.value, limit)]
+            if rc != 0:
+                return ["? (RmGetList %d)" % rc]
+            out = []
+            for i in range(min(count.value, limit)):
+                p = infos[i]
+                s = "%s pid=%d" % (p.strAppName or "?", p.Process.dwProcessId)
+                if p.strServiceShortName:
+                    s += " svc=" + p.strServiceShortName
+                out.append(s)
+            return out
+        finally:
+            rm.RmEndSession(session)
+    except Exception as exc:
+        return ["? (%s)" % exc]
 
 
 def quiet_noisy_loggers() -> None:

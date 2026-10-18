@@ -1,5 +1,40 @@
 # Changelog
 
+## [20.25.0] — 2026-10-18
+
+### Added
+- **The TV keeps a playback log.** The TV kiosk runs the same player as the
+  phone but wrote nothing about its own playback, so TV buffering could not be
+  diagnosed (#94). It now sends the phone's kind of log rows to the server as
+  device `tv-kiosk` every 30 s, and the server's log notes each time the TV
+  starts and stops buffering, with the position and how much was buffered.
+- **A `buffer-wait` log row for every pause of a second or more to load,** on
+  the phone and the TV: how long, where, and what the buffer looked like when it
+  began. Before, only a run of three short pauses was logged.
+- **The server's request log names the device.** Every phone arrives from the
+  box's own address, so the request log could not tell clients apart (#18). Each
+  line now ends with the first 8 characters of the device id the Devices tab uses.
+- **Log lines to catch four open bugs:**
+  - #74 (a skipped episode of a pack appearing on disk as an empty file): every
+    file-priority change is logged with its cause, and after a skip the skipped
+    files are checked for 30 minutes. A skipped file that is on disk without
+    having been downloaded is logged with its size, its real disk use (sparse or
+    not), its pieces, and when it was first seen.
+  - #22 (library.json saves needing a second try): the log says which step
+    failed and, on Windows, which programs had the file open.
+  - #24 (offline-prepare answering 404): the log says which of the three
+    "not found" cases it was and what the library holds instead.
+
+### Fixed
+- **The phone's playback log rows keep their playhead and stream source.** The
+  log writer overwrote any field named `t` (with the time) or `src` (with
+  "js"), so every page-written player row lost both. They are now sent as `pos`
+  and `source`.
+
+Not checked: the Windows "who holds the file" lookup (#22) and the file
+size check on Windows have only run on a Mac, where the lookup is skipped. The
+kiosk log has not run on the TV yet.
+
 ## [20.24.9] — 2026-10-18
 
 ### Fixed

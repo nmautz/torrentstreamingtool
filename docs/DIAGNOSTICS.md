@@ -77,6 +77,22 @@ needs no app rebuild and works on any app from 18.7.0.
 - Sending only what is new would need the app to track it, which is a Swift change and
   the bookkeeping `DiagLog.upload` deliberately avoids. Not built.
 
+### The TV kiosk's log (20.25.0)
+
+The `?tv=1` kiosk runs the same web player as the phone, and until 20.25.0 its rows went
+nowhere: `_npLog` writes through the app plugin, and the kiosk has none. Now a kiosk page
+(`TV_MODE && !isApp`) queues the same rows (`_kioskLogPush`, up to 2,000) and posts them to
+`POST /api/diag/client-log?device=tv-kiosk` every 30 s, at 200 rows, and on `pagehide`
+(`_kioskLogFlush`). It sends only what is queued, not a whole file; the merge is by line, so
+a re-send after a lost reply adds nothing. Read it like a phone's: `?device=tv-kiosk`.
+Each kiosk start writes a `kiosk-boot` row (`build`, `ua`).
+
+**`t` and `src` belong to the row, not the caller (20.25.0).** The writer stamps `t` with
+the time and the app stamps every page row `src: "js"`, each over a field of the same
+name, so before 20.25.0 every player row lost its playhead and its stream source.
+`_npRowFields` now renames them: a page row's playhead is **`pos`** and its source is
+**`source`**. Rows written before 20.25.0 simply have neither.
+
 ### Retention — the part that is easy to get wrong
 
 **The device sends its WHOLE file every time and the server MERGES it.** Before 18.8.0 the
@@ -182,6 +198,8 @@ JS-written rows carry `src: "js"`.
 | `handback-frames` | the first 10 s of play after a `handback`: `sec` of playhead against `wall`, `total` and `dropped` frames, `fps` (= total / sec, -1 if the playhead barely moved), `height`, plus the hand-back's `away` and `rebuilt`. A choppy picture is a low `fps` with `sec` ≈ `wall`; a pause or seek inside the window shows as `sec` far from `wall` |
 | `buf-pressure` | the OS would not hold the media it was given (19.13.1). `why: "evicted"` — it removed `removed` from SourceBuffer `sb`, near the playhead, without hls.js asking; `why: "full"` — an append hit `QuotaExceededError`. For the next 3 min the iOS preroll override stands down and hls.js targets 30–45 s ahead. Throttled to one per 5 s |
 | `hls-warn` | a **non-fatal** hls.js media error, by `details` (`bufferFullError`, `bufferStalledError`, `bufferNudgeOnStall`, `bufferSeekOverHole`, …) with `n` = how many since the last row (19.13.1). One per 5 s per kind |
+| `buffer-wait` | one mid-episode wait for data of 1 s or more, written when playback resumes (20.25.0): `ms`, `afterSeek` (it began within 2.5 s of a user seek), `seekedDuring`, `fwdNow`, `pressure`, `loader`, and the start facts (`pos`, `fwd`, `buffered`, `ready`, `engine`, `mode`, `source`, `file`) **as they were when the wait began**. `stutter` needs a run of waits; this is the single long one. One per 3 s. On the kiosk the server also logs each stall (see § Bug-hunting lines) |
+| `kiosk-boot` | the `tv-kiosk` page started: `build`, `ua` |
 | `stutter` | three or more `waiting` events inside 12 s, none within 2.5 s of a user seek — the picture is stopping and starting (19.13.1). Carries `fwd`, `buffered`, `ready`, `pressure` and `loader`. `fwd` large + `ready` 4 means it is not starved for data. One per 10 s |
 | `unasked-pause` | the element paused with the page visible and no transport press behind it (19.13.1) — something other than the viewer paused it |
 | `auto-skip` | the **native** player fired a Smart Skip while it held the display (18.12.0) — `type` (`intro`/`credits`), `from`, and for an intro `to`. This is the only skip actor during a handoff; the page draws the tile but never fires |
@@ -650,11 +668,32 @@ Logs** (and included in "Download All").
 | `streamlink_app.log` | `streamlink` logger | App log. Anomalies escalate here at WARNING. |
 | `flaresolverr.log` | FlareSolverr itself (`LOG_FILE`, 20.19.0) | Every Cloudflare check: the request, "Challenge detected", "Challenge solved!", "Response in N s", or the error. **Read it when an indexer behind Cloudflare is slow or failing**; no other log says why. Rolled to `.1` past 5 MB when FlareSolverr is launched (`diagnostics.child_log`). Absent when FlareSolverr is not installed, is older than 3.4.6, or has not been restarted since 20.19.0. |
 
+**`dev=` on access lines (20.25.0).** Every client reaches the box from the box's own
+address (it is its own Tailscale subnet router), so the peer column names nobody. A request
+that carries a device id (`X-Device-Id`, or the `streamlink_device_id` cookie) ends with
+` dev=<first 8 chars>`, the same id the Devices tab keys on. `diag_track_requests` sets a
+context variable (`diag.set_access_tag`) and `_AccessTagFilter` on the `uvicorn.access`
+logger appends it: uvicorn writes the access line from inside the request's own task, so the
+value is still there. A line with no `dev=` came from something that sends no id (AVPlayer's
+own media fetches, the native discovery probe, the HTTPS proxy's outer hop).
+
 > **One file, one handler.** `access.log` is owned exclusively by uvicorn's
 > dictConfig, and `uvicorn.error` deliberately writes to `uvicorn.log` rather
 > than sharing `streamlink_app.log`. Two `RotatingFileHandler`s on one file
 > means rotation renames it while the other handle is open — a `PermissionError`
 > on Windows, the primary target, and potentially a lost log.
+
+### Bug-hunting lines in `streamlink_app.log` (20.25.0)
+
+Each of these was added to catch an open bug in the act. `grep` for the prefix.
+
+| Prefix | Bug | Says |
+|---|---|---|
+| `tv-local: buffering at` / `playing again after` | #94 | the kiosk's `stalled` heartbeat field changed: position, seconds buffered ahead, file, and how long it lasted. 2-4 s resolution; the exact waits are `buffer-wait` rows in the `tv-kiosk` client log |
+| `filePrio <hash8> prio=N n=K why=` | #74 | every file-priority write to qBittorrent and who made it: `schedule`, `pack-slice`, `pack-slice-pending`, `download-select`, `queue-play`, `freed-heal`, `stream-file-select`, `stream-race-narrow`, `save-to-library` (`+focus` while a stream focus is on) |
+| `skip-watch <hash8>:` | #74 | after a skip, the torrent's skipped files are looked at 3 s, 30 s, 2, 10 and 30 min later. The first line counts them, says how long after the add the skip came, and gives qBit's `preallocate_all`. A **WARNING** `skipped file ON DISK` names a skipped file qBit says it has not fetched (under 1 %) that exists anyway: `already` (there at the first look, so something selected it first) or `appeared` (and when), its length, **`allocated`** bytes (sparse = near 0), qBit's progress, pieces on disk in its range, and the range |
+| `library.json write succeeded on attempt N after Xs;` | #22 | each failed attempt: `[WinError 32] replace library.json.tmp -> library.json` (or `write library.json.tmp`), and on the first, `held by:` — the processes Windows' Restart Manager says had the file open (`diag.file_holders`), at most once a minute. `(nobody by then)` means the lock was gone before it was asked. `library.json read retrying:` is the same for a read |
+| `offline-prepare 404 (<why>)` | #24 | which of the three 404s it was (`item not found`, `file not in item`, `file not on disk`) and what the library holds instead: the item that now owns the file, a same-named file at another path, or whether the folder exists. Once per item/file/reason per 10 min |
 
 ---
 

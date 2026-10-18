@@ -22325,6 +22325,8 @@ function _npStyledSub(sub) {
 // Silent and free off-app: no plugin, no row, no throw. Never put anything on
 // the hot path through here — it is a bridge hop per call.
 function _npLog(ev, fields, cat) {
+  fields = _npRowFields(fields);
+  if (TV_MODE && !isApp) { _kioskLogPush(ev, fields, cat); return; }
   if (!isApp || !_cap || !_cap.np || !_cap.np.log) return;
   // A Capacitor plugin proxy answers for ANY method name, so on a shell built
   // before `log` existed this resolves to a function that REJECTS. An
@@ -22334,6 +22336,54 @@ function _npLog(ev, fields, cat) {
     const r = _cap.np.log({ ev: ev, cat: cat || "play", fields: fields || {} });
     if (r && r.catch) r.catch(() => {});
   } catch (_) {}
+}
+
+// `t` and `src` belong to the row: the writer stamps `t` with the time and the
+// app marks a page row `src: "js"`, each OVER a field of the same name. Until
+// 20.25.0 that silently dropped the playhead (`t`) and the stream source (`src`)
+// from every player row. They travel as `pos` and `source` instead.
+function _npRowFields(fields) {
+  if (!fields || (!("t" in fields) && !("src" in fields))) return fields || {};
+  const f = Object.assign({}, fields);
+  if ("t" in f) { if (!("pos" in f)) f.pos = f.t; delete f.t; }
+  if ("src" in f) { if (!("source" in f)) f.source = f.src; delete f.src; }
+  return f;
+}
+
+// The TV kiosk's transcript (#94). The kiosk runs this same player, but with no
+// app plugin its rows went nowhere, so TV buffering left nothing to read but
+// segment times in access.log. It queues the same rows and posts them to the
+// client-log store as device `tv-kiosk` (Admin → client logs). The server merges
+// by line, so a re-send after a lost reply costs nothing.
+const KIOSK_LOG_DEVICE = "tv-kiosk";
+const KIOSK_LOG_MAX = 2000;            // rows held while the box is unreachable
+const _kioskLogQ = [];
+let _kioskLogBusy = false;
+function _kioskLogPush(ev, fields, cat) {
+  let line;
+  try {
+    line = JSON.stringify(Object.assign({}, fields || {},
+      { t: new Date().toISOString(), ev: ev, cat: cat || "play" }));
+  } catch (_) { return; }
+  _kioskLogQ.push(line);
+  if (_kioskLogQ.length > KIOSK_LOG_MAX) _kioskLogQ.splice(0, _kioskLogQ.length - KIOSK_LOG_MAX);
+  if (_kioskLogQ.length >= 200) _kioskLogFlush();
+}
+function _kioskLogFlush() {
+  if (_kioskLogBusy || !_kioskLogQ.length) return;
+  _kioskLogBusy = true;
+  const n = _kioskLogQ.length;
+  const body = _kioskLogQ.slice(0, n).join("\n") + "\n";
+  fetch("/api/diag/client-log?device=" + KIOSK_LOG_DEVICE, {
+    method: "POST", headers: { "Content-Type": "text/plain" }, body: body,
+    keepalive: body.length < 60000,
+  }).then(r => { if (r.ok) _kioskLogQ.splice(0, n); })
+    .catch(() => {})
+    .finally(() => { _kioskLogBusy = false; });
+}
+if (TV_MODE && !isApp) {
+  setInterval(_kioskLogFlush, 30000);
+  window.addEventListener("pagehide", _kioskLogFlush);
 }
 
 // Throttled variant for events that can repeat many times a second (`waiting`
@@ -27882,6 +27932,34 @@ function _lpNoteWaiting(v) {
   }, "play");
 }
 
+// One row per mid-episode buffering wait that the viewer could see (a second or
+// more), written when playback resumes: how long, where, and what the buffer and
+// loader looked like when it began. `stutter` above only fires on a RUN of waits,
+// so a single long one, the TV's complaint in #94, wrote nothing. The kiosk's
+// heartbeat also reports `stalled`, which the server logs as it changes.
+const LP_BUF_WAIT_MIN_MS = 1000;
+let _lpBufWait = null;      // {at, file, seek, facts} while waiting mid-play
+function _lpBufWaitBegin(v) {
+  if (_lpBufWaiting() || !lp.itemId || !lp.everPlayed || v.paused) return;
+  _lpBufWait = { at: Date.now(), file: lp.filePath,
+                 seek: Date.now() - _lpUserSeekAt < 2500, facts: _lpStartFacts(v) };
+}
+function _lpBufWaitEnd(v) {
+  const w = _lpBufWait;
+  _lpBufWait = null;
+  if (!w || w.file !== lp.filePath) return;
+  const ms = Date.now() - w.at;
+  if (ms < LP_BUF_WAIT_MIN_MS) return;
+  _npLogThrottled("buffer-wait", 3000, "buffer-wait", {
+    ms: ms, afterSeek: w.seek, seekedDuring: _lpUserSeekAt > w.at,
+    pressure: _lpUnderPressure(), loader: _lpLoaderState(),
+    fwdNow: +(_lpFwdBuffer(v).toFixed(2)), ...w.facts,
+  }, "play");
+}
+function _lpBufWaiting() {
+  return !!_lpBufWait && _lpBufWait.file === lp.filePath;
+}
+
 // hls.js's non-fatal errors are where it says what it is struggling with — a
 // full buffer, a stall it nudged past, a hole it jumped — and the ERROR handler
 // returned on `!fatal` without a word.
@@ -30943,6 +31021,11 @@ function _tvLocalBeat(force) {
       time:      v ? (v.currentTime || 0) : 0,
       duration:  (v && v.duration) || lp.duration || 0,
       playback:  !v ? "buffering" : (v.ended ? "ended" : (v.paused ? "paused" : "playing")),
+      // Waiting for data mid-episode, and how much is buffered ahead. The server
+      // logs each change of `stalled` (#94); `playback` stays "playing" so the
+      // dashboards' now-playing state does not flicker through a stall.
+      stalled:   !!v && !v.paused && _lpBufWaiting(),
+      fwd:       v ? +(_lpFwdBuffer(v).toFixed(1)) : 0,
       // The media element's gain is the real amp on this surface, so the
       // dashboard's volume slider should show it (not the host mixer).
       volume:    v ? Math.round((v.muted ? 0 : (v.volume || 0)) * 100) : 0,
@@ -32157,6 +32240,13 @@ function _lpAttachVideoEvents() {
   // _lpClockPump returns early when paused, and a paused film that stopped
   // beating would be reaped and hand the screen to the background video.
   setInterval(() => _tvLocalBeat(false), 2000);
+  // Marks the start of each kiosk run in its transcript (#94): which build, which browser.
+  if (TV_MODE && !isApp) {
+    _npLog("kiosk-boot", {
+      build: ((document.querySelector("[data-ui-version]") || {}).textContent || "?").trim(),
+      ua: navigator.userAgent.slice(0, 160),
+    }, "app");
+  }
   v.addEventListener("loadedmetadata", () => {
     lp.duration = v.duration || 0;
     if (!lp.resumeApplied && lp.resumeSec > 0 && lp.resumeSec < (v.duration||0) - 5) {
@@ -32208,6 +32298,7 @@ function _lpAttachVideoEvents() {
     _npSyncAwake();
   });
   v.addEventListener("pause", () => {
+    _lpBufWait = null;     // a wait the viewer paused through is not a stall
     // A pause nobody asked for, with the page in front of the viewer. Intent is
     // written only by the transport paths, so this is the element being paused
     // by something else — the other shape "it keeps pausing" can take.
@@ -32264,6 +32355,7 @@ function _lpAttachVideoEvents() {
   v.addEventListener("waiting", () => {
     lp._devStalls = (lp._devStalls || 0) + 1;   // dev-mode HUD stall counter
     if (lp.itemId) _lpNoteWaiting(v);
+    _lpBufWaitBegin(v);
     // Stalled for data → square Metro spinner (shown even when the control
     // overlay is hidden, YouTube-style), plus keep the overlay from auto-hiding.
     document.getElementById("localPlayer").classList.add("lp-buffering");
@@ -32277,6 +32369,7 @@ function _lpAttachVideoEvents() {
     // Safari-native recovery success lands here (hls.js recovery is detected
     // on FRAG_LOADED instead — buffered playback also fires `playing`).
     if (!lp.hls && lp.netDown) _lpNetReset();
+    _lpBufWaitEnd(v);
     // A start that FOUGHT is the one worth a row — it closes the loop on every
     // cold-kick/cold-stall above it and gives the time-to-first-frame that says
     // how bad it was. A clean start writes nothing.
@@ -33528,6 +33621,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.24.9</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.25.0</div>
 </body>
 </html>
