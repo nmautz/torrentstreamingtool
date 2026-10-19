@@ -685,7 +685,7 @@ own media fetches, the native discovery probe, the HTTPS proxy's outer hop).
 > means rotation renames it while the other handle is open — a `PermissionError`
 > on Windows, the primary target, and potentially a lost log.
 
-### Bug-hunting lines in `streamlink_app.log` (20.25.0)
+### Bug-hunting lines in `streamlink_app.log` (20.25.0, 20.25.2)
 
 Each of these was added to catch an open bug in the act. `grep` for the prefix.
 
@@ -695,6 +695,8 @@ Each of these was added to catch an open bug in the act. `grep` for the prefix.
 | `filePrio <hash8> prio=N n=K why=` | #74 | every file-priority write to qBittorrent and who made it: `schedule`, `pack-slice`, `pack-slice-pending`, `download-select`, `queue-play`, `freed-heal`, `stream-file-select`, `stream-race-narrow`, `save-to-library` (`+focus` while a stream focus is on) |
 | `skip-watch <hash8>:` | #74 | after a skip, the torrent's skipped files are looked at 3 s, 30 s, 2, 10 and 30 min later. The first line counts them, says how long after the add the skip came, and gives qBit's `preallocate_all`. A **WARNING** `skipped file ON DISK` names a skipped file qBit says it has not fetched (under 1 %) that exists anyway: `already` (there at the first look, so something selected it first) or `appeared` (and when), its length, **`allocated`** bytes (sparse = near 0), qBit's progress, pieces on disk in its range, and the range |
 | `library.json write succeeded on attempt N after Xs;` | #22 | each failed attempt: `[WinError 32] replace library.json.tmp -> library.json` (or `write library.json.tmp`), and on the first, `held by:` — the processes Windows' Restart Manager says had the file open (`diag.file_holders`), at most once a minute. `(nobody by then)` means the lock was gone before it was asked. `library.json read retrying:` is the same for a read |
+| `library.json save took Xs (N MB):` / `load took` | #96 | a library read or write of 1 s or more (`_LIB_IO_SLOW_S`), split by step. Save: `dumps`, `open`, `write`, `fsync`, `close` (a Windows scanner inspects a file as its handle closes), `replace`, `snapshot`, and `retry_wait` when #22's retries ran. Load: `read`, `parse`, `migrate`. These are times ON the worker thread |
+| `library txn by <caller> held the lock Xs (<outcome>; waited Ys for it):` | #96 | a `mutate_library()` transaction that held the lock 1 s or more: `load`, `body`, `save`, measured AROUND the `to_thread` calls, so they include waiting for a free worker. A `save` much bigger than the matching `save took` line means a busy thread pool, not a slow disk. `outcome` is `saved`, `unchanged` (`LibraryUnchanged`) or `aborted` (the body raised). The `LOCK 'library' held` line and the vitals anomaly now name the holder the same way, `update_progress [save]`, instead of starlette's `coro` |
 | `offline-prepare 404 (<why>)` | #24 | which of the three 404s it was (`item not found`, `file not in item`, `file not on disk`) and what the library holds instead: the item that now owns the file, a same-named file at another path, or whether the folder exists. Once per item/file/reason per 10 min |
 
 ---
@@ -929,8 +931,15 @@ Its samples land after the release and name what ran next. Tested in
 
 1. The vitals snapshot and the triggering reason
 2. Every in-flight request with its age
-3. Every instrumented lock: held-for, holder task, waiter count
-4. **Every asyncio task stack**
+3. Every instrumented lock: held-for, holder, waiter count. The library lock's
+   holder is `caller [step]` (`update_progress [save]`, `shot_scan_loop [get_library]`),
+   set through `InstrumentedLock.set_holder`
+4. **Every asyncio task's whole await chain** (`diag.await_chain`, 20.25.2), then
+   `waiting on: <type>` for the frameless leaf. Before 20.25.2 each task printed
+   one frame, because `Task.get_stack()` stops at a suspended coroutine's top
+   frame, so every request read as starlette's `coro`. A chain still ends at an
+   `async with` on an `@asynccontextmanager` (`waiting on: async_generator_asend`),
+   which is why the library lock carries its own label
 5. **Every thread stack**
 
 This is the artifact the 2026-09-13 incident lacked, and nothing reconstructs it

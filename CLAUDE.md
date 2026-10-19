@@ -129,6 +129,7 @@ make test                 # pure unit tests for the leaf modules (no deps, no ve
                           #   python tests/test_devactivity.py
                           #   python tests/test_bookmarks.py
                           #   python tests/test_diagnostics.py
+                          #   python tests/test_lib_io_timing.py
                           #   python tests/test_analyzer_fp.py
                           #   python tests/test_discovery.py
                           #   python tests/test_appchannel.py

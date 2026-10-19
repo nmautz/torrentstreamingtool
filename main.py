@@ -930,19 +930,37 @@ def _parse_library_bytes(blob: bytes) -> Optional[dict]:
     return raw
 
 
-def _write_durable(path: Path, blob: bytes) -> None:
+def _write_durable(path: Path, blob: bytes, steps: Optional[dict] = None) -> None:
     """Write `blob` to `path` so a power cut leaves the old or the new file, never zeros.
 
     Temp file in the same directory (same volume ⇒ atomic replace on NTFS and
     POSIX), flushed *and fsynced* before the replace. PermissionError propagates
     so the caller's retry loop can ride out Windows scanner locks.
+
+    `steps` (optional) accumulates seconds per step: open / write / fsync / close
+    / replace. `close` is its own step because a Windows scanner inspects a file
+    when its handle closes (#96).
     """
     tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "wb") as fh:
+    clock = time.monotonic
+    t0 = clock()
+    fh = open(tmp, "wb")
+    try:
+        t1 = clock()
         fh.write(blob)
         fh.flush()
+        t2 = clock()
         os.fsync(fh.fileno())
+        t3 = clock()
+    finally:
+        fh.close()
+    t4 = clock()
     os.replace(tmp, path)
+    t5 = clock()
+    if steps is not None:
+        for k, v in (("open", t1 - t0), ("write", t2 - t1), ("fsync", t3 - t2),
+                     ("close", t4 - t3), ("replace", t5 - t4)):
+            steps[k] = steps.get(k, 0.0) + v
 
 
 def _library_snapshots() -> list[Path]:
@@ -1030,6 +1048,7 @@ def _recover_library() -> Optional[dict]:
 
 
 def _load_lib_raw() -> dict:
+    t0 = time.monotonic()
     blob = b""
     for attempt in range(len(_SAVE_RETRY_DELAYS) + 1):
         try:
@@ -1046,13 +1065,19 @@ def _load_lib_raw() -> dict:
                 log.info("library.json read retrying: %s%s", _lock_failure_desc(exc),
                          _lock_holders_note())
             time.sleep(_SAVE_RETRY_DELAYS[attempt])
+    t_read = time.monotonic()
     raw = _parse_library_bytes(blob)
     if raw is None:
         raw = _recover_library()
         if raw is None:
             return {"profiles": [], "items": []}
+    t_parse = time.monotonic()
     raw["items"] = [_migrate_item(it) for it in raw.get("items", [])]
     _fold_item_hides(raw)
+    t_end = time.monotonic()
+    _note_slow_lib_io("load", t_end - t0,
+                      {"read": t_read - t0, "parse": t_parse - t_read,
+                       "migrate": t_end - t_parse}, len(blob))
     return raw
 
 
@@ -1117,26 +1142,48 @@ def _lock_holders_note() -> str:
     return (" held by: " + ", ".join(who)) if who else " held by: (nobody by then)"
 
 
+# A library.json read or write that takes this long logs where the time went
+# (#96). On an idle disk both take milliseconds. On 2026-10-18 the box's progress
+# saves held the library lock 5-17 s each while F: was busy, and nothing said
+# whether it was the write, the fsync, the replace or the snapshot.
+_LIB_IO_SLOW_S = 1.0
+
+
+def _steps_note(steps: dict) -> str:
+    """`dumps 0.08s, fsync 6.81s, …` in the order the steps ran."""
+    return ", ".join("%s %.2fs" % (k, v) for k, v in steps.items())
+
+
+def _note_slow_lib_io(op: str, total: float, steps: dict, size: int) -> None:
+    if total >= _LIB_IO_SLOW_S:
+        log.warning("library.json %s took %.2fs (%.1f MB): %s",
+                    op, total, size / 1e6, _steps_note(steps))
+
+
 def _save_lib_raw(data: dict) -> None:
     # Durable atomic write — see "Library durability" above. The replace alone
     # survives a process crash; the fsync in _write_durable is what survives a
     # power cut. library.json is rewritten every ~15 s during playback.
+    t0 = time.monotonic()
     blob = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+    steps: dict = {"dumps": time.monotonic() - t0}
     last: Optional[OSError] = None
     fails: list[str] = []
-    t0 = time.monotonic()
     for attempt in range(len(_SAVE_RETRY_DELAYS) + 1):
         try:
             # The temp write is retried too: the previous tick's .tmp can still be
             # held by the same scanner, and failing there loses the write just as
             # completely as failing on the replace.
-            _write_durable(LIBRARY_FILE, blob)
+            _write_durable(LIBRARY_FILE, blob, steps)
             if attempt:
                 # What failed and who held it, so #22 can name the holder instead
                 # of counting retries.
                 log.info("library.json write succeeded on attempt %d after %.2fs; %s",
                          attempt + 1, time.monotonic() - t0, "; ".join(fails))
+            t_snap = time.monotonic()
             _maybe_snapshot_library(data, blob)
+            steps["snapshot"] = time.monotonic() - t_snap
+            _note_slow_lib_io("save", time.monotonic() - t0, steps, len(blob))
             return
         except PermissionError as exc:      # WinError 5 / 32 both surface here
             last = exc
@@ -1148,11 +1195,14 @@ def _save_lib_raw(data: dict) -> None:
             # Anything else (disk full, path gone) is not a lock; don't spin on it.
             raise
         if attempt < len(_SAVE_RETRY_DELAYS):
+            t_wait = time.monotonic()
             time.sleep(_SAVE_RETRY_DELAYS[attempt])
+            steps["retry_wait"] = steps.get("retry_wait", 0.0) + time.monotonic() - t_wait
     # Out of retries. Raise — the caller's 500 is the honest answer, and the
     # client now treats it as a failed save rather than a successful one.
-    log.error("library.json write failed after %d attempts (%.2fs): %s",
-              len(_SAVE_RETRY_DELAYS) + 1, time.monotonic() - t0, "; ".join(fails))
+    log.error("library.json write failed after %d attempts (%.2fs): %s [%s]",
+              len(_SAVE_RETRY_DELAYS) + 1, time.monotonic() - t0, "; ".join(fails),
+              _steps_note(steps))
     raise last if last is not None else OSError("library.json write failed")
 
 
@@ -1164,12 +1214,16 @@ async def get_library() -> dict:
     # whole loop — the dashboard went laggy and the HTTPS proxy threw ReadErrors
     # mid-request while the loop was blocked. Run the blocking work in a thread;
     # the lock still serialises access, but the loop stays free.
+    caller = sys._getframe(1).f_code.co_name
     async with _lib_lock:
+        _lib_lock.set_holder(f"{caller} [get_library]")
         return await asyncio.to_thread(_load_lib_raw)
 
 
 async def put_library(data: dict) -> None:
+    caller = sys._getframe(1).f_code.co_name
     async with _lib_lock:
+        _lib_lock.set_holder(f"{caller} [put_library]")
         await asyncio.to_thread(_save_lib_raw, data)
 
 
@@ -1185,8 +1239,7 @@ class LibraryUnchanged(Exception):
     """
 
 
-@asynccontextmanager
-async def mutate_library():
+def mutate_library():
     """Read → mutate → write library.json as ONE atomic transaction.
 
     `get_library()` and `put_library()` each take `_lib_lock`, but neither holds
@@ -1231,14 +1284,63 @@ async def mutate_library():
     as `_all_library_paths()` — inside the block. Keep network and disk IO out of
     it too: this is the single global library lock, and holding it across a qBit
     round trip or an N-file delete stalls every other reader and writer.
+
+    The caller's name labels the lock while it is held, with the step it is on
+    (`update_progress [save]`), and a transaction that holds the lock for
+    `_LIB_IO_SLOW_S` or more logs how the time split (#96).
     """
+    return _library_txn(sys._getframe(1).f_code.co_name)
+
+
+@asynccontextmanager
+async def _library_txn(caller: str):
+    clock = time.monotonic
+    t_ask = clock()
     async with _lib_lock:
-        lib = await asyncio.to_thread(_load_lib_raw)
+        t_in = clock()
+        t_loaded = t_body = 0.0
+        outcome = "aborted"
         try:
-            yield lib
-        except LibraryUnchanged:
-            return
-        await asyncio.to_thread(_save_lib_raw, lib)
+            _lib_lock.set_holder(f"{caller} [load]")
+            lib = await asyncio.to_thread(_load_lib_raw)
+            t_loaded = clock()
+            _lib_lock.set_holder(f"{caller} [body]")
+            try:
+                yield lib
+            except LibraryUnchanged:
+                outcome = "unchanged"
+                return
+            t_body = clock()
+            _lib_lock.set_holder(f"{caller} [save]")
+            await asyncio.to_thread(_save_lib_raw, lib)
+            outcome = "saved"
+        finally:
+            _note_slow_txn(caller, outcome, t_ask, t_in, t_loaded, t_body, clock())
+
+
+def _note_slow_txn(caller: str, outcome: str, t_ask: float, t_in: float,
+                   t_loaded: float, t_body: float, t_end: float) -> None:
+    """One line when a transaction held the library lock `_LIB_IO_SLOW_S` or more.
+
+    load and save are measured around the `to_thread` call, so they include any
+    wait for a free worker; the `library.json load/save took` line (logged when
+    the I/O itself is slow) is the time on the thread. A big gap between the two
+    is a busy thread pool, not a slow disk.
+    """
+    held = t_end - t_in
+    if held < _LIB_IO_SLOW_S:
+        return
+    parts = []
+    if t_loaded:
+        parts.append("load %.2fs" % (t_loaded - t_in))
+        end_body = t_body or t_end
+        parts.append("body %.2fs" % (end_body - t_loaded))
+        if t_body:
+            parts.append("save %.2fs" % (t_end - t_body))
+    else:
+        parts.append("load %.2fs" % held)
+    log.warning("library txn by %s held the lock %.2fs (%s; waited %.2fs for it): %s",
+                caller, held, outcome, t_in - t_ask, ", ".join(parts))
 
 
 def _now_iso() -> str:

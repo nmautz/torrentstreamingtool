@@ -41,6 +41,7 @@ test:
 	python3 tests/test_devactivity.py
 	python3 tests/test_bookmarks.py
 	python3 tests/test_diagnostics.py
+	python3 tests/test_lib_io_timing.py
 	python3 tests/test_analyzer_fp.py
 	python3 tests/test_discovery.py
 	python3 tests/test_appchannel.py

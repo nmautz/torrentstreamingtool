@@ -1,5 +1,21 @@
 # Changelog
 
+## [20.25.2] — 2026-10-18
+
+### Fixed
+- **The log now says where a slow library save spends its time (#96).** On
+  Oct 18 every progress save on the box held the library for 5-17 s, and the
+  whole server queued behind it, but the logs could not say why. A library read
+  or write of a second or more now logs each step (writing, flushing to disk,
+  replacing the old file, the backup copy), and a save that holds the library
+  that long logs which request it was and how its time split. The lock warning
+  and the health line now name the request holding it instead of an internal
+  name, and stall reports show each task's full chain of waits instead of one
+  line.
+
+Not checked: none of it has run on the box yet; the slow case was tested with
+a simulated clock.
+
 ## [20.25.1] — 2026-10-18
 
 ### Fixed

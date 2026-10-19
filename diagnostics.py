@@ -618,6 +618,17 @@ class InstrumentedLock:
     def locked(self) -> bool:
         return self._lock.locked()
 
+    def set_holder(self, label: str) -> None:
+        """Name the current holder and what it is doing (`update_progress [save]`).
+
+        The task name alone is starlette's `call_next.<locals>.coro` for every
+        request, which named nobody in the 2026-10-18 lock holds (#96). The label
+        shows in the LOCK line, the vitals anomaly and the stall dump. A no-op
+        when the lock is not held.
+        """
+        if self._probe.acquired_at:
+            self._probe.holder = label
+
     async def __aenter__(self):
         p = self._probe
         p.waiters += 1
@@ -637,16 +648,47 @@ class InstrumentedLock:
     async def __aexit__(self, *exc) -> None:
         p = self._probe
         held = p.held_for()
+        holder = p.holder
         p.max_held_s = max(p.max_held_s, held)
         p.acquired_at = 0.0
         p.holder = ""
         self._lock.release()
         if held >= LOCK_HELD_WARN_S:
-            log.warning("LOCK '%s' held %.1fs — every waiter was blocked that long",
-                        p.name, held)
+            log.warning("LOCK '%s' held %.1fs by %s — every waiter was blocked that long",
+                        p.name, held, holder or "?")
 
 
 # ── Stack dumps ──────────────────────────────────────────────────────────────
+
+def await_chain(task: "asyncio.Task", limit: int = 40) -> tuple[list, Any]:
+    """Every frame of a task's await chain, outermost first, and what the last one awaits.
+
+    `Task.get_stack()` gives a suspended coroutine ONE frame (a suspended
+    coroutine's frame has no `f_back`), so a request parked inside
+    `mutate_library` read as starlette's `coro` and nothing more (#96). This
+    follows `cr_await` / `gi_yieldfrom` / `ag_await` down instead. The leaf has
+    no frame: usually a Future's iterator (the last frame says which sleep, lock
+    or `to_thread`). An `async with` on an
+    `@asynccontextmanager` ends the chain at its `async_generator_asend`, which
+    exposes no frame; `InstrumentedLock.set_holder` covers the library's one.
+    """
+    frames: list = []
+    obj: Any = task.get_coro()
+    while obj is not None and len(frames) < limit:
+        f = (getattr(obj, "cr_frame", None) or getattr(obj, "gi_frame", None)
+             or getattr(obj, "ag_frame", None))
+        if f is None:
+            break
+        frames.append(f)
+        nxt = getattr(obj, "cr_await", None)
+        if nxt is None:
+            nxt = getattr(obj, "gi_yieldfrom", None)
+        if nxt is None:
+            nxt = getattr(obj, "ag_await", None)
+        obj = nxt
+    return frames, obj
+
+
 
 def dump_stalled_state(reason: str) -> Optional[Path]:
     """Write every asyncio task stack + every thread stack to `logs/stall_<ts>.txt`.
@@ -690,8 +732,11 @@ def dump_stalled_state(reason: str) -> Optional[Path]:
         for t in asyncio.all_tasks():
             buf.write(f"\n--- task {t.get_name()} done={t.done()} ---\n")
             try:
-                for frame in t.get_stack(limit=25):
+                frames, leaf = await_chain(t)
+                for frame in frames:
                     buf.write("".join(traceback.format_stack(frame, limit=1)))
+                if leaf is not None:
+                    buf.write(f"  waiting on: {type(leaf).__name__}\n")
             except Exception as exc:
                 buf.write(f"  <stack unavailable: {exc}>\n")
     except Exception as exc:
