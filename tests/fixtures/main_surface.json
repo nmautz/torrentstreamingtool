@@ -668,6 +668,9 @@
   "REMOTE_VOLUME_STEP": {
    "kind": "value"
   },
+  "ROOT": {
+   "kind": "value"
+  },
   "RecheckReq": {
    "kind": "class"
   },
@@ -1149,9 +1152,6 @@
    "kind": "value"
   },
   "_MACOS_HIDE_OTHERS_SCRIPT": {
-   "kind": "value"
-  },
-  "_MAIN_LOOP": {
    "kind": "value"
   },
   "_MAX_DOWNLOAD_RETRIES": {
@@ -8659,9 +8659,6 @@
     "data:POSITIONAL_OR_KEYWORD"
    ]
   },
-  "qbit": {
-   "kind": "value"
-  },
   "qbit_add_magnet": {
    "kind": "async def",
    "params": [
@@ -8902,6 +8899,9 @@
   "retry_playback": {
    "kind": "async def",
    "params": []
+  },
+  "runtime": {
+   "kind": "module backend.runtime"
   },
   "save_stream_to_library": {
    "kind": "async def",
@@ -9571,9 +9571,6 @@
   "vlc_clear_playlist": {
    "kind": "async def",
    "params": []
-  },
-  "vlc_client": {
-   "kind": "value"
   },
   "vlc_file_uri": {
    "kind": "def",

@@ -92,6 +92,8 @@ from backend.packslice import (  # noqa: F401
     _PACK_SLICE_GRACE_SECS,
     _PACK_FIRST_MAX_BYTES,
 )
+from backend import runtime
+from backend.paths import ROOT
 from backend.models import (  # noqa: F401
     StreamPrepareReq,
     StreamReq,
@@ -233,7 +235,7 @@ winaccept_patch.apply()
 # (logs/hls.log) because that pipeline is the most failure-prone and the one
 # operators most often need to debug; everything also propagates to the shared
 # app log + stderr (captured by launchd/the console into logs/streamlink.err).
-LOG_DIR = Path(__file__).parent / "logs"
+LOG_DIR = ROOT / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # Diagnostic transcripts uploaded by client devices (the iOS app). A SUBDIRECTORY
@@ -650,7 +652,7 @@ def _write_env_keys(updates: dict[str, str]) -> int:
     Empty-string values clear the entry rather than leaving `KEY=` behind.
     Returns the count of keys actually written/changed.
     """
-    env_path = Path(__file__).parent / ".env"
+    env_path = ROOT / ".env"
     lines: list[str] = []
     if env_path.exists():
         lines = env_path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -689,31 +691,35 @@ def _write_env_keys(updates: dict[str, str]) -> int:
 
 
 def _reload_settings() -> None:
-    """Re-instantiate Settings so newly-written .env values take effect without
-    a full server restart. Most code references `settings.foo` via the module
-    global, so rebinding here propagates to all callers."""
-    global settings
-    settings = Settings()
+    """Re-read .env so newly-written values take effect without a full server
+    restart.
+
+    In place: re-running `__init__` re-validates the same object from .env (a
+    key that was removed falls back to its default, exactly as a fresh
+    `Settings()` would). `settings` is never rebound, so a module that did
+    `from ... import settings` sees the new values too. That is what lets the
+    split of main.py into backend/ import it (docs/BACKEND.md § The core's design)."""
+    settings.__init__()
 
 
-LIBRARY_FILE = Path(__file__).parent / "library.json"
-BACKGROUND_DIR = Path(__file__).parent / ".background"
+LIBRARY_FILE = ROOT / "library.json"
+BACKGROUND_DIR = ROOT / ".background"
 # Dedicated Chrome user-data-dir for the YouTube-on-TV kiosk window. Isolated so
 # launching/killing it never touches the user's normal Chrome, and so we can
 # identify *just* the kiosk instance to kill on Stop (match this path in cmdline).
-TV_CHROME_PROFILE = Path(__file__).parent / ".tv_chrome_profile"
+TV_CHROME_PROFILE = ROOT / ".tv_chrome_profile"
 # Separate user-data-dir for the TV UI dashboard kiosk (`/?tv=1`). MUST differ
 # from TV_CHROME_PROFILE: the YouTube Stop path kills its kiosk by matching the
 # profile path in the cmdline, and sharing a dir would take the dashboard kiosk
 # down with it (it also keeps its own localStorage: profile pick, prefs).
-TVUI_CHROME_PROFILE = Path(__file__).parent / ".tvui_chrome_profile"
+TVUI_CHROME_PROFILE = ROOT / ".tvui_chrome_profile"
 
 # Countdown popup shown on the TV itself. VLC is launched with a `marq`
 # sub-source that re-reads this file ~5×/s and renders its contents bottom-right.
 # main.py writes the "Skipping … in N" text here; emptying the file clears it.
 # run.py and watchdog.py launch VLC with --marq-file pointed at this same path —
 # keep _vlc_marquee_args() (below) in sync with their arg lists.
-MARQUEE_FILE = Path(__file__).parent / ".vlc_marquee.txt"
+MARQUEE_FILE = ROOT / ".vlc_marquee.txt"
 
 
 def _vlc_marquee_args() -> list:
@@ -891,7 +897,7 @@ _UI_VERSION_BADGE_RE = re.compile(r'<div[^>]*\bdata-ui-version\b[^>]*>([^<]*)</d
 def _read_ui_version(default: str = "11.18.0") -> str:
     """Parse the UI version out of the shipped `static/index.html` badge."""
     try:
-        html = (Path(__file__).resolve().parent / "static" / "index.html").read_text(
+        html = (ROOT.resolve() / "static" / "index.html").read_text(
             encoding="utf-8", errors="replace")
     except OSError:
         return default
@@ -900,7 +906,7 @@ def _read_ui_version(default: str = "11.18.0") -> str:
 
 
 UI_VERSION = _read_ui_version()
-_lib_lock: 'diag.InstrumentedLock'  # initialised in lifespan; wraps an asyncio.Lock
+# The library lock is runtime._lib_lock (built in the lifespan; backend/runtime.py).
 
 # Retains references to fire-and-forget background tasks so the event loop's weak
 # reference doesn't let them be garbage-collected mid-flight. Each task discards
@@ -923,7 +929,7 @@ def _spawn_bg(coro) -> "asyncio.Task":
 # gate serialises the heavy work so a bulk analyze drains as a queue instead of
 # a thundering herd. See docs/ANALYZER.md § Concurrency.
 ANALYSIS_CONCURRENCY = 2
-_analysis_gate: asyncio.Semaphore  # initialised in lifespan
+# The gate itself is runtime._analysis_gate (built in the lifespan).
 
 
 # ── Library Storage ───────────────────────────────────────────────────────────
@@ -1347,15 +1353,15 @@ async def get_library() -> dict:
     # mid-request while the loop was blocked. Run the blocking work in a thread;
     # the lock still serialises access, but the loop stays free.
     caller = sys._getframe(1).f_code.co_name
-    async with _lib_lock:
-        _lib_lock.set_holder(f"{caller} [get_library]")
+    async with runtime._lib_lock:
+        runtime._lib_lock.set_holder(f"{caller} [get_library]")
         return await asyncio.to_thread(_load_lib_raw)
 
 
 async def put_library(data: dict) -> None:
     caller = sys._getframe(1).f_code.co_name
-    async with _lib_lock:
-        _lib_lock.set_holder(f"{caller} [put_library]")
+    async with runtime._lib_lock:
+        runtime._lib_lock.set_holder(f"{caller} [put_library]")
         await asyncio.to_thread(_save_lib_raw, data)
 
 
@@ -1428,22 +1434,22 @@ def mutate_library():
 async def _library_txn(caller: str):
     clock = time.monotonic
     t_ask = clock()
-    async with _lib_lock:
+    async with runtime._lib_lock:
         t_in = clock()
         t_loaded = t_body = 0.0
         outcome = "aborted"
         try:
-            _lib_lock.set_holder(f"{caller} [load]")
+            runtime._lib_lock.set_holder(f"{caller} [load]")
             lib = await asyncio.to_thread(_load_lib_raw)
             t_loaded = clock()
-            _lib_lock.set_holder(f"{caller} [body]")
+            runtime._lib_lock.set_holder(f"{caller} [body]")
             try:
                 yield lib
             except LibraryUnchanged:
                 outcome = "unchanged"
                 return
             t_body = clock()
-            _lib_lock.set_holder(f"{caller} [save]")
+            runtime._lib_lock.set_holder(f"{caller} [save]")
             await asyncio.to_thread(_save_lib_raw, lib)
             outcome = "saved"
         finally:
@@ -1835,12 +1841,9 @@ class AppState:
 
 
 state = AppState()
-# The main asyncio loop, captured at lifespan startup. Needed by code running
-# on foreign threads (the HID input listener) to schedule coroutines back onto
-# the loop via run_coroutine_threadsafe.
-_MAIN_LOOP: Optional[asyncio.AbstractEventLoop] = None
-qbit: Optional[httpx.AsyncClient] = None
-vlc_client: Optional[httpx.AsyncClient] = None   # persistent keep-alive client for VLC (see _vlc_http)
+# The main loop and the qBit / VLC clients are built in the lifespan and live in
+# backend/runtime.py: read them as runtime._MAIN_LOOP, runtime.qbit,
+# runtime.vlc_client.
 _admin_sessions: dict[str, float] = {}   # token → expiry Unix timestamp
 
 # ── Profile session tokens ────────────────────────────────────────────────────
@@ -1861,7 +1864,7 @@ _admin_sessions: dict[str, float] = {}   # token → expiry Unix timestamp
 # access and the ability to delete — with only a 403 to explain it — every morning
 # is worse than the tokens outliving a process. The TTL still forces a periodic
 # re-entry, which is what actually bounds them.
-PROFILE_SESSIONS_FILE = Path(__file__).parent / "profile_sessions.json"
+PROFILE_SESSIONS_FILE = ROOT / "profile_sessions.json"
 _profile_sessions: dict[str, dict] = {}
 PROFILE_SESSION_TTL = 12 * 3600          # 12 h — a viewing session, not a login
 # A REMEMBERED session (20.0.0). The iOS app pins one account to the phone and
@@ -2007,7 +2010,7 @@ def _http_client(**kw) -> httpx.AsyncClient:
 # ── Jackett Session ───────────────────────────────────────────────────────────
 _jackett_cookie: str = ""
 _jackett_cookie_expiry: float = 0.0
-_jackett_cookie_lock: asyncio.Lock  # initialised in lifespan
+# The cookie's lock is runtime._jackett_cookie_lock (built in the lifespan).
 
 
 async def _jackett_login() -> str:
@@ -2034,7 +2037,7 @@ async def _jackett_admin(timeout: float = 15.0):
     global _jackett_cookie, _jackett_cookie_expiry
     cookies: dict[str, str] = {}
     if settings.jackett_password:
-        async with _jackett_cookie_lock:
+        async with runtime._jackett_cookie_lock:
             if not _jackett_cookie or time.time() >= _jackett_cookie_expiry:
                 _jackett_cookie = await _jackett_login()
                 _jackett_cookie_expiry = time.time() + 3600
@@ -2382,7 +2385,7 @@ def _pin_hash(pin: str) -> str:
 
 async def qbit_login() -> bool:
     try:
-        r = await qbit.post(
+        r = await runtime.qbit.post(
             f"{settings.qbit_url}/api/v2/auth/login",
             data={"username": settings.qbit_username, "password": settings.qbit_password},
         )
@@ -2394,10 +2397,10 @@ async def qbit_login() -> bool:
 async def qreq(method: str, path: str, **kw) -> Optional[httpx.Response]:
     """Make an authenticated qBit API request, re-logging in on 403."""
     try:
-        r = await qbit.request(method, f"{settings.qbit_url}{path}", **kw)
+        r = await runtime.qbit.request(method, f"{settings.qbit_url}{path}", **kw)
         if r.status_code == 403:
             await qbit_login()
-            r = await qbit.request(method, f"{settings.qbit_url}{path}", **kw)
+            r = await runtime.qbit.request(method, f"{settings.qbit_url}{path}", **kw)
         return r
     except Exception:
         return None
@@ -2924,15 +2927,14 @@ def _vlc_http() -> httpx.AsyncClient:
     startup finishes (or in a stray task) still works. `base_url` + client-level
     `auth` mean callers pass only the relative path.
     """
-    global vlc_client
-    if vlc_client is None or vlc_client.is_closed:
-        vlc_client = _http_client(
+    if runtime.vlc_client is None or runtime.vlc_client.is_closed:
+        runtime.vlc_client = _http_client(
             base_url=settings.vlc_url,
             auth=httpx.BasicAuth("", settings.vlc_password),
             timeout=httpx.Timeout(5.0, connect=2.0),
             limits=httpx.Limits(max_connections=4, max_keepalive_connections=4, keepalive_expiry=30.0),
         )
-    return vlc_client
+    return runtime.vlc_client
 
 
 async def vlc(command: str, **params) -> None:
@@ -3157,7 +3159,7 @@ async def _current_playback_path() -> Optional[Path]:
 # "exceeded", and warns that continuing gets the IP firewalled. So: count what
 # we spend, stop well short, and when the ban page does appear, believe it.
 
-_OS_QUOTA_FILE = Path(__file__).resolve().parent / ".opensubs_quota.json"
+_OS_QUOTA_FILE = ROOT.resolve() / ".opensubs_quota.json"
 _OS_DAILY_CAP = 150
 _os_quota_lock = asyncio.Lock()
 _os_dl_cache: "dict[str, bytes]" = {}          # link -> bytes, so a retry is free
@@ -3623,7 +3625,7 @@ LOCAL_IMG_BASE = "/api/metadata/img"
 # not kept for ever: TMDb's API terms cap caching at 6 months, so a file is
 # fetched again once it is `tmdbcache.REFRESH_AFTER` old and dropped at
 # `tmdbcache.MAX_AGE` if TMDb still can't be reached (`_tmdb_img_bytes`).
-TMDB_IMG_CACHE = Path(__file__).parent / ".tmdb_img_cache"
+TMDB_IMG_CACHE = ROOT / ".tmdb_img_cache"
 _TMDB_IMG_SIZES = {"w92", "w154", "w185", "w300", "w342", "w500", "w780",
                    "w1280", "original"}
 _TMDB_IMG_FILE_RE = re.compile(r"^[A-Za-z0-9_-]+\.(?:jpg|jpeg|png|svg)$")
@@ -3829,7 +3831,7 @@ def _tmdb_override_present() -> bool:
 # On-disk cache of TMDb API responses (see tmdbcache.py). Fresh entries are
 # served without a network call; a failed refetch falls back to the stale copy,
 # so metadata survives an internet outage.
-TMDB_API_CACHE = Path(__file__).parent / ".tmdb_cache"
+TMDB_API_CACHE = ROOT / ".tmdb_cache"
 _tmdb_disk = tmdbcache.TmdbCache(TMDB_API_CACHE)
 
 # ── Anime season mapping ────────────────────────────────────────────────────
@@ -3842,7 +3844,7 @@ _tmdb_disk = tmdbcache.TmdbCache(TMDB_API_CACHE)
 # Everything about it is optional. No table on disk, or a show the table has
 # never heard of, and `entries_for` answers `[]` — which is exactly the
 # pre-17.1.0 behaviour for every show, anime or not.
-ANIME_MAP_CACHE = Path(__file__).parent / ".anime_map"
+ANIME_MAP_CACHE = ROOT / ".anime_map"
 _anime_map = animemap.AnimeMap(ANIME_MAP_CACHE)
 # Serialises refreshes and stops a stale table triggering one fetch per caller.
 _anime_map_lock = asyncio.Lock()
@@ -5930,7 +5932,7 @@ def _spawn_metadata_fetch(item_id: str, **kw) -> "asyncio.Task[Optional[dict]]":
 
 def _find_vlc_bin() -> Optional[str]:
     """Locate the VLC binary, checking .env first then well-known paths."""
-    env_file = Path(__file__).parent / ".env"
+    env_file = ROOT / ".env"
     if env_file.exists():
         for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
             line = line.strip()
@@ -7295,7 +7297,7 @@ async def _save_track_pref(
     raw VLC ES IDs — they're what the on-device player (and a VLC replay whose
     ES IDs drifted, or the next episode of the series) restore from."""
     try:
-        async with _lib_lock:
+        async with runtime._lib_lock:
             lib = await asyncio.to_thread(_load_lib_raw)
             item = next((it for it in lib["items"] if it["id"] == item_id), None)
             if not item:
@@ -7343,7 +7345,7 @@ async def _set_shuffle_pref(item_id: str, profile_id: str, shuffle: bool, scope:
     if not item_id or not profile_id:
         return
     try:
-        async with _lib_lock:
+        async with runtime._lib_lock:
             lib = await asyncio.to_thread(_load_lib_raw)
             item = next((it for it in lib["items"] if it["id"] == item_id), None)
             if not item:
@@ -7478,7 +7480,7 @@ async def _save_series_sub_sel(profile_id: str, series: str, sel: Optional[dict]
         return
     sel.setdefault("at", _now_iso())
     try:
-        async with _lib_lock:
+        async with runtime._lib_lock:
             lib = await asyncio.to_thread(_load_lib_raw)
             prof = next((p for p in lib.get("profiles", []) if p.get("id") == profile_id), None)
             if not prof:
@@ -7584,7 +7586,7 @@ async def _save_series_audio_sel(profile_id: str, series: str, sel: Optional[dic
         return
     sel.setdefault("at", _now_iso())
     try:
-        async with _lib_lock:
+        async with runtime._lib_lock:
             lib = await asyncio.to_thread(_load_lib_raw)
             prof = next((p for p in lib.get("profiles", []) if p.get("id") == profile_id), None)
             if not prof:
@@ -7649,7 +7651,7 @@ async def _learn_profile_audio_pref(profile_id: str, sel: Optional[dict]) -> Non
     if not (lang or (count and idx >= 0)):
         return
     try:
-        async with _lib_lock:
+        async with runtime._lib_lock:
             lib = await asyncio.to_thread(_load_lib_raw)
             prof = next((p for p in lib.get("profiles", []) if p.get("id") == profile_id), None)
             if not prof:
@@ -13107,7 +13109,7 @@ async def _run_series_analysis(series_key: str) -> None:
     # oversubscribe the host (see ANALYSIS_CONCURRENCY). Acquire the lock first so
     # duplicate triggers for one series collapse before they ever queue on the
     # gate.
-    async with lock, _analysis_gate:
+    async with lock, runtime._analysis_gate:
         lib = await get_library()
         items = _items_for_series_key(lib, series_key)
         ready_items = [it for it in items if it.get("status") == "ready"]
@@ -14600,7 +14602,7 @@ async def subtitle_upgrade_loop() -> None:
 
 
 # ── AI subtitles: retirement cleanup ──────────────────────────────────────────
-AI_SUBS_RETIRED_MARKER = Path(__file__).parent / ".ai_subs_retired"
+AI_SUBS_RETIRED_MARKER = ROOT / ".ai_subs_retired"
 
 
 def _sweep_ai_subs_sync(paths: list[str]) -> tuple[int, int]:
@@ -14622,7 +14624,7 @@ def _sweep_ai_subs_sync(paths: list[str]) -> tuple[int, int]:
                 freed += size
         except OSError:
             continue
-    whisper_dir = Path(__file__).parent / "tools" / "whisper"
+    whisper_dir = ROOT / "tools" / "whisper"
     if whisper_dir.exists():
         try:
             freed += sum(f.stat().st_size for f in whisper_dir.rglob("*") if f.is_file())
@@ -14665,11 +14667,10 @@ async def _retire_ai_subtitles() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
-    global qbit, vlc_client, _lib_lock, _jackett_cookie_lock, _analysis_gate, _MAIN_LOOP
-    _MAIN_LOOP = asyncio.get_running_loop()
+    runtime._MAIN_LOOP = asyncio.get_running_loop()
     # Route asyncio's own callback errors into the app log (and demote the benign
     # Windows WinError 10054 disconnect churn that used to flood it at ERROR).
-    diag.install_loop_exception_handler(_MAIN_LOOP)
+    diag.install_loop_exception_handler(runtime._MAIN_LOOP)
     # Make StreamLink's request handling the box's top priority before anything
     # else — so controls / UI / VLC-control stay responsive under heavy prep load.
     _raise_own_priority()
@@ -14679,11 +14680,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # stalls every library-touching request while the pure-async VLC/qBit
     # pollers carry on at full cadence — a box that looks healthy in the logs
     # and is dead to every client. See docs/DIAGNOSTICS.md.
-    _lib_lock = diag.InstrumentedLock(asyncio.Lock(), "library")
-    _jackett_cookie_lock = asyncio.Lock()
-    _analysis_gate = asyncio.Semaphore(ANALYSIS_CONCURRENCY)
+    runtime._lib_lock = diag.InstrumentedLock(asyncio.Lock(), "library")
+    runtime._jackett_cookie_lock = asyncio.Lock()
+    runtime._analysis_gate = asyncio.Semaphore(ANALYSIS_CONCURRENCY)
     _load_profile_sessions()   # PIN-verified profile sessions (survive a restart)
-    qbit = _http_client(timeout=10.0)
+    runtime.qbit = _http_client(timeout=10.0)
     _vlc_http()   # build the persistent keep-alive VLC client up front
     await qbit_login()
     Path(settings.qbit_download_path).mkdir(parents=True, exist_ok=True)
@@ -14858,9 +14859,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         power_listener.stop()
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
-    await qbit.aclose()
-    if vlc_client is not None:
-        await vlc_client.aclose()
+    await runtime.qbit.aclose()
+    if runtime.vlc_client is not None:
+        await runtime.vlc_client.aclose()
     if _tmdb_client is not None:
         await _tmdb_client.aclose()
 
@@ -20830,7 +20831,7 @@ async def sync_progress(req: SyncProgressReq, request: Request) -> JSONResponse:
     _TRACK_KEYS = ("audio_track", "subtitle_track", "local_audio_idx",
                    "local_subtitle_idx", "audio_offset_ms")
 
-    async with _lib_lock:
+    async with runtime._lib_lock:
         lib = await asyncio.to_thread(_load_lib_raw)
         items_by_id = {it["id"]: it for it in lib.get("items", [])}
 
@@ -21040,7 +21041,7 @@ async def sync_resolve(req: SyncResolveReq, request: Request) -> JSONResponse:
     _TRACK_KEYS = ("audio_track", "subtitle_track", "local_audio_idx",
                    "local_subtitle_idx", "audio_offset_ms")
 
-    async with _lib_lock:
+    async with runtime._lib_lock:
         lib = await asyncio.to_thread(_load_lib_raw)
         items_by_id = {it["id"]: it for it in lib.get("items", [])}
 
@@ -21158,7 +21159,7 @@ async def set_local_tracks(item_id: str, req: LocalTracksReq) -> JSONResponse:
     interchange — that's why they're kept under separate keys.
     """
     series = ""
-    async with _lib_lock:
+    async with runtime._lib_lock:
         lib = await asyncio.to_thread(_load_lib_raw)
         item = next((it for it in lib["items"] if it["id"] == item_id), None)
         if not item:
@@ -22816,7 +22817,7 @@ _PYCAW_LAST_ERROR: Optional[str] = None
 # can only be contained by an OS process boundary, so all Windows volume ops now
 # run in `winvol_helper.py` as a long-lived child: if it ever crashes, only the
 # child dies and we respawn it — the server stays up. See docs/GOTCHAS.md.
-WINVOL_HELPER = Path(__file__).parent / "winvol_helper.py"
+WINVOL_HELPER = ROOT / "winvol_helper.py"
 _winvol_proc: Optional[subprocess.Popen] = None   # the live helper child
 _winvol_lock: Optional[asyncio.Lock] = None       # serializes round-trips
 
@@ -23288,7 +23289,7 @@ def _tv_input_event(kind: str) -> None:
             now = time.monotonic()
             if now - _tv_click_pause_last >= 0.4:
                 _tv_click_pause_last = now
-                loop = _MAIN_LOOP
+                loop = runtime._MAIN_LOOP
                 if loop is not None:
                     asyncio.run_coroutine_threadsafe(
                         _remote_key_action("playpause"), loop)
@@ -23299,7 +23300,7 @@ def _tv_input_event(kind: str) -> None:
         return
     if playing:
         return
-    loop = _MAIN_LOOP
+    loop = runtime._MAIN_LOOP
     if loop is not None:
         asyncio.run_coroutine_threadsafe(_tv_ui_show("input"), loop)
 
@@ -23368,7 +23369,7 @@ async def tv_ui_loop() -> None:
 @app.get("/tv", include_in_schema=False)
 async def tv_player_page() -> FileResponse:
     """The host-side kiosk page: YouTube IFrame player + SSE command listener."""
-    return FileResponse(str(Path(__file__).parent / "static" / "tv.html"))
+    return FileResponse(str(ROOT / "static" / "tv.html"))
 
 
 @app.post("/api/youtube")
@@ -26082,7 +26083,7 @@ async def get_discovery() -> JSONResponse:
             lan_ip = netadapters.resolve_preferred(state.preferred_adapter)[0]
         except Exception:
             lan_ip = ""
-        return discovery.payload(Path(__file__).resolve().parent, UI_VERSION, lan_ip)
+        return discovery.payload(ROOT.resolve(), UI_VERSION, lan_ip)
 
     body = await asyncio.to_thread(_build)
     return JSONResponse(body, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
@@ -26505,7 +26506,7 @@ async def player_manifest(request: Request) -> JSONResponse:
     the UI_VERSION constant historically drifts)."""
 
     def _build() -> tuple[str, list[dict]]:
-        static_dir = Path(__file__).parent / "static"
+        static_dir = ROOT / "static"
         files: list[dict] = []
         for name in _PLAYER_SNAPSHOT_FILES:
             try:
@@ -26903,7 +26904,7 @@ async def events(request: Request) -> StreamingResponse:
 
 @app.get("/admin", include_in_schema=False)
 async def admin_page() -> FileResponse:
-    return FileResponse(str(Path(__file__).parent / "static" / "admin.html"))
+    return FileResponse(str(ROOT / "static" / "admin.html"))
 
 
 @app.get("/api/admin/status")
@@ -27147,7 +27148,7 @@ async def admin_indexer_health(request: Request) -> JSONResponse:
 def _flaresolverr_bin_path() -> str:
     """Resolve the installed FlareSolverr binary from .env (`_FLARESOLVERR_BIN`),
     falling back to PATH. Empty string when not installed."""
-    env_file = Path(__file__).parent / ".env"
+    env_file = ROOT / ".env"
     if env_file.exists():
         for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
             line = line.strip()
@@ -30869,7 +30870,7 @@ async def admin_updater_changelog(request: Request) -> JSONResponse:
     `{ok:false}` (not an error) when the file is missing so the UI degrades
     gracefully."""
     _require_admin(request)
-    path = Path(__file__).parent / "CHANGELOG.md"
+    path = ROOT / "CHANGELOG.md"
     try:
         text = await asyncio.to_thread(path.read_text, encoding="utf-8")
     except OSError as exc:
@@ -31309,7 +31310,7 @@ async def admin_set_background_enabled(request: Request, req: BackgroundEnabledR
 # on a move). This central dir is kept only so the startup migration
 # (`_migrate_offline_cache_layout`) can find and relocate pre-v8 bundles, and so
 # the cache inventory still surfaces any stragglers as orphans to purge.
-OFFLINE_CACHE = Path(__file__).parent / ".offline_cache"
+OFFLINE_CACHE = ROOT / ".offline_cache"
 # Per-media-file bundle directory name. Lives inside each source file's folder.
 OFFLINE_CACHE_DIRNAME = ".streamlink_cache"
 # Bump this when offline-output requirements change (codec rules, ffmpeg args,
@@ -38711,7 +38712,7 @@ async def bundle_manifest(item_id: str, request: Request, file_path: str = "", p
 #     real-time and playback doesn't stall at the buffer edge. The ABR ladder,
 #     seamless quality menu and seamless multi-audio stay full-prep-only.
 
-ONDEMAND_CACHE = Path(__file__).parent / ".ondemand_cache"
+ONDEMAND_CACHE = ROOT / ".ondemand_cache"
 OD_SEGMENT_SECS = HLS_SEGMENT_SECS    # MUST match for segment-index ↔ time math
 OD_SESSION_IDLE_SECS = 90             # reap a session this long without a fetch
 OD_SEG_WAIT_TIMEOUT  = 30             # max seconds to hold a segment request open
@@ -39481,7 +39482,7 @@ async def ondemand_close(session_key: str) -> JSONResponse:
 # product decision that clipping is a prepped-only feature. The clip itself is
 # cut from the ORIGINAL source (not the HLS segments) for best quality + precise
 # track mapping.
-CLIPS_CACHE = Path(__file__).parent / ".clips"
+CLIPS_CACHE = ROOT / ".clips"
 CLIP_TTL_SECS = 2 * 3600           # generated clips are purged after 2 hours
 CLIP_MAX_SECONDS = 300             # cap "last X seconds" so a clip can't balloon into a huge re-encode
 CLIP_ENCODE_TIMEOUT = 240          # kill a wedged clip encode after this long

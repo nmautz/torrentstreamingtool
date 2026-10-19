@@ -258,7 +258,7 @@ async def reader():
 async def run(coro_fn):
     global LOCK
     LOCK = diag.InstrumentedLock(asyncio.Lock(), "library-test")
-    ns["_lib_lock"] = LOCK
+    ns["runtime"] = types.SimpleNamespace(_lib_lock=LOCK)   # backend/runtime.py
     return await coro_fn()
 
 reset()

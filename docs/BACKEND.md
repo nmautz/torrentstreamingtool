@@ -23,15 +23,18 @@ exactly what they saw before.
 | `backend/filelist.py` | `VIDEO_EXTS`, `build_file_list`, `largest_video`, `human_size`, `_file_by_index` | (under a stale "Release audio-language classification" header) |
 | `backend/resume.py` | `find_resume_hint`, `find_series_resume_hint` and their helpers | Resume |
 | `backend/packslice.py` | The pack-slicing limits only; the functions still need the core | Pack slicing |
+| `backend/runtime.py` | What the lifespan builds: `qbit`, `vlc_client`, `_lib_lock`, `_jackett_cookie_lock`, `_analysis_gate`, `_MAIN_LOOP`. **Always read as `runtime.X`** (20.25.7) | Global State, Library Storage, Jackett Session |
+| `backend/paths.py` | `ROOT`, the repo root. main.py's `Path(__file__).parent` became `ROOT` (20.25.7) | (26 places) |
 
 ### The rules (each one is a way a split fails without an error)
 
 1. **backend/ never imports main.** main.py is the composition root: it imports
    the package, never the other way round, so there is no import cycle.
 2. **Never `from x import NAME` when NAME is rebound at runtime** (`global NAME;
-   NAME = ...`). The importer keeps the old object. Read it as `x.NAME`. Today
-   that means about 45 globals in main.py, including `settings` (reloaded),
-   `qbit`, `vlc_client`, `_lib_lock` and `_MAIN_LOOP` (all built in the lifespan).
+   NAME = ...`). The importer keeps the old object. Read it as `x.NAME`. The
+   objects the lifespan builds are in `backend/runtime.py` for exactly this
+   reason (`runtime.qbit`). `settings` is reloaded in place, so it is safe to
+   import. About 40 subsystem-private globals in main.py are still rebound.
 3. **A top-level def/class lives in one place.** A move that leaves the old copy
    behind gives two versions, and which one runs depends on import order.
 4. **The importer never rebinds a name it imported from backend/.**
@@ -59,7 +62,7 @@ pointer comment where the code was.
 |-------|---------|
 | `python tests/surface_snapshot.py` (`make surface`; needs the venv, `.venv\Scripts\python` on Windows) | A route lost, added, reordered (Starlette matches the first route that fits) or re-signatured; a request model changed (OpenAPI hash); middleware order; a name main.py used to export. Re-pin with `--write` **only** for a change you meant |
 | `python tests/test_backend_layout.py` | The rules above |
-| pyflakes on main.py and backend/ | An undefined name: the one mistake no import-time check sees, because it fails only when that function runs. Not a project dependency; install it in a throwaway venv. The "undefined name" lines for main.py must match the baseline (`_lib_lock` x3, `Iterable` x1 in 20.25.6) |
+| pyflakes on main.py and backend/ | An undefined name: the one mistake no import-time check sees, because it fails only when that function runs. Not a project dependency; install it in a throwaway venv. The "undefined name" lines for main.py must match the baseline (since 20.25.7 only `Iterable`, a string annotation) |
 | `make test` | The dozen tests that copy functions out of the source by name now read main.py **plus** backend/ (`tests/_backend_src.py`), so a moved function is still found |
 
 ### Order of work
@@ -72,17 +75,41 @@ qBit client. In order:
 1. **Pure leaves** (done in 20.25.6, more remain): code that needs only its inputs.
 2. **The core**: `Settings`/`settings`, logging, library storage (`get_library`,
    `put_library`, `mutate_library`, `_lib_lock`), `AppState`/`state`, the SSE
-   broadcast, the qBit and VLC clients. Everything else stands on these. Rule 2
-   makes this a design step, not a move: the runtime-built objects (`qbit`,
-   `vlc_client`, `_lib_lock`, `_MAIN_LOOP`, `settings` on reload) need a home
-   that is read through its module (`runtime.qbit`), or must stop being rebound.
-   A few foundation pieces are misplaced and must move first (`UI_VERSION` sits
-   in the env-key section; `Settings` uses `remote_volume_guard` from the HID
-   remote section).
+   broadcast, the qBit and VLC clients. Everything else stands on these. See
+   § The core's design below.
 3. **Subsystems** on top of the core, one per module: TMDb, subtitles, pack
    slicing, racing, the download monitor, bundles/HLS, source eviction, the reaper.
 4. **Routes last**, as `APIRouter`s included in exactly the order the routes are
    registered today. The surface snapshot proves the order held.
+
+### The core's design
+
+Rule 2 is what makes the core a design step. 45 globals are rebound with `global`.
+Measured at 20.25.6, they fall into four kinds:
+
+| Kind | Names | Plan |
+|------|-------|------|
+| `settings` (rebound by `_reload_settings` after an `.env` write; read in about 30 sections) | `settings` | **Reload in place**: `settings.__init__()` instead of `settings = Settings()`. The object never changes, so `from backend.config import settings` is safe. Tested on pydantic-settings 2: the same object, new values, a key removed from `.env` falls back to its default, equal to a fresh `Settings()` |
+| Built in the lifespan | `qbit`, `vlc_client`, `_lib_lock`, `_jackett_cookie_lock`, `_analysis_gate`, `_MAIN_LOOP` | **`backend/runtime.py`** holds them; the lifespan assigns `runtime.qbit = ...`, readers use `runtime.qbit`. Only ~30 reads in all (`_lib_lock` 16, the others 1-5), so it is a small edit |
+| Private to one subsystem | `_tmdb_offline_until`, `_bundle_index`, `_reap_task`, `_winvol_proc`, ... (most of the 45) | Move with their subsystem. A reader in another module uses `module.X`; `test_backend_layout.py` rule 2 refuses a `from` import |
+| Never rebound | `state` (1,461 reads), `_admin_sessions`, ... | Ordinary imports |
+
+Paths are the other trap: 26 places in main.py build paths from
+`Path(__file__).parent` (the repo root there, `backend/` in a module; moved as is,
+`LIBRARY_FILE` would point at an empty `backend/library.json`).
+`backend/paths.py` holds `ROOT = Path(__file__).parent.parent` (no `.resolve()`,
+so every path string stays exactly what it was), and a moved line uses `ROOT`.
+`tests/move_to_backend.py` refuses a block that mentions `__file__`.
+
+Batches, each shipped and checked on the box before the next:
+
+- **C1** (done, 20.25.7): `backend/paths.py`, `backend/runtime.py`, `settings`
+  reloaded in place. Small edits in main.py, no moves.
+- **C2**: `backend/config.py` (`Settings`, `settings`, `_reload_settings`, the
+  env-key registry, `UI_VERSION`) and the logging setup.
+- **C3**: library storage and durability (`backend/library.py`).
+- **C4**: `AppState`/`state` and the SSE broadcast.
+- **C5**: the qBit and VLC clients.
 
 ## Section map (in source order)
 

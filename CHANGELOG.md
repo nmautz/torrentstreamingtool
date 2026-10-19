@@ -1,5 +1,22 @@
 # Changelog
 
+## [20.25.7] — 2026-10-18
+
+### Changed
+- **The qBit and VLC clients, the library lock and the main loop now live in
+  `backend/runtime.py`** (#64). The server builds them when it starts, and code
+  reads them as `runtime.qbit` and so on. That way the code still to move out
+  of main.py sees the objects the server built, not the empty placeholders they
+  were at import. The objects themselves and the way they are built are
+  unchanged.
+- **Settings reload in place.** Saving a key on the admin Env Keys tab used to
+  replace the settings object; it now re-reads `.env` into the same one, with
+  the same result. This lets other modules import `settings` directly.
+- **The repo root has one definition** (`backend/paths.py`). The 26 places in
+  main.py that worked it out from `__file__` now use it. Every path is
+  unchanged; code that moves into `backend/` would otherwise have pointed one
+  folder too deep.
+
 ## [20.25.6] — 2026-10-18
 
 ### Changed
