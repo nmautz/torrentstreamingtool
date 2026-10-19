@@ -1,5 +1,15 @@
 # Changelog
 
+## [20.25.5] — 2026-10-18
+
+### Fixed
+- **The disk health line's per-operation time is right on Windows.** It read
+  0 ms for the box's hard disk: the library that supplies the numbers reports
+  Windows disk time in whole seconds while calling it milliseconds, so every
+  time was 1000 times too small and a slow drive could never be flagged. A
+  drive that was busy for under a second in total now shows an upper bound
+  (`<2.0ms`).
+
 ## [20.25.4] — 2026-10-18
 
 ### Fixed

@@ -303,6 +303,37 @@ try:
 finally:
     diag._windows_drive_map, diag.sys.platform, diag.time.monotonic = _real_win, _real_plat, _real_mono2
     diag._drive_map.update(t=None, map={})
+# Windows: psutil's disk times are whole seconds, not ms.
+_real_unit = diag._DISK_TIME_UNIT_MS
+diag._DISK_TIME_UNIT_MS = 1000.0
+_clock2 = [500.0]
+_real_mono3, _real_ps3, _real_names3 = diag.time.monotonic, diag.psutil, diag._drive_names
+diag.time.monotonic = lambda: _clock2[0]
+diag._drive_names = lambda: {"PhysicalDrive2": "F:", "PhysicalDrive0": "C:"}
+fake2 = _FakePsutil()
+diag.psutil = fake2
+diag._disk_prev.clear()
+try:
+    fake2.disks = {"PhysicalDrive2": _dk(0, 0, 10, 10, 0, 0), "PhysicalDrive0": _dk(0, 0, 3, 3, 0, 0)}
+    diag.disk_sample()
+    _clock2[0] += 30.0
+    # F: 100 I/Os, 85 s of I/O time (850 ms each); C: 500 I/Os inside one second.
+    fake2.disks = {"PhysicalDrive2": _dk(50, 50, 52, 53, 0, 0), "PhysicalDrive0": _dk(250, 250, 3, 3, 0, 0)}
+    d = diag.disk_sample()
+    f = next(x for x in d["disks"] if x["disk"] == "F:")
+    c = next(x for x in d["disks"] if x["disk"] == "C:")
+    ok("Windows disk time is read as seconds", abs(f["ms"] - 850.0) < 1e-6, str(f))
+    ok("under one second in total is an upper bound, not 0",
+       c.get("under") and abs(c["ms"] - 2.0) < 1e-6, str(c))
+    ok("and prints as one", ",C:<2.0ms/" in _line(), _line())
+    bad = _bad()
+    ok("the slow Windows drive raises the anomaly; the bound never does",
+       any(b.startswith("disk F: 850 ms") for b in bad) and not any("C:" in b for b in bad), str(bad))
+finally:
+    diag._DISK_TIME_UNIT_MS = _real_unit
+    diag.time.monotonic, diag.psutil, diag._drive_names = _real_mono3, _real_ps3, _real_names3
+    diag._disk_prev.clear()
+    diag.state.disk_last = {}
 ok("sub-10 ms latency keeps a decimal", diag._ms(0.43) == "0.4" and diag._ms(850.2) == "850")
 
 ok("Linux partitions and loop devices are skipped, disks kept",

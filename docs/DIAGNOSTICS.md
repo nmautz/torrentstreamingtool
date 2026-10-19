@@ -731,7 +731,10 @@ a delta over the 30 s since the previous sample:
   the first sample and every 10 min after; the app log says what it found
   (`disk sampler: drives PhysicalDrive0=C:, PhysicalDrive2=F:`) at start and on
   any change. A volume spanning disks keeps `PhysicalDriveN`. Under 10 ms the
-  time keeps a decimal (`0.4ms`, an SSD). Linux
+  time keeps a decimal (`0.4ms`, an SSD). **On Windows the time comes from
+  psutil in whole seconds** (see GOTCHAS § psutil's Windows disk times), so a
+  drive whose I/Os add up to under a second in the sample prints an upper
+  bound, `C:<2.0ms`, and never counts as slow. Linux
   shows `sda` / `nvme0n1` (partitions and loop devices skipped); macOS `disk0`.
 - `io=` the `IO_TOP_N` processes that moved the most bytes, at least 1 MB/s,
   as read + write MB/s; `-` when none did. **These are `io_counters()`: on

@@ -839,7 +839,13 @@ def _proc_stats() -> dict:
 
 _disk_prev: dict = {}                       # last raw counters, for the next delta
 _disk_busy = threading.Lock()               # one sample at a time, even after a timeout
-_drive_map: dict = {"t": None, "map": {}}  # t: monotonic of the last lookup, None = never
+_drive_map: dict = {"t": None, "map": {}}
+# psutil's read_time / write_time are milliseconds everywhere EXCEPT Windows,
+# where psutil/arch/windows/disk.c divides the 100 ns DISK_PERFORMANCE counters
+# by 10,000,000 under a "convert to ms" comment: whole SECONDS (seen on the box,
+# 20.25.4: a hard disk at "0.0 ms" per I/O). If psutil ever fixes it, every drive
+# reads 1000x slow and the anomaly fires on an idle box: loud, not silent.
+_DISK_TIME_UNIT_MS = 1000.0 if sys.platform == "win32" else 1.0  # t: monotonic of the last lookup, None = never
 _disk_pool = None                           # a private one-thread executor (see disk_sample_async)
 
 
@@ -963,9 +969,15 @@ def disk_sample() -> dict:
                 ops = max(0, (c.read_count - o.read_count) + (c.write_count - o.write_count))
                 if not ops:
                     continue
-                ms = max(0, (c.read_time - o.read_time) + (c.write_time - o.write_time))
+                ticks = max(0, (c.read_time - o.read_time) + (c.write_time - o.write_time))
                 mbs = max(0, (c.read_bytes - o.read_bytes) + (c.write_bytes - o.write_bytes)) / dt / 1_048_576
-                rows.append({"disk": names.get(k, k), "ms": ms / ops, "mbs": mbs, "ops": ops})
+                row = {"disk": names.get(k, k), "ms": ticks * _DISK_TIME_UNIT_MS / ops,
+                       "mbs": mbs, "ops": ops}
+                if not ticks and _DISK_TIME_UNIT_MS > 1.0:
+                    # Under one tick (a whole second on Windows) across all its
+                    # I/Os: all we know is the average is below tick / ops.
+                    row["ms"], row["under"] = _DISK_TIME_UNIT_MS / ops, True
+                rows.append(row)
             rows.sort(key=lambda r: r["ms"], reverse=True)
             top = []
             for pid, (name, r, w) in procs.items():
@@ -1020,8 +1032,8 @@ def _disk_fields(s: dict) -> str:
     if "disks" not in s:
         return ""
     # A letter already ends in ':' (`F:850ms`); a physical name gets one (`PhysicalDrive0:4ms`).
-    dsk = ",".join(f"{d['disk'].rstrip(':')}:{_ms(d['ms'])}ms/{d['mbs']:.1f}MBps"
-                   for d in s["disks"]) or "-"
+    dsk = ",".join(f"{d['disk'].rstrip(':')}:{'<' if d.get('under') else ''}"
+                   f"{_ms(d['ms'])}ms/{d['mbs']:.1f}MBps" for d in s["disks"]) or "-"
     io = ",".join(f"{p['name']}:{p['r_mbs']:.1f}r+{p['w_mbs']:.1f}w" for p in s["io_top"]) or "-"
     return f" dsk={dsk} io={io} io_denied={s.get('io_denied', 0)}"
 
@@ -1085,7 +1097,7 @@ def _anomalies(s: dict) -> list[str]:
     if s["oldest_req_s"] >= REQUEST_STUCK_S:
         out.append(f"request stuck {s['oldest_req_s']:.0f}s: {s['oldest_req']}")
     slow = [d for d in s.get("disks", ())
-            if d["ms"] >= DISK_SLOW_MS and d["ops"] >= DISK_SLOW_MIN_OPS]
+            if d["ms"] >= DISK_SLOW_MS and d["ops"] >= DISK_SLOW_MIN_OPS and not d.get("under")]
     if slow:
         busiest = ", ".join(f"{p['name']} {p['r_mbs']:.1f} MB/s read + {p['w_mbs']:.1f} write"
                             for p in s.get("io_top", ())) or "no process over 1 MB/s"

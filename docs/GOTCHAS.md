@@ -7717,3 +7717,21 @@ The library tile's "New" badge and countdown (`bookmarks.air_state`, `_air_row`)
   nothing to go stale, and a second profile gets its own answer.
 - `_AIR_FACTS` is empty for the first 90 seconds after a start. `/coverage` must
   answer `air: null` then, never wait on TMDb: it runs on every search render.
+
+## psutil's Windows disk times are seconds, not milliseconds (20.25.5)
+
+`psutil.disk_io_counters()` documents `read_time` / `write_time` in milliseconds,
+and they are, everywhere but Windows. `psutil/arch/windows/disk.c` divides the
+100 ns `DISK_PERFORMANCE` counters by 10,000,000 under a "convert to ms"
+comment, which gives whole **seconds**. The 20.25.3 disk sampler took them as
+ms: on the box a spinning F: read "0.0 ms" per I/O, and the 250 ms alarm
+could never have fired.
+
+`diag._DISK_TIME_UNIT_MS` is 1000 on Windows. Seconds are coarse, so a drive
+whose I/Os add up to under one second in a 30 s sample shows an upper bound
+(`C:<2.0ms`) and never raises the alarm. If psutil ever corrects the unit, every
+drive will read 1000× slow and the alarm will fire on an idle box: loud, so it
+will be noticed. Exact values (and the drive's idle time and queue depth) would
+need our own `IOCTL_DISK_PERFORMANCE` call; not built. See DIAGNOSTICS.md
+§ vitals_loop.
+
