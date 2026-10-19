@@ -181,8 +181,16 @@ def main():
     dest.write_bytes(text.replace("\n", eol).encode("utf-8"))
 
     new = re.sub(r"\n{4,}", "\n\n\n", "".join(l for i, l in enumerate(lines, 1) if not inr(i)))
+    # A name the block rebinds (`global X`) must not be re-imported: main would
+    # keep the first object forever (tests/test_backend_layout.py rule 2). If
+    # main still reads one, change those reads to `backend.x.X` by hand.
+    rebound = {g for n in tree.body if inr(n.lineno) for x in ast.walk(n)
+               if isinstance(x, ast.Global) for g in x.names}
+    skipped = [n for n in defined if n in rebound]
+    if skipped:
+        print("NOTE: not re-imported into main (rebound at runtime): %s" % ", ".join(skipped))
     imp = "from backend.%s import (  # noqa: F401\n%s)\n" % (
-        Path(a.to).stem, "".join("    %s,\n" % n for n in defined))
+        Path(a.to).stem, "".join("    %s,\n" % n for n in defined if n not in rebound))
     if MARK not in new:
         assert new.count(ANCHOR) == 1, "main.py's `winaccept_patch.apply()` anchor moved"
         new = new.replace(ANCHOR, ANCHOR + "\n" + MARK + "\n" + imp, 1)

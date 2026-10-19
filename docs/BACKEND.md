@@ -29,6 +29,8 @@ exactly what they saw before.
 | `backend/config.py` | `Settings` and `settings` (reloaded in place by `_reload_settings`, which is still in main.py) (20.25.8) | Settings |
 | `backend/version.py` | `UI_VERSION`, read from the badge in `static/index.html` (20.25.8) | (Night mode, oddly) |
 | `backend/logs.py` | The whole logging setup: `log`, `hls_log`, `LOG_DIR`, client-log storage, `_log_version_banner`. Runs at import (20.25.8) | Logging |
+| `backend/library.py` | `library.json`: `LIBRARY_FILE`, `get_library` / `put_library` / `mutate_library` / `LibraryUnchanged`, `_migrate_item`, the durable save, snapshots and recovery, `_now_iso`, `_parse_iso_dt`, `_series_key`. Its private `_last_library_snapshot` / `_lock_holder_last` are NOT re-exported (rebound) (20.25.9) | Library Storage, Library durability, Smart Skip helpers |
+| `backend/story_order.py` | `_story_index`: a film's place in its saga, from its titles (20.25.9) | TMDb |
 
 ### The rules (each one is a way a split fails without an error)
 
@@ -114,7 +116,10 @@ Batches, each shipped and checked on the box before the next:
   checked by diffing every logger, handler and hook before/after). The env-key
   registry and `_reload_settings` stay for now: they need `_tmdb_override_present`
   from the TMDb section.
-- **C3**: library storage and durability (`backend/library.py`).
+- **C3** (done, 20.25.9): library storage and durability (`backend/library.py`).
+  Checked by loading and saving a copy of library.json with the old and new
+  code (identical), and by comparing the box's `/api/library` for every
+  profile before and after.
 - **C4**: `AppState`/`state` and the SSE broadcast.
 - **C5**: the qBit and VLC clients.
 

@@ -3513,9 +3513,6 @@
    "kind": "def",
    "params": []
   },
-  "_last_library_snapshot": {
-   "kind": "value"
-  },
   "_launch_kiosk_browser": {
    "kind": "def",
    "params": [
@@ -3615,9 +3612,6 @@
    "params": [
     "exc:POSITIONAL_OR_KEYWORD"
    ]
-  },
-  "_lock_holder_last": {
-   "kind": "value"
   },
   "_lock_holders_note": {
    "kind": "def",

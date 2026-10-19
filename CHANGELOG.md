@@ -1,5 +1,16 @@
 # Changelog
 
+## [20.25.9] — 2026-10-19
+
+### Changed
+- **Reading and saving library.json moved out of main.py** (#64) into
+  `backend/library.py`, line for line: `get_library`, `put_library`,
+  `mutate_library`, the item migration, the durable save with its Windows
+  retry, the snapshots and the recovery from them. A copy of library.json
+  loaded and saved with the old and the new code came out byte for byte the
+  same. `tests/move_to_backend.py` no longer re-exports a name the moved code
+  reassigns at runtime, since main.py would only ever see its first value.
+
 ## [20.25.8] — 2026-10-19
 
 ### Changed
