@@ -1,5 +1,21 @@
 # Changelog
 
+## [20.25.3] — 2026-10-18
+
+### Added
+- **The health log names whoever else is using the disk (#96).** The library
+  slowdowns happen when the F: drive is busy, but nothing on the box said what
+  was keeping it busy. Every 30 s the health line now shows how long each drive
+  takes per read or write, how much it is moving, and the three programs moving
+  the most data (for example Defender, the Search indexer or qBittorrent). A
+  drive averaging a quarter of a second per operation is flagged in the main log
+  together with those programs.
+
+Not checked: the drive letters and the per-program numbers use Windows calls
+that have only run against a stand-in on a Mac. Whether an unelevated
+StreamLink may read Defender's numbers is unknown; the line counts the
+programs it could not read.
+
 ## [20.25.2] — 2026-10-18
 
 ### Fixed

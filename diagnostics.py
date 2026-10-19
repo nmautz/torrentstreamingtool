@@ -81,6 +81,14 @@ THREADPOOL_WARN_FRAC  = 0.85    # default executor this saturated ⇒ to_thread 
 STALL_DUMP_COOLDOWN_S = 300.0   # min gap between stack dumps, so a long outage writes a few not thousands
 LOOP_BLOCK_SAMPLE_S   = 2.0     # loop heartbeat this stale ⇒ start sampling the loop thread's stack
 CHILD_LOG_CAP         = 5 * 1024 * 1024   # a helper process's own log is rolled past this
+# Who else is using the disk (#96). The box's library saves went from milliseconds to
+# 5-17 s while F: was busy, and nothing in our own logs could name the other user.
+DISK_SLOW_MS          = 250.0   # a drive averaging this per I/O over a sample is the bottleneck (an idle HDD: 5-20 ms)
+DISK_SLOW_MIN_OPS     = 5       # fewer I/Os than this in a sample is too few to call a drive slow
+IO_TOP_N              = 3       # processes named per sample
+IO_TOP_MIN_BPS        = 1_048_576   # a process moving less than 1 MB/s is not worth naming
+DISK_SAMPLE_TIMEOUT_S = 5.0     # the sampler is skipped for this vitals line past this
+DRIVE_MAP_TTL_S       = 600.0   # how long the PhysicalDriveN -> letter map is trusted
 # Requests that wait on Jackett by design: a Test sits behind a Cloudflare check
 # (60 s a try, tried twice, and Jackett runs them one at a time). Not "stuck"
 # until they have had this long. On 2026-10-11 a Test-all that was simply
@@ -132,6 +140,7 @@ class DiagState:
     loop_beat:       float = 0.0     # monotonic; set by _measure_loop_lag every turn
     loop_thread_id:  int   = 0
     last_block:      str   = ""      # the most recent LOOP BLOCKED report, for the stall dump
+    disk_last:       dict  = field(default_factory=dict)   # the latest disk_sample(), merged into snapshot()
 
 
 state = DiagState()
@@ -826,6 +835,184 @@ def _proc_stats() -> dict:
         return {}
 
 
+# ── Disk: who else is using it ───────────────────────────────────────────────
+
+_disk_prev: dict = {}                       # last raw counters, for the next delta
+_disk_busy = threading.Lock()               # one sample at a time, even after a timeout
+_drive_map: dict = {"t": 0.0, "map": {}}
+_disk_pool = None                           # a private one-thread executor (see disk_sample_async)
+
+
+def _windows_drive_map() -> dict:
+    """`PhysicalDrive1` -> `F:` (`C:+D:` when one disk holds several volumes).
+
+    psutil names disks by physical number on Windows; the volume's letter is what
+    a person knows. IOCTL_STORAGE_GET_DEVICE_NUMBER on the volume (`F:`) answers it with
+    no admin rights. A volume that spans disks (dynamic/Storage Spaces) has no one
+    number: it is left out and its disk keeps the physical name.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
+                                wintypes.HANDLE]
+    k32.DeviceIoControl.restype = wintypes.BOOL
+    k32.DeviceIoControl.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID,
+                                    wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+                                    ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    class _DeviceNumber(ctypes.Structure):
+        _fields_ = [("DeviceType", wintypes.DWORD), ("DeviceNumber", wintypes.ULONG),
+                    ("PartitionNumber", wintypes.ULONG)]
+
+    invalid = wintypes.HANDLE(-1).value
+    found: dict = {}
+    for part in psutil.disk_partitions(all=False):
+        if "cdrom" in (part.opts or "") or not part.fstype:
+            continue
+        letter = part.device.rstrip("\\/")            # 'F:'
+        # 0 access + share read/write: enough for this IOCTL, and never blocks a writer.
+        h = k32.CreateFileW("\\\\.\\" + letter, 0, 0x1 | 0x2, None, 3, 0, None)
+        if not h or h == invalid:
+            continue
+        try:
+            dn, got = _DeviceNumber(), wintypes.DWORD(0)
+            if k32.DeviceIoControl(h, 0x2D1080, None, 0, ctypes.byref(dn),
+                                   ctypes.sizeof(dn), ctypes.byref(got), None):
+                found.setdefault(f"PhysicalDrive{dn.DeviceNumber}", []).append(letter)
+        finally:
+            k32.CloseHandle(h)
+    return {k: "+".join(v) for k, v in found.items()}
+
+
+def _drive_names() -> dict:
+    now = time.monotonic()
+    if now - _drive_map["t"] >= DRIVE_MAP_TTL_S:
+        _drive_map["t"] = now
+        try:
+            _drive_map["map"] = _windows_drive_map() if sys.platform == "win32" else {}
+        except Exception as exc:
+            log.warning("disk sampler: drive letters unavailable (%s: %s); "
+                        "showing physical names", type(exc).__name__, exc)
+            _drive_map["map"] = {}
+    return _drive_map["map"]
+
+
+def _skip_disk(name: str) -> bool:
+    # Linux lists partitions, loop and RAM devices next to the disks.
+    return name.startswith(("loop", "ram", "zram")) or (
+        sys.platform.startswith("linux") and name[-1:].isdigit()
+        and not name.startswith("nvme") and not name.startswith("mmcblk"))
+
+
+def disk_sample() -> dict:
+    """Each drive's average time per I/O and MB/s since the last call, and the
+    processes that moved the most bytes. Blocking (it walks every process): run it
+    off the loop, see `disk_sample_async`.
+
+    The first call only primes the counters and returns {}.
+
+    Per-process bytes come from `io_counters()`. On Windows they count ALL reads and
+    writes the process issued, cached ones and network ones included, so they name
+    who is busy, not exact disk traffic. A process we may not query (another
+    account's service, a protected one) is counted in `io_denied`, so a top list
+    that is blind to the culprit says so.
+    """
+    if psutil is None or not _disk_busy.acquire(blocking=False):
+        return {}
+    try:
+        now = time.monotonic()
+        try:
+            disks = psutil.disk_io_counters(perdisk=True) or {}
+        except Exception:
+            disks = {}
+        procs: dict = {}
+        denied = 0
+        for p in psutil.process_iter(["name"]):
+            try:
+                io = p.io_counters()
+            except psutil.AccessDenied:
+                denied += 1
+                continue
+            except Exception:                       # gone, zombie, unsupported
+                continue
+            procs[p.pid] = ((p.info.get("name") or "?"), io.read_bytes, io.write_bytes)
+
+        out: dict = {}
+        t0 = _disk_prev.get("t")
+        dt = (now - t0) if t0 else 0.0
+        if dt > 0:
+            names = _drive_names()
+            rows = []
+            for k, c in disks.items():
+                o = _disk_prev["disks"].get(k)
+                if o is None or _skip_disk(k):
+                    continue
+                ops = max(0, (c.read_count - o.read_count) + (c.write_count - o.write_count))
+                if not ops:
+                    continue
+                ms = max(0, (c.read_time - o.read_time) + (c.write_time - o.write_time))
+                mbs = max(0, (c.read_bytes - o.read_bytes) + (c.write_bytes - o.write_bytes)) / dt / 1_048_576
+                rows.append({"disk": names.get(k, k), "ms": ms / ops, "mbs": mbs, "ops": ops})
+            rows.sort(key=lambda r: r["ms"], reverse=True)
+            top = []
+            for pid, (name, r, w) in procs.items():
+                o = _disk_prev["procs"].get(pid)
+                if not o or o[0] != name:
+                    continue
+                dr, dw = max(0, r - o[1]) / dt, max(0, w - o[2]) / dt
+                if dr + dw >= IO_TOP_MIN_BPS:
+                    top.append((dr + dw, name, dr, dw))
+            top.sort(reverse=True)
+            out = {"disks": rows[:4],
+                   "io_top": [{"name": n, "r_mbs": dr / 1_048_576, "w_mbs": dw / 1_048_576}
+                              for _, n, dr, dw in top[:IO_TOP_N]],
+                   "io_denied": denied}
+        _disk_prev.update(t=now, disks=disks, procs=procs)
+        state.disk_last = out
+        return out
+    finally:
+        _disk_busy.release()
+
+
+async def disk_sample_async() -> None:
+    """`disk_sample()` on its own thread, bounded by `DISK_SAMPLE_TIMEOUT_S`.
+
+    Its own thread, not `to_thread`: a saturated default pool is one of the
+    things vitals exists to report, and must not also silence this. On a timeout
+    the previous sample is dropped rather than shown as current.
+    """
+    global _disk_pool
+    if psutil is None:
+        return
+    if _disk_pool is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _disk_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="diag-disk")
+    loop = asyncio.get_running_loop()
+    try:
+        await asyncio.wait_for(loop.run_in_executor(_disk_pool, disk_sample),
+                               DISK_SAMPLE_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        state.disk_last = {"error": "timeout"}
+
+
+def _disk_fields(s: dict) -> str:
+    """` dsk=F:850ms/22.0MBps,C:4ms/0.1MBps io=MsMpEng.exe:85.0r+0.0w io_denied=12`."""
+    if s.get("disk_error"):
+        return f" dsk={s['disk_error']}"
+    if "disks" not in s:
+        return ""
+    # A letter already ends in ':' (`F:850ms`); a physical name gets one (`PhysicalDrive0:4ms`).
+    dsk = ",".join(f"{d['disk'].rstrip(':')}:{d['ms']:.0f}ms/{d['mbs']:.1f}MBps"
+                   for d in s["disks"]) or "-"
+    io = ",".join(f"{p['name']}:{p['r_mbs']:.1f}r+{p['w_mbs']:.1f}w" for p in s["io_top"]) or "-"
+    return f" dsk={dsk} io={io} io_denied={s.get('io_denied', 0)}"
+
+
 def snapshot() -> dict:
     """One flat dict of everything worth knowing about process health."""
     loop = asyncio.get_event_loop()
@@ -851,18 +1038,24 @@ def snapshot() -> dict:
         "probe_fails": state.probe_failures,
     }
     snap.update(_proc_stats())
+    dk = state.disk_last
+    if dk.get("error"):
+        snap["disk_error"] = dk["error"]
+    elif dk:
+        snap.update(dk)
     return snap
 
 
-def snapshot_line() -> str:
-    s = snapshot()
+def snapshot_line(s: Optional[dict] = None) -> str:
+    s = s if s is not None else snapshot()
     return (f"up={s['uptime_s']:.0f}s lag={s['loop_lag_s']:.2f}s tasks={s['tasks']} "
             f"tp={s['tp_threads']}/{s['tp_max']}+q{s['tp_queued']} "
             f"inflight={s['inflight']} oldest={s['oldest_req_s']:.1f}s "
             f"lock_held={s['lock_held_s']:.1f}s waiters={s['lock_waiters']} "
             f"probe={s['probe_ms']:.0f}ms fails={s['probe_fails']} "
             f"rss={s.get('rss_mb', 0):.0f}MB thr={s.get('threads', 0)} "
-            f"fds={s.get('fds', 0)} conns={s.get('conns', 0)}")
+            f"fds={s.get('fds', 0)} conns={s.get('conns', 0)}"
+            + _disk_fields(s))
 
 
 def _anomalies(s: dict) -> list[str]:
@@ -878,6 +1071,15 @@ def _anomalies(s: dict) -> list[str]:
                    f"with {s['tp_queued']} queued — to_thread calls are waiting")
     if s["oldest_req_s"] >= REQUEST_STUCK_S:
         out.append(f"request stuck {s['oldest_req_s']:.0f}s: {s['oldest_req']}")
+    slow = [d for d in s.get("disks", ())
+            if d["ms"] >= DISK_SLOW_MS and d["ops"] >= DISK_SLOW_MIN_OPS]
+    if slow:
+        busiest = ", ".join(f"{p['name']} {p['r_mbs']:.1f} MB/s read + {p['w_mbs']:.1f} write"
+                            for p in s.get("io_top", ())) or "no process over 1 MB/s"
+        blind = f" ({s['io_denied']} processes unreadable)" if s.get("io_denied") else ""
+        out.append("disk " + ", ".join(f"{d['disk']} {d['ms']:.0f} ms per I/O ({d['mbs']:.1f} MB/s)"
+                                       for d in slow)
+                   + f"; busiest: {busiest}{blind}")
     return out
 
 
@@ -1012,8 +1214,9 @@ async def vitals_loop() -> None:
     while True:
         await asyncio.sleep(VITALS_INTERVAL_S)
         try:
+            await disk_sample_async()
             s = snapshot()
-            line = snapshot_line()
+            line = snapshot_line(s)
             if _vitals_log:
                 _vitals_log.info(line)
             bad = _anomalies(s)

@@ -715,7 +715,38 @@ Writes one compact line to `vitals.log`:
 ```
 up=3612s lag=0.01s tasks=47 tp=12/20+q0 inflight=1 oldest=0.3s
 lock_held=0.0s waiters=0 probe=4ms fails=0 rss=412MB thr=31 fds=612 conns=48
+dsk=F:850ms/22.0MBps,C:4ms/0.1MBps io=MsMpEng.exe:85.0r+0.0w,qbittorrent.exe:0.1r+40.0w io_denied=12
 ```
+
+**Who else is using the disk (20.25.3, #96).** The `dsk` / `io` fields come from
+`disk_sample()`, which runs on its own one-thread executor (`diag-disk`, never the
+default pool) before each line, capped at `DISK_SAMPLE_TIMEOUT_S`. Everything is
+a delta over the 30 s since the previous sample:
+
+- `dsk=` each drive with any I/O, slowest first: **average milliseconds per I/O**
+  (read + write time over read + write count) and MB/s. An idle hard disk is
+  5-20 ms; hundreds means everything that touches it, `library.json` saves
+  included, queues. On Windows a drive is named by its letter (`F:`, or `C:+D:`
+  when one disk holds both), found with `IOCTL_STORAGE_GET_DEVICE_NUMBER` and
+  refreshed every 10 min; a volume spanning disks keeps `PhysicalDriveN`. Linux
+  shows `sda` / `nvme0n1` (partitions and loop devices skipped); macOS `disk0`.
+- `io=` the `IO_TOP_N` processes that moved the most bytes, at least 1 MB/s,
+  as read + write MB/s; `-` when none did. **These are `io_counters()`: on
+  Windows they count every read and write the process issued, cached and network
+  ones included**, so they name who is busy rather than measure the platters. A
+  pid that changed program between samples is not credited. macOS cannot read
+  other processes' counters, so it always shows `-`.
+- `io_denied=` processes we were not allowed to query. StreamLink runs
+  unelevated: if this is high and `io=` names nobody while a drive is slow, the
+  culprit is probably a protected or SYSTEM process (Defender, the Search
+  indexer); confirm in Resource Monitor → Disk.
+- `dsk=timeout`: the sample took longer than 5 s (no stale numbers are shown).
+- On the first line after a start the counters are only being primed, so the
+  fields are absent.
+
+A drive averaging `DISK_SLOW_MS` or more over at least `DISK_SLOW_MIN_OPS` I/Os
+is an anomaly: `VITALS ANOMALY: disk F: 850 ms per I/O (22.0 MB/s); busiest:
+MsMpEng.exe 85.0 MB/s read + 0.0 write (12 processes unreadable)`.
 
 If the sampler *itself* throws, that is reported at **ERROR** with a traceback on
 the 1st, 2nd, 4th, 8th … consecutive failure (geometric backoff), and recovery is
@@ -735,6 +766,8 @@ up in the file an operator opens first. Thresholds (all in `diagnostics.py`):
 | `PATIENT_S` | 300 s | The same, for the two indexer Test routes (`POST /api/admin/indexers/{id}/test`, `…/test-all`). They wait on Jackett by design: a Cloudflare check is 60 s a try, tried twice, one at a time. On 2026-10-11 a Test all that was simply waiting wrote a CRITICAL stall dump for an idle server. `SLOW REQUEST` still logs them |
 | `THREADPOOL_WARN_FRAC` | 0.85 | Pool this full **and** work queued ⇒ saturated |
 | `STALL_DUMP_COOLDOWN_S` | 300 s | Minimum gap between stack dumps |
+| `DISK_SLOW_MS` | 250 ms | A drive averaging this per I/O (over ≥ `DISK_SLOW_MIN_OPS` = 5 I/Os) ⇒ anomaly naming the busiest processes |
+| `IO_TOP_N` / `IO_TOP_MIN_BPS` | 3 / 1 MB/s | How many processes `io=` names, and the least a process must move to be named |
 
 Thread-pool saturation is reported only when the pool is at capacity *and* the
 work queue is non-empty. `ThreadPoolExecutor` exposes no "busy" counter and

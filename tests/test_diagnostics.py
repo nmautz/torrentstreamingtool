@@ -162,6 +162,134 @@ ok("a malformed id is ignored", diag.scope_device_id(_scope(("x-device-id", "a b
 ok("no id is ''", diag.scope_device_id(_scope(("cookie", "other=1"))) == "")
 
 
+# ── disk_sample: who else is using the disk (#96) ────────────────────────────
+from types import SimpleNamespace as _NS   # noqa: E402
+
+
+class _Denied(Exception):
+    pass
+
+
+class _FakeProc:
+    def __init__(self, pid, name, r, w, denied=False):
+        self.pid, self.info, self._io, self._denied = pid, {"name": name}, (r, w), denied
+
+    def io_counters(self):
+        if self._denied:
+            raise _Denied()
+        return _NS(read_bytes=self._io[0], write_bytes=self._io[1])
+
+
+def _dk(rc, wc, rt, wt, rb, wb):
+    return _NS(read_count=rc, write_count=wc, read_time=rt, write_time=wt,
+               read_bytes=rb, write_bytes=wb)
+
+
+class _FakePsutil:
+    AccessDenied = _Denied
+
+    def __init__(self):
+        self.disks, self.procs = {}, []
+
+    def disk_io_counters(self, perdisk=False):
+        return self.disks
+
+    def process_iter(self, attrs=None):
+        return iter(self.procs)
+
+
+_MB = 1_048_576
+
+
+async def _in_loop(fn):
+    return fn()
+
+
+def _line():
+    return asyncio.run(_in_loop(diag.snapshot_line))
+
+
+def _bad():
+    return asyncio.run(_in_loop(lambda: diag._anomalies(diag.snapshot())))
+_real_psutil, _real_names, _real_mono = diag.psutil, diag._drive_names, diag.time.monotonic
+_clock = [100.0]
+fake = _FakePsutil()
+diag.psutil = fake
+diag._drive_names = lambda: {"PhysicalDrive1": "F:"}
+diag.time.monotonic = lambda: _clock[0]
+diag._disk_prev.clear()
+diag.state.disk_last = {}
+try:
+    fake.disks = {"PhysicalDrive0": _dk(10, 10, 100, 100, 0, 0),
+                  "PhysicalDrive1": _dk(10, 10, 100, 100, 0, 0)}
+    fake.procs = [_FakeProc(1, "MsMpEng.exe", 0, 0), _FakeProc(2, "python.exe", 0, 0),
+                  _FakeProc(3, "qbittorrent.exe", 0, 0), _FakeProc(4, "svchost.exe", 0, 0),
+                  _FakeProc(5, "lsass.exe", 0, 0, denied=True)]
+    ok("the first sample only primes the counters", diag.disk_sample() == {})
+    ok("so the line has no disk fields yet", " dsk=" not in _line())
+
+    _clock[0] += 30.0
+    # F: 100 I/Os taking 85,000 ms (850 ms each) moving 30 MB/s; C: 50 I/Os at 4 ms.
+    fake.disks = {"PhysicalDrive0": _dk(35, 35, 200, 200, 3 * _MB, 0),
+                  "PhysicalDrive1": _dk(60, 60, 42600, 42600, 900 * _MB, 0)}
+    fake.procs = [_FakeProc(1, "MsMpEng.exe", 2550 * _MB, 0),       # 85 MB/s read
+                  _FakeProc(2, "python.exe", 3 * _MB, 30 * _MB),      # 1.1 MB/s
+                  _FakeProc(3, "qbittorrent.exe", 0, 60 * _MB),       # 2 MB/s write
+                  _FakeProc(4, "svchost.exe", 1, 1),                  # under 1 MB/s
+                  _FakeProc(5, "lsass.exe", 0, 0, denied=True),
+                  _FakeProc(6, "new.exe", 9 * 10**9, 0)]              # no baseline
+    d = diag.disk_sample()
+    ok("drives sorted slowest first, letters where known",
+       [x["disk"] for x in d["disks"]] == ["F:", "PhysicalDrive0"], str(d))
+    ok("time per I/O is the delta time over the delta ops",
+       abs(d["disks"][0]["ms"] - 850.0) < 1e-6 and abs(d["disks"][1]["ms"] - 4.0) < 1e-6, str(d))
+    ok("MB/s over the sample interval", abs(d["disks"][0]["mbs"] - 30.0) < 1e-6, str(d))
+    ok("top processes by bytes moved, at most IO_TOP_N",
+       [p["name"] for p in d["io_top"]] == ["MsMpEng.exe", "qbittorrent.exe", "python.exe"],
+       str(d["io_top"]))
+    ok("a process with no baseline is not credited with its lifetime",
+       all(p["name"] != "new.exe" for p in d["io_top"]))
+    ok("unreadable processes are counted", d["io_denied"] == 1, str(d))
+    line = _line()
+    ok("the vitals line carries the disks and the top list",
+       " dsk=F:850ms/30.0MBps,PhysicalDrive0:4ms/0.1MBps io=MsMpEng.exe:85.0r+0.0w," in line
+       and line.endswith(" io_denied=1"), line)
+    bad = _bad()
+    ok("a slow drive is an anomaly that names the busiest process",
+       any(b.startswith("disk F: 850 ms per I/O") and "MsMpEng.exe 85.0 MB/s read" in b
+           and "(1 processes unreadable)" in b for b in bad), str(bad))
+    ok("the fast drive is not", not any("PhysicalDrive0" in b for b in bad), str(bad))
+
+    _clock[0] += 30.0
+    # Two slow I/Os are too few to blame the drive; pid 1 now belongs to another program.
+    fake.disks = {"PhysicalDrive1": _dk(61, 61, 43600, 43600, 900 * _MB, 0)}
+    fake.procs = [_FakeProc(1, "other.exe", 9 * 10**9, 0)]
+    d = diag.disk_sample()
+    ok("a handful of I/Os never raises the anomaly",
+       not any(b.startswith("disk ") for b in _bad()), str(d))
+    ok("a reused pid is not credited", d["io_top"] == [], str(d))
+    ok("an idle interval reads io=-", " io=- " in _line())
+
+    diag.state.disk_last = {"error": "timeout"}
+    ok("a timed-out sample says so instead of repeating the last one",
+       _line().endswith(" dsk=timeout"), _line())
+    diag._disk_busy.acquire()
+    try:
+        ok("an overlapping sample is skipped", diag.disk_sample() == {})
+    finally:
+        diag._disk_busy.release()
+    diag.psutil = None
+    ok("no psutil: nothing", diag.disk_sample() == {})
+finally:
+    diag.psutil, diag._drive_names, diag.time.monotonic = _real_psutil, _real_names, _real_mono
+    diag.state.disk_last = {}
+    diag._disk_prev.clear()
+
+ok("Linux partitions and loop devices are skipped, disks kept",
+   [n for n in ("loop0", "ram1", "sda", "nvme0n1") if not diag._skip_disk(n)]
+   == (["sda", "nvme0n1"]))
+
+
 print("%d passed, %d failed" % (_PASS, len(_FAIL)))
 for f in _FAIL:
     print("FAIL:", f)
