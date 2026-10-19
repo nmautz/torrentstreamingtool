@@ -1,5 +1,15 @@
 # Changelog
 
+## [20.25.8] — 2026-10-19
+
+### Changed
+- **Settings, the version and the logging setup moved out of main.py** (#64)
+  into `backend/config.py`, `backend/version.py` and `backend/logs.py`, line
+  for line. Logging is set up at the same point in startup as before, and every
+  logger, handler, file and exception hook it creates was compared before and
+  after: they are identical. `tests/move_to_backend.py` now also warns when the
+  code it moves uses `__name__`, whose value changes in a module.
+
 ## [20.25.7] — 2026-10-18
 
 ### Changed

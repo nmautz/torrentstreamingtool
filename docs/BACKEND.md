@@ -10,7 +10,8 @@ the top-level leaf modules listed in CLAUDE.md.
 The split started in 20.25.6. **The rule for every step: move code, never change
 it.** A step takes whole top-level statements out of main.py exactly as written,
 puts them in a `backend/` module, and main.py imports every name back
-(`from backend.x import (...)`, in the block under `import winaccept_patch`).
+(`from backend.x import (...)`, in the block under `winaccept_patch.apply()`;
+module-level code in a moved block, such as the logging setup, runs there).
 So `main.<name>`, `globals()` lookups and every caller still in main.py see
 exactly what they saw before.
 
@@ -25,6 +26,9 @@ exactly what they saw before.
 | `backend/packslice.py` | The pack-slicing limits only; the functions still need the core | Pack slicing |
 | `backend/runtime.py` | What the lifespan builds: `qbit`, `vlc_client`, `_lib_lock`, `_jackett_cookie_lock`, `_analysis_gate`, `_MAIN_LOOP`. **Always read as `runtime.X`** (20.25.7) | Global State, Library Storage, Jackett Session |
 | `backend/paths.py` | `ROOT`, the repo root. main.py's `Path(__file__).parent` became `ROOT` (20.25.7) | (26 places) |
+| `backend/config.py` | `Settings` and `settings` (reloaded in place by `_reload_settings`, which is still in main.py) (20.25.8) | Settings |
+| `backend/version.py` | `UI_VERSION`, read from the badge in `static/index.html` (20.25.8) | (Night mode, oddly) |
+| `backend/logs.py` | The whole logging setup: `log`, `hls_log`, `LOG_DIR`, client-log storage, `_log_version_banner`. Runs at import (20.25.8) | Logging |
 
 ### The rules (each one is a way a split fails without an error)
 
@@ -105,8 +109,11 @@ Batches, each shipped and checked on the box before the next:
 
 - **C1** (done, 20.25.7): `backend/paths.py`, `backend/runtime.py`, `settings`
   reloaded in place. Small edits in main.py, no moves.
-- **C2**: `backend/config.py` (`Settings`, `settings`, `_reload_settings`, the
-  env-key registry, `UI_VERSION`) and the logging setup.
+- **C2** (done, 20.25.8): `backend/config.py` (`Settings`, `settings`),
+  `backend/version.py` (`UI_VERSION`), `backend/logs.py` (the logging setup;
+  checked by diffing every logger, handler and hook before/after). The env-key
+  registry and `_reload_settings` stay for now: they need `_tmdb_override_present`
+  from the TMDb section.
 - **C3**: library storage and durability (`backend/library.py`).
 - **C4**: `AppState`/`state` and the SSE broadcast.
 - **C5**: the qBit and VLC clients.
@@ -385,7 +392,7 @@ Separate from the bundle-prep job system above. When a non-prepped file is playe
 
 ## Logging
 
-`main.py` configures Python `logging` at import time via `_init_logging()` (just below the imports). There is one logger tree under the name `streamlink`:
+`backend/logs.py` configures Python `logging` when it is imported, via `_init_logging()`; main.py imports it in the `backend/` block just below `winaccept_patch.apply()` (since 20.25.8; before that this was main.py's own Logging section, at the same point in the import order). There is one logger tree under the name `streamlink`:
 
 - `log` = `logging.getLogger("streamlink")` — the app-wide logger. Two handlers: a `RotatingFileHandler` → `logs/streamlink_app.log` (2 MB × 3 backups) and a stderr `StreamHandler` capped at `WARNING`. `propagate=False` so records don't double-emit through uvicorn's root logger.
 - `hls_log` = `logging.getLogger("streamlink.hls")` — child logger for the offline-prep / HLS pipeline. Adds its **own** `RotatingFileHandler` → `logs/hls.log`, and (because it propagates to `streamlink`) every line also lands in `logs/streamlink_app.log` + stderr.

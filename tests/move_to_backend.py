@@ -14,7 +14,7 @@ is fine.
     still defined in main.py         -> BLOCKER: printed, nothing written.
                                         Move that first (bottom-up only).
 - main.py gets `from backend.NAME import (every name the block defines)` in
-  the backend/ block under `import winaccept_patch`, so its namespace is
+  the backend/ block under `winaccept_patch.apply()`, so its namespace is
   unchanged.
 - Module-level statements other than defs and assignments are printed as
   NOTEs: they run earlier now (at main's import block), so check them.
@@ -29,7 +29,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 MARK = "# ── backend/ package (main.py split; see docs/BACKEND.md) ──"
-ANCHOR = "import winaccept_patch\n"
+ANCHOR = "winaccept_patch.apply()\n"
 
 
 def pyflakes_undefined(text):
@@ -99,6 +99,11 @@ def main():
         elif not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)):
             print("NOTE: module-level statement at %d: %s" % (n.lineno, ast.unparse(n)[:100]))
     block = "".join(l for i, l in enumerate(lines, 1) if inr(i))
+    for i, l in enumerate(lines, 1):
+        # A bare __name__ is "main" there and "backend.x" here (a logger name, a
+        # registry key). `type(e).__name__` is fine and not flagged.
+        if inr(i) and re.search(r"(?<![.\w])__name__", l):
+            print("NOTE: line %d uses __name__, which changes in a module: %s" % (i, l.strip()[:90]))
     if "__file__" in block:
         # Path(__file__).parent is the repo root in main.py and backend/ in a
         # module: moved verbatim, LIBRARY_FILE would quietly point at an empty
@@ -179,7 +184,7 @@ def main():
     imp = "from backend.%s import (  # noqa: F401\n%s)\n" % (
         Path(a.to).stem, "".join("    %s,\n" % n for n in defined))
     if MARK not in new:
-        assert new.count(ANCHOR) == 1, "main.py's `import winaccept_patch` anchor moved"
+        assert new.count(ANCHOR) == 1, "main.py's `winaccept_patch.apply()` anchor moved"
         new = new.replace(ANCHOR, ANCHOR + "\n" + MARK + "\n" + imp, 1)
     else:
         j = new.index("\n\n", new.index(MARK))
