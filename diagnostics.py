@@ -48,6 +48,7 @@ import faulthandler
 import io
 import logging
 import os
+import re
 import socket
 import sys
 import threading
@@ -251,6 +252,57 @@ def set_access_tag(device_id: str) -> None:
     """Name the device the current request came from. Empty = say nothing."""
     if device_id:
         _access_tag.set(device_id[:8])
+
+
+_DEVICE_ID_OK = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_DEVICE_COOKIE = b"streamlink_device_id="
+
+
+def scope_device_id(scope: dict) -> str:
+    """The device id an ASGI request names: `X-Device-Id`, else the
+    `streamlink_device_id` cookie (hls.js, EventSource and <img> send only the
+    cookie). '' when absent or malformed."""
+    did = b""
+    cookie = b""
+    for k, v in scope.get("headers") or ():
+        if k == b"x-device-id":
+            did = v.strip()
+        elif k == b"cookie":
+            cookie = v
+    if not did and _DEVICE_COOKIE in cookie:
+        for part in cookie.split(b";"):
+            part = part.strip()
+            if part.startswith(_DEVICE_COOKIE):
+                did = part[len(_DEVICE_COOKIE):].strip()
+                break
+    try:
+        s = did.decode("ascii")
+    except UnicodeDecodeError:
+        return ""
+    return s if _DEVICE_ID_OK.match(s) else ""
+
+
+class AccessTagMiddleware:
+    """Pure ASGI, and it must be the OUTERMOST middleware (`add_middleware` last).
+
+    Setting the tag from an `@app.middleware("http")` function does not work: each
+    of those (Starlette's `BaseHTTPMiddleware`) runs the app inside it in a child
+    task with a COPY of the context, so a value set inside never reaches the
+    outermost task, which is the one that hands the response to uvicorn and so
+    writes the access line. 20.25.0 set it from `diag_track_requests`, the
+    innermost of four, and the box logged no `dev=` at all. A pure ASGI layer
+    runs in uvicorn's own request task."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope.get("type") == "http":
+            try:
+                set_access_tag(scope_device_id(scope))
+            except Exception:
+                pass
+        await self.app(scope, receive, send)
 
 
 class _AccessTagFilter(logging.Filter):

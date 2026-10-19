@@ -6821,9 +6821,20 @@ keys the same way.
 The box is its own Tailscale subnet router, so a phone on the tailnet arrives
 from `192.168.0.106` like everything else (#18). `access.log` lines now end with
 ` dev=<8 chars>` when the request named a device. It is a context variable set
-in `diag_track_requests` and read back by a filter on the `uvicorn.access`
+by `diag.AccessTagMiddleware` and read back by a filter on the `uvicorn.access`
 **logger**, which works because uvicorn starts each request in a fresh context
-and writes its access line from that request's task. Two things still key on
+and writes its access line from that request's task.
+
+**That middleware must be pure ASGI and registered last** (`app.add_middleware`
+below every `@app.middleware`). Starlette makes the LAST-registered middleware
+the outermost, so `diag_track_requests`, registered first, is the innermost of
+the five, whatever its docstring said. And each `@app.middleware` function is a
+`BaseHTTPMiddleware`, which runs the app inside it in a child task with a COPY
+of the context. A value set in an inner one never reaches the outermost task,
+which is the one that sends the response and writes the access line. 20.25.0
+set the tag from `diag_track_requests`. A one-middleware test passed and the box
+logged no `dev=` at all. Test anything context-based against the real `main:app`
+(uvicorn with `lifespan="off"`, run from the repo directory). Two things still key on
 the peer address and so treat every remote client as one: the PIN retry throttle
 (`_pin_client_key`) and the Devices tab's IP inference. The throttle was left as
 is, because keying it on a device id the client chooses would let a guesser

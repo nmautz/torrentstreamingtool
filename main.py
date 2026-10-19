@@ -15257,9 +15257,9 @@ _req_seq = itertools.count(1)
 async def diag_track_requests(request: Request, call_next):
     """Record every request in-flight so a wedged one is visible while it's stuck.
 
-    Declared before the other middleware so it wraps them (Starlette applies
-    `@app.middleware` in reverse registration order) — a request that hangs
-    inside the HTTPS redirect or the adapter redirect is still counted.
+    Declared FIRST, which in Starlette makes it the INNERMOST of the
+    `@app.middleware` functions (the last one registered is the outermost), so
+    it does not time the HTTPS or adapter redirects in front of it.
 
     This is what the 2026-09-13 outage had no equivalent of: uvicorn's access
     log only records a request when it *finishes*, so a handler that never
@@ -15268,12 +15268,6 @@ async def diag_track_requests(request: Request, call_next):
     """
     rid = next(_req_seq)
     diag.note_request_start(rid, request.method, request.url.path)
-    # Every client arrives from the box's own address (the Tailscale subnet
-    # router), so access.log names the device instead: ` dev=<first 8>`.
-    try:
-        diag.set_access_tag(_dev_request_device_id(request))
-    except Exception:
-        pass
     status = 0
     t0 = time.perf_counter()
     try:
@@ -15889,6 +15883,13 @@ async def network_adapter_redirect(request: Request, call_next):
                 return RedirectResponse(
                     f"{proto}://{target}{request.url.path}{qs}", status_code=307)
     return await call_next(request)
+
+
+# Registered LAST so it is the outermost layer: access.log's ` dev=<first 8>`
+# (every client arrives from the box's own address). It cannot live in an
+# `@app.middleware` function; see `diag.AccessTagMiddleware`. Keep it below
+# every `@app.middleware` in this file.
+app.add_middleware(diag.AccessTagMiddleware)
 
 
 # ── Request Models ────────────────────────────────────────────────────────────

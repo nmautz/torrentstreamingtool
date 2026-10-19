@@ -148,6 +148,20 @@ ok("one without is left alone", _access_line("").endswith(' 200'), _access_line(
 ok("a percent sign cannot break the line", "dev=ab" in _access_line("a%b"), _access_line("a%b"))
 
 
+def _scope(*headers):
+    return {"type": "http", "headers": [(k.encode(), v.encode()) for k, v in headers]}
+
+
+ok("device id from the header", diag.scope_device_id(_scope(("x-device-id", "abc-123"))) == "abc-123")
+ok("device id from the cookie",
+   diag.scope_device_id(_scope(("cookie", "x=1; streamlink_device_id=feed_99; y=2"))) == "feed_99")
+ok("the header wins over the cookie",
+   diag.scope_device_id(_scope(("cookie", "streamlink_device_id=cookie"),
+                               ("x-device-id", "header"))) == "header")
+ok("a malformed id is ignored", diag.scope_device_id(_scope(("x-device-id", "a b"))) == "")
+ok("no id is ''", diag.scope_device_id(_scope(("cookie", "other=1"))) == "")
+
+
 print("%d passed, %d failed" % (_PASS, len(_FAIL)))
 for f in _FAIL:
     print("FAIL:", f)

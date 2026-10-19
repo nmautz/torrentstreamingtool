@@ -671,10 +671,12 @@ Logs** (and included in "Download All").
 **`dev=` on access lines (20.25.0).** Every client reaches the box from the box's own
 address (it is its own Tailscale subnet router), so the peer column names nobody. A request
 that carries a device id (`X-Device-Id`, or the `streamlink_device_id` cookie) ends with
-` dev=<first 8 chars>`, the same id the Devices tab keys on. `diag_track_requests` sets a
-context variable (`diag.set_access_tag`) and `_AccessTagFilter` on the `uvicorn.access`
-logger appends it: uvicorn writes the access line from inside the request's own task, so the
-value is still there. A line with no `dev=` came from something that sends no id (AVPlayer's
+` dev=<first 8 chars>`, the same id the Devices tab keys on (20.25.1). `diag.AccessTagMiddleware`,
+a pure ASGI layer added **last** in `main.py` so it is outermost, sets a context variable,
+and `_AccessTagFilter` on the `uvicorn.access` logger appends it: uvicorn writes the access
+line from inside the request's own task, so the value is still there. **It cannot be set from
+an `@app.middleware` function** (20.25.0 tried, from `diag_track_requests`, and the box logged
+no `dev=` at all): see GOTCHAS § The access log's peer address names nobody. A line with no `dev=` came from something that sends no id (AVPlayer's
 own media fetches, the native discovery probe, the HTTPS proxy's outer hop).
 
 > **One file, one handler.** `access.log` is owned exclusively by uvicorn's
@@ -757,9 +759,11 @@ downstream of the server** — look at `lock_held` and `tp_*` in the vitals line
 
 ## Request tracking
 
-`diag_track_requests` is registered **first** in `main.py`, which makes it the
-outermost middleware (Starlette applies them in reverse), so it times the whole
-stack including the HTTPS and adapter redirects.
+`diag_track_requests` is registered **first** in `main.py`. In Starlette the LAST one
+registered is the outermost, so this is the **innermost** `@app.middleware`: a request
+redirected by the HTTPS or adapter middleware in front of it is never counted (the
+docstring said the opposite until 20.25.1). Only `AccessTagMiddleware`, added after all of
+them, is outermost.
 
 It matters because **uvicorn's access log only records a request when it
 finishes** — a handler that never returns leaves no line at all. `diag.state.inflight`

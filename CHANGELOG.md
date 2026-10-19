@@ -1,5 +1,14 @@
 # Changelog
 
+## [20.25.1] — 2026-10-18
+
+### Fixed
+- **The server's request log now really names the device (#18).** 20.25.0 added
+  the device tag in a place that never reached the line being written: the box
+  logged no tag at all. It is now added by a layer that runs before everything
+  else. Checked against the server's full request handling locally (header,
+  cookie, malformed id, a 404).
+
 ## [20.25.0] — 2026-10-18
 
 ### Added
