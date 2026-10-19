@@ -25,7 +25,8 @@ sys.path.insert(0, str(ROOT))
 import ixwait            # noqa: E402
 
 WANTED = ("_test_one_indexer", "_test_health_row", "_run_indexer_tests", "indexer_warmup")
-src = io.open(ROOT / "main.py", encoding="utf-8").read()
+import _backend_src                       # noqa: E402
+src = _backend_src.read()
 fns = {n.name: n for n in ast.parse(src).body
        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in WANTED}
 

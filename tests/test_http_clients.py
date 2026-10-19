@@ -16,25 +16,28 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Files whose clients are built per call on the server's event loop, and how
-# many direct constructions each may keep. (https_proxy.py builds its one client
-# at startup, so it isn't listed.)
-FILES = {"main.py": 1}   # the one inside _http_client itself
+# The server's event-loop code: main.py and the backend/ package it is being
+# split into. Between them they may keep exactly one direct construction, the
+# one inside _http_client itself, wherever that lives. (https_proxy.py builds
+# its one client at startup, so it isn't scanned.)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _backend_src                       # noqa: E402
+ALLOWED = 1
 
 _CALL = re.compile(r"\bhttpx\.AsyncClient\(")
 
 fails = []
-for name, allowed in FILES.items():
-    with open(os.path.join(ROOT, name), encoding="utf-8") as f:
+hits = []
+for path in _backend_src.files():
+    with open(path, encoding="utf-8") as f:
         lines = f.read().splitlines()
-    hits = [(i + 1, ln.strip()) for i, ln in enumerate(lines)
-            if _CALL.search(ln) and not ln.lstrip().startswith(("#", "`"))]
-    if len(hits) != allowed:
-        fails.append("%s: %d httpx.AsyncClient( call(s), expected %d - use _http_client(...)\n%s"
-                     % (name, len(hits), allowed,
-                        "\n".join("     %d: %s" % h for h in hits)))
+    hits += [(os.path.relpath(path, ROOT), i + 1, ln.strip()) for i, ln in enumerate(lines)
+             if _CALL.search(ln) and not ln.lstrip().startswith(("#", "`"))]
+if len(hits) != ALLOWED:
+    fails.append("%d httpx.AsyncClient( call(s), expected %d - use _http_client(...)\n%s"
+                 % (len(hits), ALLOWED, "\n".join("     %s:%d: %s" % h for h in hits)))
 
-print("http_clients: %d passed, %d failed" % (len(FILES) - len(fails), len(fails)))
+print("http_clients: %d passed, %d failed" % (1 - len(fails), len(fails)))
 for f in fails:
     print("  FAIL " + f)
 sys.exit(1 if fails else 0)

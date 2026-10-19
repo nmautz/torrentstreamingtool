@@ -1,4 +1,4 @@
-.PHONY: setup run test clean
+.PHONY: setup run test surface clean
 
 setup:
 	python3 setup.py
@@ -47,6 +47,13 @@ test:
 	python3 tests/test_appchannel.py
 	python3 tests/test_voicestatus.py
 	python3 tests/test_voicepick.py
+	python3 tests/test_backend_layout.py
+
+# The backend's outside surface (routes in order, request models, every name
+# main exports) against tests/fixtures/main_surface.json. Imports main, so it
+# needs the venv. Run it after every move while main.py is split into backend/.
+surface:
+	.venv/bin/python tests/surface_snapshot.py
 
 clean:
 	rm -rf .venv __pycache__ .env

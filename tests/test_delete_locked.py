@@ -18,7 +18,8 @@ from pathlib import Path
 from typing import Optional
 
 ROOT = Path(__file__).resolve().parent.parent
-src = io.open(ROOT / "main.py", encoding="utf-8").read()
+import _backend_src                       # noqa: E402
+src = _backend_src.read()
 tree = ast.parse(src)
 
 WANT = {"_delete_files_now", "_qbit_let_go", "_unlink_resilient", "_item_all_torrent_hashes",

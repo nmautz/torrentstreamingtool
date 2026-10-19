@@ -18,7 +18,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 MAIN = Path(__file__).resolve().parent.parent / "main.py"
-src = io.open(MAIN, encoding="utf-8").read()
+import _backend_src                       # noqa: E402
+src = _backend_src.read()
 tree = ast.parse(src)
 
 WANT = {"_pack_slice_want", "_pack_slice_apply", "_pack_slice_settle",

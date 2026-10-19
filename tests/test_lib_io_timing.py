@@ -23,7 +23,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 import diagnostics as diag  # noqa: E402  (stdlib only)
 
-src = io.open(ROOT / "main.py", encoding="utf-8").read()
+import _backend_src                       # noqa: E402
+src = _backend_src.read()
 tree = ast.parse(src)
 
 WANT = {"_write_durable", "_steps_note", "_note_slow_lib_io", "_save_lib_raw",

@@ -21,7 +21,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 import tmdbcache      # noqa: E402
 
-src = io.open(ROOT / "main.py", encoding="utf-8").read()
+import _backend_src                       # noqa: E402
+src = _backend_src.read()
 tree = ast.parse(src)
 
 WANT = {"_tmdb_retention_due", "_tmdb_expire_items", "_tmdb_retention_pass"}

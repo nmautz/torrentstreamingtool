@@ -22,7 +22,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 import racerules, relquality, stallrule      # noqa: E402
 
-src = io.open(ROOT / "main.py", encoding="utf-8").read()
+import _backend_src                       # noqa: E402
+src = _backend_src.read()
 tree = ast.parse(src)
 
 WANT = {"_reconcile_item_race", "_race_promote", "_race_drop", "_race_settle",

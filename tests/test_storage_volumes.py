@@ -15,7 +15,8 @@ import ast, functools, io, ntpath, os, shutil, sys, tempfile, types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-src = io.open(ROOT / "main.py", encoding="utf-8").read()
+import _backend_src                       # noqa: E402
+src = _backend_src.read()
 tree = ast.parse(src)
 WANT = {"_volume_of_dir", "_volume_of", "_library_free_by_volume", "_storage_breakdown_sync"}
 code = "\n\n".join(ast.get_source_segment(src, n) for n in tree.body

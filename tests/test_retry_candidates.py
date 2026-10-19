@@ -17,7 +17,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 import titleslot            # noqa: E402
 
-src = io.open(ROOT / "main.py", encoding="utf-8").read()
+import _backend_src                       # noqa: E402
+src = _backend_src.read()
 fn = next(n for n in ast.parse(src).body
           if isinstance(n, ast.FunctionDef) and n.name == "_retry_candidates")
 

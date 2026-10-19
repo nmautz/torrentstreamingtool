@@ -334,8 +334,8 @@ eq("place: ... filed at S08E01", (w[0]["season"], w[0]["episode"]), (8, 1))
 # (as tests/test_retry_candidates.py does).
 import ast, io                    # noqa: E402
 from typing import Optional       # noqa: E402
-_src = io.open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py"),
-               encoding="utf-8").read()
+import _backend_src               # noqa: E402
+_src = _backend_src.read()
 _fn = next(n for n in ast.parse(_src).body
            if isinstance(n, ast.FunctionDef) and n.name == "_roam_seasons_wanted")
 _tried = set()

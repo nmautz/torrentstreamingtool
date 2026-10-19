@@ -31,7 +31,8 @@ All four services (VLC, qBittorrent, Jackett, dashboard) run on the same host ex
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `main.py` | 3600 | FastAPI app, all routes, background tasks, AppState, qBit/VLC clients |
+| `main.py` | ~41000 | FastAPI app, all routes, background tasks, AppState, qBit/VLC clients. Being split into `backend/` |
+| `backend/` | — | Code moved out of `main.py` line for line, re-exported by main (models, release names, file lists, resume, …). Never imports main. See [BACKEND.md § Splitting main.py](BACKEND.md) |
 | `run.py` | 880 | Launcher — finds and starts VLC/qBit/Jackett, then uvicorn |
 | `setup.py` | 1145 | First-time configurator — venv, deps, qBit ini, .env, SSL certs |
 | `daemon.py` | 545 | launchd / systemd / Task Scheduler service installer |

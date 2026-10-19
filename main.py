@@ -86,6 +86,138 @@ import watchrule
 import watchpurge
 import winaccept_patch
 
+# ── backend/ package (main.py split; see docs/BACKEND.md) ──
+from backend.packslice import (  # noqa: F401
+    _PACK_EXTRA_MAX_BYTES,
+    _PACK_SLICE_GRACE_SECS,
+    _PACK_FIRST_MAX_BYTES,
+)
+from backend.models import (  # noqa: F401
+    StreamPrepareReq,
+    StreamReq,
+    DownloadReq,
+    VisibilityReq,
+    ProfileReq,
+    ProgressReq,
+    YouTubeReq,
+    YouTubeControlReq,
+    YouTubeTvStateReq,
+    TvLocalStateReq,
+    TvPlaybackModeReq,
+    TvLocalOpenReq,
+    PlaybackSessionReq,
+    PlaybackYieldReq,
+    PlaybackPullReq,
+    LibraryPlayReq,
+    MarkWatchedReq,
+    AdminLoginReq,
+    AdminItemLockReq,
+    AdminSettingsReq,
+    ScheduledRebootReq,
+    AutoPrepReq,
+    PlayPrepReq,
+    DownloadRaceReq,
+    ClientLogAutoReq,
+    PackFirstReq,
+    StreamFocusReq,
+    MissingContentReq,
+    PrepValidateReq,
+    NetworkReq,
+    ForcePrepReq,
+    ForcePrepStopReq,
+    CacheAutopurgeReq,
+    SourceEvictionReq,
+    ValidateFilesReq,
+    BundleAuditReq,
+    RepairFilesReq,
+    CompressFilesReq,
+    CompressEstimateReq,
+    HlsTrimReq,
+    HlsResyncReq,
+    OndemandOnlyReq,
+    OndemandOnlyLockReq,
+    SeriesLockReq,
+    OndemandOnlyUserReq,
+    AutoMaintReq,
+    SttConfigReq,
+    SubsConfigReq,
+    BookmarkReq,
+    BookmarkSeenReq,
+    EpisodeViewReq,
+    ProfileSubsReq,
+    QbitLimitsReq,
+    PrepPauseReq,
+    MetadataRefreshReq,
+    MetadataSetReq,
+    RenameReq,
+    MoveReq,
+    ProfilePinReq,
+    ProfileElevatedReq,
+    ProfileIndexersReq,
+    ProfileAutoSkipReq,
+    ProfileResumeModeReq,
+    MaxVolumeReq,
+    VlcStartVolumeReq,
+    NightModeReq,
+    SystemVolumeDefaultReq,
+    YouTubeStartVolumeReq,
+    HostVolumeReq,
+    WindowControlReq,
+    SkipNowReq,
+    AdminSkipDataReq,
+    BackgroundVolumeReq,
+    BackgroundEnabledReq,
+    ProfileSimpleUiReq,
+)
+from backend.resume import (  # noqa: F401
+    _resume_anchor,
+    _resume_from_files,
+    _progress_for,
+    _section_hints,
+    _pick_active_section,
+    find_resume_hint,
+    _section_summary,
+    _files_in_section,
+    _merged_series_files,
+    find_series_resume_hint,
+)
+from backend.filelist import (  # noqa: F401
+    VIDEO_EXTS,
+    build_file_list,
+    _file_by_index,
+    largest_video,
+    human_size,
+)
+from backend.release_names import (  # noqa: F401
+    _YEAR_RE,
+    _strip_release_tags,
+    extract_hash,
+    parse_season_episode,
+    _TT_EP_RE,
+    _TT_EP_FRAC_RE,
+    _TT_EP_X_RE,
+    _TT_MULTI_PLUS_RE,
+    _TT_MULTI_WORD_PLUS_RE,
+    _TT_MULTI_LIST_RE,
+    _TT_MULTI_RANGE_RE,
+    _TT_SEASON_EP_DASH_RE,
+    _TT_SEASONS_WORD_RE,
+    _TT_SEASON_RE,
+    _TT_SEASON_WORD_RE,
+    _TT_ORDINAL_SEASON_RE,
+    _TT_COMPLETE_SERIES_RE,
+    _TT_EP_RANGE_RE,
+    _TT_ABS_EP_RE,
+    _TT_ABS_DASH_RE,
+    _TT_SIZE_RE,
+    _TT_ABS_TAIL_RE,
+    _TT_TRAIL_YEAR_RE,
+    _TT_EXT_RE,
+    _TT_RES_NUMS,
+    _tt_bounded_span,
+    parse_torrent_title,
+)
+
 # Harden the Windows Proactor accept loop before uvicorn starts serving: a
 # client that vanishes mid-handshake must not close the listening socket and
 # kill the whole server. No-op off Windows. See winaccept_patch.py.
@@ -2887,7 +3019,6 @@ async def vlc_status() -> Optional[dict]:
     return None
 
 
-
 async def vlc_playlist_uri() -> Optional[str]:
     """Return the file:// URI of the currently active VLC playlist item."""
     try:
@@ -3018,7 +3149,6 @@ async def _current_playback_path() -> Optional[Path]:
             except Exception:
                 pass
     return None
-
 
 
 # ── the download budget ────────────────────────────────────────
@@ -3908,29 +4038,7 @@ async def _tmdb_get(path: str, params: Optional[dict] = None) -> Optional[dict]:
     return hit[0] if hit else None
 
 
-_YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
-
-
-def _strip_release_tags(name: str) -> str:
-    """Strip common release/quality tags from a torrent title so a TMDb search
-    has a shot at matching the canonical show name."""
-    if not name:
-        return ""
-    s = name
-    s = re.sub(r"\[[^\]]*\]", " ", s)
-    s = re.sub(r"\([^)]*\)", " ", s)
-    s = re.sub(
-        r"\b(2160p|1080p|720p|480p|4K|UHD|BluRay|BDRip|BRRip|DVDRip|WEB-?DL|WEBRip|"
-        r"HDTV|HDR|HDR10|HEVC|x264|x265|H\.?264|H\.?265|AAC|AC3|DTS|FLAC|EAC3|"
-        r"REMUX|REPACK|PROPER|EXTENDED|UNRATED|MULTi|DUAL|SUBBED|DUBBED|BATCH|"
-        r"VOSTFR|SUBFRENCH|\d{1,2}[ -]?bit|"
-        r"COMPLETE|S\d{1,2}|Season\s*\d{1,2}|E\d{1,3})\b.*",
-        " ", s, flags=re.IGNORECASE,
-    )
-    s = re.sub(r"[._\-]+", " ", s)
-    s = re.sub(r"\s+", " ", s).strip(" -_.")
-    return s
-
+# _YEAR_RE and _strip_release_tags are in backend/release_names.py.
 
 def _search_terms_for_item(item: dict) -> tuple[str, Optional[int]]:
     """Build (query, year_hint?) for TMDb search from a library item."""
@@ -6404,273 +6512,8 @@ async def _apply_night_mode(enabled: bool) -> None:
         await broadcast("stream_status", {"status": "error", "message": f"Night mode toggle failed: {exc}"})
 
 
-# ── Utilities ─────────────────────────────────────────────────────────────────
-
-def extract_hash(magnet: str) -> Optional[str]:
-    """Pull the info-hash from a magnet URI, normalising base32 → hex."""
-    m = re.search(r"xt=urn:btih:([a-fA-F0-9]{40}|[A-Za-z2-7]{32})", magnet, re.I)
-    if not m:
-        return None
-    h = m.group(1)
-    if len(h) == 32:
-        try:
-            h = base64.b32decode(h.upper()).hex()
-        except Exception:
-            return None
-    return h.lower()
-
-
-def parse_season_episode(name: str) -> tuple[int, int]:
-    """Extract (season, episode) from one file name or relative path.
-
-    Thin wrapper over `episodes.parse_slot` for the callers that only ever see a
-    bare filename (uploads, non-torrent moves). Anything holding a whole item's
-    file list should use `episodes.attribute_paths` instead — the release root
-    has to be identified before a directory can be read as a season, and that
-    takes every path. See docs/LIBRARY_DATA.md § Season/episode attribution.
-    """
-    slot = episodes.parse_slot(name)
-    return slot["season"], slot["episode"]
-
-
-# ── Search-result title parsing (show grouping) ──────────────────────────────
-# Structural markers that separate a show's name from its season/episode/release
-# info. Used by parse_torrent_title() to group flat search results into shows.
-# `\d{1,3}` + `(?!\d)`: without them "S01E015" matched "E01" and left the 5
-# behind, so ten different episodes of Hunter x Hunter all parsed as episode 1
-# and flooded every S01E01 search.
-_TT_EP_RE          = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,3})(?!\d)")
-# A FRACTIONAL episode code — "S01E07.5", the scene's form for a recap or
-# summary special. It is not episode 7, and handing one to somebody who asked
-# for episode 7 is a silent wrong answer (live: a 2160p ToonsHub Solo Leveling
-# S01E07.5 at 38 seeders, which the seeder-led pick took).
-#
-# Two things make this fiddly. It is matched against the RAW title, because
-# `norm` flattens dots to spaces and "S01E07.5" is "S01E07 5" by then. And the
-# single-digit requirement is the whole discriminator: ".5" is a fraction,
-# ".720p"/".1080p"/".2160p" is a resolution tag. Measured on live results: 1
-# release of the first shape, 111 of the second, so a rule that cannot tell
-# them apart would break a hundred titles to fix one.
-#
-# Only the dotted/underscored form is matched. A space-separated
-# "S01E07 5" is conceivable but was not observed, and widening the
-# separator class would start reading an ordinary trailing number as a
-# fraction for no measured gain.
-#
-# It is a FLAG, not a failed match, and that is deliberate: dropping the match
-# would fall through to `_TT_SEASON_RE`, which sees the "S01" and classifies a
-# 300 MB recap as a whole SEASON PACK — strictly worse than the bug it fixes.
-_TT_EP_FRAC_RE     = re.compile(r"[Ss]\d{1,2}[Ee]\d{1,3}[._]\d(?!\d)")
-_TT_EP_X_RE        = re.compile(r"\b(\d{1,2})x(\d{2})\b")
-# Multi-season packs. The trailing (?!\d) stops the second number from matching a
-# resolution/year *prefix* — "S01 - 720p" must NOT read as S1-72, "S08 - 2019"
-# not as S8-20. Legit forms: S01-S05, S01-05, S01-5, S1+S2+S3, S01-S02-S03.
-_TT_MULTI_PLUS_RE  = re.compile(r"[Ss]\d{1,2}(?:\s*[+&]\s*[Ss]?\d{1,2})+")         # S1+S2+S3 / S01&02
-_TT_MULTI_WORD_PLUS_RE = re.compile(
-    r"[Ss]easons?\s*\d{1,2}(?:\s*[+&]\s*(?:[Ss]easons?\s*)?\d{1,2})+")             # Season 1 + 2
-_TT_MULTI_LIST_RE  = re.compile(r"[Ss]\d{1,2}(?:\s*-\s*[Ss]?\d{1,2}(?!\d)){2,}")   # S01-S02-S03…
-_TT_MULTI_RANGE_RE = re.compile(r"[Ss](\d{1,2})\s*-\s*[Ss]?(\d{1,2})(?!\d)")       # S01-S05 / S01-5
-# Fansub per-episode form for sequel seasons: "[SubsPlease] Show S2 - 05" /
-# "Show Season 2 - 05". A *spaced* dash + a 2+-digit second number with no S
-# prefix is an episode, not a season range — real packs write "S01-S05"/"S01-05"
-# tight, or "Seasons 1-5" (plural, which this pattern's singular "Season" never
-# matches). Must be tested before the multiseason ranges, which would otherwise
-# swallow "S2 - 05" as a bogus seasons-2-to-5 pack.
-_TT_SEASON_EP_DASH_RE = re.compile(r"\b[Ss](?:eason\s*)?(\d{1,2})\s+-\s+(\d{2,4})(?!\d)")
-_TT_SEASONS_WORD_RE = re.compile(r"[Ss]easons?\s*(\d{1,2})\s*-\s*(\d{1,2})(?!\d)") # Seasons 1-5
-_TT_SEASON_RE      = re.compile(r"\b[Ss](\d{1,2})\b")
-_TT_SEASON_WORD_RE = re.compile(r"\b[Ss]eason\s*(\d{1,2})\b")
-# Ordinal season ("Sousou no Frieren 2nd Season") — the dominant fansub form for
-# anime sequels. Without it, "…2nd Season - 10" reads as absolute S1E10 and the
-# ordinal stays in the show name, fragmenting the group away from season 1.
-_TT_ORDINAL_SEASON_RE = re.compile(r"\b(\d{1,2})(?:st|nd|rd|th)\s+[Ss]eason\b", re.IGNORECASE)
-_TT_COMPLETE_SERIES_RE = re.compile(r"\bComplete\s+(?:Series|Pack|Collection)\b", re.IGNORECASE)
-# Absolute-numbered anime episode ("[Grp] One Piece - 1168 [1080p]", "One Piece
-# EP1168", "Naruto 121 (..."). Only consulted when NO S/E or season marker exists.
-# Dash / EP are strong fansub signals (1-4 digits); a bare trailing number needs
-# 3-4 digits so "Ocean's 11" (a movie) isn't read as an episode.
-# Absolute-episode-range batch ("One Piece 001-574", "One Piece 1094-1099") —
-# the long-running-anime bulk form. Requires a 3+-digit upper bound so year
-# spans and small number pairs never match; validated further at the use site.
-_TT_EP_RANGE_RE    = re.compile(r"\b(\d{1,4})\s*[-~]\s*(\d{3,4})(?!\d)")
-_TT_ABS_EP_RE      = re.compile(r"\b[Ee][Pp]\s?(\d{1,4})\b")                       # EP1168
-_TT_ABS_DASH_RE    = re.compile(r"\s-\s+(\d{1,4})(?!\d)")                          # Show - 121
-# Size tags ("1.85GB", "700 MB", "2 GB") — stripped before structural parsing so a
-# YIFY-style "- 1.85GB" can't be misread as absolute episode 1 (dots → spaces in
-# norm turn "1.85GB" into "1 85GB", so match the split form too).
-_TT_SIZE_RE        = re.compile(r"\b\d+(?:[ .]\d+)?\s*(?:[GMKT]i?B|MB|GB|KB|TB)\b", re.I)
-_TT_ABS_TAIL_RE    = re.compile(r"\s(\d{3,4})\s*(?=[\[(]|$)")                      # Show 1168 [.. / (..
-_TT_TRAIL_YEAR_RE  = re.compile(r"\s+(?:19|20)\d{2}$")
-_TT_EXT_RE         = re.compile(r"\.(?:mkv|mp4|avi|mov|m4v|ts|webm)$", re.IGNORECASE)
-_TT_RES_NUMS       = {480, 540, 576, 720, 1080, 1440, 2160, 4320}
-
-
-def _tt_bounded_span(a: int, b: int):
-    """Accept a season range only if it's plausible. Rejects the resolution/year
-    bleed and absolute-ep dashes ("S4 - 37") that would otherwise read as a
-    30+-season pack — real multi-season packs span a handful of seasons."""
-    lo, hi = min(a, b), max(a, b)
-    if hi > 50 or (hi - lo) > 30:
-        return None
-    return lo, hi
-
-
-def parse_torrent_title(title: str) -> dict:
-    """Classify a raw torrent title into a show + kind so flat search results can
-    be grouped. Returns:
-        show        display-cased show name ("Breaking Bad")
-        show_key    normalised grouping key ("breaking bad")
-        kind        "episode" | "season" | "multiseason" | "movie"
-        season      episode/season kinds: the season number (0 otherwise)
-        episode     episode kind: episode number (absolute-numbered anime → season 1)
-        season_from/season_to  multiseason kind: inclusive season range (0 = "complete")
-        ep_from/ep_to  multiseason kind only: absolute-episode-range batch
-                       ("One Piece 001-574"; 0 when the pack is season-based)
-        year        detected release year (or None)
-    The show name is the text *before* the first structural marker, run through
-    _strip_release_tags — this is what separates e.g. a "Better Call Saul S06E11
-    Breaking Bad" or "Moonshiners S15E12 Braking Badly" hit out of a search for
-    "breaking bad" into their own groups instead of polluting the show."""
-    raw = _html.unescape(title or "")   # Jackett titles can carry &amp; etc.
-    # Checked on `raw`: the next line destroys the dot this depends on.
-    frac_ep = bool(_TT_EP_FRAC_RE.search(raw))
-    norm = re.sub(r"[._]+", " ", raw)
-    norm = re.sub(r"\s+", " ", norm).strip()
-    # Drop size tags so "- 1.85GB" / "- 700 MB" aren't misread as absolute episodes.
-    norm = re.sub(r"\s+", " ", _TT_SIZE_RE.sub(" ", norm)).strip()
-
-    ym = _YEAR_RE.search(norm)
-    year = int(ym.group(0)) if ym else None
-
-    season = episode = season_from = season_to = ep_from = ep_to = 0
-    abs_marker_pos = None   # where to cut the show name for an absolute-numbered ep
-
-    ep_m    = _TT_EP_RE.search(norm) or _TT_EP_X_RE.search(norm)
-    plus_m  = _TT_MULTI_PLUS_RE.search(norm) or _TT_MULTI_WORD_PLUS_RE.search(norm)
-    list_m  = _TT_MULTI_LIST_RE.search(norm)
-    range_m = _TT_SEASONS_WORD_RE.search(norm) or _TT_MULTI_RANGE_RE.search(norm)
-    complete_series = bool(_TT_COMPLETE_SERIES_RE.search(norm))
-
-    # "S2 - 05" / "Season 2 - 05" (spaced dash, padded episode) is a sequel-
-    # season *episode*, not a range — claim it before the multiseason block.
-    epdash_m = None
-    if ep_m is None:
-        m = _TT_SEASON_EP_DASH_RE.search(norm)
-        if m:
-            n = int(m.group(2))
-            if not (1900 <= n <= 2099) and n not in _TT_RES_NUMS:
-                epdash_m = m
-
-    kind = None
-    if epdash_m is not None:
-        kind = "episode"
-        season, episode = int(epdash_m.group(1)), int(epdash_m.group(2))
-    if kind is None and (plus_m or list_m or range_m or complete_series):
-        span = None
-        if plus_m:
-            nums = [int(x) for x in re.findall(r"\d{1,2}", plus_m.group(0))]
-            span = _tt_bounded_span(min(nums), max(nums)) if nums else None
-        elif list_m:
-            nums = [int(x) for x in re.findall(r"\d{1,2}", list_m.group(0))]
-            span = _tt_bounded_span(min(nums), max(nums)) if nums else None
-        elif range_m:
-            span = _tt_bounded_span(int(range_m.group(1)), int(range_m.group(2)))
-        if span:
-            kind, (season_from, season_to) = "multiseason", span
-        elif complete_series:
-            kind = "multiseason"          # "Complete Series" with no explicit numbers
-        elif range_m:
-            # Implausible span ("S01 - 720p" already blocked by (?!\d); "S4 - 37")
-            # → treat as the single leading season, not a bogus pack.
-            kind, season = "season", int(range_m.group(1))
-
-    if kind is None:
-        if ep_m:
-            kind = "episode"
-            season, episode = int(ep_m.group(1)), int(ep_m.group(2))
-        else:
-            sm = (_TT_SEASON_WORD_RE.search(norm) or _TT_ORDINAL_SEASON_RE.search(norm)
-                  or _TT_SEASON_RE.search(norm))
-            if sm:
-                kind, season = "season", int(sm.group(1))
-                # "<show> 2nd Season - 10" / "<show> Season 2 - 10": an absolute
-                # episode number AFTER a word/ordinal season marker is that
-                # season's episode (the fansub form for sequel seasons), not a
-                # batch. Bare "S2 - 10" is left alone — _TT_MULTI_RANGE_RE owns
-                # that ambiguity.
-                if sm.re is not _TT_SEASON_RE:
-                    am = (_TT_ABS_EP_RE.search(norm, sm.end())
-                          or _TT_ABS_DASH_RE.search(norm, sm.end()))
-                    if am:
-                        n = int(am.group(1))
-                        if not (1900 <= n <= 2099) and n not in _TT_RES_NUMS:
-                            kind, episode = "episode", n
-            else:
-                # Absolute-episode-range batch ("One Piece 001-574") — must be
-                # tested before the single abs-episode forms, whose " - NNN"
-                # would otherwise read the range's upper bound as one episode.
-                rm = _TT_EP_RANGE_RE.search(norm)
-                if rm:
-                    a_, b_ = int(rm.group(1)), int(rm.group(2))
-                    if (b_ <= a_ or b_ < 100
-                            or (1900 <= a_ <= 2099 and 1900 <= b_ <= 2099)
-                            or (a_ in _TT_RES_NUMS and b_ in _TT_RES_NUMS)):
-                        rm = None
-                if rm is not None:
-                    kind = "multiseason"     # an episodes batch is a pack
-                    ep_from, ep_to = int(rm.group(1)), int(rm.group(2))
-                    abs_marker_pos = rm.start()
-                else:
-                    am = (_TT_ABS_EP_RE.search(norm) or _TT_ABS_DASH_RE.search(norm)
-                          or _TT_ABS_TAIL_RE.search(norm))
-                    if am:
-                        n = int(am.group(1))
-                        if not (1900 <= n <= 2099) and n not in _TT_RES_NUMS:
-                            kind, season, episode = "episode", 1, n
-                            abs_marker_pos = am.start()   # cut before " - " / "EP" / the number
-                if kind is None:
-                    kind = "movie"
-
-    # Show name = text before the earliest structural marker.
-    positions = []
-    for rx in (_TT_EP_RE, _TT_EP_X_RE, _TT_SEASONS_WORD_RE, _TT_MULTI_PLUS_RE,
-               _TT_MULTI_WORD_PLUS_RE, _TT_MULTI_LIST_RE, _TT_MULTI_RANGE_RE,
-               _TT_SEASON_WORD_RE, _TT_ORDINAL_SEASON_RE, _TT_SEASON_RE,
-               _TT_COMPLETE_SERIES_RE):
-        m = rx.search(norm)
-        if m:
-            positions.append(m.start())
-    if abs_marker_pos is not None:
-        positions.append(abs_marker_pos)
-    cut = min(positions) if positions else len(norm)
-    show = _strip_release_tags(norm[:cut]) or _strip_release_tags(norm) or norm.strip()
-    # A cut inside parens ("Show (Season 1) …") leaves a dangling "(" the tag
-    # stripper can't remove (it only strips balanced pairs) — trim trailing
-    # opener/separator punctuation so the group key merges with the clean name.
-    show = re.sub(r"[\s(\[{|:,&+\-–—]+$", "", show).strip() or show
-    # Key ignores punctuation so apostrophe/colon variants of the same title
-    # ("Frieren: Beyond Journey's End" / "Frieren Beyond Journeys End") land in
-    # one group instead of fragmenting by scene-name styling.
-    show_key = re.sub(r"\s+", " ", re.sub(r"[^\w\s]+", "", show.lower())).strip()
-    # …and ignores CJK decoration when a Latin name remains ("DanDaDan ダンダダン"
-    # groups with "Dandadan"; a purely-CJK title keeps its CJK key).
-    ascii_key = re.sub(r"\s+", " ", re.sub(r"[^\x00-\x7f]+", " ", show_key)).strip()
-    if len(re.sub(r"[^a-z0-9]", "", ascii_key)) >= 3:
-        show_key = ascii_key
-    show_key = _TT_EXT_RE.sub("", show_key)                       # drop a trailing .mkv etc
-    show_key = _TT_TRAIL_YEAR_RE.sub("", show_key).strip()        # "inception 2010" ⇒ "inception"
-
-    return {
-        "show": show, "show_key": show_key, "kind": kind,
-        "season": season, "episode": episode,
-        "season_from": season_from, "season_to": season_to,
-        "ep_from": ep_from, "ep_to": ep_to, "year": year,
-        # "S01E07.5" — a recap/summary special, NOT episode 7. Only meaningful
-        # on an `episode` kind; consumers that resolve a specific episode must
-        # skip it (see `_bgIngest`), consumers that just group results need not
-        # care. See `_TT_EP_FRAC_RE` for why this is a flag and not a non-match.
-        "special": frac_ep and kind == "episode",
-    }
+# extract_hash, parse_season_episode and parse_torrent_title (search-result
+# title parsing) are in backend/release_names.py.
 
 
 # ── Release audio-language classification ───────────────────────────
@@ -6683,56 +6526,9 @@ def parse_torrent_title(title: str) -> dict:
 # Keeping both in one pure leaf module is what makes that shareable, and it
 # finally puts the context rules in docs/GOTCHAS.md under test - `main` needs
 # fastapi to import, so nothing here could ever be covered by `make test`.
-
-
-VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".m2ts", ".webm"}
-
-
-def build_file_list(qbit_file_list: list, save_path: str) -> list[dict]:
-    """Build a sorted video-file list from qBittorrent's files API response.
-
-    Season/episode attribution is done over the whole list at once (qBit's
-    `name` is relative to the save path, so the torrent's own folder structure
-    is intact here — that's where an anime batch keeps its seasons). Numbers
-    that turn out to be series-absolute are corrected later, once TMDb's season
-    inventory is known; see `_reattribute_item_files`.
-    """
-    videos = [f for f in qbit_file_list
-              if Path(f.get("name", "")).suffix.lower() in VIDEO_EXTS]
-    rels = [f.get("name", "") for f in videos]
-    result = [{
-        "name": Path(rel).name,
-        "path": str(Path(save_path) / rel),
-        "size_bytes": f.get("size", 0),
-        "season": 0,
-        "episode": 0,
-    } for rel, f in zip(rels, videos)]
-    for entry, slot in zip(result, episodes.attribute_paths(rels)):
-        episodes.apply_slot(entry, slot)
-    result.sort(key=episodes.sort_key)
-    return result
-
-
-def _file_by_index(files: list, idx: int) -> Optional[dict]:
-    """Return the file dict whose 'index' field equals idx (falls back to enumerate position)."""
-    for i, f in enumerate(files):
-        if f.get("index", i) == idx:
-            return f
-    return None
-
-
-def largest_video(files: list) -> Optional[dict]:
-    videos = [f for f in files if Path(f["name"]).suffix.lower() in VIDEO_EXTS]
-    pool = videos or files
-    return max(pool, key=lambda f: f.get("size", 0), default=None)
-
-
-def human_size(n: int) -> str:
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024:
-            return f"{n:.1f} {unit}"
-        n /= 1024
-    return f"{n:.1f} PB"
+#
+# The file-list helpers that sat here (VIDEO_EXTS, build_file_list,
+# largest_video, human_size, _file_by_index) are in backend/filelist.py.
 
 
 # ── Per-item download scheduling ────────────────────────────────────────────────
@@ -7136,21 +6932,9 @@ async def _recheck_for_ghosts(h: str, title: str, gone: list[str]) -> bool:
 # fetched ten gigabytes during the grace period would have cost more than the feature
 # saves; priority 0 across the board costs nothing and is undone the tick the episode
 # is identified.
-
-# Non-video files ride along free (a Subs/ folder, an .nfo) as long as they are
-# small — they are what `_discover_local_subs` goes looking for, and losing them
-# means an episode that arrives without its own subtitles. Anything bigger is an
-# extra nobody asked for.
-_PACK_EXTRA_MAX_BYTES = 8 * 1024 * 1024
-# How long an unresolved slice may hold the whole torrent at priority 0 before we
-# give up on it and fall back to a single-episode release. Generous: it has to cover
-# a TMDb round trip, the anime-mapping fetch, and a slow metadata resolve.
-_PACK_SLICE_GRACE_SECS = 300
-# The ceiling ships as an admin setting; this is its default. It clears the
-# long-running-anime Blu-ray packs the feature exists for (Hunter x Hunter's complete
-# run is 144.7 GB) and stops only genuinely absurd complete-franchise torrents, which
-# cost real qBit bookkeeping for one episode.
-_PACK_FIRST_MAX_BYTES = 200 * 1024 ** 3
+#
+# The knobs (_PACK_EXTRA_MAX_BYTES, _PACK_SLICE_GRACE_SECS, _PACK_FIRST_MAX_BYTES)
+# are in backend/packslice.py.
 
 
 # How often an app sends its diagnostic log when collection is on. The device
@@ -7495,275 +7279,7 @@ async def _set_playback_owner(profile_id: Optional[str], lib: Optional[dict] = N
     state.library_profile_color = (prof or {}).get("color", "") or ""
 
 
-# ── Resume ───────────────────────────────────────────────────────────────────────
-# ONE resume algorithm, used by every caller. There used to be two — an item-level
-# one that followed `last_file` forward, and a merged-series one that picked the
-# most-recently-touched unfinished file anywhere in the show — and they disagreed,
-# which is why the Resume button could offer one episode and play another. Worse,
-# neither was section-aware: Attack on Titan's resume landed on **Junior High
-# ep 2** because a half-watched spin-off episode outranked the main run.
-#
-# The rules, in one place:
-#   * Resume is computed **per section** (episodes.sections_for). A section never
-#     resumes into another one — finishing S04 does not roll on into Extras.
-#   * Within a section it follows the viewer FORWARD from their anchor (the file
-#     they last had open), never backwards to an episode they deliberately
-#     skipped, and steps past it once it is completed.
-#   * The show-level hint is simply its most-recently-played section's hint, so
-#     the tile's Resume button and the play it triggers are one computation.
-
-
-def _resume_anchor(files: list, fp_for, last_file: str = "") -> Optional[int]:
-    """Index of the file the viewer last had open in this list, or None.
-
-    The anchor is whichever file carries the newest ``updated_at`` — data every
-    progress write already produces, and the only signal available across a
-    merged series whose members each keep their own ``last_file``. A stored
-    ``last_file`` still wins when it names a file in this list that has no
-    progress yet (started, then stopped inside the 5 s save window).
-
-    **Ties are the normal case, not an edge case.** `_now_iso()` has one-second
-    resolution and `mark_watched` stamps every file it touches, so "mark the
-    season watched" gives twenty-five episodes the identical timestamp — and any
-    resume in that same second sees a flat field. Picking the first match there
-    sent the viewer back to episode 1 immediately after they marked the season
-    watched. So when the clock cannot separate them, separate them by how far
-    the viewer actually got: the LAST completed file, else the LAST one they are
-    genuinely part-way into, else the FIRST (a batch reset stamps every file at
-    position 0, and the anchor for that is the beginning).
-    """
-    best_at = ""
-    for f in files:
-        at = (fp_for(f) or {}).get("updated_at", "")
-        if at > best_at:
-            best_at = at
-    if best_at:
-        tied = [i for i, f in enumerate(files)
-                if (fp_for(f) or {}).get("updated_at", "") == best_at]
-        done = [i for i in tied if (fp_for(files[i]) or {}).get("completed")]
-        if done:
-            return done[-1]
-        started = [i for i in tied
-                   if (fp_for(files[i]) or {}).get("position_sec", 0) > 5]
-        return started[-1] if started else tied[0]
-    if last_file:
-        for i, f in enumerate(files):
-            if f.get("path", "") == last_file:
-                return i
-    return None
-
-
-def _resume_from_files(files: list, fp_for, last_file: str = "",
-                       extra: Optional[dict] = None) -> Optional[dict]:
-    """Best file+position to resume within one ordered list of files."""
-    if not files:
-        return None
-    extra = extra or {}
-
-    def _hint(f: dict, *, all_completed: bool = False) -> dict:
-        path = f.get("path", "")
-        fp = {} if all_completed else (fp_for(f) or {})
-        pos = fp.get("position_sec", 0)
-        dur = fp.get("duration_sec", 0)
-        return {
-            "item_id": f.get("item_id", ""),
-            "file_path": path,
-            "episode_name": f.get("name", Path(path).name),
-            "position_sec": pos,
-            "duration_sec": dur,
-            "pct": round(pos / dur * 100, 1) if dur else (100 if all_completed else 0),
-            **({"all_completed": True} if all_completed else {}),
-            **extra,
-        }
-
-    idx = _resume_anchor(files, fp_for, last_file)
-    if idx is not None:
-        anchor = fp_for(files[idx]) or {}
-        # Still mid-episode → resume the anchor itself.
-        if not anchor.get("completed") and anchor.get("position_sec", 0) > 5:
-            return _hint(files[idx])
-        # Finished it (or barely started) → first un-completed at/after it. Skip
-        # the anchor only when it is actually completed.
-        for f in files[idx + 1 if anchor.get("completed") else idx:]:
-            if not (fp_for(f) or {}).get("completed"):
-                return _hint(f)
-        # Nothing left ahead — fall through so a genuinely skipped earlier
-        # episode (or the all-completed rewatch) is still surfaced.
-
-    for f in files:
-        if not (fp_for(f) or {}).get("completed"):
-            return _hint(f)
-
-    return _hint(files[0], all_completed=True)
-
-
-def _progress_for(items: list, profile_id: str):
-    """``(fp_for, last_file)`` — a per-file progress lookup that works for a
-    single item and for a merged series alike, plus the newest ``last_file``
-    among the members. Files must carry ``item_id`` when more than one item is
-    passed (see ``_merged_series_files``)."""
-    by_item = {it.get("id", ""): it.get("progress", {}).get(profile_id, {}) for it in items}
-    single = by_item.get(items[0].get("id", ""), {}) if len(items) == 1 else None
-
-    def fp_for(f: dict) -> dict:
-        prof = single if single is not None else by_item.get(f.get("item_id", ""), {})
-        return (prof or {}).get("file_progress", {}).get(f.get("path", ""), {})
-
-    last_file, last_at = "", ""
-    for prof in by_item.values():
-        lf = (prof or {}).get("last_file", "")
-        if not lf:
-            continue
-        at = ((prof.get("file_progress", {}) or {}).get(lf, {}) or {}).get("updated_at", "")
-        if not last_file or at > last_at:
-            last_file, last_at = lf, at
-    return fp_for, last_file
-
-
-def _section_hints(items: list, files: list, profile_id: str,
-                   show_title: str = "") -> list:
-    """Every section of a show with its own independent resume hint and watched
-    count. Ordered main-first, Extras last (episodes.sections_for)."""
-    if profile_id and items:
-        fp_for, last_file = _progress_for(items, profile_id)
-    else:
-        fp_for, last_file = (lambda f: {}), ""
-    out = []
-    for sec in episodes.sections_for(files, show_title):
-        sec_files = sec["files"]
-        watched = sum(1 for f in sec_files if (fp_for(f) or {}).get("completed"))
-        newest = max(((fp_for(f) or {}).get("updated_at", "") for f in sec_files),
-                     default="")
-        out.append({
-            "key":     sec["key"],
-            "label":   sec["label"],
-            "kind":    sec["kind"],
-            "bucket":  sec["bucket"],
-            "counted": sec["counted"],
-            "count":   sec["count"],
-            "watched": watched,
-            "last_at": newest,
-            "resume":  _resume_from_files(sec_files, fp_for, last_file) if profile_id else None,
-        })
-    return out
-
-
-def _pick_active_section(sections: list) -> Optional[dict]:
-    """The section whose Resume the show-level button should offer: the most
-    recently played one, else the first with something left to watch, else the
-    main run. Never Extras unless it is genuinely all there is.
-
-    Sections tie on `last_at` for the same reason files do — one-second
-    timestamps, and a batch write stamps a whole section at once (see
-    `_resume_anchor`). A plain `max` then returns whichever section happens to
-    come first, which is the main run by construction. So rank by engagement
-    before position: a section the viewer is mid-episode in beats one whose
-    files merely carry the same timestamp."""
-    played = [s for s in sections if s.get("last_at")]
-    if played:
-        def rank(s):
-            r = s.get("resume") or {}
-            mid = 1 if (r.get("position_sec", 0) > 5 and not r.get("all_completed")) else 0
-            return (s["last_at"], mid, s.get("watched", 0))
-        return max(played, key=rank)
-    for s in sections:
-        if s["counted"] and s["watched"] < s["count"]:
-            return s
-    return next((s for s in sections if s["counted"]), sections[0] if sections else None)
-
-
-def find_resume_hint(item: dict, profile_id: str) -> Optional[dict]:
-    """Best file+position to resume one item, scoped to its active section."""
-    if not profile_id or not item.get("files"):
-        return None
-    prof = item.get("progress", {}).get(profile_id, {})
-    sections = _section_hints([item], item["files"], profile_id, item.get("series", ""))
-    active = _pick_active_section(sections)
-    hint = (active or {}).get("resume")
-    if not hint:
-        return None
-    return {
-        **hint,
-        "section": active["key"],
-        "section_label": active["label"],
-        # Whether this item's last play (for this profile) was Shuffle Play, so
-        # Resume can offer to keep shuffling. Ephemeral playback state is gone by
-        # now; this preference is what survives the stop. See set_shuffle_pref.
-        "shuffle": bool(prof.get("shuffle")),
-        "shuffle_scope": prof.get("shuffle_scope", "") or "",
-    }
-
-
-def _section_summary(sec: dict, meta: Optional[dict] = None) -> dict:
-    """A section without its file list — what the grid and the group page need to
-    render a row (name, how much of it there is, how far in the viewer got), plus
-    its own cached TMDb binding when one has resolved. `meta` is the parent
-    item's `metadata.sections` map; see _fetch_section_metadata."""
-    out = {k: sec[k] for k in
-           ("key", "label", "kind", "bucket", "counted", "count", "watched", "resume")}
-    blob = (meta or {}).get(sec["key"]) or {}
-    if blob.get("source") and blob.get("source") != "none":
-        # The section's own title wins over the folder name — "Attack on Titan:
-        # Junior High" rather than the release's "Attack On Titan Junior High".
-        out["label"] = blob.get("title") or out["label"]
-        out["meta"] = blob
-    return out
-
-
-def _files_in_section(files: list, section: str) -> list:
-    """The files of one section, in canonical order.
-
-    A playlist built from a resume hint has to stop at its own section's edge.
-    The flat file list runs main → spin-off → Extras → Movies → OAD, so resuming
-    Junior High ep 2 and slicing to the end used to queue up the creditless
-    openings and the compilation films behind it."""
-    if not section:
-        return list(files)
-    return sorted((f for f in files if episodes.section_key(f) == section),
-                  key=episodes.sort_key)
-
-
-def _merged_series_files(items: list) -> list:
-    """Flatten every member item's files into one (season, episode)-ordered list,
-    tagging each file with its owning ``item_id`` — the join key that lets the
-    merged-series UI drive play/prep/progress against the right item."""
-    out = []
-    for it in items:
-        iid = it.get("id", "")
-        for f in it.get("files", []):
-            g = dict(f)
-            g["item_id"] = iid
-            out.append(g)
-    out.sort(key=episodes.sort_key)
-    return out
-
-
-def find_series_resume_hint(items: list, profile_id: str) -> Optional[dict]:
-    """Series-level resume across a show whose episodes live in separate items.
-    Identical rules to ``find_resume_hint`` — the same function, in fact — with
-    the owning ``item_id`` carried on the hint so the caller knows which item to
-    seek."""
-    if not profile_id or not items:
-        return None
-    files = _merged_series_files(items)
-    if not files:
-        return None
-    title = next((it.get("series") for it in items if (it.get("series") or "").strip()), "")
-    sections = _section_hints(items, files, profile_id, title)
-    active = _pick_active_section(sections)
-    hint = (active or {}).get("resume")
-    if not hint:
-        return None
-    # Shuffle Play, same as find_resume_hint — but read across the members. The
-    # flag is written to all of them (_set_shuffle_pref), so `any` only matters
-    # for runs recorded before that was true; it costs nothing and heals them.
-    shuffling = any(bool((it.get("progress", {}).get(profile_id) or {}).get("shuffle"))
-                    for it in items)
-    scope = next((str((it.get("progress", {}).get(profile_id) or {}).get("shuffle_scope") or "")
-                  for it in items
-                  if (it.get("progress", {}).get(profile_id) or {}).get("shuffle_scope")), "")
-    return {**hint, "section": active["key"], "section_label": active["label"],
-            "shuffle": shuffling, "shuffle_scope": scope if shuffling else ""}
+# Resume (find_resume_hint, find_series_resume_hint, ...) is in backend/resume.py.
 
 
 # ── Track Preference Helpers ──────────────────────────────────────────────────
@@ -15994,595 +15510,7 @@ async def network_adapter_redirect(request: Request, call_next):
 app.add_middleware(diag.AccessTagMiddleware)
 
 
-# ── Request Models ────────────────────────────────────────────────────────────
-
-class StreamPrepareReq(BaseModel):
-    magnet: str
-    title: str
-
-
-class StreamReq(BaseModel):
-    magnet: str
-    title: str
-    file_index: Optional[int] = None     # specific file to stream (None = largest video)
-    torrent_hash: Optional[str] = None   # hash from /stream/prepare (skips re-adding)
-
-
-class DownloadReq(BaseModel):
-    magnet: str
-    title: str
-    series: str = ""
-    season: int = 0
-    episode: int = 0
-    save_path: str = ""
-    torrent_hash: str = ""          # pre-added hash from /api/library/prepare
-    selected_file_indices: list[int] = []  # if non-empty, skip all other files
-    default_visible_profiles: list[str] = []  # if non-empty, only these profiles see it by default
-    download_mode: str = "now"      # "now" = download immediately; "idle" = only during idle/night window
-    profile_id: str = ""            # who is asking — only meaningful alongside admin_only
-    admin_only: bool = False        # start the item content-locked (elevated profiles only)
-    # The TMDb entry the user actually picked, when the caller knows it. Smart
-    # search opens a show page FROM a TMDb candidate, so the right answer is in
-    # hand at download time — and throwing it away meant the server re-guessed
-    # the show from the release name and could land somewhere else entirely
-    # (a "Regular Show" season pack bound "Regular Show: The Movie"). Empty from
-    # Classic search / a pasted magnet, which still fall back to the guess.
-    tmdb_id: int = 0
-    tmdb_kind: str = ""             # "tv" | "movie"
-    # Download it even though TMDb says it isn't out yet. Honoured only for a
-    # PIN-verified elevated profile (the content-lock permission) — see
-    # _unreleased_gate.
-    allow_unreleased: bool = False
-    # ── Parallel download racing (16.0.0). All optional, all default-off, so a
-    # request that doesn't set them behaves exactly as it always did.
-    #
-    # `auto_picked` is THE gate: racing only happens where the USER did not
-    # choose a torrent. The download modal and the per-episode source sheet
-    # never set it, so those paths are untouched by construction.
-    auto_picked: bool = False
-    # Ordered alternatives for the same content, best first. `candidates[0]`
-    # must be `magnet` — it is the release the frontend auto-picked and the one
-    # the normal pipeline adds; the rest are only ever added BESIDE it. Sent by
-    # the client rather than re-derived here because the pick depends on page
-    # state the server doesn't have (audio preference, size/seeder filters, the
-    # relevance cut), and a second implementation of that ranking would
-    # disagree with the one the user can actually see.
-    candidates: list[dict] = []
-    # TMDb runtime (minutes) and episode count for the bytes-per-minute quality
-    # cross-check. 0 means "unknown", which `relquality` handles by letting the
-    # release name stand — never guessed. The server falls back to
-    # `_race_runtime_hint` when the client doesn't know either.
-    runtime_min: float = 0
-    episode_count: int = 0
-    # ── Pack slicing (17.8.0). The caller asked for these episodes and this
-    # torrent is a whole-season pack, so keep only their files and set every
-    # other one to "skip". Stored on the item as `pack_slice` and re-resolved
-    # each monitor tick until the attribution settles — see _pack_slice_apply.
-    #
-    # Season/episode rather than file indices ON PURPOSE: a pack's numbering is
-    # not final until TMDb metadata binds and passes 2 and 3 have run, which is
-    # after the add. `selected_file_indices` remains the right shape for the
-    # download modal, where a person picked rows off a resolved file list.
-    want_episodes: list[list[int]] = []
-    # ...or whole SEASONS of it (19.12.0): a multi-season / complete-series pack
-    # picked to answer "get Season 1". Every file attributed to one of these
-    # seasons is kept and the rest are skipped. See _pack_slice_want_seasons.
-    want_seasons: list[int] = []
-    # The single-episode release to fall back to if the episode turns out not to
-    # be identifiable inside the pack. Same slim shape as `candidates`.
-    pack_fallback: dict = {}
-
-
-class VisibilityReq(BaseModel):
-    profile_id: str
-    hidden: bool
-
-
-class ProfileReq(BaseModel):
-    name: str
-    color: str = "indigo"
-
-
-class ProgressReq(BaseModel):
-    profile_id: str
-    file_path: str
-    position_sec: float
-    duration_sec: float
-
-
-class YouTubeReq(BaseModel):
-    url: str
-
-
-class YouTubeControlReq(BaseModel):
-    action: str
-    value: Optional[float] = None        # ±seconds (seek) / 0-100% (seek_to) / volume
-
-
-class YouTubeTvStateReq(BaseModel):
-    # Heartbeat + playback report posted by the /tv kiosk page. All optional —
-    # an early beat (before the IFrame player is ready) carries only video_id.
-    video_id: Optional[str] = None
-    title: Optional[str] = None
-    time: Optional[float] = None
-    duration: Optional[float] = None
-    volume: Optional[float] = None
-    playback: Optional[str] = None
-
-
-class TvLocalStateReq(BaseModel):
-    # Heartbeat + playback report posted by the ?tv=1 kiosk while ITS OWN <video>
-    # is the active TV playback. The on-device twin of YouTubeTvStateReq; all
-    # optional so an early beat (player constructed, metadata not in yet) is valid.
-    active: bool = True
-    item_id: Optional[str] = None
-    file_path: Optional[str] = None
-    # Who this playback belongs to. LOAD-BEARING: the kiosk is signed in as one
-    # household profile but a play pushed from a phone belongs to whoever pressed
-    # it there, so the page reports the owning profile and the server pins
-    # state.library_profile_id to it (see _set_playback_owner). Without this every
-    # phone-pushed TV play was credited to the kiosk's own profile — the viewer's
-    # own resume position never moved, so their next Play restarted the episode.
-    profile_id: Optional[str] = None
-    title: Optional[str] = None
-    time: Optional[float] = None
-    duration: Optional[float] = None
-    playback: Optional[str] = None
-    # The page's live Smart Skip offer, mirrored onto state.skip_offer so every
-    # dashboard's fullscreen controls can show (and act on) it — the skip window
-    # is evaluated by the page against its own <video>, not by vlc_progress_tracker
-    # which has no VLC to poll on this surface. Shape matches what the dashboard
-    # already renders, plus `label` so an auto-skip countdown reads identically on
-    # the phone and on the TV. Sent on EVERY beat (null when there is no offer),
-    # so a cleared offer clears server-side too.
-    skip_offer: Optional[dict] = None
-    # True while the page's playlist is a shuffled run. Shuffle on this surface
-    # lives only in the page (lp.playlist order), so state.library_shuffle_order
-    # is empty and the fullscreen Exit-Shuffle tile would never appear.
-    shuffle: Optional[bool] = None
-    # {"audio":[{id,label}], "subtitle":[{id,label}], current_audio, current_subtitle}
-    tracks: Optional[dict] = None
-    nav_count: Optional[int] = None      # length of the page's playlist
-    nav_index: Optional[int] = None      # its position in it
-    # The page's ordered playlist, sent only when it CHANGES (a new run), not on
-    # every 2 s beat — it can be a hundred-plus paths. Mirrored onto
-    # state.library_playlist because that is what a TV→phone handoff slices to
-    # build its tail; without it the handoff carries one file and auto-advance
-    # dies at the end of the episode.
-    playlist: Optional[list[str]] = None
-    # Waiting for data mid-episode, and seconds buffered ahead (20.25.0, #94).
-    # Logged as it changes; `playback` stays "playing" through a stall.
-    stalled: Optional[bool] = None
-    fwd: Optional[float] = None
-    # The media element's own gain as 0-100, so the dashboard's volume slider
-    # reflects the surface actually making the sound.
-    volume: Optional[float] = None
-
-
-class TvPlaybackModeReq(BaseModel):
-    mode: str
-
-
-class TvLocalOpenReq(BaseModel):
-    # Push a file onto the kiosk's own player — the VLC → on-device half of the
-    # fullscreen More-panel switch.
-    item_id: str
-    file_path: str
-    profile_id: str = ""
-    seek: float = 0.0
-
-
-class PlaybackSessionReq(BaseModel):
-    """Heartbeat from an on-device player, ~every 2 s (5 s from the backgrounded
-    native iOS player, to spare the battery).
-
-    This is what makes a phone's playback visible to the household's other
-    devices. All optional but `device_id` and `profile_id` — an early beat, sent
-    the moment a play is requested and before metadata is in, is valid and
-    wanted: a cold JIT start can take seconds, and a session nobody can see yet
-    is a session nobody can pull.
-    """
-    device_id: str                            # this browser's localStorage UUID
-    device_name: str = ""                     # "Nathan's iPhone" / auto from the UA
-    profile_id: str = ""                      # whose session this is (lp.profileId or the signed-in one)
-    active: bool = True                       # false ⇒ the player stopped; drop the session
-    item_id: Optional[str] = None
-    file_path: Optional[str] = None
-    title: Optional[str] = None               # human label for the banner ("Frieren S01E12")
-    position_sec: Optional[float] = None
-    duration_sec: Optional[float] = None
-    playback: Optional[str] = None            # playing | paused | buffering
-    # "server" = streaming HLS from this host; "offline" = the iOS app playing its
-    # OWN downloaded bundle while still on the LAN. Both are pullable (the host has
-    # the same file), but the banner says which, because stopping an offline play
-    # frees nothing on the host.
-    source: Optional[str] = None
-    # ── Continuity payload — everything a pull must carry across ──────────────
-    # Sent only when it CHANGES (a new run / a new pick), not on every beat: the
-    # playlist alone can be a hundred-plus paths and this beats at 2 s. The
-    # session record keeps the last value, so the pull always has the full set
-    # even though the beat that triggered it was a bare position update.
-    playlist: Optional[list[str]] = None
-    playlist_items: Optional[list[str]] = None   # merged-series: owning item id per path
-    shuffle: Optional[bool] = None
-    shuffle_scope: Optional[str] = None
-    audio_sel: Optional[dict] = None             # the resolvable descriptors, not raw indices —
-    subtitle_sel: Optional[dict] = None          # indices drift between releases (LIBRARY_DATA.md)
-    audio_offset_ms: Optional[int] = None
-
-
-class PlaybackYieldReq(BaseModel):
-    """The source device's answer to a yield command: its EXACT final playhead
-    plus whatever continuity it holds, posted the instant before it tears its
-    player down. The puller is blocked on this (up to PLAYBACK_YIELD_WAIT_SECS),
-    which is what makes a pulled-over episode land on the same frame instead of
-    up to a beat behind."""
-    device_id: str = ""              # must match the session's owner, else ignored
-    position_sec: Optional[float] = None
-    duration_sec: Optional[float] = None
-    playlist: Optional[list[str]] = None
-    playlist_items: Optional[list[str]] = None
-    shuffle: Optional[bool] = None
-    shuffle_scope: Optional[str] = None
-    audio_sel: Optional[dict] = None
-    subtitle_sel: Optional[dict] = None
-    audio_offset_ms: Optional[int] = None
-
-
-class PlaybackPullReq(BaseModel):
-    session_id: str                  # the session to take over
-    device_id: str = ""              # the puller, so it never yields itself
-    device_name: str = ""            # shown on the source device's "moved to …" notice
-    profile_id: str = ""             # the puller's profile — checked against the session's
-
-
-class LibraryPlayReq(BaseModel):
-    profile_id: str
-    files: list[str] = []         # ordered list of absolute paths to play as a playlist
-    seek_first_to: Optional[float] = None  # seek into the first file (seconds)
-    shuffle: bool = False         # Shuffle Play: `files` is a temp random order — record
-                                  # it so next/prev navigate the shuffle, not natural order
-    shuffle_scope: str = ""       # last-used pool ("all" | "unwatched"), persisted so a
-                                  # later Resume can re-shuffle the same scope
-    items: list[str] = []         # merged-series play: the owning item id for each entry in
-                                  # `files` (same length/order). When set, playback spans
-                                  # these items and the tracker re-targets library_item_id.
-    force_vlc: bool = False       # ignore settings.tv_playback_mode and play on VLC. Set by
-                                  # every "switch to VLC" path — the More-panel surface
-                                  # toggle and the automatic on-device fallback — which
-                                  # would otherwise be routed straight back to the surface
-                                  # they are trying to leave (an infinite bounce).
-
-
-class MarkWatchedReq(BaseModel):
-    profile_id: str
-    watched: bool
-    file_paths: list[str] = []    # specific paths; empty = all files in item
-    season: Optional[int] = None  # if set (and file_paths empty), filter to this season
-
-
-class AdminLoginReq(BaseModel):
-    password: str
-
-
-class AdminItemLockReq(BaseModel):
-    admin_only: bool
-
-
-class AdminSettingsReq(BaseModel):
-    indexer_categories: Optional[str] = None
-    tmdb_api_key: Optional[str] = None
-    hls_ladder: Optional[list[int]] = None   # ABR down-rung heights for new preps
-
-
-class ScheduledRebootReq(BaseModel):
-    enabled: bool = False
-    time: str = "00:00"                       # local HH:MM in `timezone`
-    timezone: str = "America/Los_Angeles"     # IANA name; "" = system local
-    idle_minutes: int = 15                     # idle window before a reboot fires
-    catch_up_hours: int = 4                    # how long after `time` the reboot may still fire; clamped 1–24
-
-
-class AutoPrepReq(BaseModel):
-    mode: str = "off"                          # "always" | "idle" | "off"
-    idle_minutes: int = 30                     # idle mode: prep after this many minutes with no activity; clamped 1–720
-    on_activity: str = "hard"                  # idle mode: "hard" ⇒ kill in-flight on activity · "soft" ⇒ let it finish
-
-
-class PlayPrepReq(BaseModel):
-    enabled: bool = True                       # auto on-device prep of the playing episode (+ playlist tail) on every VLC play
-
-
-class DownloadRaceReq(BaseModel):
-    enabled: bool = False                      # off by default: racing multiplies bandwidth and disk
-    size: int = 3                              # candidates per race (2-4)
-    max_items: int = 2                         # concurrent races, box-wide
-    quality_ceiling: int = 1080                # the HQ track's target tier (720/1080/2160)
-    hq_upgrade: bool = True                    # keep a better copy and swap it in when it lands
-
-
-class ClientLogAutoReq(BaseModel):
-    enabled: bool = False                      # apps send their diagnostic log on their own
-
-
-class PackFirstReq(BaseModel):
-    enabled: bool = True                       # auto picker may answer a one-episode request with a season pack
-    max_bytes: int = _PACK_FIRST_MAX_BYTES     # hard refusal above this torrent size, whatever the per-episode share
-
-
-class StreamFocusReq(BaseModel):
-    pack_focus: bool = True                    # deselect the other files in a pack while one is streamed
-    sibling_kbps: int = 512                    # total KB/s the OTHER downloads share meanwhile (0 = no throttle)
-
-
-class MissingContentReq(BaseModel):
-    enabled: bool = True                       # library shows seasons/episodes the show has but this box hasn't downloaded
-    show_unaired: bool = False                 # include not-yet-aired TMDb episodes (as "Upcoming") instead of hiding them
-
-
-class PrepValidateReq(BaseModel):
-    mode: str = "off"                          # "off" | "before" | "after" — auto deep-validate/remux-repair a source as it rides through bulk prep
-
-
-class NetworkReq(BaseModel):
-    preferred_adapter: str = ""                # physical interface NAME to make primary; "" = auto-pick
-
-
-class ForcePrepReq(BaseModel):
-    item_id: Optional[str] = None              # force-prep one library item; None/"" ⇒ whole library
-
-
-class ForcePrepStopReq(BaseModel):
-    hard: bool = False                         # True ⇒ kill the in-flight encode now; False ⇒ let the current file finish, then cancel the rest
-
-
-class CacheAutopurgeReq(BaseModel):
-    enabled: bool = False
-    max_gb: float = 50.0                        # purge orphan offline-cache bundles once .offline_cache/ reaches this many GB; clamped 1–10000
-
-
-class SourceEvictionReq(BaseModel):
-    """settings.source_eviction — delete a prepped file's SOURCE, keep its bundle.
-
-    `enabled` only arms the sweep; the dry run works while it is off, which is how
-    you size the feature before letting it delete anything. Every field is clamped
-    server-side by `srcevict.policy_from` (and `target_gb` is forced above
-    `floor_gb`, so a disk sitting on the line can't sweep one file per tick)."""
-    enabled: bool = False
-    idle_days: int = srcevict.DEFAULT_IDLE_DAYS                   # since a series was last PLAYED
-    never_played_days: int = srcevict.DEFAULT_NEVER_PLAYED_DAYS   # since DOWNLOAD, for a series nobody opened
-    floor_gb: float = srcevict.DEFAULT_FLOOR_GB                   # free space that starts a sweep
-    target_gb: float = srcevict.DEFAULT_TARGET_GB                 # free space that stops it
-
-
-class ValidateFilesReq(BaseModel):
-    scope: Optional[str] = None                 # None/""/"all" ⇒ whole library; else a library item id
-    deep: bool = True                           # True ⇒ full ffmpeg decode (catches mid-file corruption); False ⇒ quick ffprobe header check
-
-
-class BundleAuditReq(BaseModel):
-    scope: Optional[str] = None                 # None/""/"all" ⇒ every prepped file; else a library item id
-    dry_run: bool = False                       # report damage WITHOUT purging the bundle or re-queuing prep
-
-
-class RepairFilesReq(BaseModel):
-    paths: Optional[list[str]] = None           # specific files to repair; defaults to the last validation scan's damaged list
-    reencode: bool = False                      # allow a lossy re-encode fallback when a lossless remux can't fix it
-
-
-class CompressFilesReq(BaseModel):
-    scope: Optional[str] = None                 # None/""/"all" ⇒ whole library; else a library item id
-    level: str = "balanced"                     # light | balanced | maximum (ignored when `crf` is set)
-    codec: str = "h264"                         # h264 | hevc
-    crf: Optional[int] = None                   # Advanced override (18–32); disables the preset's down-scaling
-
-
-class CompressEstimateReq(BaseModel):
-    scope: Optional[str] = None
-    level: str = "balanced"
-    codec: str = "h264"
-
-
-class HlsTrimReq(BaseModel):
-    heights: list[int] = []                     # ABR down-rung heights to KEEP (original is always kept)
-    dry_run: bool = False                       # True ⇒ only report bytes that WOULD be freed
-    scope: Optional[str] = None                 # None/""/"all" ⇒ every bundle; else a library item id
-
-
-class HlsResyncReq(BaseModel):
-    dry_run: bool = False                       # True ⇒ only count bundles that LOOK misaligned
-    scope: Optional[str] = None                 # None/""/"all" ⇒ every bundle; else a library item id
-
-
-class OndemandOnlyReq(BaseModel):
-    item_id: str
-    enabled: bool                               # True ⇒ on-device playback uses JIT only; no permanent bundle
-
-
-class OndemandOnlyLockReq(BaseModel):
-    item_id: str
-    locked: bool                                # True ⇒ non-admin dashboard users can't change the on-demand-only flag
-
-
-class SeriesLockReq(BaseModel):
-    locked: bool                                # series-wide on-demand-only lock (series key is in the path)
-
-
-class OndemandOnlyUserReq(BaseModel):
-    enabled: bool                               # user-facing toggle (item id is in the path); honours the admin lock
-
-
-class AutoMaintReq(BaseModel):
-    # `validate` is the wire/JSON key (UI sends {fingerprint, validate}); the Python
-    # attribute is renamed via alias so it doesn't shadow pydantic BaseModel.validate.
-    model_config = ConfigDict(populate_by_name=True)
-    fingerprint: bool = True                              # auto-run Smart Skip analysis for never-fingerprinted series while idle
-    validate_files: bool = Field(True, alias="validate")  # auto deep-validate never-validated source files while idle
-    bundles: bool = True                                  # auto-audit prepped HLS bundles for frozen-picture damage while idle
-
-
-class SttConfigReq(BaseModel):
-    enabled: bool = True
-    translate: bool = True                     # also emit an English track for non-English audio
-
-
-class SubsConfigReq(BaseModel):
-    # Unified subtitle policy (settings.subtitles). `default_language` is the
-    # preferred subtitle language (3-letter code; "" = Any). `on_by_default` is
-    # the admin default for subs on/off (a profile may override). `auto_search`
-    # fetches a preferred-language sub online on playback when none is embedded.
-    default_language: str = "eng"
-    on_by_default: bool = False
-    auto_search: bool = True
-    upgrade_late_subs: bool = True
-    single_option: bool = True
-
-
-class BookmarkReq(BaseModel):
-    # One TMDb title, in the /api/tmdb/search candidate shape (bookmarks.normalize
-    # keeps only what a bookmark stores).
-    id: int
-    kind: str
-    title: str
-    year: str = ""
-    poster_path: str = ""
-    date: str = ""
-
-
-class BookmarkSeenReq(BaseModel):
-    # "kind:tmdb_id" keys to clear the NEW flag on; None = every bookmark.
-    keys: Optional[list[str]] = None
-
-
-class EpisodeViewReq(BaseModel):
-    # Which arrangement of a show this profile sees on the episode page: a TMDb
-    # episode group id, or None for TMDb's own seasons (the default).
-    tmdb_id: int
-    group_id: Optional[str] = None
-
-
-class ProfileSubsReq(BaseModel):
-    # Per-profile override of the admin subs-on/off default.
-    # None ⇒ inherit the admin default; True/False ⇒ force on/off for this profile.
-    subtitles_on: Optional[bool] = None
-
-
-class QbitLimitsReq(BaseModel):
-    ratio_enabled: bool = False                # stop seeding once max_ratio is reached
-    ratio: float = 1.0                         # share ratio (uploaded / downloaded); clamped 0–9998
-    dl_limit_bytes: int = 0                    # global download cap, bytes/sec (0 = unlimited)
-    up_limit_bytes: int = 0                    # global upload cap, bytes/sec (0 = unlimited)
-
-
-class PrepPauseReq(BaseModel):
-    # True ⇒ terminate the file ffmpeg is encoding right now (instant relief, partial
-    # work is discarded); False ⇒ let the in-flight file finish, then hold the rest.
-    kill: bool = False
-
-
-class MetadataRefreshReq(BaseModel):
-    tmdb_id: Optional[int] = None     # manual override; pairs with `kind`
-    kind: Optional[str] = None        # "tv" | "movie"
-
-
-class MetadataSetReq(BaseModel):
-    """User-driven metadata correction (any profile — not admin-gated).
-
-    mode="tmdb"   → force-bind a chosen TMDb entry (tmdb_id + kind); pulls full
-                    episode data and is stamped source="manual".
-    mode="custom" → hand-entered metadata; needs no TMDb key, stamped
-                    source="custom". Art is supplied as absolute image URLs."""
-    mode: str = "tmdb"                     # "tmdb" | "custom"
-    tmdb_id: Optional[int] = None          # mode=tmdb
-    kind: Optional[str] = None             # "tv" | "movie"
-    # custom fields (mode=custom) ↓
-    title: Optional[str] = None
-    overview: Optional[str] = None
-    year: Optional[str] = None
-    vote_average: Optional[float] = None
-    poster_url: Optional[str] = None       # absolute image URL
-    backdrop_url: Optional[str] = None     # absolute image URL
-    genres: Optional[list[str]] = None
-
-
-class RenameReq(BaseModel):
-    name: str                         # new series name (or movie title for one-offs)
-
-
-class MoveReq(BaseModel):
-    dest_dir: str                     # destination directory for the series' files
-
-
-class ProfilePinReq(BaseModel):
-    pin: str          # 4 digits to set, "" to clear
-    current_pin: str = ""  # required when changing an existing PIN without admin token
-
-
-class ProfileElevatedReq(BaseModel):
-    elevated: bool    # whether this profile can view admin-only library items
-
-
-class ProfileIndexersReq(BaseModel):
-    allowed: list[str] = []   # indexer IDs this profile may search; [] = unrestricted
-
-
-class ProfileAutoSkipReq(BaseModel):
-    auto_skip_intro: Optional[bool] = None
-    auto_skip_credits: Optional[bool] = None
-
-
-class ProfileResumeModeReq(BaseModel):
-    resume_mode: str  # "auto" | "prompt" | "off"
-
-
-class MaxVolumeReq(BaseModel):
-    max_volume: int   # 0-200; 200 = no cap
-
-
-class VlcStartVolumeReq(BaseModel):
-    vlc_start_volume: int   # 0-100; % of the max-volume cap applied to VLC at startup
-
-
-class NightModeReq(BaseModel):
-    night_mode: Optional[bool] = None   # VLC dynamic-range compressor on/off (omit to leave unchanged)
-    preset: Optional[str] = None        # intensity preset: light|medium|max (omit to leave unchanged)
-
-
-class SystemVolumeDefaultReq(BaseModel):
-    system_volume_default: int   # 0-100; OS volume restored when YouTube stops
-
-
-class YouTubeStartVolumeReq(BaseModel):
-    youtube_start_volume: int   # 0-100; OS volume pre-set before a YouTube play starts
-
-
-class HostVolumeReq(BaseModel):
-    host_volume: int  # 0-100; live host OS mixer volume
-
-
-class WindowControlReq(BaseModel):
-    action: str = "toggle"        # "pause" | "resume" | "toggle"
-    seconds: int = 0              # pause duration; 0 (or omitted) = until the user resumes
-
-
-class SkipNowReq(BaseModel):
-    type: str         # "intro" or "credits"
-
-
-class AdminSkipDataReq(BaseModel):
-    file_path: str
-    intro_start: Optional[float] = None    # null = clear intro
-    intro_end:   Optional[float] = None
-    credits_start: Optional[float] = None  # null = clear credits
-
-
-class BackgroundVolumeReq(BaseModel):
-    volume: int       # 0-200
-
-
-class BackgroundEnabledReq(BaseModel):
-    enabled: bool
-
+# The request models (every route's body) are in backend/models.py.
 
 def _profile_simple_ui(p: dict) -> bool:
     """Does this profile get the simplified UI?
@@ -16605,10 +15533,6 @@ def _profile_simple_ui(p: dict) -> bool:
     if v is None:
         return not bool(p.get("elevated", False))
     return bool(v)
-
-
-class ProfileSimpleUiReq(BaseModel):
-    simple_ui: Optional[bool] = None   # None clears the override (back to the default)
 
 
 # ── Routes: Profiles ─────────────────────────────────────────────────────────
@@ -25499,7 +24423,6 @@ async def playback_pull(req: PlaybackPullReq) -> JSONResponse:
     _playback_bump_rev()
     await broadcast("state", state_snapshot())
     return JSONResponse(payload)
-
 
 
 @app.get("/api/settings/tv-playback-mode")

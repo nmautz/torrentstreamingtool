@@ -1,8 +1,93 @@
-# Backend (`main.py`)
+# Backend (`main.py` + `backend/`)
 
-3615 lines. Everything server-side lives here except Smart Skip (`analyzer.py`).
+`main.py` is the FastAPI app: every route, the lifespan, the background tasks
+and `AppState`. It is about 41,000 lines and is being split into the `backend/`
+package (see below). Smart Skip is in `analyzer.py`, and the pure rules live in
+the top-level leaf modules listed in CLAUDE.md.
+
+## Splitting main.py
+
+The split started in 20.25.6. **The rule for every step: move code, never change
+it.** A step takes whole top-level statements out of main.py exactly as written,
+puts them in a `backend/` module, and main.py imports every name back
+(`from backend.x import (...)`, in the block under `import winaccept_patch`).
+So `main.<name>`, `globals()` lookups and every caller still in main.py see
+exactly what they saw before.
+
+### What has moved
+
+| Module | What it holds | Was in main.py under |
+|--------|---------------|----------------------|
+| `backend/models.py` | Every request model (the route bodies). Part of the API: the OpenAPI hash pins it | Request Models |
+| `backend/release_names.py` | `extract_hash`, `parse_season_episode`, `parse_torrent_title` + its `_TT_*` regexes, `_YEAR_RE`, `_strip_release_tags` | Utilities, Search-result title parsing, TMDb |
+| `backend/filelist.py` | `VIDEO_EXTS`, `build_file_list`, `largest_video`, `human_size`, `_file_by_index` | (under a stale "Release audio-language classification" header) |
+| `backend/resume.py` | `find_resume_hint`, `find_series_resume_hint` and their helpers | Resume |
+| `backend/packslice.py` | The pack-slicing limits only; the functions still need the core | Pack slicing |
+
+### The rules (each one is a way a split fails without an error)
+
+1. **backend/ never imports main.** main.py is the composition root: it imports
+   the package, never the other way round, so there is no import cycle.
+2. **Never `from x import NAME` when NAME is rebound at runtime** (`global NAME;
+   NAME = ...`). The importer keeps the old object. Read it as `x.NAME`. Today
+   that means about 45 globals in main.py, including `settings` (reloaded),
+   `qbit`, `vlc_client`, `_lib_lock` and `_MAIN_LOOP` (all built in the lifespan).
+3. **A top-level def/class lives in one place.** A move that leaves the old copy
+   behind gives two versions, and which one runs depends on import order.
+4. **The importer never rebinds a name it imported from backend/.**
+5. **Bottom-up only.** A module may use stdlib, third-party packages, the leaf
+   modules and *already-moved* backend modules. Anything still defined in main.py
+   blocks the move: move that first.
+6. **No `from __future__` in backend/** (`tests/_backend_src.py` joins the sources).
+
+Rules 1-4 and 6 are checked by `tests/test_backend_layout.py` (in `make test`).
+
+### How a move is made
+
+`tests/move_to_backend.py --to backend/NAME.py --doc "..." START-END ...` moves
+line ranges verbatim and writes the new module's imports from pyflakes' list of
+undefined names. A name still defined in main.py is reported as a **blocker** and
+nothing is written (`--dry` shows the blockers first). It adds the re-import to
+main.py and preserves the file's line endings. It needs pyflakes: run it with an
+interpreter that has it, or set `PYFLAKES_PYTHON`. Re-find the line numbers
+before every move, since each move shifts them. Afterwards, leave a one-line
+pointer comment where the code was.
+
+### How a move is checked
+
+| Check | Catches |
+|-------|---------|
+| `python tests/surface_snapshot.py` (`make surface`; needs the venv, `.venv\Scripts\python` on Windows) | A route lost, added, reordered (Starlette matches the first route that fits) or re-signatured; a request model changed (OpenAPI hash); middleware order; a name main.py used to export. Re-pin with `--write` **only** for a change you meant |
+| `python tests/test_backend_layout.py` | The rules above |
+| pyflakes on main.py and backend/ | An undefined name: the one mistake no import-time check sees, because it fails only when that function runs. Not a project dependency; install it in a throwaway venv. The "undefined name" lines for main.py must match the baseline (`_lib_lock` x3, `Iterable` x1 in 20.25.6) |
+| `make test` | The dozen tests that copy functions out of the source by name now read main.py **plus** backend/ (`tests/_backend_src.py`), so a moved function is still found |
+
+### Order of work
+
+At function level about 73% of main.py has no cycles, so it can move bottom-up
+with no redesign. The rest is one strongly connected knot of about 190 names
+(about 10,000 lines) that call each other through the library, the state and the
+qBit client. In order:
+
+1. **Pure leaves** (done in 20.25.6, more remain): code that needs only its inputs.
+2. **The core**: `Settings`/`settings`, logging, library storage (`get_library`,
+   `put_library`, `mutate_library`, `_lib_lock`), `AppState`/`state`, the SSE
+   broadcast, the qBit and VLC clients. Everything else stands on these. Rule 2
+   makes this a design step, not a move: the runtime-built objects (`qbit`,
+   `vlc_client`, `_lib_lock`, `_MAIN_LOOP`, `settings` on reload) need a home
+   that is read through its module (`runtime.qbit`), or must stop being rebound.
+   A few foundation pieces are misplaced and must move first (`UI_VERSION` sits
+   in the env-key section; `Settings` uses `remote_volume_guard` from the HID
+   remote section).
+3. **Subsystems** on top of the core, one per module: TMDb, subtitles, pack
+   slicing, racing, the download monitor, bundles/HLS, source eviction, the reaper.
+4. **Routes last**, as `APIRouter`s included in exactly the order the routes are
+   registered today. The surface snapshot proves the order held.
 
 ## Section map (in source order)
+
+> Written when main.py was 3,600 lines. The line numbers are long out of date;
+> the section names still match the `# ── X ──` headers in main.py.
 
 | Lines | Section |
 |------:|---------|

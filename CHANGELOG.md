@@ -1,5 +1,26 @@
 # Changelog
 
+## [20.25.6] — 2026-10-18
+
+### Changed
+- **main.py has started moving into a `backend/` package.** At 42,000 lines
+  the server file had become too big to work in safely. This first step moves
+  about 1,200 lines that need nothing but their inputs: the request models
+  (`backend/models.py`), reading a torrent's name (`backend/release_names.py`),
+  a torrent's file list (`backend/filelist.py`), where Resume lands
+  (`backend/resume.py`) and the pack-slicing limits (`backend/packslice.py`).
+  The code was moved line for line, and main.py still exports every name it did
+  before, so the server does exactly what it did.
+- **Checks that keep the split honest.** `tests/surface_snapshot.py` (`make
+  surface`, needs the venv) pins every route in the order it is registered, the
+  request models and every name main.py exports, and fails if a move changes
+  any of them. `tests/test_backend_layout.py` (in `make test`) catches the ways
+  a move can go wrong without an error: backend/ importing main, a copy of a
+  function left behind, a name changed in one module but not the other. The
+  tests that copy functions out of main.py's source now also look in backend/.
+  `tests/move_to_backend.py` does the moving: line ranges go into a new module
+  unchanged, and it refuses while anything they need is still in main.py.
+
 ## [20.25.5] — 2026-10-18
 
 ### Fixed

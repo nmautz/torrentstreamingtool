@@ -37,6 +37,7 @@ Each entry is a short hook so future Claude instances can jump straight to the r
 |-----|-----------------|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Always read this first if you're unfamiliar with the repo. Service topology, process model, code map, lifecycle, key invariants. |
 | [docs/BACKEND.md](docs/BACKEND.md) | Working on `main.py`. Section map by line range, `AppState` field reference, background-task descriptions, pipeline flow, qBit/VLC client notes. |
+| `backend/` (package) | **main.py is being split into it** (20.25.6). Code is moved line for line and re-exported by main, so `main.<name>` still works; backend/ never imports main. **Before moving anything, read [docs/BACKEND.md § Splitting main.py](docs/BACKEND.md)**: the rules (no `from x import` of a runtime-rebound global; bottom-up only) and the checks (`tests/surface_snapshot.py` with the venv, `tests/test_backend_layout.py`, pyflakes). Move with `tests/move_to_backend.py`, not by hand. A function you can't find in main.py is probably here. |
 | [docs/FRONTEND.md](docs/FRONTEND.md) | Working on `static/index.html` or `static/admin.html`. HTML section map, JS function list, SSE handlers, render functions, init flow. |
 | [docs/API.md](docs/API.md) | Adding/modifying an endpoint, or building a new UI feature that calls one. Every route with method, path, request shape, notes. SSE event catalog. |
 | [docs/LIBRARY_DATA.md](docs/LIBRARY_DATA.md) | Touching `library.json` schema (profiles, items, progress, skip_data, settings). Includes the migration logic. |
@@ -135,6 +136,11 @@ make test                 # pure unit tests for the leaf modules (no deps, no ve
                           #   python tests/test_appchannel.py
                           #   python tests/test_voicestatus.py
                           #   python tests/test_voicepick.py
+                          #   python tests/test_backend_layout.py
+make surface              # the backend's routes / request models / exported
+                          # names vs tests/fixtures/main_surface.json. Needs the
+                          # venv: .venv\Scripts\python tests\surface_snapshot.py
+                          # on Windows. Run after every main.py -> backend/ move.
                           # tests/search_eval/ is the LIVE search-accuracy kit
                           # (69 hand-labelled shows) - run verify.py against a
                           # box before trusting a change to episode matching.
