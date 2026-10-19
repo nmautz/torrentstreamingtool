@@ -839,7 +839,7 @@ def _proc_stats() -> dict:
 
 _disk_prev: dict = {}                       # last raw counters, for the next delta
 _disk_busy = threading.Lock()               # one sample at a time, even after a timeout
-_drive_map: dict = {"t": 0.0, "map": {}}
+_drive_map: dict = {"t": None, "map": {}}  # t: monotonic of the last lookup, None = never
 _disk_pool = None                           # a private one-thread executor (see disk_sample_async)
 
 
@@ -890,15 +890,23 @@ def _windows_drive_map() -> dict:
 
 
 def _drive_names() -> dict:
+    # `t` starts as None, not 0: Windows' monotonic clock counts from boot, so a
+    # 0 start meant no lookup for the first 10 minutes after a reboot (20.25.3).
     now = time.monotonic()
-    if now - _drive_map["t"] >= DRIVE_MAP_TTL_S:
+    last = _drive_map["t"]
+    if last is None or now - last >= DRIVE_MAP_TTL_S:
         _drive_map["t"] = now
+        old = _drive_map["map"]
         try:
-            _drive_map["map"] = _windows_drive_map() if sys.platform == "win32" else {}
+            new = _windows_drive_map() if sys.platform == "win32" else {}
         except Exception as exc:
             log.warning("disk sampler: drive letters unavailable (%s: %s); "
                         "showing physical names", type(exc).__name__, exc)
-            _drive_map["map"] = {}
+            new = {}
+        if sys.platform == "win32" and (last is None or new != old):
+            log.info("disk sampler: drives %s", ", ".join(
+                f"{k}={v}" for k, v in sorted(new.items())) or "(no letter found)")
+        _drive_map["map"] = new
     return _drive_map["map"]
 
 
@@ -1000,6 +1008,11 @@ async def disk_sample_async() -> None:
         state.disk_last = {"error": "timeout"}
 
 
+def _ms(v: float) -> str:
+    """`0.4` under 10 ms (an SSD), `850` above it."""
+    return f"{v:.1f}" if v < 10 else f"{v:.0f}"
+
+
 def _disk_fields(s: dict) -> str:
     """` dsk=F:850ms/22.0MBps,C:4ms/0.1MBps io=MsMpEng.exe:85.0r+0.0w io_denied=12`."""
     if s.get("disk_error"):
@@ -1007,7 +1020,7 @@ def _disk_fields(s: dict) -> str:
     if "disks" not in s:
         return ""
     # A letter already ends in ':' (`F:850ms`); a physical name gets one (`PhysicalDrive0:4ms`).
-    dsk = ",".join(f"{d['disk'].rstrip(':')}:{d['ms']:.0f}ms/{d['mbs']:.1f}MBps"
+    dsk = ",".join(f"{d['disk'].rstrip(':')}:{_ms(d['ms'])}ms/{d['mbs']:.1f}MBps"
                    for d in s["disks"]) or "-"
     io = ",".join(f"{p['name']}:{p['r_mbs']:.1f}r+{p['w_mbs']:.1f}w" for p in s["io_top"]) or "-"
     return f" dsk={dsk} io={io} io_denied={s.get('io_denied', 0)}"

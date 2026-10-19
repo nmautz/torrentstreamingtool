@@ -1,5 +1,14 @@
 # Changelog
 
+## [20.25.4] — 2026-10-18
+
+### Fixed
+- **The disk health line names drives by letter right after a restart.** On
+  the box it showed `PhysicalDrive2` instead of `F:`: the letter lookup waited
+  10 minutes after Windows started, because Windows counts its clock from boot.
+  The main log now also says which letter each drive got. Fast drives show
+  `0.4ms` instead of `0ms`.
+
 ## [20.25.3] — 2026-10-18
 
 ### Added

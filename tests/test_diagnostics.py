@@ -252,7 +252,7 @@ try:
     ok("unreadable processes are counted", d["io_denied"] == 1, str(d))
     line = _line()
     ok("the vitals line carries the disks and the top list",
-       " dsk=F:850ms/30.0MBps,PhysicalDrive0:4ms/0.1MBps io=MsMpEng.exe:85.0r+0.0w," in line
+       " dsk=F:850ms/30.0MBps,PhysicalDrive0:4.0ms/0.1MBps io=MsMpEng.exe:85.0r+0.0w," in line
        and line.endswith(" io_denied=1"), line)
     bad = _bad()
     ok("a slow drive is an anomaly that names the busiest process",
@@ -284,6 +284,26 @@ finally:
     diag.psutil, diag._drive_names, diag.time.monotonic = _real_psutil, _real_names, _real_mono
     diag.state.disk_last = {}
     diag._disk_prev.clear()
+
+# The drive-letter lookup must run on the first sample even when the monotonic
+# clock is small: Windows counts it from boot (20.25.3 never looked it up in the
+# first 10 minutes after a reboot).
+_real_win, _real_plat, _real_mono2 = diag._windows_drive_map, diag.sys.platform, diag.time.monotonic
+_looked = []
+diag._windows_drive_map = lambda: (_looked.append(1), {"PhysicalDrive2": "F:"})[1]
+diag.sys.platform = "win32"
+diag.time.monotonic = lambda: 90.0          # 90 s after boot
+diag._drive_map.update(t=None, map={})
+try:
+    got = diag._drive_names()
+    ok("letters are looked up on the first sample, however soon after boot",
+       got == {"PhysicalDrive2": "F:"} and _looked == [1], str(got))
+    diag._drive_names()
+    ok("and not again within the refresh interval", _looked == [1])
+finally:
+    diag._windows_drive_map, diag.sys.platform, diag.time.monotonic = _real_win, _real_plat, _real_mono2
+    diag._drive_map.update(t=None, map={})
+ok("sub-10 ms latency keeps a decimal", diag._ms(0.43) == "0.4" and diag._ms(850.2) == "850")
 
 ok("Linux partitions and loop devices are skipped, disks kept",
    [n for n in ("loop0", "ram1", "sda", "nvme0n1") if not diag._skip_disk(n)]

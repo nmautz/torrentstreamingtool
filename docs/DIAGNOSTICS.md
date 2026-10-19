@@ -727,8 +727,11 @@ a delta over the 30 s since the previous sample:
   (read + write time over read + write count) and MB/s. An idle hard disk is
   5-20 ms; hundreds means everything that touches it, `library.json` saves
   included, queues. On Windows a drive is named by its letter (`F:`, or `C:+D:`
-  when one disk holds both), found with `IOCTL_STORAGE_GET_DEVICE_NUMBER` and
-  refreshed every 10 min; a volume spanning disks keeps `PhysicalDriveN`. Linux
+  when one disk holds both), found with `IOCTL_STORAGE_GET_DEVICE_NUMBER` on
+  the first sample and every 10 min after; the app log says what it found
+  (`disk sampler: drives PhysicalDrive0=C:, PhysicalDrive2=F:`) at start and on
+  any change. A volume spanning disks keeps `PhysicalDriveN`. Under 10 ms the
+  time keeps a decimal (`0.4ms`, an SSD). Linux
   shows `sda` / `nvme0n1` (partitions and loop devices skipped); macOS `disk0`.
 - `io=` the `IO_TOP_N` processes that moved the most bytes, at least 1 MB/s,
   as read + write MB/s; `-` when none did. **These are `io_counters()`: on
