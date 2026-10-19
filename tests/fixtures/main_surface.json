@@ -3482,12 +3482,6 @@
     "timeout:POSITIONAL_OR_KEYWORD"
    ]
   },
-  "_jackett_cookie": {
-   "kind": "value"
-  },
-  "_jackett_cookie_expiry": {
-   "kind": "value"
-  },
   "_jackett_dashboard_url": {
    "kind": "async def",
    "params": [

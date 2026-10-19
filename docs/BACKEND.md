@@ -34,6 +34,8 @@ exactly what they saw before.
 | `backend/state.py` | `AppState` and `state` (never reassigned, safe to import) (20.25.10) | Global State |
 | `backend/sessions.py` | Profile session tokens (PIN proof, `profile_sessions.json`); `_profile_sessions` is private (rebound on load) (20.25.10) | Profile session tokens |
 | `backend/httpclients.py` | `_http_client`, the shared-SSL-context client factory (20.25.10) | Outbound HTTP clients |
+| `backend/jackett.py` | `_jackett_login`, `_jackett_admin` (Jackett's UI-API cookie; the cookie itself is private) (20.25.11) | Jackett Session |
+| `backend/auth.py` | `_admin_sessions`, `_check_admin`, `_require_admin`, the profile-authorisation helpers (20.25.11) | Admin Auth, Profile authorisation |
 
 ### The rules (each one is a way a split fails without an error)
 
@@ -127,7 +129,9 @@ Batches, each shipped and checked on the box before the next:
   profile session tokens and the HTTP client factory. The SSE broadcast stays:
   `state_snapshot` reads from TV UI, HLS, STT, env keys and labels, so it moves
   after those.
-- **C5**: the qBit and VLC clients.
+- **C5**: the qBit and VLC clients. Not yet: the qBit client and "Skipped files
+  that exist anyway" need each other and the reaper's `_qbit_delete_reaped`; the
+  VLC client needs `broadcast` (SSE) and two TV UI helpers. Untangle those first.
 
 ## Section map (in source order)
 

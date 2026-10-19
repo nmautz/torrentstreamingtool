@@ -1,5 +1,13 @@
 # Changelog
 
+## [20.25.11] — 2026-10-19
+
+### Changed
+- **Admin sign-in checks, profile permissions and the Jackett admin session
+  moved out of main.py** (#64) into `backend/auth.py` and `backend/jackett.py`,
+  line for line. Signed-in admin sessions are kept in the same place as before,
+  so signing in works exactly as it did.
+
 ## [20.25.10] — 2026-10-19
 
 ### Changed
