@@ -1,5 +1,14 @@
 # Changelog
 
+## [20.25.10] — 2026-10-19
+
+### Changed
+- **The server state, PIN sessions and HTTP client factory moved out of
+  main.py** (#64) into `backend/state.py`, `backend/sessions.py` and
+  `backend/httpclients.py`, line for line. `state` is the same object
+  everywhere; the session store stays private to its module because loading
+  it from disk replaces it. main.py is now under 40,000 lines.
+
 ## [20.25.9] — 2026-10-19
 
 ### Changed

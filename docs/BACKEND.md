@@ -31,6 +31,9 @@ exactly what they saw before.
 | `backend/logs.py` | The whole logging setup: `log`, `hls_log`, `LOG_DIR`, client-log storage, `_log_version_banner`. Runs at import (20.25.8) | Logging |
 | `backend/library.py` | `library.json`: `LIBRARY_FILE`, `get_library` / `put_library` / `mutate_library` / `LibraryUnchanged`, `_migrate_item`, the durable save, snapshots and recovery, `_now_iso`, `_parse_iso_dt`, `_series_key`. Its private `_last_library_snapshot` / `_lock_holder_last` are NOT re-exported (rebound) (20.25.9) | Library Storage, Library durability, Smart Skip helpers |
 | `backend/story_order.py` | `_story_index`: a film's place in its saga, from its titles (20.25.9) | TMDb |
+| `backend/state.py` | `AppState` and `state` (never reassigned, safe to import) (20.25.10) | Global State |
+| `backend/sessions.py` | Profile session tokens (PIN proof, `profile_sessions.json`); `_profile_sessions` is private (rebound on load) (20.25.10) | Profile session tokens |
+| `backend/httpclients.py` | `_http_client`, the shared-SSL-context client factory (20.25.10) | Outbound HTTP clients |
 
 ### The rules (each one is a way a split fails without an error)
 
@@ -120,7 +123,10 @@ Batches, each shipped and checked on the box before the next:
   Checked by loading and saving a copy of library.json with the old and new
   code (identical), and by comparing the box's `/api/library` for every
   profile before and after.
-- **C4**: `AppState`/`state` and the SSE broadcast.
+- **C4** (partly done, 20.25.10): `AppState`/`state` (`backend/state.py`), the
+  profile session tokens and the HTTP client factory. The SSE broadcast stays:
+  `state_snapshot` reads from TV UI, HLS, STT, env keys and labels, so it moves
+  after those.
 - **C5**: the qBit and VLC clients.
 
 ## Section map (in source order)
@@ -172,7 +178,7 @@ Batches, each shipped and checked on the box before the next:
 | 3538–3611 | Routes: admin Smart Skip (skip-data CRUD, force analyze, analyzer status) |
 | 3615    | `app.mount("/", StaticFiles…)` — must be last so API routes win |
 
-## AppState fields ([main.py:138](../main.py#L138))
+## AppState fields ([backend/state.py](../backend/state.py))
 
 | Field | What it means |
 |-------|---------------|

@@ -22,7 +22,7 @@ All four services (VLC, qBittorrent, Jackett, dashboard) run on the same host ex
 
 ## Process model
 
-- **One Python process** runs FastAPI/uvicorn (the dashboard). All state is in-memory in `AppState` ([main.py:138](../main.py#L138)).
+- **One Python process** runs FastAPI/uvicorn (the dashboard). All state is in-memory in `AppState` ([backend/state.py](../backend/state.py)).
 - **External processes**: VLC, qBittorrent, Jackett — launched by `run.py` and supervised by `watchdog.py`. They keep running after the dashboard is stopped.
 - **VPN guard task** verifies the VPN every 3 s inside the dashboard process and kills `qbittorrent` via psutil on VPN drop. The verification method is set by `settings.vpn_killswitch.mode` (mirrored to `state.vpn_mode`): `mullvad` (`mullvad status`), `generic` (any VPN tunnel interface up), or `off` (disabled). The mode-read + generic tunnel check are shared across `main.py`/`run.py`/`watchdog.py` via the leaf module `vpncheck.py`.
 - **Persistence**: a single `library.json` file at the repo root. No database.
