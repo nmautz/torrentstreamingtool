@@ -1381,6 +1381,19 @@ also requires qBit's `save_path` to equal the destination (`_norm_path`) and its
 contain `moving`. The existence check runs through `to_thread`: it stats every file every 4 s,
 on the disk the move is writing to.
 
+**Don't start a move right after a restart, and don't let the ghost sweep near one (20.25.15).**
+The same day, a Steins;Gate move started a minute after a reboot. The watchdog kills qBit until
+the VPN is up, and it restarted qBit three minutes into the move: libtorrent stopped with 18.7 GB
+already on F:, and qBit came back with the OLD save path. The fixed settle correctly never
+committed. But `_ready_ghost_sweep` then saw 18 files missing from their library paths, forced a
+recheck, and qBit reset them to 0 % and started fetching them again onto C:. The sweep now skips
+items in `_MOVING_ITEM_IDS` (added at move start, removed only when an item settles, so a
+timed-out move stays protected until the process restarts) and torrents qBit reports as
+`moving` / `checking`. **Recovery:** run the same move again. qBit's `setLocation` keeps files
+that already exist at the destination, so a re-run finished at 100 % with nothing fetched again.
+Before moving after a reboot, check that qBit has been up a few minutes (its log's `Restored
+torrent` lines carry the time).
+
 ### "Ready" is gated on per-file completion, NOT qBit torrent state, when files are skipped/idle
 
 A skipped file (priority 0) and an idle-deferred file (priority 0 while the window is shut) are both *not-wanted* as far as qBittorrent is concerned, so qBit reports the torrent **complete** (`uploading`/`stalledUP`) the moment the *wanted* files finish — even though the skipped files will never arrive and the idle files haven't fetched yet. The old monitor flipped the item to `ready` on that state, which (a) made a partial selection look fully downloaded, (b) ran audio fingerprinting against a missing set, and (c) abandoned idle-deferred files (a `ready` item is excluded from the scheduler). The monitor now flips `ready` only when **`_all_nonskip_complete`** is true — every non-skip file ≥ 99.9% downloaded — so ready + fingerprint always wait for the complete kept set. Don't revert this to a bare `qstate in (uploading, …)` check. Skipped files are also filtered out of analysis (`_analyzable_files`) and the `_item_skip_status` chip so they don't show as perpetually "pending"/"failed".

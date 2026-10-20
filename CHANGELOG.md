@@ -1,5 +1,16 @@
 # Changelog
 
+## [20.25.15] — 2026-10-20
+
+### Fixed
+- **A move that was cut short no longer makes qBittorrent download the moved
+  files again.** When qBittorrent restarted in the middle of a Steins;Gate
+  move, the files already copied to F: looked missing from their old place,
+  and the missing-files check told qBittorrent to recheck the torrent, which
+  reset 18 episodes to 0 %. That check now leaves alone anything that is being
+  moved, or whose move did not finish. Running the move again picks up the
+  files already copied.
+
 ## [20.25.14] — 2026-10-20
 
 ### Fixed

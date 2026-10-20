@@ -5421,13 +5421,25 @@ async def _ready_ghost_sweep() -> int:
     for iid, title, h, pairs, gone in await asyncio.to_thread(_scan):
         if not gone:
             continue
+        # A move in progress, or one that never settled, has files at the new
+        # place while the library still names the old one. Rechecking then makes
+        # qBit forget them: on 2026-10-20 it reset 18 GB of a Steins;Gate move
+        # that qBit's restart had cut short. Re-running the move is the cure.
+        if iid in _MOVING_ITEM_IDS:
+            log.warning("[ghost] %s: %d file(s) not at their library path, but a "
+                        "move of this item has not settled - not rechecking (re-run "
+                        "the move if it timed out)", title, len(gone))
+            continue
         if len(gone) == len(pairs):
             log.warning("[ghost] %s: every wanted file is missing - drive offline or "
                         "moved? Not re-downloading.", title)
             continue
-        if not await qbit_info(h):
+        info = await qbit_info(h)
+        if not info:
             log.warning("[ghost] %s: %d file(s) missing and qBit no longer has the "
                         "torrent - use Admin > Cleanup > Recover", title, len(gone))
+            continue
+        if any(k in (info.get("state") or "") for k in ("moving", "checking")):
             continue
         await _recheck_for_ghosts(h, title, gone)
         revived.append(iid)
@@ -16122,6 +16134,9 @@ MOVE_SETTLE_POLL    = 4      # seconds between disk-existence checks
 # In-memory status of in-flight / recent series moves, keyed by the primary item
 # id. Surfaced via GET /api/library/{id}/move-status so the UI can show progress.
 _move_status: "dict[str, dict]" = {}
+# Items in a move that has not settled (in flight, or timed out this process).
+# The ghost sweep leaves them alone; see `_ready_ghost_sweep`.
+_MOVING_ITEM_IDS: set = set()
 
 
 def _move_caches_sync(old_files: list[dict], new_files: list[dict]) -> None:
@@ -16213,6 +16228,8 @@ async def _settle_series_move(primary_id: str, snapshot: list[dict], dest: str) 
                 done = False
             if not done:
                 still.append(s)
+            else:
+                _MOVING_ITEM_IDS.discard(s.get("id"))
         status["settled"] = status["total"] - len(still)
         pending = still
         if pending:
@@ -16314,6 +16331,7 @@ async def move_library_item(item_id: str, req: MoveReq, request: Request) -> JSO
     if all(s.get("skip") for s in snapshot):
         raise HTTPException(502, f"qBittorrent could not relocate: {', '.join(qbit_errors)}")
 
+    _MOVING_ITEM_IDS.update(s["id"] for s in snapshot if not s.get("skip"))
     asyncio.create_task(_settle_series_move(item_id, snapshot, str(dest)))
 
     return JSONResponse({

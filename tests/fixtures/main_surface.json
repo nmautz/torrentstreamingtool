@@ -1175,6 +1175,9 @@
   "_MISSING_TORRENT_RETRY_TICKS": {
    "kind": "value"
   },
+  "_MOVING_ITEM_IDS": {
+   "kind": "value"
+  },
   "_NATIVE_MASTER_NAME": {
    "kind": "value"
   },
