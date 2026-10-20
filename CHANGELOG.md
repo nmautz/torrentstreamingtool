@@ -1,5 +1,18 @@
 # Changelog
 
+## [20.25.16] — 2026-10-20
+
+### Fixed
+- **A download that failed because the disk was full now recovers on its
+  own.** When qBittorrent stops a torrent with an error, the library marks it
+  failed and never looked at it again, so Family Guy kept showing as failed
+  after qBittorrent had finished it. Once qBittorrent is seeding or fetching
+  the torrent again, the item goes back to downloading and then to ready.
+  Failures that carry a message (a fake release, a duplicate) are not touched.
+- The state the dashboard receives every 2 s no longer reads the settings file
+  from disk to ask about AI subtitles, which were retired in 17.0.0. With the
+  disk busy that read took 7.6 s.
+
 ## [20.25.15] — 2026-10-20
 
 ### Fixed

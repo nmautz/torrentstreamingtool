@@ -1277,6 +1277,9 @@
   "_PYCAW_LAST_ERROR": {
    "kind": "value"
   },
+  "_QBIT_ALIVE_STATES": {
+   "kind": "value"
+  },
   "_QBIT_DL_ACTIVE": {
    "kind": "value"
   },
@@ -3200,6 +3203,12 @@
    "params": [
     "lib:POSITIONAL_OR_KEYWORD",
     "idle_open:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_heal_qbit_error_items": {
+   "kind": "async def",
+   "params": [
+    "lib:POSITIONAL_OR_KEYWORD"
    ]
   },
   "_heal_sub_newlines": {

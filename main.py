@@ -916,7 +916,9 @@ def state_snapshot() -> dict:
         # binaries: with the feature off, the buttons stay gone even on a host
         # that still has whisper lying around (or gets it back on PATH). See
         # docs/STT.md.
-        "stt_available": _stt_available() and not AI_SUBTITLES_RETIRED,
+        # Retired first: the probe re-reads .env every 60 s, on the loop, from the
+        # 2 s broadcast, and held it 7.6 s with F: busy (2026-10-20).
+        "stt_available": not AI_SUBTITLES_RETIRED and _stt_available(),
         # True ⇒ bulk stream-prep is paused (drives the global prep bar's Resume control).
         "prep_paused": state.prep_paused,
         # Window control pause (non-admin "use the computer normally" override).
@@ -5455,6 +5457,56 @@ async def _ready_ghost_sweep() -> int:
     for iid in revived:
         await broadcast("library_update", {"item_id": iid, "status": "downloading"})
     return len(revived)
+
+
+# qBit states in which a torrent is plainly working again: seeding, or fetching.
+# A STOPPED torrent is not healed: someone or something stopped it, and an item
+# that errors again would otherwise flip error <-> downloading every tick.
+_QBIT_ALIVE_STATES = {"uploading", "stalledUP", "queuedUP", "forcedUP", "stoppedUP",
+                      "downloading", "stalledDL", "queuedDL", "forcedDL"}
+
+
+async def _heal_qbit_error_items(lib: dict) -> int:
+    """Hand back to the download monitor an item it marked `error` because qBit
+    said `error` / `missingFiles`, once qBit is working on the torrent again.
+
+    That branch of `library_download_monitor` sets `status: error` with no
+    message, and the monitor only ever looks at `downloading` items, so nothing
+    set it back. On 2026-10-20 a full C: put Family Guy's torrent in qBit's error
+    state; with room again qBit finished the download and seeded it, and the
+    library went on showing the show as failed. Items with an `error` message
+    (fake release, duplicate torrent) are a verdict, not a qBit state, and are
+    left alone, as is anything with no torrent."""
+    cands = [it for it in lib.get("items", [])
+             if it.get("status") == "error" and not it.get("error") and it.get("torrent_hash")]
+    if not cands:
+        return 0
+    tors = await qbit_info_all()
+    if tors is None:
+        return 0
+    by_hash = {(t.get("hash") or "").lower(): t for t in tors}
+    heal = {it["id"]: (by_hash.get(it["torrent_hash"].lower()) or {}).get("state", "")
+            for it in cands}
+    heal = {iid: st for iid, st in heal.items() if st in _QBIT_ALIVE_STATES}
+    if not heal:
+        return 0
+    healed: list = []
+    async with mutate_library() as lib_w:
+        for it in lib_w["items"]:
+            if it["id"] in heal and it.get("status") == "error" and not it.get("error"):
+                it["status"] = "downloading"      # the monitor flips it to ready
+                it.pop("stalled_since", None)
+                state.downloading_count += 1
+                if not it.get("admin_only"):
+                    state.downloading_count_visible += 1
+                healed.append((it["id"], it.get("title", "")))
+        if not healed:
+            raise LibraryUnchanged
+    for iid, title in healed:
+        log.info("qbit-error heal: %s - qBit reports %s now; back to the download "
+                 "monitor", title, heal[iid])
+        await broadcast("library_update", {"item_id": iid, "status": "downloading"})
+    return len(healed)
 
 
 async def _recheck_for_ghosts(h: str, title: str, gone: list[str]) -> bool:
@@ -34756,6 +34808,10 @@ async def background_maintenance_loop() -> None:
                 await _reconcile_evicted_sources()
             except Exception as exc:
                 log.warning("evict reconcile: %s", exc)
+            try:
+                await _heal_qbit_error_items(lib)
+            except Exception as exc:
+                log.warning("qbit-error heal: %s", exc)
             # Also unconditional, and not idle-gated: stats only, every 30 min.
             if time.monotonic() - _ghost_sweep_at >= _GHOST_SWEEP_EVERY_S:
                 _ghost_sweep_at = time.monotonic()

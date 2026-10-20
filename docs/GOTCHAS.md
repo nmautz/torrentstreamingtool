@@ -2608,8 +2608,15 @@ eligible (`would_free_bytes: 0`) and cannot help.
 Fix: automatic prep needs room for 1.25 × the source plus a 20 GiB reserve, both when
 it queues a job and again just before a bulk job encodes (STREAMING.md § Auto-prep).
 Not fixed: the download placement (`_auto_save_path`) still chooses a disk by free
-space without counting the bundles prep will add, and an item put in `error` by a
-qBit write error is not set back to `downloading` when there is room again.
+space without counting the bundles prep will add.
+
+An item put in `error` by a qBit write error now comes back by itself (20.25.16):
+`_heal_qbit_error_items`, every maintenance tick, returns an `error` item with **no
+message** and a torrent to `downloading` once qBit reports that torrent in a working
+state (`_QBIT_ALIVE_STATES`: seeding or fetching, not stopped), and the monitor flips
+it to `ready`. A message means a verdict (fake release, duplicate torrent) and is never
+healed; a stopped torrent is left alone so an item that errors again cannot flip every
+30 s. Tests: `tests/test_error_heal.py`.
 
 ### macOS hosts can't run HLS prep — TCC blocks ffmpeg from `~/Downloads`
 

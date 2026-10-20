@@ -38,6 +38,7 @@ test:
 	python3 tests/test_delete_locked.py
 	python3 tests/test_prep_gate.py
 	python3 tests/test_prep_space.py
+	python3 tests/test_error_heal.py
 	python3 tests/test_storage_volumes.py
 	python3 tests/test_devactivity.py
 	python3 tests/test_bookmarks.py
