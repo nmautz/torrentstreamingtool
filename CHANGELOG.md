@@ -1,5 +1,15 @@
 # Changelog
 
+## [20.25.13] — 2026-10-20
+
+### Fixed
+- **Two more pauses of 3-26 s, seen right after the 20.25.12 restart.** The
+  anime season pass that runs once after a start read the TMDb cache from disk
+  on the server's main loop, with the library locked, for 26 s. And while the
+  idle background video plays, a check every 3 s looked up two file paths on
+  disk, which took 3-5 s when the disk was busy. Both now run on a worker
+  thread.
+
 ## [20.25.12] — 2026-10-20
 
 ### Fixed

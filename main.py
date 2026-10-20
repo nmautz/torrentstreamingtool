@@ -8906,7 +8906,12 @@ async def background_video_loop() -> None:
                     if uri and uri.startswith("file://"):
                         cur = uri_to_path(uri)
                         try:
-                            is_bg = Path(bg["path"]).resolve() == Path(cur).resolve()
+                            # resolve() touches the disk on Windows; this runs every
+                            # 3 s while the bg video plays, and held the loop 3-5 s
+                            # with the disk busy (2026-10-20).
+                            is_bg = await asyncio.to_thread(
+                                lambda a, b: Path(a).resolve() == Path(b).resolve(),
+                                bg["path"], cur)
                         except Exception:
                             is_bg = True   # can't tell — leave it alone
                         if not is_bg:
@@ -9760,12 +9765,15 @@ async def anime_map_backfill() -> None:
                    if (it.get("files") and _anime_entries(it.get("metadata") or {}))]
         if not targets:
             return
-        moved = 0
+        def _apply(items: list) -> int:
+            # Reads the TMDb disk cache per item (`_ep_group_homes`): on the loop
+            # this held it 26.5 s after the 20.25.12 restart, lock and all.
+            want = set(targets)
+            return sum(1 for item in items if item["id"] in want
+                       and _reattribute_item_files(item, item.get("metadata") or {}))
+
         async with mutate_library() as lib_w:
-            for item in lib_w["items"]:
-                if item["id"] in targets and _reattribute_item_files(
-                        item, item.get("metadata") or {}):
-                    moved += 1
+            moved = await asyncio.to_thread(_apply, lib_w["items"])
             if not moved:
                 raise LibraryUnchanged
         log.info("Anime season backfill: %d of %d anime item(s) renumbered or "
