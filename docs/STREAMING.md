@@ -3105,6 +3105,24 @@ detector: a fresh interaction stamps `state.last_activity`, flipping
 **`idle` + hard** case so the kill lands on the request, not up to a tick later;
 `always`, `idle`+soft, and `off` are no-ops there (the loop handles them).
 
+**The sweep never touches the disk on the event loop (20.25.12).** Every per-file
+check (`exists`, the cache key's size, the unbuildable / unreadable signatures,
+`master.m3u8`) runs in `_prep_candidates_sync`, one worker-thread hop per item;
+`_maybe_start_prep_job` checks for a built bundle through `_bundle_dir_built_sync`
+the same way. `tests/test_prep_space.py` fails if either async function calls a
+disk-touching helper directly.
+
+**Free space (20.25.12).** Automatic prep does not queue a file whose disk has less
+free than `PREP_BUNDLE_FACTOR` (1.25) × its size plus `PREP_FREE_RESERVE_BYTES`
+(20 GiB). Free space is measured once per disk per sweep (keyed by `st_dev`) and each
+queued bundle's estimate is taken off it. `_run_offline_job` checks again before a
+**bulk** job encodes and ends it as `error` ("Not enough free disk space …") without
+starting ffmpeg; the next sweep queues it again once there is room. Interactive prep
+(Prep now, play-on-device) is not gated. The app log says
+`auto-prep: N file(s) on C:\ not queued, low disk space` at most once an hour per disk.
+Source eviction (§ Source eviction) is what frees space; this only stops prep making
+it worse. See [GOTCHAS.md](GOTCHAS.md) § Auto-prep filled the disk it was downloading to.
+
 See [ADMIN.md § Automatic Stream Prep](ADMIN.md) for the panel + endpoints.
 
 #### Per-file prep schedule (`item.prep`)

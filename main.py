@@ -31993,6 +31993,18 @@ async def _run_offline_job(job_id: str) -> None:
                 _bundle_index_register(out_dir.name, out_dir)
                 job["status"] = "done"; job["progress"] = 1.0
                 return
+        # Free-space gate, the backstop behind `_enqueue_library_prep`'s: a job
+        # queued while there was room can reach the slot after the disk filled.
+        # Bulk only: a person who pressed Prep gets ffmpeg's own error.
+        if is_bulk:
+            free, size = await asyncio.to_thread(_prep_room_sync, src)
+            if not _prep_space_ok(free, size):
+                job["status"] = "error"
+                job["error"] = (f"Not enough free disk space on {src.anchor or src.parent} "
+                                f"({human_size(free or 0)} free).")
+                hls_log.warning("job %s SKIPPED (low disk space, %s free) src=%s",
+                                job_id, human_size(free or 0), src)
+                return
         hls_log.info("job %s START src=%s out=%s", job_id, src, out_dir.name)
         tmp_dir = out_dir.with_name(out_dir.name + ".part")
         ffmpeg = analyzer.ffmpeg_bin()
@@ -33080,6 +33092,96 @@ async def _src_still_downloading(src: Path) -> bool:
     return False
 
 
+# Automatic prep leaves this much free on a disk beyond the bundle it is about to
+# write, and assumes a bundle is up to PREP_BUNDLE_FACTOR times its source (66
+# Family Guy bundles: 54 GB from 0.8 GB episodes). Before 20.25.12 auto-prep never
+# looked: on 2026-10-20 it took C: to 0 bytes under a 351 GB pack that was still
+# downloading, stalled 97 of its episodes, then failed ~60 encodes a minute on
+# "No space left on device". Interactive prep (a person pressed it) is not gated.
+# See docs/GOTCHAS.md § Auto-prep filled the disk it was downloading to.
+PREP_FREE_RESERVE_BYTES = 20 * 1024 ** 3
+PREP_BUNDLE_FACTOR = 1.25
+PREP_LOW_SPACE_LOG_SECS = 3600.0
+_PREP_LOW_SPACE_LOGGED: dict = {}   # disk anchor -> monotonic time last logged
+
+
+def _prep_space_ok(free: "Optional[int]", size: int) -> bool:
+    """Room on the disk for a bundle of a `size`-byte source plus the reserve.
+    An unmeasurable disk (`None`) is not refused: refusing it would stop prep on
+    every box whose `disk_usage` call fails, which is the old behaviour's opposite
+    and no safer."""
+    if free is None:
+        return True
+    return free >= int(size * PREP_BUNDLE_FACTOR) + PREP_FREE_RESERVE_BYTES
+
+
+def _disk_free_or_none(path) -> "Optional[int]":
+    try:
+        return int(shutil.disk_usage(path).free)
+    except OSError:
+        return None
+
+
+def _prep_room_sync(src: Path) -> "tuple[Optional[int], int]":
+    """`(free bytes on src's disk, src's size)` for the pre-encode space gate."""
+    try:
+        size = src.stat().st_size
+    except OSError:
+        size = 0
+    return _disk_free_or_none(src.parent), size
+
+
+def _prep_candidates_sync(item: dict, incomplete: set, prep_cfg: dict) -> list:
+    """The disk-touching half of `_enqueue_library_prep` for one item. Runs on a
+    worker thread, NEVER on the event loop.
+
+    Each file costs several `stat()` calls (the source, the cache key's size, two
+    signatures, `master.m3u8`). These used to run on the loop, one file at a time,
+    and an `await asyncio.sleep(0)` between files did not help: a stat on a busy
+    disk can take seconds by itself. On 2026-10-19 it froze the server eight
+    times in two hours, for up to 173 s, while the TV was playing; every stall
+    dump's loop sample was `_maybe_start_prep_job`'s `master.m3u8` exists().
+
+    Returns `(path, prio, size, dev, out_dir, built)` for each file automatic
+    prep should consider."""
+    out = []
+    for f in item.get("files", []):
+        raw = f.get("path", "")
+        p = Path(raw)
+        if p.suffix.lower() not in VIDEO_EXTS:
+            continue
+        # Files qBit hasn't finished yet are skipped outright — encoding one
+        # bakes a permanently-corrupt bundle onto the finished file's cache key.
+        if _norm_path(str(p)) in incomplete:
+            continue
+        # Per-file "never" opts a file out of all automatic stream-prep (the
+        # episode-picker prep bar). The bundle, if already built, is kept.
+        if _effective_prep_mode(prep_cfg, raw) == "never":
+            continue
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        key = _offline_cache_key_for(p.name, st.st_size)   # == _offline_cache_key(p)
+        # Prep already built a damaged bundle from this file twice and gave
+        # up. Without this the auto-prep timer would re-encode a holed source
+        # forever. The verdict is pinned to the file's signature, so a
+        # re-download or a repair retires it and this resumes on its own.
+        if _bundle_unbuildable(f, key):
+            continue
+        # ffprobe could not open it last time. Wait before asking again.
+        if _prep_unreadable_wait(p):
+            continue
+        out_dir = p.parent / OFFLINE_CACHE_DIRNAME / key
+        try:
+            built = (out_dir / "master.m3u8").exists()
+        except OSError:
+            built = False
+        prio = _PREP_PRIO_NUM.get(_effective_prep_priority(prep_cfg, raw), 1)
+        out.append((p, prio, st.st_size, st.st_dev, out_dir, built))
+    return out
+
+
 async def _enqueue_library_prep() -> int:
     """Queue a bulk HLS-prep job for every un-prepped video file in the library.
 
@@ -33087,60 +33189,61 @@ async def _enqueue_library_prep() -> int:
     skips files already cached or already queued, so re-running (e.g. on a
     mid-window restart) only adds genuinely-new work. Returns the count of files
     that still need prep (newly-queued + already in flight).
+
+    A file whose disk lacks room for its bundle plus `PREP_FREE_RESERVE_BYTES` is
+    not queued. Free space is measured once per disk per sweep and the estimate of
+    each bundle queued is taken off it, so one sweep can't queue 300 jobs against
+    25 GB. `_run_offline_job` checks again just before it encodes.
     """
     if not HLS_AVAILABLE:
         return 0
     lib = await get_library()
     queued = 0
+    free: dict = {}    # st_dev -> bytes free, less the bundles this sweep queued
+    short: dict = {}   # st_dev -> [disk anchor, files refused, bytes free]
     # One qBit call for the whole sweep. The completeness check no longer trusts
     # the item's status (see `_incomplete_download_paths`), so it now runs for
     # every item rather than the handful marked "downloading" — fetching the
     # torrent list once keeps that free.
     info_map = await _torrent_info_map()
     for item in lib.get("items", []):
-        if item.get("ondemand_only"):
+        if item.get("ondemand_only") or item.get("id", "") in state.ondemand_only_items:
             continue   # on-demand-only shows never get a permanent bundle
-        # Files qBit hasn't finished yet are skipped outright — encoding one
-        # bakes a permanently-corrupt bundle onto the finished file's cache key.
         incomplete = await _incomplete_download_paths(item, info_map=info_map)
         prep_cfg = _prep_cfg(item)
-        for f in item.get("files", []):
-            p = Path(f.get("path", ""))
-            if p.suffix.lower() not in VIDEO_EXTS:
-                continue
-            if _norm_path(str(p)) in incomplete:
-                continue
-            # Per-file "never" opts a file out of all automatic stream-prep (the
-            # episode-picker prep bar). The bundle, if already built, is kept.
-            if _effective_prep_mode(prep_cfg, f.get("path", "")) == "never":
-                continue
-            try:
-                if not p.exists():
-                    continue
-            except OSError:
-                continue
-            # Prep already built a damaged bundle from this file twice and gave
-            # up. Without this the auto-prep timer would re-encode a holed source
-            # forever. The verdict is pinned to the file's signature, so a
-            # re-download or a repair retires it and this resumes on its own.
-            if _bundle_unbuildable(f, _offline_cache_key(p)):
-                continue
-            # ffprobe could not open it last time. Wait before asking again.
-            if _prep_unreadable_wait(p):
-                continue
-            prio = _PREP_PRIO_NUM.get(_effective_prep_priority(prep_cfg, f.get("path", "")), 1)
-            st = await _maybe_start_prep_job(p, item.get("id", ""), prep_prio=prio)
-            if st.get("status") in ("processing", "pending", "paused"):
-                queued += 1
-            elif st.get("status") == "cached":
+        cands = await asyncio.to_thread(_prep_candidates_sync, item, incomplete, prep_cfg)
+        for p, prio, size, dev, out_dir, built in cands:
+            if built:
+                _bundle_index_register(out_dir.name, out_dir)
                 # Already HLS-prepped, so the post-encode STT hook never fires for
                 # it — check here so auto-prep still backfills generated subs for
                 # files prepped before STT existed (or before the lang setting).
                 await _ensure_stt_for(p, item.get("id", ""), queue="bulk")
-            # Yield between every file (sync FS stat + task spawn, no internal
-            # await) so scanning a large library never stalls the event loop and
-            # the dashboard stays responsive during the auto-prep enqueue.
+                continue
+            in_flight = any(j["src"] == str(p) and j["status"] in ("pending", "processing", "paused")
+                            for j in _offline_jobs.values())
+            if not in_flight:
+                if dev not in free:
+                    free[dev] = await asyncio.to_thread(_disk_free_or_none, p.parent)
+                if not _prep_space_ok(free[dev], size):
+                    s = short.setdefault(dev, [p.anchor or str(p.parent), 0, free[dev]])
+                    s[1] += 1
+                    continue
+                if free[dev] is not None:
+                    free[dev] -= int(size * PREP_BUNDLE_FACTOR)
+            st = await _maybe_start_prep_job(p, item.get("id", ""), prep_prio=prio)
+            if st.get("status") in ("processing", "pending", "paused"):
+                queued += 1
+            elif st.get("status") == "cached":
+                await _ensure_stt_for(p, item.get("id", ""), queue="bulk")
             await asyncio.sleep(0)
+    now = time.monotonic()
+    for anchor, n, left in short.values():
+        if now - _PREP_LOW_SPACE_LOGGED.get(anchor, -1e9) >= PREP_LOW_SPACE_LOG_SECS:
+            _PREP_LOW_SPACE_LOGGED[anchor] = now
+            log.warning("auto-prep: %d file(s) on %s not queued, low disk space "
+                        "(%s free; keeps %s free beyond each bundle)",
+                        n, anchor, human_size(left or 0), human_size(PREP_FREE_RESERVE_BYTES))
     return queued
 
 
@@ -33488,6 +33591,20 @@ def _needs_validation_cheap(f: dict) -> bool:
     return not (isinstance(v, dict) and v.get("status"))
 
 
+def _validation_targets_sync(lib: dict, first_only: bool = False) -> list:
+    """`(path, name)` of every file `_needs_validation` picks, or just the first
+    when `first_only`. A stat per library file: run it via `to_thread`, never on
+    the loop (#73: a 6.5 s LOOP BLOCKED in exactly this sweep while F: was busy)."""
+    out = []
+    for it in lib.get("items", []):
+        for f in it.get("files", []):
+            if _needs_validation(f):
+                out.append((f.get("path", ""), f.get("name") or Path(f.get("path", "")).name))
+                if first_only:
+                    return out
+    return out
+
+
 async def _persist_validations(verdicts: dict) -> None:
     """Write a batch of {path → verdict} into the matching `files[].validation`."""
     if not verdicts:
@@ -33722,26 +33839,16 @@ async def _run_auto_validation() -> None:
 
     try:
         lib = await get_library()
-        targets: list[tuple[str, str]] = []   # (path, name)
-        for it in lib.get("items", []):
-            for f in it.get("files", []):
-                if _needs_validation(f):
-                    targets.append((f.get("path", ""),
-                                    f.get("name") or Path(f.get("path", "")).name))
-                await asyncio.sleep(0)
+        targets: list[tuple[str, str]] = await asyncio.to_thread(_validation_targets_sync, lib)
         av["total"] = len(targets)
         av["scanned"] = 0
         for (path, name) in targets:
             if _interrupted() or await _machine_in_use(60):
                 break
             av["current_name"] = name
-            src = Path(path)
-            try:
-                exists = src.exists()
-            except OSError:
-                exists = False
-            if not exists:
-                verdicts[path] = _make_verdict("missing", "File not found on disk.", path)
+            if not await asyncio.to_thread(os.path.exists, path):
+                verdicts[path] = await asyncio.to_thread(
+                    _make_verdict, "missing", "File not found on disk.", path)
             else:
                 ok, detail = await _validate_one_file(
                     ffmpeg, path, True,
@@ -33750,8 +33857,8 @@ async def _run_auto_validation() -> None:
                 )
                 if _interrupted():
                     break
-                verdicts[path] = _make_verdict("ok" if ok else "damaged",
-                                               "" if ok else detail, path)
+                verdicts[path] = await asyncio.to_thread(   # stats the file for its sig
+                    _make_verdict, "ok" if ok else "damaged", "" if ok else detail, path)
             av["scanned"] = av.get("scanned", 0) + 1
             if len(verdicts) >= 5:        # checkpoint so a crash loses ≤5 files
                 await _persist_validations(verdicts)
@@ -34650,11 +34757,10 @@ async def background_maintenance_loop() -> None:
                         and not state.auto_validate.get("running")
                         and not state.file_validation.get("running")
                         and not _any_analysis_running()
-                        # Accurate (stat-based) check — a flat os.stat per library
-                        # file is cheap (unlike the recursive cache walk), and it
-                        # catches sig-changed files the no-stat count would miss.
-                        and any(_needs_validation(f)
-                                for it in lib.get("items", []) for f in it.get("files", []))):
+                        # Accurate (stat-based) check: it catches sig-changed files
+                        # the no-stat count would miss. A stat per library file, so
+                        # on a worker thread: on the loop it blocked 6.5 s (#73).
+                        and await asyncio.to_thread(_validation_targets_sync, lib, True)):
                     state.auto_validate_stop = False
                     state.auto_validate = {"running": True, "total": 0, "scanned": 0,
                                            "current_name": "", "started_at": _now_iso()}
@@ -36044,8 +36150,10 @@ async def _maybe_start_prep_job(src: Path, item_id: str = "",
     # through (auto-prep, play-prep, the JIT background prep, prep-all).
     if item_id and item_id in state.ondemand_only_items:
         return {"status": "ondemand_only"}
-    out_dir = _offline_cache_dir(src)
-    if (out_dir / "master.m3u8").exists():
+    # Two stats (the source's size for the key, then master.m3u8): on a worker
+    # thread, because on a busy disk one of them alone held the loop for 26 s.
+    out_dir, built = await asyncio.to_thread(_bundle_dir_built_sync, src)
+    if built:
         _bundle_index_register(out_dir.name, out_dir)
         return {"status": "cached"}
     existing = next(
@@ -36079,6 +36187,12 @@ async def _maybe_start_prep_job(src: Path, item_id: str = "",
     }
     asyncio.create_task(_run_offline_job(job_id))
     return {"status": "processing", "job_id": job_id, "progress": 0.0, "operation": "hls"}
+
+
+def _bundle_dir_built_sync(src: Path) -> "tuple[Path, bool]":
+    """`(bundle dir, master.m3u8 exists)` for `src`. Disk I/O: call via to_thread."""
+    out_dir = _offline_cache_dir(src)
+    return out_dir, (out_dir / "master.m3u8").exists()
 
 
 def _peek_prep_state(src: Path) -> dict:

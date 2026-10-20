@@ -538,6 +538,15 @@
   "PLAY_PREP_TAIL_SECS": {
    "kind": "value"
   },
+  "PREP_BUNDLE_FACTOR": {
+   "kind": "value"
+  },
+  "PREP_FREE_RESERVE_BYTES": {
+   "kind": "value"
+  },
+  "PREP_LOW_SPACE_LOG_SECS": {
+   "kind": "value"
+  },
   "PREP_UNREADABLE_FIRST_WAIT": {
    "kind": "value"
   },
@@ -1236,6 +1245,9 @@
    "kind": "value"
   },
   "_PREP_404_SEEN": {
+   "kind": "value"
+  },
+  "_PREP_LOW_SPACE_LOGGED": {
    "kind": "value"
   },
   "_PREP_MODES": {
@@ -2035,6 +2047,12 @@
     "key:POSITIONAL_OR_KEYWORD"
    ]
   },
+  "_bundle_dir_built_sync": {
+   "kind": "def",
+   "params": [
+    "src:POSITIONAL_OR_KEYWORD"
+   ]
+  },
   "_bundle_dir_for_file": {
    "kind": "def",
    "params": [
@@ -2544,6 +2562,12 @@
    "kind": "def",
    "params": [
     "video:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_disk_free_or_none": {
+   "kind": "def",
+   "params": [
+    "path:POSITIONAL_OR_KEYWORD"
    ]
   },
   "_dl_priority_of": {
@@ -4546,6 +4570,14 @@
    "kind": "def",
    "params": []
   },
+  "_prep_candidates_sync": {
+   "kind": "def",
+   "params": [
+    "item:POSITIONAL_OR_KEYWORD",
+    "incomplete:POSITIONAL_OR_KEYWORD",
+    "prep_cfg:POSITIONAL_OR_KEYWORD"
+   ]
+  },
   "_prep_cfg": {
    "kind": "def",
    "params": [
@@ -4555,6 +4587,19 @@
   "_prep_in_progress": {
    "kind": "def",
    "params": []
+  },
+  "_prep_room_sync": {
+   "kind": "def",
+   "params": [
+    "src:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_prep_space_ok": {
+   "kind": "def",
+   "params": [
+    "free:POSITIONAL_OR_KEYWORD",
+    "size:POSITIONAL_OR_KEYWORD"
+   ]
   },
   "_prep_summary": {
    "kind": "def",
@@ -6635,6 +6680,13 @@
    "kind": "def",
    "params": [
     "lib:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_validation_targets_sync": {
+   "kind": "def",
+   "params": [
+    "lib:POSITIONAL_OR_KEYWORD",
+    "first_only:POSITIONAL_OR_KEYWORD"
    ]
   },
   "_video_can_copy": {

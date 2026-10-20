@@ -1,5 +1,24 @@
 # Changelog
 
+## [20.25.12] — 2026-10-20
+
+### Fixed
+- **The server froze for up to three minutes at a time while the TV was
+  playing.** On 2026-10-19 between 20:19 and 21:58 it stopped answering eight
+  times, once for 173 s. The automatic prep sweep checked every file in the
+  library (about five disk lookups each) on the server's main loop, and on a
+  busy disk a single lookup took up to 26 s. Those checks now run on a worker
+  thread. The file-check pass of the background maintenance (#73), which
+  looked at every file every 30 s, now runs off the main loop too.
+  `tests/test_prep_space.py` fails if either comes back.
+- **Automatic prep no longer fills a disk.** It used to bundle every episode
+  without checking free space, and on 2026-10-20 it took C: to 0 bytes while
+  Family Guy was still downloading there. That stopped 97 episodes part-way,
+  then failed about 60 encodes a minute, which pushed every older line out of
+  the app log. Prep now leaves 20 GiB plus room for the bundle, checks when it
+  queues a file and again just before it encodes, and logs once an hour per
+  disk when it holds back. Prep you start yourself is not limited.
+
 ## [20.25.11] — 2026-10-19
 
 ### Changed
