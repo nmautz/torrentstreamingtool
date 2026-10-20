@@ -1372,6 +1372,15 @@ in `_commit_item_move` (qBit doesn't know about it), keyed by name+size (`_offli
 which the move preserves. Recovery for an item stuck missing: re-run the move to the same dest —
 the settle reads qBit's real location and repairs the paths.
 
+**"Every file exists at qBit's save path" is true BEFORE the move starts (fixed 20.25.14).**
+qBit keeps reporting the OLD `save_path` until the move has finished, and the files are still
+there, so the check above passed the moment `setLocation` returned. On 2026-10-20 a 26 GB
+Death Note move C:→F: reported `done` in 0.4 s with every path still on C:, while qBit went on
+moving the files; the library would have pointed at nothing once it finished. The settle now
+also requires qBit's `save_path` to equal the destination (`_norm_path`) and its state not to
+contain `moving`. The existence check runs through `to_thread`: it stats every file every 4 s,
+on the disk the move is writing to.
+
 ### "Ready" is gated on per-file completion, NOT qBit torrent state, when files are skipped/idle
 
 A skipped file (priority 0) and an idle-deferred file (priority 0 while the window is shut) are both *not-wanted* as far as qBittorrent is concerned, so qBit reports the torrent **complete** (`uploading`/`stalledUP`) the moment the *wanted* files finish — even though the skipped files will never arrive and the idle files haven't fetched yet. The old monitor flipped the item to `ready` on that state, which (a) made a partial selection look fully downloaded, (b) ran audio fingerprinting against a missing set, and (c) abandoned idle-deferred files (a `ready` item is excluded from the scheduler). The monitor now flips `ready` only when **`_all_nonskip_complete`** is true — every non-skip file ≥ 99.9% downloaded — so ready + fingerprint always wait for the complete kept set. Don't revert this to a bare `qstate in (uploading, …)` check. Skipped files are also filtered out of analysis (`_analyzable_files`) and the `_item_skip_status` chip so they don't show as perpetually "pending"/"failed".

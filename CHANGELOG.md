@@ -1,5 +1,17 @@
 # Changelog
 
+## [20.25.14] — 2026-10-20
+
+### Fixed
+- **Moving a show to another disk said "done" before anything had moved.**
+  It checked that every file existed where qBittorrent said the torrent was,
+  but qBittorrent reports the old location until it has finished, so the
+  check passed at once and the library kept the old paths while the files
+  were moved away from under them. It now waits until qBittorrent reports the
+  new location and has stopped moving. A 26 GB move of Death Note to F:
+  reported done in 0.4 s; it had to be run a second time to record where the
+  files really were.
+
 ## [20.25.13] — 2026-10-20
 
 ### Fixed

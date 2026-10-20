@@ -16235,14 +16235,26 @@ async def _try_settle_item(s: dict, dest: Path) -> bool:
     h = s.get("hash") or ""
     if h:
         info = await qbit_info(h)
+        if not info:
+            return False
+        # qBit reports the OLD save path until the move has finished, and the files
+        # there still exist, so "every file exists at qBit's save path" was true the
+        # moment setLocation returned: on 2026-10-20 a C:->F: move "settled" in
+        # 0.4 s onto the old paths while qBit carried on moving them. Wait until
+        # qBit names the destination and is not mid-move.
+        cur_save = info.get("save_path") or ""
+        if ("moving" in (info.get("state") or "")
+                or not cur_save or _norm_path(cur_save) != _norm_path(str(dest))):
+            return False
         qfiles = await qbit_files(h)
-        cur_save = (info or {}).get("save_path") or str(dest)
         new_files = build_file_list(qfiles, cur_save)
         if not new_files:
             return False
         # Only commit once every file physically exists at the new location —
         # qBit's content move is async, so the paths must be verified, not assumed.
-        if not all(Path(f["path"]).exists() for f in new_files):
+        # A stat per file, every MOVE_SETTLE_POLL, on the disk being written to.
+        if not await asyncio.to_thread(
+                lambda: all(Path(f["path"]).exists() for f in new_files)):
             return False
         await _commit_item_move(s["id"], s["old_files"], new_files)
         return True
