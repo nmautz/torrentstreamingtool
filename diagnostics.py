@@ -79,7 +79,8 @@ PROBE_INTERVAL_S      = 30.0    # how often to prove we're still accepting
 VITALS_INTERVAL_S     = 30.0    # how often to sample
 THREADPOOL_WARN_FRAC  = 0.85    # default executor this saturated ⇒ to_thread calls are queuing
 STALL_DUMP_COOLDOWN_S = 300.0   # min gap between stack dumps, so a long outage writes a few not thousands
-LOOP_BLOCK_SAMPLE_S   = 2.0     # loop heartbeat this stale ⇒ start sampling the loop thread's stack
+LOOP_BLOCK_SAMPLE_S   = 0.5     # loop heartbeat this stale ⇒ start sampling the loop thread's stack
+                                # (2.0 until 20.25.18: a 0.5-2 s freeze was never named)
 CHILD_LOG_CAP         = 5 * 1024 * 1024   # a helper process's own log is rolled past this
 # Who else is using the disk (#96). The box's library saves went from milliseconds to
 # 5-17 s while F: was busy, and nothing in our own logs could name the other user.
@@ -95,7 +96,9 @@ DRIVE_MAP_TTL_S       = 600.0   # how long the PhysicalDriveN -> letter map is t
 # waiting wrote a CRITICAL stall dump for a server that was idle.
 PATIENT_S             = 300.0
 _PATIENT_PREFIX       = "POST /api/admin/indexers/"
-LOOP_BLOCK_POLL_S     = 0.25    # sampling interval while it is blocked
+LOOP_BLOCK_POLL_S     = 0.1     # sampling interval while it is blocked
+LOOP_LAG_TICK_S       = 0.1     # how often the loop proves it is free; a block's lag is
+                                # measured to within this (0.5 until 20.25.18, so up to 0.5 s low)
 LOOP_BLOCK_ONGOING_S  = 15.0    # still blocked this long ⇒ log what it is doing NOW, in case it never returns
 
 
@@ -129,6 +132,7 @@ class DiagState:
     started_at:      float = field(default_factory=time.monotonic)
     loop_lag_s:      float = 0.0
     loop_lag_max_s:  float = 0.0
+    loop_lag_peak_s: float = 0.0     # worst lag since the last vitals line (`lagmax=`)
     inflight:        dict  = field(default_factory=dict)   # id -> (started_monotonic, "METHOD /path")
     requests_total:  int   = 0
     requests_slow:   int   = 0
@@ -1047,6 +1051,7 @@ def snapshot() -> dict:
     snap = {
         "uptime_s":    time.monotonic() - state.started_at,
         "loop_lag_s":  state.loop_lag_s,
+        "loop_lag_peak_s": state.loop_lag_peak_s,
         "tasks":       len(asyncio.all_tasks(loop)) if loop.is_running() else 0,
         "tp_threads":  threads_n,
         "tp_max":      maxw,
@@ -1073,7 +1078,8 @@ def snapshot() -> dict:
 
 def snapshot_line(s: Optional[dict] = None) -> str:
     s = s if s is not None else snapshot()
-    return (f"up={s['uptime_s']:.0f}s lag={s['loop_lag_s']:.2f}s tasks={s['tasks']} "
+    return (f"up={s['uptime_s']:.0f}s lag={s['loop_lag_s']:.2f}s "
+            f"lagmax={s.get('loop_lag_peak_s', 0.0):.2f}s tasks={s['tasks']} "
             f"tp={s['tp_threads']}/{s['tp_max']}+q{s['tp_queued']} "
             f"inflight={s['inflight']} oldest={s['oldest_req_s']:.1f}s "
             f"lock_held={s['lock_held_s']:.1f}s waiters={s['lock_waiters']} "
@@ -1086,8 +1092,11 @@ def snapshot_line(s: Optional[dict] = None) -> str:
 def _anomalies(s: dict) -> list[str]:
     """Which thresholds this sample breaches. Empty ⇒ healthy."""
     out = []
-    if s["loop_lag_s"] >= LOOP_LAG_WARN_S:
-        out.append(f"event loop {s['loop_lag_s']:.1f}s behind")
+    # The worst turn since the last line, not this instant's: `lag` alone is one
+    # tick in 300, so a 1-3 s freeze between samples passed without a word.
+    worst = max(s["loop_lag_s"], s.get("loop_lag_peak_s", 0.0))
+    if worst >= LOOP_LAG_WARN_S:
+        out.append(f"event loop {worst:.1f}s behind")
     if s["lock_held_s"] >= LOCK_HELD_WARN_S:
         out.append(f"library lock held {s['lock_held_s']:.1f}s by {s['lock_holder'] or '?'} "
                    f"({s['lock_waiters']} waiting)")
@@ -1119,11 +1128,12 @@ async def _measure_loop_lag() -> None:
     start_loop_watchdog()
     while True:
         t0 = time.monotonic()
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(LOOP_LAG_TICK_S)
         state.loop_beat = time.monotonic()
-        lag = max(0.0, (state.loop_beat - t0) - 0.5)
+        lag = max(0.0, (state.loop_beat - t0) - LOOP_LAG_TICK_S)
         state.loop_lag_s = lag
         state.loop_lag_max_s = max(state.loop_lag_max_s, lag)
+        state.loop_lag_peak_s = max(state.loop_lag_peak_s, lag)
 
 
 # ── Loop-block sampler ───────────────────────────────────────────────────────
@@ -1242,6 +1252,7 @@ async def vitals_loop() -> None:
             await disk_sample_async()
             s = snapshot()
             line = snapshot_line(s)
+            state.loop_lag_peak_s = 0.0      # `lagmax=` covers one line each
             if _vitals_log:
                 _vitals_log.info(line)
             bad = _anomalies(s)

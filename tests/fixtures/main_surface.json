@@ -3658,6 +3658,16 @@
     "error_code:KEYWORD_ONLY"
    ]
   },
+  "_log_dir_entries_sync": {
+   "kind": "def",
+   "params": []
+  },
+  "_log_files_sync": {
+   "kind": "def",
+   "params": [
+    "prior:POSITIONAL_OR_KEYWORD"
+   ]
+  },
   "_log_version_banner": {
    "kind": "async def",
    "params": []

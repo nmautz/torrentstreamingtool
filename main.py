@@ -27642,6 +27642,14 @@ async def admin_client_logs_clear(request: Request, device: str = "") -> JSONRes
 async def admin_list_logs(request: Request) -> JSONResponse:
     """List every file in LOG_DIR with size + mtime (newest first)."""
     _require_admin(request)
+    # In a worker thread: a stat per log file held the loop 3.1 s on 2026-10-20
+    # with C: full and busy.
+    entries = await asyncio.to_thread(_log_dir_entries_sync)
+    return JSONResponse({"log_dir": str(LOG_DIR), "files": entries})
+
+
+def _log_dir_entries_sync() -> list[dict]:
+    """Every file in LOG_DIR with size + mtime, newest first. Disk I/O: to_thread."""
     entries = []
     if LOG_DIR.exists():
         for p in LOG_DIR.iterdir():
@@ -27658,7 +27666,14 @@ async def admin_list_logs(request: Request) -> JSONResponse:
                 "prior":  _is_prior_log(p.name),
             })
     entries.sort(key=lambda e: e["mtime"], reverse=True)
-    return JSONResponse({"log_dir": str(LOG_DIR), "files": entries})
+    return entries
+
+
+def _log_files_sync(prior: bool) -> list[Path]:
+    """The current run's log files, or (prior=True) the prior-run archives."""
+    if not LOG_DIR.exists():
+        return []
+    return [p for p in LOG_DIR.iterdir() if p.is_file() and _is_prior_log(p.name) == prior]
 
 
 @app.get("/api/admin/logs/_bundle")
@@ -27676,11 +27691,7 @@ async def admin_download_logs_bundle(request: Request) -> FileResponse:
     never sees this name.
     """
     _require_admin(request)
-    files: list[Path] = []
-    if LOG_DIR.exists():
-        for p in LOG_DIR.iterdir():
-            if p.is_file() and not _is_prior_log(p.name):
-                files.append(p)
+    files = await asyncio.to_thread(_log_files_sync, False)
     if not files:
         raise HTTPException(404, "No log files to download.")
 
@@ -27717,11 +27728,7 @@ async def admin_download_prior_logs_bundle(request: Request) -> FileResponse:
     route wins. See `_build_logs_zip` for the Windows-extractable ZIP rationale.
     """
     _require_admin(request)
-    files: list[Path] = []
-    if LOG_DIR.exists():
-        for p in LOG_DIR.iterdir():
-            if p.is_file() and _is_prior_log(p.name):
-                files.append(p)
+    files = await asyncio.to_thread(_log_files_sync, True)
     if not files:
         raise HTTPException(404, "No prior logs to download.")
 
@@ -27755,7 +27762,7 @@ async def admin_download_log(request: Request, name: str) -> FileResponse:
     read-while-appended races that otherwise made that log fail to download.
     """
     _require_admin(request)
-    path = _safe_log_path(name)
+    path = await asyncio.to_thread(_safe_log_path, name)   # resolve + stat: disk calls
 
     def _snapshot() -> str:
         fd, tmp_path = tempfile.mkstemp(prefix="streamlink-log-", suffix=".log")

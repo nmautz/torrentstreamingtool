@@ -26,9 +26,14 @@ WANT = {"_norm_path", "_canonical_item_path", "_find_in_paths", "_is_background_
 # Never CALLED directly inside these async functions: each touches the disk.
 SYNC_IO = {"exists", "stat", "is_file", "is_dir", "iterdir", "resolve", "vlc_file_uri",
            "_od_max_seg_on_disk", "_offline_cache_dir", "_bundle_dir_built_sync",
-           "_prep_chain_wants_sync", "_match_vlc_file_sync", "_vlc_file_uris_sync"}
+           "_prep_chain_wants_sync", "_match_vlc_file_sync", "_vlc_file_uris_sync",
+           "_safe_log_path", "_log_dir_entries_sync", "_log_files_sync"}
 ON_LOOP = {"_resolve_bundle_dir", "_vlc_wait_until_ready", "_sync_state_from_vlc",
-           "_play_prep_chain", "_vlc_relaunch_playlist", "_library_play_launch"}
+           "_play_prep_chain", "_vlc_relaunch_playlist", "_library_play_launch",
+           # 20.25.18: the log listing held the loop 3.1 s, and the freeze watch
+           # reads these every 30 min
+           "admin_list_logs", "admin_download_logs_bundle",
+           "admin_download_prior_logs_bundle", "admin_download_log"}
 
 RESOLVED = []
 

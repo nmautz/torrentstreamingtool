@@ -1,5 +1,19 @@
 # Changelog
 
+## [20.25.18] — 2026-10-20
+
+### Fixed
+- **Freezes shorter than 2 s are now measured and named.** The vitals log
+  recorded the lag of one moment every 30 s, and code that blocked the server
+  was only named once a block passed 2 s, so shorter freezes went unrecorded.
+  A new `lagmax=` field records the worst block in each 30 s, measured to within
+  0.1 s, and any block over 0.5 s is logged with the code that caused it. A
+  block over 1 s also raises a vitals warning. Freezes are judged against a
+  fixed standard, `.claude/skills/freeze-watch/` (see its `SKILL.md`).
+- Listing and downloading the server logs no longer checks each log file on
+  the request thread. One listing held up the whole server for 3.1 s this
+  morning, and the freeze watch reads the logs every 30 minutes.
+
 ## [20.25.17] — 2026-10-20
 
 ### Fixed

@@ -713,10 +713,18 @@ clearest single indicator that something synchronous is blocking the loop.
 Writes one compact line to `vitals.log`:
 
 ```
-up=3612s lag=0.01s tasks=47 tp=12/20+q0 inflight=1 oldest=0.3s
+up=3612s lag=0.01s lagmax=0.04s tasks=47 tp=12/20+q0 inflight=1 oldest=0.3s
 lock_held=0.0s waiters=0 probe=4ms fails=0 rss=412MB thr=31 fds=612 conns=48
 dsk=F:850ms/22.0MBps,C:4ms/0.1MBps io=MsMpEng.exe:85.0r+0.0w,qbittorrent.exe:0.1r+40.0w io_denied=12
 ```
+
+**`lag=` is one instant, `lagmax=` is the 30 s (20.25.18).** `lag=` is how late the
+loop's 0.1 s heartbeat came back the moment the line was written: one tick in 300.
+`lagmax=` is the worst tick since the previous line, so it is the number that
+catches a freeze between samples, and the `event loop … behind` anomaly reads it.
+Before 20.25.18 only `lag=` existed (one tick in 60), and a "0.29 s worst lag" over a
+day was the worst of 888 samples, not the worst freeze. The freeze standard the
+watch applies is `.claude/skills/freeze-watch/SKILL.md`.
 
 **Who else is using the disk (20.25.3, #96).** The `dsk` / `io` fields come from
 `disk_sample()`, which runs on its own one-thread executor (`diag-disk`, never the
@@ -942,9 +950,10 @@ is why raw is the bounded one.
 A stall dump is written by the event loop, so it runs only after the loop is free
 again. By then the frame that blocked it has returned, and the September 2026 dumps
 all show the aftermath. `diagnostics._loop_watchdog` is a daemon thread (started by
-`_measure_loop_lag`) that watches the heartbeat that task leaves every 0.5 s. When
-the heartbeat is `LOOP_BLOCK_SAMPLE_S` (2 s) stale, it samples the loop thread's stack
-every 0.25 s via `sys._current_frames()`. When the loop recovers, it logs one WARNING
+`_measure_loop_lag`) that watches the heartbeat that task leaves every
+`LOOP_LAG_TICK_S` (0.1 s). When the heartbeat is `LOOP_BLOCK_SAMPLE_S` (0.5 s) stale,
+it samples the loop thread's stack every 0.1 s via `sys._current_frames()`. Until
+20.25.18 those were 0.5 s / 2 s / 0.25 s, so a freeze under 2 s was never named. When the loop recovers, it logs one WARNING
 to `streamlink_app.log`:
 
 ```
