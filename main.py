@@ -6889,12 +6889,9 @@ async def vpn_guard() -> None:
                 connected = await asyncio.to_thread(vpncheck.generic_tunnel_up)
                 first_line = "VPN tunnel detected" if connected else "No VPN tunnel detected"
             else:  # "mullvad"
-                proc = await asyncio.create_subprocess_exec(
-                    "mullvad", "status",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                out, _ = await proc.communicate()
+                # Every 3 s: on the loop, CreateProcess plus the PATH search was a
+                # 0.16 s turn (20.25.23). `_probe_run` does both on a worker thread.
+                _, out = await _probe_run(["mullvad", "status"], timeout=15.0)
                 text = out.decode(errors="replace")
                 connected = "Connected" in text
                 first_line = text.strip().splitlines()[0] if text.strip() else "Unknown"

@@ -1,5 +1,11 @@
 # Changelog
 
+## [20.25.24] — 2026-10-20
+
+### Fixed
+- The VPN check, every 3 s, now runs `mullvad status` on a worker thread.
+  Starting it on the request thread took up to 0.16 s.
+
 ## [20.25.23] — 2026-10-20
 
 ### Fixed
