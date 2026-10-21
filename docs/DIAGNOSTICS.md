@@ -706,7 +706,7 @@ Each of these was added to catch an open bug in the act. `grep` for the prefix.
 Three background tasks, started in `lifespan` and cancelled on shutdown.
 
 ### `_measure_loop_lag`
-Sleeps 0.5 s in a loop and records how late it actually returns. Lag is the
+Sleeps `LOOP_LAG_TICK_S` (0.05 s) in a loop and records how late it actually returns. Lag is the
 clearest single indicator that something synchronous is blocking the loop.
 
 ### `vitals_loop` — every 30 s
@@ -719,7 +719,7 @@ dsk=F:850ms/22.0MBps,C:4ms/0.1MBps io=MsMpEng.exe:85.0r+0.0w,qbittorrent.exe:0.1
 ```
 
 **`lag=` is one instant, `lagmax=` is the 30 s (20.25.18).** `lag=` is how late the
-loop's 0.1 s heartbeat came back the moment the line was written: one tick in 300.
+loop's 0.05 s heartbeat came back the moment the line was written: one tick in 600.
 `lagmax=` is the worst tick since the previous line, so it is the number that
 catches a freeze between samples, and the `event loop … behind` anomaly reads it.
 Before 20.25.18 only `lag=` existed (one tick in 60), and a "0.29 s worst lag" over a
@@ -951,9 +951,11 @@ A stall dump is written by the event loop, so it runs only after the loop is fre
 again. By then the frame that blocked it has returned, and the September 2026 dumps
 all show the aftermath. `diagnostics._loop_watchdog` is a daemon thread (started by
 `_measure_loop_lag`) that watches the heartbeat that task leaves every
-`LOOP_LAG_TICK_S` (0.1 s). When the heartbeat is `LOOP_BLOCK_SAMPLE_S` (0.5 s) stale,
-it samples the loop thread's stack every 0.1 s via `sys._current_frames()`. Until
-20.25.18 those were 0.5 s / 2 s / 0.25 s, so a freeze under 2 s was never named. When the loop recovers, it logs one WARNING
+`LOOP_LAG_TICK_S` (0.05 s). When the heartbeat is `LOOP_BLOCK_SAMPLE_S` (0.15 s) stale,
+it samples the loop thread's stack every 0.05 s via `sys._current_frames()`. Until
+20.25.18 those were 0.5 s / 2 s / 0.25 s, so a freeze under 2 s was never named; until
+20.25.20 they were 0.1 s / 0.5 s / 0.1 s. The freeze standard is 250 ms, so every block
+it counts now comes with a stack. When the loop recovers, it logs one WARNING
 to `streamlink_app.log`:
 
 ```

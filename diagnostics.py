@@ -79,8 +79,9 @@ PROBE_INTERVAL_S      = 30.0    # how often to prove we're still accepting
 VITALS_INTERVAL_S     = 30.0    # how often to sample
 THREADPOOL_WARN_FRAC  = 0.85    # default executor this saturated ⇒ to_thread calls are queuing
 STALL_DUMP_COOLDOWN_S = 300.0   # min gap between stack dumps, so a long outage writes a few not thousands
-LOOP_BLOCK_SAMPLE_S   = 0.5     # loop heartbeat this stale ⇒ start sampling the loop thread's stack
-                                # (2.0 until 20.25.18: a 0.5-2 s freeze was never named)
+LOOP_BLOCK_SAMPLE_S   = 0.15    # loop heartbeat this stale ⇒ start sampling the loop thread's stack
+                                # (2.0 until 20.25.18, 0.5 until 20.25.20: the freeze standard
+                                # is 250 ms, and every block it counts must come with a name)
 CHILD_LOG_CAP         = 5 * 1024 * 1024   # a helper process's own log is rolled past this
 # Who else is using the disk (#96). The box's library saves went from milliseconds to
 # 5-17 s while F: was busy, and nothing in our own logs could name the other user.
@@ -96,9 +97,9 @@ DRIVE_MAP_TTL_S       = 600.0   # how long the PhysicalDriveN -> letter map is t
 # waiting wrote a CRITICAL stall dump for a server that was idle.
 PATIENT_S             = 300.0
 _PATIENT_PREFIX       = "POST /api/admin/indexers/"
-LOOP_BLOCK_POLL_S     = 0.1     # sampling interval while it is blocked
-LOOP_LAG_TICK_S       = 0.1     # how often the loop proves it is free; a block's lag is
-                                # measured to within this (0.5 until 20.25.18, so up to 0.5 s low)
+LOOP_BLOCK_POLL_S     = 0.05    # how often the heartbeat is checked, and the sampling interval
+LOOP_LAG_TICK_S       = 0.05    # how often the loop proves it is free; a block's lag is
+                                # measured to within this (0.5 until 20.25.18, 0.1 until 20.25.20)
 LOOP_BLOCK_ONGOING_S  = 15.0    # still blocked this long ⇒ log what it is doing NOW, in case it never returns
 
 
@@ -1118,7 +1119,7 @@ def _anomalies(s: dict) -> list[str]:
 
 
 async def _measure_loop_lag() -> None:
-    """Continuously measure how late a 0.5s sleep actually returns.
+    """Continuously measure how late a `LOOP_LAG_TICK_S` sleep actually returns.
 
     Lag is the single clearest indicator that something synchronous is blocking
     the loop. Cheap enough to run permanently.
@@ -1189,7 +1190,7 @@ def summarize_block(blocked_s: float, samples: list[str], others: list[str],
                     ongoing: bool = False) -> str:
     """Pure: the report for one block — the stacks seen most often first."""
     from collections import Counter
-    head = (f"LOOP BLOCKED {'(still) ' if ongoing else ''}{blocked_s:.1f}s — "
+    head = (f"LOOP BLOCKED {'(still) ' if ongoing else ''}{blocked_s:.2f}s — "
             f"{len(samples)} sample(s) of the event-loop thread")
     parts = [head]
     for stack, n in Counter(samples).most_common(3):

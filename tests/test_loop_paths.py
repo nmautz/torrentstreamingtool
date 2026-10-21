@@ -168,6 +168,19 @@ for n in ast.walk(tree):
                   "_warm_ep_homes" in calls)
 check("the rule found its callers", callers >= 10)
 
+print("the ffmpeg capability probes start no process on the loop (20.25.20)")
+# CreateProcess runs on the loop thread under asyncio on Windows; the first
+# ffmpeg start after a boot held it 0.6 s in _has_nvenc.
+PROBES = {"_has_nvenc", "_has_cuda_scale", "_has_tonemap", "_gpu_can_hwdecode"}
+seen = set()
+for n in tree.body:
+    if isinstance(n, ast.AsyncFunctionDef) and n.name in PROBES:
+        seen.add(n.name)
+        calls = _direct_calls(n)
+        check(f"{n.name} runs ffmpeg through _probe_run",
+              "create_subprocess_exec" not in calls and "_probe_run" in calls)
+check("every probe was found", seen == PROBES)
+
 import asyncio, time                      # noqa: E402
 sys.path.insert(0, str(ROOT))
 import epgroups                           # noqa: E402

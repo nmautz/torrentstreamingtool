@@ -30199,6 +30199,25 @@ def _offline_job_sem() -> asyncio.Semaphore:
     return _OFFLINE_JOB_SEM
 
 
+def _probe_run_sync(cmd: list[str], keep: str = "stdout",
+                    kw: Optional[dict] = None) -> tuple[int, bytes]:
+    pipe = subprocess.PIPE
+    r = subprocess.run(cmd, stdin=subprocess.DEVNULL,
+                       stdout=pipe if keep == "stdout" else subprocess.DEVNULL,
+                       stderr=pipe if keep == "stderr" else subprocess.DEVNULL,
+                       timeout=120, **(kw or {}))
+    return r.returncode, (r.stdout if keep == "stdout" else r.stderr) or b""
+
+
+async def _probe_run(cmd: list[str], keep: str = "stdout",
+                     kw: Optional[dict] = None) -> tuple[int, bytes]:
+    """One short ffmpeg capability run on a worker thread: `(returncode, the kept
+    stream)`. On Windows `asyncio.create_subprocess_exec` runs CreateProcess ON the
+    event loop, and the first ffmpeg start after a boot (exe not in the file
+    cache yet) held it 0.6 s in `_has_nvenc` (20.25.20)."""
+    return await asyncio.to_thread(_probe_run_sync, cmd, keep, kw)
+
+
 async def _has_nvenc() -> bool:
     """Detect whether ffmpeg can actually open an h264_nvenc session right now."""
     if "result" in _nvenc_probe:
@@ -30209,12 +30228,7 @@ async def _has_nvenc() -> bool:
         return False
     # Step 1: is the encoder compiled in at all?
     try:
-        proc = await asyncio.create_subprocess_exec(
-            ffmpeg, "-hide_banner", "-encoders",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        out, _ = await proc.communicate()
+        _, out = await _probe_run([ffmpeg, "-hide_banner", "-encoders"])
         if b"h264_nvenc" not in (out or b""):
             _nvenc_probe["result"] = False
             print("[offline] h264_nvenc not compiled into ffmpeg — using libx264.")
@@ -30225,15 +30239,11 @@ async def _has_nvenc() -> bool:
     # Step 2: can we actually open a session? An encoder can be listed even when
     # the driver/library is missing, so we try a 1-frame dummy encode.
     try:
-        proc = await asyncio.create_subprocess_exec(
-            ffmpeg, "-hide_banner", "-loglevel", "error",
-            "-f", "lavfi", "-i", "color=size=64x64:duration=0.04:rate=25",
-            "-c:v", "h264_nvenc", "-frames:v", "1", "-f", "null", "-",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, err = await proc.communicate()
-        ok = proc.returncode == 0
+        rc, err = await _probe_run(
+            [ffmpeg, "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "color=size=64x64:duration=0.04:rate=25",
+             "-c:v", "h264_nvenc", "-frames:v", "1", "-f", "null", "-"], keep="stderr")
+        ok = rc == 0
         if not ok:
             tail = (err or b"").decode("utf-8", "replace").strip().splitlines()[-1:]
             print(f"[offline] NVENC probe failed — using libx264. ({'; '.join(tail) or 'no detail'})")
@@ -30274,12 +30284,7 @@ async def _has_cuda_scale() -> bool:
         _cuda_scale_probe["result"] = False
         return False
     try:
-        proc = await asyncio.create_subprocess_exec(
-            ffmpeg, "-hide_banner", "-filters",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        out, _ = await proc.communicate()
+        _, out = await _probe_run([ffmpeg, "-hide_banner", "-filters"])
         ok = b"scale_cuda" in (out or b"")
     except Exception:
         ok = False
@@ -30306,12 +30311,7 @@ async def _has_tonemap() -> bool:
         _tonemap_probe["result"] = False
         return False
     try:
-        proc = await asyncio.create_subprocess_exec(
-            ffmpeg, "-hide_banner", "-filters",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        out, _ = await proc.communicate()
+        _, out = await _probe_run([ffmpeg, "-hide_banner", "-filters"])
         names = {ln.split()[1] for ln in (out or b"").decode("utf-8", "replace").splitlines()
                  if len(ln.split()) > 2}
         ok = {"zscale", "tonemap"} <= names
@@ -30364,13 +30364,11 @@ async def _gpu_can_hwdecode(sample: Path, codec: str = "", pix_fmt: str = "") ->
     ok = False
     if ffmpeg:
         try:
-            proc = await asyncio.create_subprocess_exec(
-                ffmpeg, "-hide_banner", "-loglevel", "error",
-                "-hwaccel", "cuda", "-i", str(sample),
-                "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-",
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL, **_FFMPEG_SUBPROCESS_KW)
-            rc = await proc.wait()
+            rc, _ = await _probe_run(
+                [ffmpeg, "-hide_banner", "-loglevel", "error",
+                 "-hwaccel", "cuda", "-i", str(sample),
+                 "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-"],
+                keep="", kw=_FFMPEG_SUBPROCESS_KW)
             ok = (rc == 0)
         except Exception:
             ok = False

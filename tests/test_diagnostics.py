@@ -30,7 +30,7 @@ def ok(name, cond, detail=""):
 
 # ── summarize_block (pure) ───────────────────────────────────────────────────
 r = diag.summarize_block(12.5, ["A", "B", "A", "A"], [])
-ok("head names duration and sample count", r.startswith("LOOP BLOCKED 12.5s — 4 sample(s)"), r)
+ok("head names duration and sample count", r.startswith("LOOP BLOCKED 12.50s — 4 sample(s)"), r)
 ok("most frequent stack first", r.index("3/4") < r.index("1/4"), r)
 ok("no other-threads section when none", "other threads" not in r, r)
 r = diag.summarize_block(3.0, ["X"], ["[t] Y", "[t] Y"], ongoing=True)

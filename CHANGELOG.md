@@ -1,5 +1,18 @@
 # Changelog
 
+## [20.25.20] — 2026-10-20
+
+### Fixed
+- **The freeze limit is now 250 ms, and the server can measure it.** The
+  freeze watch now treats any single freeze of 250 ms or more as something to
+  fix, down from 1 s. The server now checks for a freeze every 0.05 s and logs
+  the code behind any freeze over 0.15 s (was 0.5 s), so every freeze at the
+  new limit comes with its cause.
+- The checks of what ffmpeg can do (the GPU encoder, its filters, GPU decoding)
+  no longer start ffmpeg on the thread that answers every request. On Windows
+  starting a program there holds everything up, and the first check after a
+  boot did so for 0.6 s.
+
 ## [20.25.19] — 2026-10-20
 
 ### Fixed

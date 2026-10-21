@@ -4723,6 +4723,22 @@
     "playlist:POSITIONAL_OR_KEYWORD"
    ]
   },
+  "_probe_run": {
+   "kind": "async def",
+   "params": [
+    "cmd:POSITIONAL_OR_KEYWORD",
+    "keep:POSITIONAL_OR_KEYWORD",
+    "kw:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_probe_run_sync": {
+   "kind": "def",
+   "params": [
+    "cmd:POSITIONAL_OR_KEYWORD",
+    "keep:POSITIONAL_OR_KEYWORD",
+    "kw:POSITIONAL_OR_KEYWORD"
+   ]
+  },
   "_profile_allowed_indexers": {
    "kind": "def",
    "params": [

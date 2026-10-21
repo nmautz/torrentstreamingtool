@@ -15,10 +15,12 @@ change them here and in SKILL.md together.
 import argparse, collections, json, os, re, ssl, sys, urllib.request
 from datetime import datetime, timedelta
 
-HARD_MS = 1000         # one freeze this long: find the cause and fix it
-SOFT_MS = 250          # a freeze this long counts toward a repeat
+HARD_MS = 250          # one freeze this long: find the cause and fix it (1000 until 2026-10-20)
+SOFT_MS = 150          # a freeze this long counts toward a repeat (the sampler names >= 150 ms)
 SOFT_REPEAT = 3        # the same cause this many times in one window: fix it
-PROBE_HARD_MS = 1000   # /healthz self-probe this slow with the loop free: lock / pool starvation
+PROBE_HARD_MS = 500    # /healthz self-probe this slow with the loop free: lock / pool starvation.
+                       # The box's loopback probe itself costs 140-340 ms (the same request
+                       # answers in 10-15 ms from the LAN), so it can't share HARD_MS
 GAP_S = 45             # vitals lines further apart than this: the process (or machine) stalled
 SLOW_REQ_S = 5         # a request this slow with the loop free: a slow endpoint, listed, not a freeze
 
@@ -177,7 +179,7 @@ def report(ver, logs, stall_files, since_arg):
         if not near:
             act.append(f"HARD: {r['lagmax'] * 1000:.0f} ms at {r['t']:%H:%M:%S} with no LOOP BLOCKED report")
             out.append(f"  HARD   lagmax {r['lagmax'] * 1000:.0f} ms at {r['t']:%H:%M:%S}, unnamed "
-                       f"(a C call holding the GIL, or a block under the sampler's 0.5 s)")
+                       f"(a C call holding the GIL, or a build older than 20.25.20)")
 
     # 2. The server not answering although the loop was free.
     pr = [r for r in rows if r["probe"] >= PROBE_HARD_MS and r["lagmax"] * 1000 < SOFT_MS]
