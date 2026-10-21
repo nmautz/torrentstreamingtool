@@ -181,6 +181,15 @@ for n in tree.body:
               "create_subprocess_exec" not in calls and "_probe_run" in calls)
 check("every probe was found", seen == PROBES)
 
+print("start-up gives the loop its turns (20.25.22)")
+life = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "lifespan")
+life_src = ast.get_source_segment(src, life)
+check("lifespan shortens the GIL switch interval",
+      "sys.setswitchinterval(GIL_SWITCH_INTERVAL_S)" in life_src)
+check("lifespan reads the endpoints' source on a worker thread, before serving",
+      "await asyncio.to_thread(_warm_endpoint_sources_sync, app)" in life_src
+      and life_src.index("_warm_endpoint_sources_sync") < life_src.index("yield"))
+
 import asyncio, time                      # noqa: E402
 sys.path.insert(0, str(ROOT))
 import epgroups                           # noqa: E402

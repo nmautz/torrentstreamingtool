@@ -331,6 +331,9 @@
     "extra:VAR_KEYWORD"
    ]
   },
+  "GIL_SWITCH_INTERVAL_S": {
+   "kind": "value"
+  },
   "GPU_STALL_TIMEOUT_SECS": {
    "kind": "value"
   },
@@ -6934,6 +6937,12 @@
     "item:POSITIONAL_OR_KEYWORD",
     "qfiles:POSITIONAL_OR_KEYWORD",
     "save_path:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_warm_endpoint_sources_sync": {
+   "kind": "def",
+   "params": [
+    "app:POSITIONAL_OR_KEYWORD"
    ]
   },
   "_warm_ep_homes": {

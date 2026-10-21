@@ -1,5 +1,20 @@
 # Changelog
 
+## [20.25.22] — 2026-10-20
+
+### Fixed
+- The first request after a start no longer holds up the server for half a
+  second. On each endpoint's first request, FastAPI reads that endpoint's
+  source code to label any error it raises, and the first such read loaded
+  all 1.9 MB of main.py from the slow drive. That now happens on a worker
+  thread before the server takes requests.
+- The server gets its turn sooner when a background job is busy. Python lets
+  only one thread run at a time, and the request thread had to wait up to
+  5 ms behind a busy job each time it touched the network. Over one batch of
+  work that added up to 0.24 s. The wait is now at most 1 ms.
+- Python's garbage collector was ruled out: the longest pause after a start
+  was 80 ms.
+
 ## [20.25.21] — 2026-10-20
 
 ### Fixed

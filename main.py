@@ -13370,9 +13370,39 @@ async def _retire_ai_subtitles() -> None:
 
 # ── FastAPI App ───────────────────────────────────────────────────────────────
 
+# How long a thread may hold the GIL before another that wants it gets a turn
+# (CPython's default is 5 ms). The loop thread gives the GIL up on every socket /
+# IOCP call and waits to get it back, so a worker running Python flat out (the
+# eviction scan over every file) charged it up to 5 ms per call: a 0.24 s turn
+# on WSARecvInto at the 20.25.21 start. 1 ms costs the workers a little
+# throughput and gives the loop its turn five times sooner.
+GIL_SWITCH_INTERVAL_S = 0.001
+
+
+def _warm_endpoint_sources_sync(app: FastAPI) -> int:
+    """FastAPI reads each endpoint's source (`inspect.getsourcelines`) on its
+    first request, to name it in error messages, and caches it per function.
+    The first such read pulls all of main.py (1.9 MB, 40 k lines, on F:) into
+    linecache and held the loop 0.56 s at the 20.25.21 start. Done here once,
+    on a worker thread, before the server takes a request. Returns the count."""
+    try:
+        from fastapi.routing import _extract_endpoint_context
+    except Exception:
+        return 0                       # a FastAPI without it reads no source
+    n = 0
+    for route in app.routes:
+        call = getattr(getattr(route, "dependant", None), "call", None)
+        if call is not None:
+            _extract_endpoint_context(call)
+            n += 1
+    return n
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
     runtime._MAIN_LOOP = asyncio.get_running_loop()
+    sys.setswitchinterval(GIL_SWITCH_INTERVAL_S)
+    await asyncio.to_thread(_warm_endpoint_sources_sync, app)
     # Route asyncio's own callback errors into the app log (and demote the benign
     # Windows WinError 10054 disconnect churn that used to flood it at ERROR).
     diag.install_loop_exception_handler(runtime._MAIN_LOOP)
