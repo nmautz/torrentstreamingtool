@@ -1116,8 +1116,8 @@ Two ways to populate the cache:
 > NVENC ignores it. See [GOTCHAS.md](GOTCHAS.md) for why the cap is 1.
 
 > **Interactive prep takes precedence over bulk.** A prep started by the user
-> *now* — play-on-device (`_lpLoadIndex`) or the fullscreen **Prep for Device**
-> tile (both POST `/offline-prepare {bulk:false}`) — must not sit behind
+> *now* — play-on-device (`_lpLoadIndex`, which POSTs
+> `/offline-prepare {bulk:false}`) — must not sit behind
 > overnight / idle / manual `/prep-all` bulk work, even when a bulk file is
 > already mid-encode. Two pieces enforce this against the single concurrency slot:
 > 1. **Preemption.** `_preempt_running_bulk()` (called from `offline_prepare` for
@@ -1132,7 +1132,7 @@ Two ways to populate the cache:
 >    it back if an interactive prep appeared while it was queued. So queued bulk
 >    waiters drain past the interactive job rather than racing it for the freed slot.
 >
-> Net effect: holding **Prep for Device** boots the in-flight bulk encode and starts
+> Net effect: an interactive prep boots the in-flight bulk encode and starts
 > your file within a tick; the booted bulk file resumes once interactive prep clears.
 
 > **Prep priority orders bulk work (three tiers, mid default).** Within the bulk /
@@ -2488,22 +2488,21 @@ the TV and sit in a long transcode. `_handoffReadyState` resolves readiness from
 prepped (episode-picker Prep or a card's Prep for Streaming). Tapping while not
 prepped shows a toast instead of acting.
 
-The **fullscreen To-Device tile** (`#fcHandoffBtn`) is richer — instead of greying
-when not prepped, it offers **hold-to-prep in place**. `_renderFcHandoff(s)` paints
-four states: **ready** ("Play To Device", hold → `handoffToDevice`); **not-ready**
-("Prep for Device?", hold → `prepCurrentForDevice`); **prepping** ("Prepping 42%"
-with a `#fcHandoffBar` fill, driven by `app._fcPrepPct`); and **unknown/macOS**
-(neutral, or the old greyed "Not prepped" note when HLS is unavailable).
-`fcDeviceTileHold` is the hold dispatcher. **Holding the tile while it's `prepping`
-hands off to the device immediately** via `handoffToDevice(btn, allowOnDemand=true)`
-— the device starts the JIT on-demand stream (`_lpLoadIndex`'s un-prepped fallback)
-within a tick rather than waiting out the full encode, and the full ABR bundle keeps
-building in the background. The `allowOnDemand` flag is what lets `handoffToDevice`
-skip its `_handoffReadyState === false` block in that case. `prepCurrentForDevice` POSTs
-`/offline-prepare {bulk:false}` (interactive — bypasses the global pause gate and
-the idle-prep kill so the encode starts **while VLC keeps playing the TV**), polls
-`/offline-job/{id}` for progress, then `_finishFcPrep` flips the tile to
-"Play To Device". See [FRONTEND.md](FRONTEND.md) for the readiness state machine.
+The **fullscreen To-Device tile** (`#fcHandoffBtn`) is not prep-gated: when the
+file has no bundle it **streams on demand** instead of greying. `_renderFcHandoff(s)`
+paints four states: **ready** ("Play To Device", hold → `handoffToDevice`);
+**not-ready** ("Stream to Device", hold → `handoffToDevice(btn, allowOnDemand=true)`);
+**prepping** ("Prepping…", a prep started elsewhere; hold → the same on-demand
+handoff); and **unknown/macOS** (neutral, or the old greyed "Not prepped" note when
+HLS is unavailable). `fcDeviceTileHold` is the hold dispatcher. The on-demand handoff
+stops the TV and the device starts the JIT stream (`_lpLoadIndex`'s un-prepped
+fallback) within seconds; `stream-ondemand` queues the full ABR bundle in the
+background itself (§ Background full prep), so the next play gets the bundle. The
+`allowOnDemand` flag is what lets `handoffToDevice` skip its
+`_handoffReadyState === false` block. Until 20.26.0 a not-ready tile offered
+"Prep for Device?" instead, which encoded while VLC kept playing and made you wait
+for the bundle before you could hand off. See [FRONTEND.md](FRONTEND.md) for the
+readiness state machine.
 
 ### 7. Handoff to VLC (device → TV)
 
@@ -2616,7 +2615,7 @@ when the app comes back.
 *Pulling is **not** prep-gated, unlike the footer Handoff button.* `handoffToDevice`
 greys out when the current file has no HLS bundle, because it would stop the TV
 and then sit in a full encode. A pull takes the on-demand (JIT) path instead —
-the same thing the fullscreen To-Device tile does when you hold it mid-prep
+the same thing the fullscreen To-Device tile does when the file isn't prepped
 (`allowOnDemand`) — so playback starts in seconds rather than being refused. The
 only hard gate is `hlsAvailable` (false on a macOS host).
 

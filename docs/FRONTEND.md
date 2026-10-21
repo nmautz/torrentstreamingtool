@@ -981,21 +981,19 @@ toast); `null` (unknown) stays clickable to avoid false-blocking. The async
 result is cached in `app._handoffReady` / `app._handoffReadyFile` (guarded by
 `app._handoffInflightFile`).
 
-**Fullscreen To-Device tile (`#fcHandoffBtn`) — hold-to-prep.** Rather than just
-greying when not prepped, the fullscreen tile invites prepping in place.
-`_renderFcHandoff(s)` (called from `renderPlayer` and the prep poll loop) paints
-its `#fcHandoffLabel` / `#fcHandoffNote` / `#fcHandoffBar` for four states:
-**ready** ("Play To Device"), **not-ready** ("Prep for Device?", `.handoff-prep`),
-**prepping** ("Prepping 42%", `.handoff-busy` + the `#fcHandoffBar` fill from
-`app._fcPrepPct`; an indeterminate "Prepping…" when a prep started elsewhere owns
-the job), and **unknown / macOS-no-HLS** (neutral, or the legacy greyed "Not
-prepped" note). `fcDeviceTileHold(btn)` dispatches the hold: ready/unknown →
-`handoffToDevice`; known-not-ready → `prepCurrentForDevice()`, which POSTs
-`/offline-prepare {bulk:false}` (interactive, so it starts **while VLC keeps
-playing** — the TV is *not* stopped), polls `/offline-job/{id}` for progress, and
-`_finishFcPrep` flips it to "Play To Device". The first prep in a session still
-shows `confirmStreamPrepWarning()`. State lives in `app._fcPrepFile` /
-`app._fcPrepPct`.
+**Fullscreen To-Device tile (`#fcHandoffBtn`) — streams on demand when not
+prepped.** Rather than greying when the file has no bundle, the fullscreen tile
+hands off onto the JIT on-demand path. `_renderFcHandoff(s)` (called from
+`renderPlayer`) paints its `#fcHandoffLabel` / `#fcHandoffNote` for four states:
+**ready** ("Play To Device"), **not-ready** ("Stream to Device", `.handoff-prep`),
+**prepping** ("Prepping…", `.handoff-busy`, for a prep started from the episode
+picker or prep-all), and **unknown / macOS-no-HLS** (neutral, or the legacy greyed
+"Not prepped" note). `fcDeviceTileHold(btn)` dispatches the hold: ready/unknown →
+`handoffToDevice(btn)`; not-ready or prepping → `handoffToDevice(btn, true)`
+(`allowOnDemand`), which stops the TV and lets `_lpLoadIndex` fall back to
+`stream-ondemand`. That endpoint queues the full bundle prep itself, so the tile no
+longer starts one (until 20.26.0 it ran `prepCurrentForDevice`, which encoded while
+the TV kept playing and made you wait for the bundle).
 
 `lpHandoffToVlc(btn)` is the reverse — it pushes the on-device play back onto the
 TV. It captures the local `<video>` position + remaining playlist tail, calls

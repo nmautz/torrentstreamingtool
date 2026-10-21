@@ -1,5 +1,15 @@
 # Changelog
 
+## [20.26.0] — 2026-10-21
+
+### Changed
+- **The TV remote's device tile streams an unprepped episode instead of
+  offering to prep it.** While an episode with no stream bundle played on the
+  TV, the tile said "Prep for Device?" and holding it started an encode you
+  then had to wait out. It now says "Stream to Device": holding it stops the
+  TV and picks the episode up on this device at the same moment, on the
+  on-demand (JIT) stream, within seconds. The full prep still gets queued in
+  the background, as every on-demand play already does.
 ## [20.25.24] — 2026-10-20
 
 ### Fixed
