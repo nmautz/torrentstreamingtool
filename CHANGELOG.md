@@ -5,6 +5,11 @@
 ### Fixed
 - The VPN check, every 3 s, now runs `mullvad status` on a worker thread.
   Starting it on the request thread took up to 0.16 s.
+- **The watchdog no longer parses the whole library every 3 s.** To find the
+  VPN mode it read and parsed all 7.6 MB of library.json each time. The
+  watchdog runs inside the server process, and Python can run only one
+  thread at a time, so each parse held up the server for about 0.1 s. It
+  now reads only the one setting, and only after the file has changed.
 
 ## [20.25.23] — 2026-10-20
 
