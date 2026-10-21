@@ -1,5 +1,14 @@
 # Changelog
 
+## [20.25.19] — 2026-10-20
+
+### Fixed
+- Opening a show page, and finishing or moving a download, no longer reads
+  TMDb's episode-group files from disk on the thread that answers every
+  request. Up to 25 small files per show were read there each time the
+  5-minute memory of them lapsed. At start-up this held up the whole server
+  for 0.8 s. They are now read on a worker thread first.
+
 ## [20.25.18] — 2026-10-20
 
 ### Fixed

@@ -1067,6 +1067,12 @@
   "_EP_GROUP_ID_RE": {
    "kind": "value"
   },
+  "_EP_HOMES_TTL": {
+   "kind": "value"
+  },
+  "_EP_HOMES_WARM": {
+   "kind": "value"
+  },
   "_EXPLORE_SECTIONS": {
    "kind": "value"
   },
@@ -2692,7 +2698,8 @@
   "_ep_group_homes": {
    "kind": "def",
    "params": [
-    "metadata:POSITIONAL_OR_KEYWORD"
+    "metadata:POSITIONAL_OR_KEYWORD",
+    "max_age:POSITIONAL_OR_KEYWORD"
    ]
   },
   "_ep_groups_fetch": {
@@ -2710,6 +2717,12 @@
   },
   "_ep_groups_tried": {
    "kind": "value"
+  },
+  "_ep_homes_fill_sync": {
+   "kind": "def",
+   "params": [
+    "metas:POSITIONAL_OR_KEYWORD"
+   ]
   },
   "_ep_homes_memo": {
    "kind": "value"
@@ -6905,6 +6918,13 @@
     "item:POSITIONAL_OR_KEYWORD",
     "qfiles:POSITIONAL_OR_KEYWORD",
     "save_path:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_warm_ep_homes": {
+   "kind": "async def",
+   "params": [
+    "items:POSITIONAL_OR_KEYWORD",
+    "meta:POSITIONAL_OR_KEYWORD"
    ]
   },
   "_watch_offers": {

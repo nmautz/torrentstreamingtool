@@ -1,5 +1,6 @@
 """Matching a playing file to the library touches no disk in the usual case, and
-the playback paths keep their disk calls off the event loop (20.25.17).
+the playback paths keep their disk calls off the event loop (20.25.17), as does
+every async caller of the episode-group homes (20.25.19).
 
     python tests/test_loop_paths.py      (or `make test`)
 
@@ -134,6 +135,81 @@ for name, fn in sorted(bodies.items()):
                 bad.append(f"{called}() at line {n.lineno}")
     check(f"{name} calls none of them directly" + (f" ({', '.join(bad)})" if bad else ""),
           not bad)
+
+print("episode-group homes are read off the loop (20.25.19)")
+# `_ep_group_homes` opens up to 25 TMDb cache files on a memo miss. Every async
+# function that reaches it through the sync attribution code warms it first.
+NEEDS_WARM = {"_ep_group_homes", "_ep_groups_pending", "_nudge_metadata_health",
+              "_reattribute_item_files", "_resettle_files"}
+
+
+def _direct_calls(fn):
+    out = []
+
+    def walk(n):
+        for c in ast.iter_child_nodes(n):
+            if isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue                  # a nested def may well run in a thread
+            if isinstance(c, ast.Call):
+                f = c.func
+                out.append(f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", ""))
+            walk(c)
+    walk(fn)
+    return out
+
+
+callers = 0
+for n in ast.walk(tree):
+    if isinstance(n, ast.AsyncFunctionDef):
+        calls = _direct_calls(n)
+        if NEEDS_WARM & set(calls):
+            callers += 1
+            check(f"{n.name} warms the homes before {sorted(NEEDS_WARM & set(calls))[0]}",
+                  "_warm_ep_homes" in calls)
+check("the rule found its callers", callers >= 10)
+
+import asyncio, time                      # noqa: E402
+sys.path.insert(0, str(ROOT))
+import epgroups                           # noqa: E402
+
+READS = []
+
+
+class FakeDisk:
+    def get(self, key):
+        READS.append(key)
+        return None                       # nothing cached: homes None, memoised
+
+
+hns = {"Optional": __import__("typing").Optional, "time": time, "asyncio": asyncio,
+       "epgroups": epgroups, "_tmdb_disk": FakeDisk(), "_ep_homes_memo": {},
+       "_ep_groups_tried": set(), "_EP_GROUPS_MAX": 24}
+hpieces = []
+for node in tree.body:
+    if isinstance(node, ast.Assign) and any(
+            getattr(t, "id", "") in ("_EP_HOMES_TTL", "_EP_HOMES_WARM") for t in node.targets):
+        hpieces.append(ast.get_source_segment(src, node))
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in (
+            "_ep_group_homes", "_ep_homes_fill_sync", "_warm_ep_homes"):
+        hpieces.append(ast.get_source_segment(src, node))
+exec("\n\n".join(hpieces), hns)
+
+show = {"metadata": {"tmdb_kind": "tv", "tmdb_id": 1429, "all_seasons": []},
+        "files": [{"season": 4, "episode": 0, "path": "x"}]}
+movie = {"metadata": {"tmdb_kind": "movie", "tmdb_id": 5}, "files": [{"path": "y"}]}
+check("a stuck (season, 0) file makes the show eligible", epgroups.eligible(show["files"]))
+asyncio.run(hns["_warm_ep_homes"]([show, show, movie]))
+warm_reads = len(READS)
+check("the warm-up reads the show once, the film not at all", warm_reads == 1)
+READS.clear()
+hns["_ep_group_homes"](show["metadata"])
+check("the sync read after it touches no disk", READS == [])
+asyncio.run(hns["_warm_ep_homes"]([show]))
+check("a fresh memo is not read again", READS == [])
+sid = 1429
+hns["_ep_homes_memo"][sid] = (time.monotonic() - hns["_EP_HOMES_WARM"] - 1, None)
+asyncio.run(hns["_warm_ep_homes"]([show]))
+check("a memo near its expiry is re-read by the warm-up", len(READS) == 1)
 
 print()
 if fails:

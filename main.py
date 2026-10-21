@@ -3106,6 +3106,9 @@ async def _tmdb_fetch_one_season(show_id: int, sn: int) -> Optional[dict]:
 # season. Never stored on `metadata` (most of those blobs are pinned); the TMDb
 # disk cache is the store. See epgroups.py.
 _EP_GROUPS_MAX = 24                  # One Piece has 18; past this is noise
+_EP_HOMES_TTL = 300                  # a memoised `_ep_group_homes` is trusted this long
+_EP_HOMES_WARM = 240                 # `_warm_ep_homes` re-reads past this, so the sync
+                                     # read that follows it is always a memo hit
 _ep_homes_memo: dict[int, tuple[float, Optional[dict]]] = {}
 _ep_groups_tried: set[int] = set()  # shows fetched this run: never re-nudge an unanswerable one
 
@@ -3132,7 +3135,8 @@ async def _ep_groups_fetch(show_id: int) -> tuple[list[dict], dict[str, dict]]:
     return rows, out
 
 
-def _ep_group_homes(metadata: Optional[dict]) -> Optional[dict]:
+def _ep_group_homes(metadata: Optional[dict],
+                    max_age: float = _EP_HOMES_TTL) -> Optional[dict]:
     """`epgroups.season_homes` for a show, from the TMDb disk cache only (sync:
     it runs inside the attribution pass). None = the groups were never fetched
     here, so there's no opinion; `{}` = fetched, and nothing belongs anywhere.
@@ -3145,7 +3149,7 @@ def _ep_group_homes(metadata: Optional[dict]) -> Optional[dict]:
     if not show_id or meta.get("tmdb_kind") != "tv":
         return None
     hit = _ep_homes_memo.get(show_id)
-    if hit and time.monotonic() - hit[0] < 300:
+    if hit and time.monotonic() - hit[0] < max_age:
         return hit[1]
     listing = _tmdb_disk.get(f"/tv/{show_id}/episode_groups")
     homes: Optional[dict] = None
@@ -3168,6 +3172,39 @@ def _ep_group_homes(metadata: Optional[dict]) -> Optional[dict]:
             homes = epgroups.season_homes(groups, meta.get("all_seasons") or [])
     _ep_homes_memo[show_id] = (time.monotonic(), homes)
     return homes
+
+
+def _ep_homes_fill_sync(metas: list) -> None:
+    for m in metas:
+        _ep_group_homes(m, _EP_HOMES_WARM)
+
+
+async def _warm_ep_homes(items, meta: Optional[dict] = None) -> None:
+    """Memoise the episode-group homes of these items off the loop, so the sync
+    attribution code that runs next (`_ep_groups_pending`, `_reattribute_item_files`,
+    `_resettle_files`, `_nudge_metadata_health`) never reads the disk on it.
+
+    A memo miss in `_ep_group_homes` opens up to 25 TMDb cache files on F:. On
+    the loop that held it 0.8 s after the 20.25.18 start (`episode_group_backfill`),
+    and every show page open and download rebuild could do the same once the
+    5-minute memo lapsed. `meta` stands in for each item's own metadata."""
+    now = time.monotonic()
+    cold, seen = [], set()
+    for it in items:
+        m = meta if meta is not None else (it.get("metadata") or {})
+        if not isinstance(m, dict) or m.get("tmdb_kind") != "tv" \
+                or not epgroups.eligible(it.get("files") or []):
+            continue
+        try:
+            sid = int(m.get("tmdb_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        hit = _ep_homes_memo.get(sid)
+        if sid and sid not in seen and not (hit and now - hit[0] < _EP_HOMES_WARM):
+            seen.add(sid)
+            cold.append(m)
+    if cold:
+        await asyncio.to_thread(_ep_homes_fill_sync, cold)
 
 
 async def _tmdb_fetch_tv(show_id: int, seasons: Optional[list[int]]) -> dict:
@@ -3413,6 +3450,7 @@ async def _settle_attribution(lib: dict, item: dict,
     write re-reads under the lock and re-applies to the fresh item, because by the
     time we get here that snapshot may predate other writers.
     """
+    await _warm_ep_homes([item], meta or {})
     if (meta or {}).get("tmdb_kind") == "tv" and meta.get("tmdb_id") \
             and epgroups.eligible(item.get("files") or []) \
             and _ep_group_homes(meta) is None:
@@ -3431,6 +3469,7 @@ async def _settle_attribution(lib: dict, item: dict,
             fresh = next((x for x in lib_w["items"] if x["id"] == item.get("id")), None)
             if fresh is None:
                 raise LibraryUnchanged
+            await _warm_ep_homes([fresh], meta or {})
             _reattribute_item_files(fresh, meta)   # pure + idempotent — same result
 
     have = {int(k) for k in (meta or {}).get("seasons", {}) if str(k).isdigit()}
@@ -3461,6 +3500,7 @@ async def _settle_attribution(lib: dict, item: dict,
         it2["metadata"].setdefault("seasons", {}).update(extra)
         if roam:
             # The names just fetched are what `roam` was waiting for.
+            await _warm_ep_homes([it2])
             _reattribute_item_files(it2, it2["metadata"])
     return it2["metadata"]
 
@@ -9898,6 +9938,7 @@ async def episode_group_backfill() -> None:
     await asyncio.sleep(ANIME_BACKFILL_START_DELAY + 30)
     try:
         lib = await get_library()
+        await _warm_ep_homes(lib["items"])
         targets = [it["id"] for it in lib["items"]
                    if _ep_groups_pending(it, it.get("metadata") or {})]
         for item_id in targets:
@@ -9959,6 +10000,7 @@ async def _repair_empty_ready_items(lib: dict) -> list:
                                                    "message": item["error"]})
             continue
         item["files"] = new_files
+        await _warm_ep_homes([item])
         _resettle_files(item)
         item["size_bytes"] = sum(f["size_bytes"] for f in new_files)
         log.info("Repaired empty ready item %r: %d file(s) from qBit (%s)",
@@ -11022,6 +11064,7 @@ async def _apply_race_upgrade(item_id: str) -> None:
             cur["torrent_hash"] = hq_hash
             cur["title"] = hq.get("title", "") or cur.get("title", "")
             cur["files"] = new_files
+            await _warm_ep_homes([cur])
             _resettle_files(cur)
             cur["size_bytes"] = sum(f.get("size_bytes", 0) for f in new_files)
             cur["download_source"] = {"magnet": hq.get("magnet", ""),
@@ -11324,6 +11367,7 @@ async def library_download_monitor() -> None:
                         if nf.get("path") in prev_compressed:
                             nf["compressed"] = True
                     item["files"] = new_files
+                    await _warm_ep_homes([item])
                     _resettle_files(item)
                     item["size_bytes"] = sum(f["size_bytes"] for f in new_files)
 
@@ -13191,6 +13235,7 @@ async def library_download_pipeline(
                                 "skipped": [], "fallback": {},
                             }
                         if it.get("pack_slice"):
+                            await _warm_ep_homes([it])
                             _resettle_files(it)
                             _pack_slice_apply(it, qfiles, save_path)
                         target = it
@@ -14435,15 +14480,17 @@ async def library_coverage(request: Request, profile_id: str = "",
     # because it looks complete. Nudge the repair from here too. Bounded per
     # call: the condition is rare, self-clearing and joins in-flight fetches, but
     # a library that somehow held fifty of them shouldn't fire fifty at once.
-    nudged = 0
+    to_nudge = []
     for members in groups.values():
-        if nudged >= COVERAGE_NUDGE_PER_CALL:
+        if len(to_nudge) >= COVERAGE_NUDGE_PER_CALL:
             break
         for it in members:
             if _movie_binding_is_stale(it, it.get("metadata") or {}):
-                _nudge_metadata_health(it)
-                nudged += 1
+                to_nudge.append(it)
                 break
+    await _warm_ep_homes(to_nudge)
+    for it in to_nudge:
+        _nudge_metadata_health(it)
 
     shows = []
     for skey, members in groups.items():
@@ -14852,6 +14899,7 @@ async def get_item_files(request: Request, item_id: str,
     if not item:
         raise HTTPException(404, "Item not found.")
     _assert_item_visible(request, lib, item, profile_id)
+    await _warm_ep_homes([item])
     _nudge_metadata_health(item)
     cfg = _download_cfg(item)
     prep_cfg = _prep_cfg(item)
@@ -15205,6 +15253,7 @@ async def get_series_files(request: Request, series_key: str,
     # is the only one that shows it (a later season pack of a show already in
     # the library — see _nudge_metadata_health, condition 0). Its fetch fires
     # `metadata_update`, which repaints this page with the settled numbers.
+    await _warm_ep_homes(members)
     for it in members:
         _nudge_metadata_health(it)
 
@@ -15266,6 +15315,7 @@ async def get_item_metadata(request: Request, item_id: str,
         # Cached, but possibly from before the season inventory existed — heal it
         # in the background so absolute episode numbers get corrected. See
         # _nudge_metadata_health.
+        await _warm_ep_homes([item])
         _nudge_metadata_health(item)
 
     # Once the item itself is bound, resolve its sections (a spin-off folder is
@@ -16295,6 +16345,7 @@ async def _commit_item_move(item_id: str, old_files: list[dict],
                 nf = dict(nf, validation=prev["validation"])
             merged.append(nf)
         it["files"] = merged
+        await _warm_ep_homes([it])
         _resettle_files(it)
 
 
