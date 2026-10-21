@@ -1,5 +1,15 @@
 # Changelog
 
+## [20.25.23] — 2026-10-20
+
+### Fixed
+- HTTP requests the server makes no longer search the disk for a missing
+  Python package. The HTTP library tries to import `sniffio` each time it sets
+  up a connection. The package is not installed, so every attempt searched the
+  disk, on the thread that answers every request. It showed up in 4 of the 9
+  freezes logged since 20.25.20. The import now fails at once, with the same
+  result.
+
 ## [20.25.22] — 2026-10-20
 
 ### Fixed

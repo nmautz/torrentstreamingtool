@@ -41,6 +41,15 @@ from typing import AsyncGenerator, Optional
 from urllib.parse import quote, unquote, urlparse
 
 import httpx
+import importlib.util
+
+# httpcore asks for `sniffio` on every lock and event it sets up, from inside a
+# try/import. anyio 4 stopped depending on it, so on the box it is not installed
+# and every HTTP request searched sys.path on disk for it, on the loop: `import
+# sniffio` was the frame of 4 of 9 LOOP BLOCKED samples on 20.25.20-22. A None
+# entry makes that import fail at once, with the same answer ("asyncio").
+if importlib.util.find_spec("sniffio") is None:
+    sys.modules.setdefault("sniffio", None)
 import psutil
 import diagnostics as diag
 import devactivity

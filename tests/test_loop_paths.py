@@ -190,6 +190,10 @@ check("lifespan reads the endpoints' source on a worker thread, before serving",
       "await asyncio.to_thread(_warm_endpoint_sources_sync, app)" in life_src
       and life_src.index("_warm_endpoint_sources_sync") < life_src.index("yield"))
 
+check("a missing sniffio is stubbed, so httpcore's per-request import never searches the disk",
+      'sys.modules.setdefault("sniffio", None)' in src
+      and src.index('sys.modules.setdefault("sniffio", None)') < src.index("\napp = FastAPI("))
+
 import asyncio, time                      # noqa: E402
 sys.path.insert(0, str(ROOT))
 import epgroups                           # noqa: E402

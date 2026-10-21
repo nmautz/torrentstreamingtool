@@ -8431,6 +8431,9 @@
     "n:POSITIONAL_OR_KEYWORD"
    ]
   },
+  "importlib": {
+   "kind": "module importlib"
+  },
   "indexer_warmup": {
    "kind": "async def",
    "params": []
