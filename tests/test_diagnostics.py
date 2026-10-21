@@ -341,6 +341,29 @@ ok("Linux partitions and loop devices are skipped, disks kept",
    == (["sda", "nvme0n1"]))
 
 
+# Garbage collection is timed (20.25.21): a long pass holds the GIL and stops the loop.
+_real_pc = diag.time.perf_counter
+_clock = [100.0]
+diag.time.perf_counter = lambda: _clock[0]
+diag.state.gc_peak_s, diag.state.gc_peak_gen, diag.state.gc_slow = 0.0, -1, []
+diag.state.loop_thread_id = diag.threading.get_ident()
+diag._gc_callback("start", {"generation": 2})
+_clock[0] += 0.31
+diag._gc_callback("stop", {"generation": 2, "collected": 7})
+diag._gc_callback("start", {"generation": 0})
+_clock[0] += 0.001
+diag._gc_callback("stop", {"generation": 0, "collected": 0})
+diag.time.perf_counter = _real_pc
+ok("the longest collection is the peak", round(diag.state.gc_peak_s, 2) == 0.31
+   and diag.state.gc_peak_gen == 2)
+_lines = diag.drain_gc_pauses()
+ok("only the slow one is logged, named as the loop's",
+   len(_lines) == 1 and _lines[0].startswith("GC PAUSE 0.31s gen2 at ")
+   and "on event loop: 7 collected" in _lines[0], _lines)
+ok("draining empties it", diag.drain_gc_pauses() == [])
+ok("a stop with no start is ignored", diag._gc_callback("stop", {"generation": 1}) is None)
+
+
 print("%d passed, %d failed" % (_PASS, len(_FAIL)))
 for f in _FAIL:
     print("FAIL:", f)

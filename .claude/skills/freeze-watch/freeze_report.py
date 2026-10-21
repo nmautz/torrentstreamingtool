@@ -64,6 +64,7 @@ def parse_vitals(text):
             if re.search(k + r"=([\d.]+)", ln) else d
         lag = g("lag")
         rows.append({"t": t, "up": g("up"), "lag": lag, "lagmax": g("lagmax", lag),
+                     "gcmax": g("gcmax"),
                      "has_lagmax": "lagmax=" in ln, "probe": g("probe"),
                      "fails": g("fails"), "line": ln})
     return rows
@@ -93,7 +94,7 @@ def cause_of(stack_lines):
 
 
 def parse_app(text, since):
-    blocks, slow, lock, pool, disk, errors, dumps = [], [], [], [], [], [], []
+    blocks, slow, lock, pool, disk, errors, dumps, gcs = [], [], [], [], [], [], [], []
     lines = text.splitlines()
     i = 0
     while i < len(lines):
@@ -130,6 +131,10 @@ def parse_app(text, since):
                     pool.append((t, re.search(r"thread pool saturated [^;|]*", ln).group(0)))
                 if re.search(r"; disk |ANOMALY: disk ", ln):
                     disk.append((t, re.search(r"disk [^|]*", ln).group(0)[:120]))
+            elif "GC PAUSE" in ln:
+                m = re.search(r"GC PAUSE ([\d.]+)s gen(\d+) at [\d:]+ on ([^:]+):", ln)
+                if m:
+                    gcs.append((t, float(m.group(1)), int(m.group(2)), m.group(3)))
             elif "STALL DUMP written" in ln:
                 dumps.append((t, ln.split("STALL DUMP written to ", 1)[-1][:140]))
             elif " ERROR " in ln or " CRITICAL " in ln:
@@ -140,14 +145,14 @@ def parse_app(text, since):
     for b in blocks:
         if b["still"] and not any(0 <= (f["t"] - b["t"]).total_seconds() <= 3600 for f in final):
             final.append(b)
-    return sorted(final, key=lambda b: b["t"]), slow, lock, pool, disk, errors, dumps
+    return sorted(final, key=lambda b: b["t"]), slow, lock, pool, disk, errors, dumps, gcs
 
 
 def report(ver, logs, stall_files, since_arg):
     rows = parse_vitals(logs["vitals.log"])
     since = datetime.strptime(since_arg, "%Y-%m-%d %H:%M:%S") if since_arg else last_restart(rows)
     rows = [r for r in rows if r["t"] >= since]
-    blocks, slow, lock, pool, disk, errors, dumps = parse_app(logs["streamlink_app.log"], since)
+    blocks, slow, lock, pool, disk, errors, dumps, gcs = parse_app(logs["streamlink_app.log"], since)
     out, act = [], []
     end = rows[-1]["t"] if rows else since
     out.append(f"build {ver}   window {since:%m-%d %H:%M:%S} -> {end:%H:%M:%S} "
@@ -180,6 +185,23 @@ def report(ver, logs, stall_files, since_arg):
             act.append(f"HARD: {r['lagmax'] * 1000:.0f} ms at {r['t']:%H:%M:%S} with no LOOP BLOCKED report")
             out.append(f"  HARD   lagmax {r['lagmax'] * 1000:.0f} ms at {r['t']:%H:%M:%S}, unnamed "
                        f"(a C call holding the GIL, or a build older than 20.25.20)")
+
+    # 1b. Garbage collection (20.25.21+): it holds the GIL, so a long pass is a loop
+    # freeze whichever thread runs it, and LOOP BLOCKED then names an innocent line.
+    if any("gcmax=" in r["line"] for r in rows) or gcs:
+        gw = max((g for _, g, _, _ in gcs), default=max((r["gcmax"] for r in rows), default=0))
+        hard_g = [x for x in gcs if x[1] * 1000 >= HARD_MS]
+        soft_g = [x for x in gcs if SOFT_MS <= x[1] * 1000 < HARD_MS]
+        out.append(f"gc       worst {gw * 1000:.0f} ms | >= {HARD_MS} ms: {len(hard_g)} "
+                   f"| {SOFT_MS}-{HARD_MS - 1} ms: {len(soft_g)}")
+        rep_g = len(soft_g) >= SOFT_REPEAT
+        if hard_g or rep_g:
+            act.append(f"{'HARD' if hard_g else 'REPEAT'}: garbage collector (see GC PAUSE lines)")
+        for tag, xs in (("HARD", hard_g), ("REPEAT" if rep_g else "soft", soft_g)):
+            by_g = collections.Counter((gen, who) for _, _, gen, who in xs)
+            for (gen, who), n in by_g.most_common():
+                worst = max(g for _, g, gn, w in xs if (gn, w) == (gen, who)) * 1000
+                out.append(f"  {tag:6} {n}x worst {worst:.0f} ms  gen{gen} collection on {who}")
 
     # 2. The server not answering although the loop was free.
     pr = [r for r in rows if r["probe"] >= PROBE_HARD_MS and r["lagmax"] * 1000 < SOFT_MS]
@@ -219,7 +241,7 @@ def report(ver, logs, stall_files, since_arg):
     verdict = "ACT" if act else "PASS"
     kinds = collections.Counter(x.split(":", 1)[0] for x in act)
     named = [x.split(": ", 1)[1] for x in dict.fromkeys(act)
-             if x.startswith(("HARD: ", "REPEAT: ")) and ".py:" in x]
+             if x.startswith(("HARD: ", "REPEAT: ")) and (".py:" in x or "garbage" in x)]
     head = f"VERDICT: {verdict}"
     if act:
         head += (f"  ({len(hard_l)} loop freezes >= {HARD_MS} ms, worst {max(lm, default=0):.0f} ms; "

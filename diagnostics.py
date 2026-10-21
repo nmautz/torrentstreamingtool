@@ -45,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import faulthandler
+import gc
 import io
 import logging
 import os
@@ -100,6 +101,8 @@ _PATIENT_PREFIX       = "POST /api/admin/indexers/"
 LOOP_BLOCK_POLL_S     = 0.05    # how often the heartbeat is checked, and the sampling interval
 LOOP_LAG_TICK_S       = 0.05    # how often the loop proves it is free; a block's lag is
                                 # measured to within this (0.5 until 20.25.18, 0.1 until 20.25.20)
+GC_PAUSE_LOG_S        = 0.1     # a garbage collection this long is logged (GC PAUSE): it holds the
+                                # GIL, so it stops the loop whichever thread it runs on (20.25.21)
 LOOP_BLOCK_ONGOING_S  = 15.0    # still blocked this long ⇒ log what it is doing NOW, in case it never returns
 
 
@@ -146,6 +149,10 @@ class DiagState:
     loop_thread_id:  int   = 0
     last_block:      str   = ""      # the most recent LOOP BLOCKED report, for the stall dump
     disk_last:       dict  = field(default_factory=dict)   # the latest disk_sample(), merged into snapshot()
+    block_lag_s:     float = 0.0     # worst lag since the watchdog's last report: a block's true length
+    gc_peak_s:       float = 0.0     # longest collection since the last vitals line (`gcmax=`)
+    gc_peak_gen:     int   = -1
+    gc_slow:         list  = field(default_factory=list)   # (wall, secs, gen, collected, thread id) >= GC_PAUSE_LOG_S
 
 
 state = DiagState()
@@ -1053,6 +1060,8 @@ def snapshot() -> dict:
         "uptime_s":    time.monotonic() - state.started_at,
         "loop_lag_s":  state.loop_lag_s,
         "loop_lag_peak_s": state.loop_lag_peak_s,
+        "gc_peak_s":   state.gc_peak_s,
+        "gc_peak_gen": state.gc_peak_gen,
         "tasks":       len(asyncio.all_tasks(loop)) if loop.is_running() else 0,
         "tp_threads":  threads_n,
         "tp_max":      maxw,
@@ -1080,7 +1089,9 @@ def snapshot() -> dict:
 def snapshot_line(s: Optional[dict] = None) -> str:
     s = s if s is not None else snapshot()
     return (f"up={s['uptime_s']:.0f}s lag={s['loop_lag_s']:.2f}s "
-            f"lagmax={s.get('loop_lag_peak_s', 0.0):.2f}s tasks={s['tasks']} "
+            f"lagmax={s.get('loop_lag_peak_s', 0.0):.2f}s "
+            f"gcmax={s.get('gc_peak_s', 0.0):.2f}s/g{max(s.get('gc_peak_gen', -1), 0)} "
+            f"tasks={s['tasks']} "
             f"tp={s['tp_threads']}/{s['tp_max']}+q{s['tp_queued']} "
             f"inflight={s['inflight']} oldest={s['oldest_req_s']:.1f}s "
             f"lock_held={s['lock_held_s']:.1f}s waiters={s['lock_waiters']} "
@@ -1127,6 +1138,7 @@ async def _measure_loop_lag() -> None:
     state.loop_thread_id = threading.get_ident()
     state.loop_beat = time.monotonic()
     start_loop_watchdog()
+    start_gc_watch()
     while True:
         t0 = time.monotonic()
         await asyncio.sleep(LOOP_LAG_TICK_S)
@@ -1135,6 +1147,7 @@ async def _measure_loop_lag() -> None:
         state.loop_lag_s = lag
         state.loop_lag_max_s = max(state.loop_lag_max_s, lag)
         state.loop_lag_peak_s = max(state.loop_lag_peak_s, lag)
+        state.block_lag_s = max(state.block_lag_s, lag)
 
 
 # ── Loop-block sampler ───────────────────────────────────────────────────────
@@ -1150,6 +1163,44 @@ async def _measure_loop_lag() -> None:
 # too. The samples then land only after it releases, and name what ran next.
 
 _watchdog_started = False
+_gc_starts: dict = {}
+
+
+def _gc_callback(phase: str, info: dict) -> None:
+    """Time every collection. A full (gen 2) pass walks every live container,
+    and with a few parsed copies of a 7.6 MB library alive that is millions: it
+    runs on whichever thread happened to allocate, holding the GIL throughout,
+    so the loop stops and the sampler names whatever innocent line it was on."""
+    tid = threading.get_ident()
+    if phase == "start":
+        _gc_starts[tid] = time.perf_counter()
+        return
+    t0 = _gc_starts.pop(tid, None)
+    if t0 is None:
+        return
+    d = time.perf_counter() - t0
+    gen = int(info.get("generation", -1))
+    if d > state.gc_peak_s:
+        state.gc_peak_s, state.gc_peak_gen = d, gen
+    if d >= GC_PAUSE_LOG_S and len(state.gc_slow) < 200:
+        state.gc_slow.append((time.time(), d, gen, int(info.get("collected", 0)), tid))
+
+
+def start_gc_watch() -> None:
+    if _gc_callback not in gc.callbacks:
+        gc.callbacks.append(_gc_callback)
+
+
+def drain_gc_pauses() -> list[str]:
+    """The slow collections since the last call, as log lines (pure formatting)."""
+    rows, state.gc_slow = state.gc_slow, []
+    names = {th.ident: th.name for th in threading.enumerate()}
+    out = []
+    for wall, d, gen, collected, tid in rows:
+        who = "event loop" if tid == state.loop_thread_id else names.get(tid, f"thread {tid}")
+        out.append(f"GC PAUSE {d:.2f}s gen{gen} at {time.strftime('%H:%M:%S', time.localtime(wall))} "
+                   f"on {who}: {collected} collected")
+    return out
 _IDLE_FRAMES = ("select", "_poll", "GetQueuedCompletionStatus", "poll",
                 "wait", "acquire", "get")
 
@@ -1220,17 +1271,23 @@ def _loop_watchdog() -> None:
                 fr = frames.get(state.loop_thread_id)
                 if fr is not None:
                     samples.append(_stack_key(fr))
-                    if fr.f_code.co_name in _IDLE_FRAMES:
-                        others.extend(_busy_threads(frames, {me, state.loop_thread_id}))
+                    # Always: a loop thread that looks busy may be waiting for the GIL
+                    # at whatever line it was on (20.25.21).
+                    others.extend(_busy_threads(frames, {me, state.loop_thread_id}))
                 if not told_ongoing and stale >= LOOP_BLOCK_ONGOING_S:
                     told_ongoing = True
                     log.warning("%s", summarize_block(stale, samples, others, ongoing=True))
                 continue
             if samples:
-                report = summarize_block(now - blocked_since, samples, others)
+                # The loop's own measure of the turn, when it has one: this thread
+                # can itself wake late under GIL contention, which made 0.23 s
+                # blocks read 0.48 s on 20.25.20.
+                took = state.block_lag_s if state.block_lag_s > 0 else now - blocked_since
+                report = summarize_block(took, samples, others)
                 state.last_block = time.strftime("%Y-%m-%d %H:%M:%S ") + report
                 log.warning("%s", report)
             samples, others, blocked_since, told_ongoing = [], [], 0.0, False
+            state.block_lag_s = 0.0
         except Exception as exc:                     # never let the watchdog die
             log.error("loop watchdog sample failed: %s: %s", type(exc).__name__, exc)
             samples, others, blocked_since, told_ongoing = [], [], 0.0, False
@@ -1254,6 +1311,9 @@ async def vitals_loop() -> None:
             s = snapshot()
             line = snapshot_line(s)
             state.loop_lag_peak_s = 0.0      # `lagmax=` covers one line each
+            state.gc_peak_s, state.gc_peak_gen = 0.0, -1
+            for gl in drain_gc_pauses():
+                log.warning("%s", gl)
             if _vitals_log:
                 _vitals_log.info(line)
             bad = _anomalies(s)

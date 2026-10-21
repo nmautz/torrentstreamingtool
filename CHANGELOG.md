@@ -1,5 +1,17 @@
 # Changelog
 
+## [20.25.21] — 2026-10-20
+
+### Fixed
+- **The freeze logs now show when Python's garbage collector stops the server.**
+  On 20.25.20 six start-up freezes of 0.2-0.5 s pointed at lines that take
+  microseconds, which means the server was waiting on something else in the
+  process. Every collection is now timed, and any over 0.1 s is logged
+  (`GC PAUSE`). The worst in each 30 s is recorded as `gcmax=`. Freeze reports
+  now also list the other busy threads.
+- A freeze's logged length now comes from the server's own timing. The checking
+  thread could itself wake late, so a 0.23 s freeze was logged as 0.48 s.
+
 ## [20.25.20] — 2026-10-20
 
 ### Fixed

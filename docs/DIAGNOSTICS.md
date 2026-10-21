@@ -726,6 +726,15 @@ Before 20.25.18 only `lag=` existed (one tick in 60), and a "0.29 s worst lag" o
 day was the worst of 888 samples, not the worst freeze. The freeze standard the
 watch applies is `.claude/skills/freeze-watch/SKILL.md`.
 
+**`gcmax=` is the longest garbage collection in the 30 s (20.25.21).** Written as
+`gcmax=0.31s/g2` (seconds / generation). A collection holds the GIL for its whole run,
+so it stops the loop whichever thread triggered it, and the `LOOP BLOCKED` sampler
+then names whatever harmless line the loop thread was on (an `import` of a module
+already loaded, a zero-timeout `select`). Any collection of `GC_PAUSE_LOG_S` (0.1 s)
+or more is also logged to `streamlink_app.log` as `GC PAUSE 0.31s gen2 at HH:MM:SS on
+<thread>: N collected`. Timed by a `gc.callbacks` hook (`_gc_callback`); the log lines
+are written by `vitals_loop`, never from inside the callback.
+
 **Who else is using the disk (20.25.3, #96).** The `dsk` / `io` fields come from
 `disk_sample()`, which runs on its own one-thread executor (`diag-disk`, never the
 default pool) before each line, capped at `DISK_SAMPLE_TIMEOUT_S`. Everything is

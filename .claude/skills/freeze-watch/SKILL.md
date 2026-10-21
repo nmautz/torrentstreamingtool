@@ -47,6 +47,13 @@ case. On 20.25.18-19 a block under 0.5 s is never named. Builds before 20.25.18 
 no `lagmax=` and a 2 s sampler: the report says so, and anything under 2 s on them is
 invisible.
 
+**A named line that can't take that long is a GIL wait.** On 20.25.20 the start-up
+blocks named `import sniffio` (already imported), a zero-timeout `select` and a socket
+receive. The loop thread was waiting for the GIL, held by a garbage collection or a
+C call in another thread. 20.25.21+ logs every collection over 0.1 s (`GC PAUSE`,
+`gcmax=`), and the report judges them by the same lines; `LOOP BLOCKED` reports now
+always list the other threads running Python.
+
 ## Running the check
 
 ```bash
