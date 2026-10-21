@@ -14,7 +14,7 @@ main.py can't be imported without the whole dependency tree, so - like
 tests/test_delete_locked.py - the functions under test are lifted out of its
 source by name. The lift asserts every name was found.
 """
-import ast, asyncio, io, json, logging, os, sys, tempfile, threading, time, types
+import ast, asyncio, io, json, logging, marshal, os, sys, tempfile, threading, time, types
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -28,6 +28,7 @@ src = _backend_src.read()
 tree = ast.parse(src)
 
 WANT = {"_write_durable", "_steps_note", "_note_slow_lib_io", "_save_lib_raw",
+        "_save_lib_raw_inner", "_lib_file_key",
         "_load_lib_raw", "mutate_library", "_library_txn", "_note_slow_txn",
         "LibraryUnchanged", "get_library", "put_library"}
 CONSTS = {"_LIB_IO_SLOW_S", "_SAVE_RETRY_DELAYS"}
@@ -101,8 +102,12 @@ fake_time = types.SimpleNamespace(monotonic=CLOCK.monotonic,
                                   sleep=lambda s: CLOCK.advance(s))
 
 
+MIGRATED = [0]
+
+
 def _migrate_item(it):
     CLOCK.advance(SLOW["migrate"])       # one item in LIB
+    MIGRATED[0] += 1
     return it
 
 
@@ -121,6 +126,7 @@ ns = {
     "_recover_library": lambda: None,
     "_migrate_item": _migrate_item,
     "_fold_item_hides": lambda raw: None,
+    "marshal": marshal, "_LIB_CACHE": None, "_LIB_GEN": 0,
 }
 
 pieces, found = [], set()
@@ -215,10 +221,51 @@ got = ns["_load_lib_raw"]()
 check("loads the library", got["items"] == LIB["items"])
 check("a fast load logs nothing", warnings(CAP.take()) == [])
 SLOW["migrate"] = 4.0
+ns["_LIB_CACHE"] = None                  # a cold load; the cache is checked below
 ns["_load_lib_raw"]()
 w = warnings(CAP.take())
 check("a slow load names the step", w and "load took" in w[0] and "migrate 4.00s" in w[0],
       str(w))
+
+print("the parsed-library cache")
+reset()
+LIBF = ns["LIBRARY_FILE"]
+LIBF.write_text(json.dumps(LIB))
+ns["_LIB_CACHE"] = None
+MIGRATED[0] = 0
+a = ns["_load_lib_raw"]()
+b = ns["_load_lib_raw"]()
+check("an unchanged file is parsed once", MIGRATED[0] == 1, str(MIGRATED))
+check("a hit returns the same library", b == a == {**LIB, "items": LIB["items"]})
+b["items"][0]["progress"]["mine"] = 1
+check("each load is its own copy", "mine" not in ns["_load_lib_raw"]()["items"][0]["progress"])
+LIBF.write_text(json.dumps({"profiles": [], "items": [{"id": "other", "progress": {}}]}))
+check("a file written by someone else is read again",
+      ns["_load_lib_raw"]()["items"][0]["id"] == "other")
+ns["_save_lib_raw"](LIB)
+n0 = MIGRATED[0]
+got = ns["_load_lib_raw"]()
+check("a save is read back, not served from the cache",
+      got["items"] == LIB["items"] and MIGRATED[0] == n0 + 1, str(MIGRATED))
+ns["_load_lib_raw"]()
+check("and is cached after that", MIGRATED[0] == n0 + 1, str(MIGRATED))
+# A save that runs while a load is between its stat and its store: the load must
+# not keep what it parsed. The fake migrate step is where the save lands.
+real_migrate = ns["_migrate_item"]
+ns["_LIB_CACHE"] = None
+ns["_migrate_item"] = lambda it: (ns.__setitem__("_LIB_GEN", ns["_LIB_GEN"] + 2), it)[1]
+ns["_load_lib_raw"]()
+ns["_migrate_item"] = real_migrate
+check("a load overlapped by a save keeps nothing", ns["_LIB_CACHE"] is None)
+REPLACE_FAILS[0] = 99
+ns["_load_lib_raw"]()
+try:
+    ns["_save_lib_raw"](LIB)
+except PermissionError:
+    pass
+CAP.take()
+check("a failed save still drops the cache", ns["_LIB_CACHE"] is None)
+REPLACE_FAILS[0] = 0
 
 print("mutate_library")
 SEEN_HOLDER = []

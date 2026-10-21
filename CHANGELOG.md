@@ -1,5 +1,33 @@
 # Changelog
 
+## [20.25.17] — 2026-10-20
+
+### Fixed
+- **The server no longer rereads its whole library file about once a
+  second.** Every library access read and parsed all of library.json (7.6 MB
+  on the box), and about 17 background loops do that every 2-30 s. The
+  background-video loop parsed it every 3 s just to read one setting. With
+  nothing playing, the server read about 9 MB/s all day, and each parse briefly
+  held up every other request. A parsed copy is now kept in memory and dropped
+  whenever the file is saved or changes on disk. Each caller still gets its own
+  copy.
+- **Playing a long show in VLC no longer touches every episode file every
+  2 s.** Matching the playing file to the library opened each file in the show
+  to compare paths (425 for Family Guy), on the thread that answers every
+  request. The same happened on each Next or Prev press, and when a play queued
+  the rest of the season. Paths are now compared as text first; a file is only
+  opened when the text doesn't match (a Windows short name), and the result
+  is remembered. Queuing the playlist runs in a worker thread.
+- The remaining disk checks on the playback paths now run in a worker thread
+  too:
+  - each segment request of a phone copy;
+  - each segment request and wait poll of an on-demand stream;
+  - the prep chain that starts when a show is played;
+  - the next-episode check behind the skip-credits button;
+  - matching what VLC is playing after a restart.
+- Saving the admin settings no longer makes the next state update parse the
+  whole library on the request thread.
+
 ## [20.25.16] — 2026-10-20
 
 ### Fixed

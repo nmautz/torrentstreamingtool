@@ -1689,6 +1689,25 @@ def vlc_file_uri(p: Path) -> str:
     return rp.as_uri()
 
 
+def _vlc_file_uris_sync(paths: list) -> list[str]:
+    out = []
+    for p in paths:
+        try:
+            out.append(vlc_file_uri(Path(p)))
+        except Exception:
+            continue
+    return out
+
+
+async def _vlc_file_uris(paths: list) -> list[str]:
+    """`vlc_file_uri` for a whole playlist tail, in one worker thread. Each one
+    resolve()s its path, which opens the file on Windows, and a tail is the rest
+    of the show (~400 files for Family Guy) - on the event loop that was one
+    stall per play, on the drive prep was busy encoding to. A path that can't be
+    made into a URI is left out."""
+    return await asyncio.to_thread(_vlc_file_uris_sync, list(paths))
+
+
 # ── Subtitle search (OpenSubtitles legacy REST, keyless) ──────────────────
 #
 # The RULES live in two leaf modules, both measured on the eval kit in
@@ -2413,9 +2432,9 @@ def _tmdb_override_present() -> bool:
     every 2 s and on every TV state post. It used to read and parse the whole
     library.json each time, and on 2026-10-17, with the disk busy, those reads
     blocked the loop for 2-14 s at a time while the TV was playing. The memo is
-    read from disk only while it is empty (start-up, or just after
-    `admin_update_settings` cleared it); `_tmdb_effective_key` refreshes it on
-    every TMDb use past its TTL."""
+    read from disk only while it is empty, at start-up (`admin_update_settings`
+    sets it rather than clearing it, 20.25.17); `_tmdb_effective_key` refreshes
+    it on every TMDb use past its TTL."""
     global _tmdb_key_memo
     if _tmdb_key_memo is None:
         try:
@@ -4942,8 +4961,8 @@ async def _retry_task(file_path: Path) -> None:
             try:
                 cur = str(state.library_current_file)
                 idx = state.library_playlist.index(cur)
-                for p in state.library_playlist[idx + 1:]:
-                    await vlc("in_enqueue", input=vlc_file_uri(Path(p)))
+                for uri in await _vlc_file_uris(state.library_playlist[idx + 1:]):
+                    await vlc("in_enqueue", input=uri)
             except (ValueError, Exception):
                 pass
 
@@ -5028,8 +5047,9 @@ async def _apply_night_mode(enabled: bool) -> None:
             await broadcast("stream_status", {"status": "error", "message": "VLC could not be relaunched."})
             return
 
-        first_resolved = resume_path.resolve()
-        play_task = asyncio.create_task(vlc("in_play", input=vlc_file_uri(first_resolved)))
+        first_resolved = await asyncio.to_thread(resume_path.resolve)
+        first_uri = await asyncio.to_thread(vlc_file_uri, first_resolved)
+        play_task = asyncio.create_task(vlc("in_play", input=first_uri))
         ready = await _vlc_wait_until_ready(first_resolved, timeout=10.0)
 
         state.stream_status = "playing"
@@ -5063,9 +5083,9 @@ async def _apply_night_mode(enabled: bool) -> None:
                 await play_task
             except Exception:
                 pass
-            for p in tail:
+            for uri in await _vlc_file_uris(tail):
                 try:
-                    await vlc("in_enqueue", input=vlc_file_uri(Path(p)))
+                    await vlc("in_enqueue", input=uri)
                 except Exception:
                     pass
     except Exception as exc:
@@ -5868,18 +5888,34 @@ def _canonical_item_path(vlc_path: str, item: dict) -> str:
     so progress keys always match what get_item_files and find_resume_hint
     expect.  Falls back to vlc_path if no match is found.
     """
-    try:
-        target = Path(vlc_path).resolve()
-    except Exception:
-        return vlc_path
-    for f in item.get("files", []):
+    files = item.get("files", [])
+    # The string compare first. It is the usual case and touches no disk:
+    # resolve() opens the file on Windows, and this runs on the event loop every
+    # 2 s of VLC playback over EVERY file in the item (Family Guy: 425).
+    want = _norm_path(vlc_path)
+    for f in files:
         stored = f.get("path", "")
-        try:
-            if Path(stored).resolve() == target:
-                return stored
-        except Exception:
-            continue
+        if stored and _norm_path(stored) == want:
+            return stored
+    target = _resolved_key(vlc_path)
+    if not target:
+        return vlc_path
+    for f in files:
+        stored = f.get("path", "")
+        if stored and _resolved_key(stored) == target:
+            return stored
     return vlc_path
+
+
+@functools.lru_cache(maxsize=8192)
+def _resolved_key(p: str) -> str:
+    """`Path(p).resolve()` as a `_norm_path` key, remembered per process ("" if it
+    can't be resolved). On Windows resolve() opens the file, which on a busy disk
+    takes seconds; what a path resolves to only changes if a link is re-pointed."""
+    try:
+        return _norm_path(str(Path(p).resolve()))
+    except Exception:
+        return ""
 
 
 async def _set_playback_owner(profile_id: Optional[str], lib: Optional[dict] = None) -> None:
@@ -8798,10 +8834,10 @@ def _is_background_path(p: str) -> bool:
     bgp = state.background_video_path
     if not bgp or not p:
         return False
-    try:
-        return Path(bgp).resolve() == Path(p).resolve()
-    except Exception:
-        return str(bgp) == str(p)
+    if _norm_path(bgp) == _norm_path(p):
+        return True
+    a = _resolved_key(bgp)
+    return bool(a) and a == _resolved_key(p)
 
 
 async def _play_background_video() -> bool:
@@ -8994,6 +9030,30 @@ async def background_video_loop() -> None:
             pass
 
 
+def _match_vlc_file_sync(lib: dict, cur_path: str, bg_path: str
+                         ) -> "tuple[bool, Optional[dict], Optional[str]]":
+    """(is the bg video, library item, its stored path) for what VLC is playing.
+    Compares path strings first and resolved paths only when no string matches.
+    Disk I/O: call via to_thread."""
+    want = _norm_path(cur_path)
+    if bg_path and _norm_path(bg_path) == want:
+        return True, None, None
+    files = [(it, f.get("path", "")) for it in lib.get("items", [])
+             for f in it.get("files", []) if f.get("path")]
+    for it, stored in files:
+        if _norm_path(stored) == want:
+            return False, it, stored
+    target = _resolved_key(cur_path)
+    if not target:
+        return False, None, None
+    if bg_path and _resolved_key(bg_path) == target:
+        return True, None, None
+    for it, stored in files:
+        if _resolved_key(stored) == target:
+            return False, it, stored
+    return False, None, None
+
+
 async def _sync_state_from_vlc() -> None:
     """On lifespan startup, restore `state` from VLC's actual playback so SSE
     clients see the correct "now playing" title after a server restart (admin
@@ -9018,37 +9078,16 @@ async def _sync_state_from_vlc() -> None:
         if not uri or not uri.startswith("file://"):
             return
         cur_path = uri_to_path(uri)
-        try:
-            cur_resolved = Path(cur_path).resolve()
-        except Exception:
-            cur_resolved = Path(cur_path)
-
         lib = await get_library()
         bg_path = (lib.get("settings", {}).get("background_video") or {}).get("path", "")
-        if bg_path:
-            try:
-                if Path(bg_path).resolve() == cur_resolved:
-                    state.background_playing = True
-                    return
-            except Exception:
-                pass
-
-        matched_item: Optional[dict] = None
-        matched_path: Optional[str] = None
-        for item in lib.get("items", []):
-            for f in item.get("files", []):
-                stored = f.get("path", "")
-                if not stored:
-                    continue
-                try:
-                    if Path(stored).resolve() == cur_resolved:
-                        matched_item = item
-                        matched_path = stored
-                        break
-                except Exception:
-                    continue
-            if matched_item:
-                break
+        # In a worker thread: the match runs over every file in the library, and
+        # a resolve() of each (it opens the file on Windows) is what this used to
+        # cost on the event loop, right after a restart.
+        is_bg, matched_item, matched_path = await asyncio.to_thread(
+            _match_vlc_file_sync, lib, cur_path, bg_path)
+        if is_bg:
+            state.background_playing = True
+            return
 
         state.stream_status = "playing"
         if matched_item and matched_path:
@@ -12335,7 +12374,7 @@ async def _maybe_emit_skip_offer(
             # Done-marker guard mirrors the auto path so a dismissed offer stays
             # dismissed for the rest of the credits window.
             next_path = _next_file_in_item(item, file_path)
-            next_exists = bool(next_path) and Path(next_path).exists()
+            next_exists = bool(next_path) and await asyncio.to_thread(Path(next_path).exists)
             offer = {
                 "type": "credits",
                 "credits_start": round(cs, 1),
@@ -12382,8 +12421,8 @@ async def vlc_next_file(current_file: str, item: dict) -> None:
     state.track_pref_applied_file = next_path
     await vlc_clear_playlist()
     await vlc("in_play", input=vlc_file_uri(Path(next_path)))
-    for p in new_tail[1:]:
-        await vlc("in_enqueue", input=vlc_file_uri(Path(p)))
+    for uri in await _vlc_file_uris(new_tail[1:]):
+        await vlc("in_enqueue", input=uri)
     if state.library_item_id and state.library_profile_id:
         asyncio.create_task(_apply_track_prefs(
             state.library_item_id, state.library_profile_id, next_path, delay=2.0,
@@ -18421,12 +18460,11 @@ async def _vlc_wait_until_ready(
     immediately. We poll every 0.2 s and still wait out a genuinely slow open so
     nothing fires before VLC can honour it.
     """
-    target: Optional[Path] = None
+    # Compared as `_resolved_key`s (remembered) rather than resolve()d on every
+    # 0.2 s poll: resolve() opens the file on Windows, on the event loop.
+    target: Optional[str] = None
     if expected_file is not None:
-        try:
-            target = expected_file.resolve()
-        except Exception:
-            target = expected_file
+        target = _resolved_key(str(expected_file)) or _norm_path(str(expected_file))
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         vs = await vlc_status()
@@ -18439,12 +18477,8 @@ async def _vlc_wait_until_ready(
             uri = await vlc_playlist_uri()
             if uri:
                 cur = uri_to_path(uri)
-                try:
-                    if Path(cur).resolve() == target:
-                        return True
-                except Exception:
-                    if cur == str(target):
-                        return True
+                if _norm_path(cur) == target or _resolved_key(cur) == target:
+                    return True
         await asyncio.sleep(0.2)
     return False
 
@@ -18471,13 +18505,14 @@ async def _library_play_launch(
        the user is already watching the first file.
     """
     first = Path(playlist[0])
-    first_resolved = first.resolve()
+    first_resolved = await asyncio.to_thread(first.resolve)   # opens the file on Windows
     # Clear any stale playlist items first (incl. the bg video) so VLC's list
     # mirrors `playlist` and can't auto-advance into a leftover entry. Awaited
     # so it completes before the in_play below appends the new item.
     await vlc_clear_playlist()
     # Detached: don't let in_play's slow reply gate the UI flip or the seek.
-    play_task = asyncio.create_task(vlc("in_play", input=vlc_file_uri(first_resolved)))
+    first_uri = await asyncio.to_thread(vlc_file_uri, first_resolved)
+    play_task = asyncio.create_task(vlc("in_play", input=first_uri))
     try:
         # Wait for VLC to actually be playing the new file (poll, not the slow
         # in_play reply). Falls through after the timeout and flips optimistically
@@ -18536,8 +18571,9 @@ async def _library_play_launch(
                 await play_task
             except Exception:
                 pass
+            uris = await _vlc_file_uris(rest)
             await asyncio.gather(
-                *(vlc("in_enqueue", input=vlc_file_uri(Path(p))) for p in rest),
+                *(vlc("in_enqueue", input=u) for u in uris),
                 return_exceptions=True,
             )
     except asyncio.CancelledError:
@@ -23753,16 +23789,19 @@ def _find_in_paths(current: str, paths: list[str]) -> int:
         return paths.index(current)
     except ValueError:
         pass
-    try:
-        resolved = Path(current).resolve()
+    # Then the separator/case-blind string compare, which touches no disk. On
+    # Windows the exact match usually fails (VLC's URI gives `C:/...`, the library
+    # stores `C:\...`), and resolving every path of a 425-file playlist on the
+    # event loop is what a Next press used to cost.
+    want = _norm_path(current)
+    for i, p in enumerate(paths):
+        if _norm_path(p) == want:
+            return i
+    resolved = _resolved_key(current)
+    if resolved:
         for i, p in enumerate(paths):
-            try:
-                if Path(p).resolve() == resolved:
-                    return i
-            except Exception:
-                continue
-    except Exception:
-        pass
+            if _resolved_key(p) == resolved:
+                return i
     return -1
 
 
@@ -23799,8 +23838,8 @@ async def _vlc_replace_upcoming(upcoming: list[str]) -> bool:
             if nid is not None:
                 await vlc("pl_delete", id=str(nid))
         # Enqueue the natural-order tail behind the still-playing current file.
-        for p in upcoming:
-            await vlc("in_enqueue", input=vlc_file_uri(Path(p)))
+        for uri in await _vlc_file_uris(upcoming):
+            await vlc("in_enqueue", input=uri)
         return True
     except Exception:
         return False
@@ -23816,11 +23855,12 @@ async def _vlc_relaunch_playlist(playlist: list[str], target_name: str) -> None:
     for seconds while the user is already watching the new episode.
     """
     first = Path(playlist[0])
-    first_resolved = first.resolve()
+    first_resolved = await asyncio.to_thread(first.resolve)   # opens the file on Windows
     # Clear stale playlist items (a leftover bg entry could otherwise win an
     # end-of-file auto-advance and play the bg video instead of this episode).
     await vlc_clear_playlist()
-    play_task = asyncio.create_task(vlc("in_play", input=vlc_file_uri(first_resolved)))
+    first_uri = await asyncio.to_thread(vlc_file_uri, first_resolved)
+    play_task = asyncio.create_task(vlc("in_play", input=first_uri))
     try:
         await _vlc_wait_until_ready(first_resolved, timeout=10.0)
         state.stream_status = "playing"
@@ -23836,8 +23876,9 @@ async def _vlc_relaunch_playlist(playlist: list[str], target_name: str) -> None:
                 await play_task
             except Exception:
                 pass
+            uris = await _vlc_file_uris(rest)
             await asyncio.gather(
-                *(vlc("in_enqueue", input=vlc_file_uri(Path(p))) for p in rest),
+                *(vlc("in_enqueue", input=u) for u in uris),
                 return_exceptions=True,
             )
     except asyncio.CancelledError:
@@ -26087,7 +26128,9 @@ async def admin_update_settings(request: Request, req: AdminSettingsReq) -> JSON
                 overrides["tmdb_api_key"] = v
             else:
                 overrides.pop("tmdb_api_key", None)
-            _tmdb_key_memo = None
+            # Set, not dropped: an empty memo makes the 2 s state snapshot parse
+            # the whole library on the event loop (`_tmdb_override_present`).
+            _tmdb_key_memo = (time.monotonic(), (v or settings.tmdb_api_key or "").strip())
         if req.hls_ladder is not None:
             # Keep only valid ladder heights, dedupe, order high→low. Exactly the
             # built-in default removes the override (cleaner); any other selection —
@@ -31294,14 +31337,16 @@ async def _rebuild_bundle_index() -> None:
 
 async def _resolve_bundle_dir(key: str) -> Optional[Path]:
     """Locate a bundle dir by key, rebuilding the index once on a cold miss."""
+    # is_dir off the loop: every segment request of every player comes through
+    # here, on the drive that is busiest while something is being watched.
     d = _bundle_index.get(key)
-    if d is not None and d.is_dir():
+    if d is not None and await asyncio.to_thread(d.is_dir):
         return d
     if not _bundle_index_built or d is not None:
         # Either never built, or a stale entry points at a vanished dir — rescan.
         await _rebuild_bundle_index()
         d = _bundle_index.get(key)
-    return d if (d is not None and d.is_dir()) else None
+    return d if (d is not None and await asyncio.to_thread(d.is_dir)) else None
 
 
 def _migrate_offline_cache_layout_sync(items: list[dict]) -> tuple[int, int, int]:
@@ -35525,12 +35570,11 @@ async def _play_prep_chain(item_id: str, files: list[str]) -> None:
             continue
         p = Path(path)
         try:
-            if p.suffix.lower() not in VIDEO_EXTS or not p.exists():
+            # Off the loop: a play of Family Guy walks ~400 files here, three disk
+            # calls each, on the drive prep is encoding to.
+            if not await asyncio.to_thread(_prep_chain_wants_sync, p):
                 continue
         except OSError:
-            continue
-        out_dir = _offline_cache_dir(p)
-        if (out_dir / "master.m3u8").exists():
             continue
         job_id = _start_interactive_prep_job(p, item_id)
         if not job_id:
@@ -36289,6 +36333,13 @@ def _bundle_dir_built_sync(src: Path) -> "tuple[Path, bool]":
     return out_dir, (out_dir / "master.m3u8").exists()
 
 
+def _prep_chain_wants_sync(p: Path) -> bool:
+    """A video on disk with no finished bundle yet. Disk I/O: call via to_thread."""
+    if p.suffix.lower() not in VIDEO_EXTS or not p.exists():
+        return False
+    return not _bundle_dir_built_sync(p)[1]
+
+
 def _peek_prep_state(src: Path) -> dict:
     """Read-only sibling of _maybe_start_prep_job — never starts new work.
 
@@ -36876,7 +36927,7 @@ async def offline_cache_bundle_file(cache_key: str, filename: str,
     # keeps consuming the untouched `master.m3u8`. See _native_master above.
     if filename == _NATIVE_MASTER_NAME:
         src = bundle_dir / "master.m3u8"
-        if not src.is_file():
+        if not await asyncio.to_thread(src.is_file):
             raise HTTPException(404, "Cached file not found.")
         txt = await asyncio.to_thread(src.read_text, encoding="utf-8", errors="replace")
         meta = await asyncio.to_thread(_read_meta, bundle_dir)
@@ -36889,7 +36940,7 @@ async def offline_cache_bundle_file(cache_key: str, filename: str,
     sm = _SUB_PLAYLIST_RE.match(filename)
     if sm:
         vtt = bundle_dir / f"sub_{sm.group(1)}.vtt"
-        if not vtt.is_file():
+        if not await asyncio.to_thread(vtt.is_file):
             raise HTTPException(404, "No such subtitle.")
         meta = await asyncio.to_thread(_read_meta, bundle_dir)
         return Response(content=_sub_wrapper_playlist(vtt.name,
@@ -38181,8 +38232,11 @@ async def ondemand_file(session_key: str, filename: str):
     n = int(m.group(1))
     seg_path = _od_seg_path(session, n)
 
-    # Already produced → serve straight away.
-    if seg_path.exists():
+    # Already produced → serve straight away. Every disk check here runs in a
+    # worker thread: this is the route an unprepped episode plays through, one
+    # request per segment plus a 0.15 s wait poll, and the session dir sits on
+    # the drive ffmpeg is writing to.
+    if await asyncio.to_thread(seg_path.exists):
         return FileResponse(str(seg_path), media_type="video/mp2t")
 
     # Decide (under the session lock) whether the running encode will reach n soon
@@ -38190,11 +38244,11 @@ async def ondemand_file(session_key: str, filename: str):
     # decision + any restart — NOT for the wait below — so concurrent segment
     # requests during a seek don't each spawn an ffmpeg.
     async with session["lock"]:
-        if not seg_path.exists():   # re-check inside the lock
+        if not await asyncio.to_thread(seg_path.exists):   # re-check inside the lock
             proc = session.get("proc")
             alive = proc is not None and proc.returncode is None
             covered = alive and session["start_seg"] <= n
-            near = (n - _od_max_seg_on_disk(session)) <= OD_LOOKAHEAD_SEGS
+            near = (n - await asyncio.to_thread(_od_max_seg_on_disk, session)) <= OD_LOOKAHEAD_SEGS
             if not (covered and near):
                 # n is before the current encode, or too far ahead of it (a seek)
                 # — start a fresh encode at n.
@@ -38204,13 +38258,13 @@ async def ondemand_file(session_key: str, filename: str):
     # spinner is the user-visible "generating that part" state.
     deadline = time.time() + OD_SEG_WAIT_TIMEOUT
     while time.time() < deadline:
-        if seg_path.exists():
+        if await asyncio.to_thread(seg_path.exists):
             session["last_access"] = time.time()
             return FileResponse(str(seg_path), media_type="video/mp2t")
         proc = session.get("proc")
         # Encode ended without producing n (crash / unexpected EOF) — stop waiting.
         if proc is not None and proc.returncode not in (None, 0) \
-                and _od_max_seg_on_disk(session) < n:
+                and await asyncio.to_thread(_od_max_seg_on_disk, session) < n:
             break
         await asyncio.sleep(0.15)
     raise HTTPException(504, "Segment generation timed out.", headers=_OD_NO_STORE)

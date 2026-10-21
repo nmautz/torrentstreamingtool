@@ -3696,6 +3696,14 @@
     "text:POSITIONAL_OR_KEYWORD"
    ]
   },
+  "_match_vlc_file_sync": {
+   "kind": "def",
+   "params": [
+    "lib:POSITIONAL_OR_KEYWORD",
+    "cur_path:POSITIONAL_OR_KEYWORD",
+    "bg_path:POSITIONAL_OR_KEYWORD"
+   ]
+  },
   "_maybe_auto_fetch_for_device": {
    "kind": "async def",
    "params": [
@@ -4596,6 +4604,12 @@
     "item:POSITIONAL_OR_KEYWORD"
    ]
   },
+  "_prep_chain_wants_sync": {
+   "kind": "def",
+   "params": [
+    "p:POSITIONAL_OR_KEYWORD"
+   ]
+  },
   "_prep_in_progress": {
    "kind": "def",
    "params": []
@@ -5320,6 +5334,9 @@
     "tracks:POSITIONAL_OR_KEYWORD",
     "single_option:KEYWORD_ONLY"
    ]
+  },
+  "_resolved_key": {
+   "kind": "value"
   },
   "_restart_vlc_process": {
    "kind": "async def",
@@ -6748,6 +6765,18 @@
     "title:POSITIONAL_OR_KEYWORD",
     "codec:POSITIONAL_OR_KEYWORD",
     "fallback:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_vlc_file_uris": {
+   "kind": "async def",
+   "params": [
+    "paths:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_vlc_file_uris_sync": {
+   "kind": "def",
+   "params": [
+    "paths:POSITIONAL_OR_KEYWORD"
    ]
   },
   "_vlc_focus_windows": {

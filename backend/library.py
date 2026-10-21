@@ -10,6 +10,7 @@ library_backups/, and recovered from a snapshot when the file will not parse.
 """
 import asyncio
 import json
+import marshal
 import os
 import sys
 import threading
@@ -282,7 +283,36 @@ def _recover_library() -> Optional[dict]:
         return None
 
 
+# ── Parsed-library cache ──────────────────────────────────────────────────────
+#
+# Every get_library / mutate_library used to read the whole file and json.loads
+# it. On the box library.json is 7.6 MB and ~17 background loops read it every
+# 2-30 s (background_video_loop every 3 s, for one setting), so on 2026-10-20 the
+# server read ~9 MB/s all day with nothing playing, and each parse held the GIL
+# for the event loop's whole turn. A load now remembers what it parsed, keyed on
+# the file (mtime, size, inode) AND on `_LIB_GEN`, which every save moves; a hit
+# is a `marshal` copy of the migrated library, so no caller ever shares objects
+# with another. Any write by anyone changes the file key, so a stale hit needs
+# both a write the file system can't see and no save from this process.
+_LIB_CACHE: Optional[tuple] = None    # (file key, gen, marshal bytes)
+_LIB_GEN = 0
+
+
+def _lib_file_key() -> Optional[tuple]:
+    try:
+        st = LIBRARY_FILE.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size, st.st_ino)
+
+
 def _load_lib_raw() -> dict:
+    global _LIB_CACHE
+    gen = _LIB_GEN
+    fkey = _lib_file_key()
+    hit = _LIB_CACHE
+    if fkey is not None and hit is not None and hit[0] == fkey and hit[1] == gen:
+        return marshal.loads(hit[2])
     t0 = time.monotonic()
     blob = b""
     for attempt in range(len(_SAVE_RETRY_DELAYS) + 1):
@@ -313,6 +343,14 @@ def _load_lib_raw() -> dict:
     _note_slow_lib_io("load", t_end - t0,
                       {"read": t_read - t0, "parse": t_parse - t_read,
                        "migrate": t_end - t_parse}, len(blob))
+    # Keyed on what was stat-ed BEFORE the read: if the file was replaced in
+    # between, the next stat differs and that load reads again. A save that began
+    # meanwhile moved `_LIB_GEN`, so nothing is kept.
+    if fkey is not None and gen == _LIB_GEN:
+        try:
+            _LIB_CACHE = (fkey, gen, marshal.dumps(raw))
+        except ValueError:
+            _LIB_CACHE = None
     return raw
 
 
@@ -399,6 +437,16 @@ def _save_lib_raw(data: dict) -> None:
     # Durable atomic write — see "Library durability" above. The replace alone
     # survives a process crash; the fsync in _write_durable is what survives a
     # power cut. library.json is rewritten every ~15 s during playback.
+    global _LIB_GEN, _LIB_CACHE
+    _LIB_GEN += 1                 # before AND after: see "Parsed-library cache"
+    _LIB_CACHE = None
+    try:
+        _save_lib_raw_inner(data)
+    finally:
+        _LIB_GEN += 1
+
+
+def _save_lib_raw_inner(data: dict) -> None:
     t0 = time.monotonic()
     blob = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
     steps: dict = {"dumps": time.monotonic() - t0}
