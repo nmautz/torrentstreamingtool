@@ -4731,7 +4731,8 @@
    "params": [
     "cmd:POSITIONAL_OR_KEYWORD",
     "keep:POSITIONAL_OR_KEYWORD",
-    "kw:POSITIONAL_OR_KEYWORD"
+    "kw:POSITIONAL_OR_KEYWORD",
+    "timeout:POSITIONAL_OR_KEYWORD"
    ]
   },
   "_probe_run_sync": {
@@ -4739,7 +4740,8 @@
    "params": [
     "cmd:POSITIONAL_OR_KEYWORD",
     "keep:POSITIONAL_OR_KEYWORD",
-    "kw:POSITIONAL_OR_KEYWORD"
+    "kw:POSITIONAL_OR_KEYWORD",
+    "timeout:POSITIONAL_OR_KEYWORD"
    ]
   },
   "_profile_allowed_indexers": {
