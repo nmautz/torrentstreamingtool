@@ -171,7 +171,8 @@ check("the rule found its callers", callers >= 10)
 print("the ffmpeg capability probes start no process on the loop (20.25.20)")
 # CreateProcess runs on the loop thread under asyncio on Windows; the first
 # ffmpeg start after a boot held it 0.6 s in _has_nvenc.
-PROBES = {"_has_nvenc", "_has_cuda_scale", "_has_tonemap", "_gpu_can_hwdecode"}
+PROBES = {"_has_nvenc", "_has_cuda_scale", "_has_tonemap", "_gpu_can_hwdecode",
+          "_sample_gpu"}               # 20.25.23: every 5 s, 0.14 s on the loop
 seen = set()
 for n in tree.body:
     if isinstance(n, ast.AsyncFunctionDef) and n.name in PROBES:

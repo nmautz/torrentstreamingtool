@@ -9,6 +9,9 @@
   disk, on the thread that answers every request. It showed up in 4 of the 9
   freezes logged since 20.25.20. The import now fails at once, with the same
   result.
+- The GPU load sample, taken every 5 s, now starts `nvidia-smi` on a worker
+  thread. Starting it on the request thread, including the search for the
+  program, took up to 0.14 s.
 
 ## [20.25.22] — 2026-10-20
 

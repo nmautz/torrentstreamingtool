@@ -8065,13 +8065,11 @@ async def _sample_gpu() -> Optional[dict]:
     if _gpu_smi_ok is False:
         return None
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "nvidia-smi",
-            "--query-gpu=utilization.gpu,memory.used,memory.total",
-            "--format=csv,noheader,nounits",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-        )
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=4.0)
+        # Every 5 s: on the loop, CreateProcess plus the PATH search for the exe
+        # was a 0.14 s turn (20.25.22). `_probe_run` does both on a worker thread.
+        rc, out = await _probe_run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total",
+             "--format=csv,noheader,nounits"], timeout=4.0)
     except Exception:
         _gpu_smi_ok = False
         return None
@@ -30239,22 +30237,22 @@ def _offline_job_sem() -> asyncio.Semaphore:
 
 
 def _probe_run_sync(cmd: list[str], keep: str = "stdout",
-                    kw: Optional[dict] = None) -> tuple[int, bytes]:
+                    kw: Optional[dict] = None, timeout: float = 120.0) -> tuple[int, bytes]:
     pipe = subprocess.PIPE
     r = subprocess.run(cmd, stdin=subprocess.DEVNULL,
                        stdout=pipe if keep == "stdout" else subprocess.DEVNULL,
                        stderr=pipe if keep == "stderr" else subprocess.DEVNULL,
-                       timeout=120, **(kw or {}))
+                       timeout=timeout, **(kw or {}))
     return r.returncode, (r.stdout if keep == "stdout" else r.stderr) or b""
 
 
 async def _probe_run(cmd: list[str], keep: str = "stdout",
-                     kw: Optional[dict] = None) -> tuple[int, bytes]:
+                     kw: Optional[dict] = None, timeout: float = 120.0) -> tuple[int, bytes]:
     """One short ffmpeg capability run on a worker thread: `(returncode, the kept
     stream)`. On Windows `asyncio.create_subprocess_exec` runs CreateProcess ON the
     event loop, and the first ffmpeg start after a boot (exe not in the file
     cache yet) held it 0.6 s in `_has_nvenc` (20.25.20)."""
-    return await asyncio.to_thread(_probe_run_sync, cmd, keep, kw)
+    return await asyncio.to_thread(_probe_run_sync, cmd, keep, kw, timeout)
 
 
 async def _has_nvenc() -> bool:
