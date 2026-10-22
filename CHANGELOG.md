@@ -1,5 +1,13 @@
 # Changelog
 
+## [20.26.2] — 2026-10-22
+
+### Fixed
+- The server no longer pauses for 0.67 s at start-up while it asks ffmpeg for
+  its version. The first ffmpeg start after a boot is slow, and it was made on
+  the thread that answers every request. It now runs on a worker thread, like
+  the other ffmpeg checks.
+
 ## [20.26.1] — 2026-10-22
 
 ### Fixed

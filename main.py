@@ -30657,11 +30657,9 @@ async def _ffmpeg_version() -> Optional[tuple[int, int]]:
         _ffmpeg_version_probe["result"] = None
         return None
     try:
-        proc = await asyncio.create_subprocess_exec(
-            ffmpeg, "-version",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-        )
-        out, _ = await proc.communicate()
+        # A worker thread starts it: CreateProcess on the loop took 0.67 s at the
+        # 20.26.1 start (see _probe_run).
+        _, out = await _probe_run([ffmpeg, "-version"], timeout=30.0)
         m = re.search(rb"ffmpeg version (\d+)\.(\d+)", out or b"")
         ver: Optional[tuple[int, int]] = (int(m.group(1)), int(m.group(2))) if m else None
     except Exception:
