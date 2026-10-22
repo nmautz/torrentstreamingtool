@@ -2893,7 +2893,8 @@
   "_ffprobe_full": {
    "kind": "def",
    "params": [
-    "path:POSITIONAL_OR_KEYWORD"
+    "path:POSITIONAL_OR_KEYWORD",
+    "timeout:POSITIONAL_OR_KEYWORD"
    ]
   },
   "_file_by_index": {

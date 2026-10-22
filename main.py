@@ -30764,7 +30764,7 @@ def _source_has_editlist(path: str) -> bool:
     return honored is not None and raw is not None and abs(honored - raw) > EDITLIST_REENCODE_SECS
 
 
-def _ffprobe_full(path: str) -> dict:
+def _ffprobe_full(path: str, timeout: float = 15.0) -> dict:
     """Enumerate every stream + container metadata.
 
     Returns:
@@ -30797,7 +30797,7 @@ def _ffprobe_full(path: str) -> dict:
         r = subprocess.run(
             [binp, "-v", "error", "-print_format", "json",
              "-show_streams", "-show_format", path],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=timeout,
             encoding="utf-8", errors="replace",
         )
         data = json.loads(r.stdout or "{}")
@@ -35472,6 +35472,17 @@ async def _compress_one_file_inner(ffmpeg: str, path: str, *, crf: int, codec: s
 
     stopped = is_stopped
     info = await asyncio.to_thread(_ffprobe_full, str(src))
+    if not info:
+        # ffprobe could not run at all ({}), which is not "no video": on
+        # 2026-10-22 three healthy Steins;Gate episodes timed out at 15 s in a
+        # row while F: was saturated, and were reported as having no video.
+        # Once more after a pause, with room to finish.
+        await asyncio.sleep(10)
+        info = await asyncio.to_thread(_ffprobe_full, str(src), 90.0)
+        if not info:
+            return ("failed", "Could not read the file's streams: ffprobe failed or timed "
+                    "out, usually because the disk was busy. Nothing was changed; run "
+                    "it again.", before, before)
     if not info.get("video"):
         return "failed", "No decodable video stream.", before, before
     src_h = int((info.get("video") or {}).get("height") or 0)

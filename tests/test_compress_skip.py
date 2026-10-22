@@ -102,6 +102,17 @@ check("the estimate leaves the same files out",
 check("both request models have recompress",
       src.count("recompress: bool = False") >= 2)
 
+print("a probe that could not run is not 'no video' (20.26.9)")
+inner = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef)
+             and n.name == "_compress_one_file_inner")
+inner_src = ast.get_source_segment(src, inner)
+check("an empty probe is retried with a longer timeout before failing",
+      "if not info:" in inner_src
+      and inner_src.index("if not info:") < inner_src.index('"No decodable video stream."')
+      and "_ffprobe_full, str(src), 90.0" in inner_src)
+check("and says it timed out, not that the file has no video",
+      "ffprobe failed or timed" in inner_src)
+
 print()
 if fails:
     print(f"{len(fails)} FAILED"); sys.exit(1)

@@ -1,5 +1,15 @@
 # Changelog
 
+## [20.26.9] — 2026-10-22
+
+### Fixed
+- Compression no longer reports a healthy episode as having "No decodable
+  video stream" when the disk is too busy to read it. Three Steins;Gate
+  episodes failed that way in a row while the disk was saturated: reading
+  each file's track list took longer than 15 s. A read that fails is now tried
+  again after a pause, with up to 90 s to finish. If that fails too, the
+  episode is reported as unreadable for now and left unchanged.
+
 ## [20.26.8] — 2026-10-22
 
 ### Fixed
