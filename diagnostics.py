@@ -1077,6 +1077,10 @@ def disk_sample() -> dict:
             disks = psutil.disk_io_counters(perdisk=True) or {}
         except Exception:
             disks = {}
+        # How long each half took (20.26.8): the loop stalls 0.15-0.2 s in the
+        # same second as nearly every vitals line under load, with no Python
+        # running elsewhere, so one of these C calls is holding the GIL.
+        t_disk = time.monotonic()
         procs: dict = {}
         denied = 0
         for p in psutil.process_iter(["name"]):
@@ -1089,6 +1093,8 @@ def disk_sample() -> dict:
                 continue
             procs[p.pid] = ((p.info.get("name") or "?"), io.read_bytes, io.write_bytes)
 
+        t_proc = time.monotonic()
+        samp = (round((t_disk - now) * 1000), round((t_proc - t_disk) * 1000), len(procs) + denied)
         out: dict = {}
         t0 = _disk_prev.get("t")
         dt = (now - t0) if t0 else 0.0
@@ -1124,7 +1130,7 @@ def disk_sample() -> dict:
             out = {"disks": rows[:4],
                    "io_top": [{"name": n, "r_mbs": dr / 1_048_576, "w_mbs": dw / 1_048_576}
                               for _, n, dr, dw in top[:IO_TOP_N]],
-                   "io_denied": denied}
+                   "io_denied": denied, "samp": samp}
         _disk_prev.update(t=now, disks=disks, procs=procs)
         state.disk_last = out
         return out
@@ -1168,7 +1174,11 @@ def _disk_fields(s: dict) -> str:
     dsk = ",".join(f"{d['disk'].rstrip(':')}:{'<' if d.get('under') else ''}"
                    f"{_ms(d['ms'])}ms/{d['mbs']:.1f}MBps" for d in s["disks"]) or "-"
     io = ",".join(f"{p['name']}:{p['r_mbs']:.1f}r+{p['w_mbs']:.1f}w" for p in s["io_top"]) or "-"
-    return f" dsk={dsk} io={io} io_denied={s.get('io_denied', 0)}"
+    out = f" dsk={dsk} io={io} io_denied={s.get('io_denied', 0)}"
+    if s.get("samp"):
+        d, pr, n = s["samp"]
+        out += f" samp={d}+{pr}ms/{n}p"             # disk counters + process walk (20.26.8)
+    return out
 
 
 def snapshot() -> dict:

@@ -740,6 +740,12 @@ From 20.26.1 the start-up heap is frozen out of full collections
 M frozen, counts (a, b, c)`, at most once per `GC_CENSUS_EVERY_S` (10 min). N is
 what a full pass walks; it grows with every parsed library copy alive at the time.
 
+**`samp=` is how long the disk sample itself took (20.26.8).** `samp=120+40ms/212p`:
+`psutil.disk_io_counters` took 120 ms, walking 212 processes' `io_counters` took 40 ms.
+Both run on the `diag-disk` thread, but a C call that holds the GIL stops the loop for
+its whole length. On 2026-10-22, under load, 12 of 14 unexplained 0.15-0.21 s loop
+blocks fell in the same second as a vitals line.
+
 **Log lines are written by the `log-writer` thread (20.26.5).** `defer_log_writes`
 moves every stream and file handler's writes onto it at the start of lifespan, so a
 line can land in the file a moment after it was logged; order is kept.

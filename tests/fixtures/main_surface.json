@@ -8663,6 +8663,9 @@
   "math": {
    "kind": "module math"
   },
+  "mediabin": {
+   "kind": "module mediabin"
+  },
   "metadata_image": {
    "kind": "async def",
    "params": [

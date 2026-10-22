@@ -253,7 +253,7 @@ try:
     line = _line()
     ok("the vitals line carries the disks and the top list",
        " dsk=F:850ms/30.0MBps,PhysicalDrive0:4.0ms/0.1MBps io=MsMpEng.exe:85.0r+0.0w," in line
-       and line.endswith(" io_denied=1"), line)
+       and " io_denied=1 samp=" in line and line.endswith("ms/6p"), line)
     bad = _bad()
     ok("a slow drive is an anomaly that names the busiest process",
        any(b.startswith("disk F: 850 ms per I/O") and "MsMpEng.exe 85.0 MB/s read" in b

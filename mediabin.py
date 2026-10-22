@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -34,6 +35,26 @@ def _lp(cmd: list[str]) -> list[str]:
     return cmd
 
 
+# Where each binary is, remembered (20.26.8). Finding one reads .env and stats the
+# exe, or searches PATH, and ~44 call sites ask, most of them on the event loop:
+# the admin Compression card's status poll (every 2 s) held it 0.33 s with the
+# disk busy. A found binary is re-checked every `_BIN_TTL_FOUND_S`, a missing
+# one every `_BIN_TTL_MISSING_S`, so installing ffmpeg is noticed within a minute.
+_BIN_TTL_FOUND_S = 300.0
+_BIN_TTL_MISSING_S = 60.0
+_bin_memo: dict = {}
+
+
+def _memo_bin(key: str, find) -> Optional[str]:
+    now = time.monotonic()
+    hit = _bin_memo.get(key)
+    if hit is not None and now < hit[0]:
+        return hit[1]
+    val = find()
+    _bin_memo[key] = (now + (_BIN_TTL_FOUND_S if val else _BIN_TTL_MISSING_S), val)
+    return val
+
+
 def _env_bin(env_key: str) -> Optional[str]:
     """Read a binary path from the .env file. Falls back to PATH lookup."""
     env_file = Path(__file__).parent / ".env"
@@ -48,14 +69,18 @@ def _env_bin(env_key: str) -> Optional[str]:
 
 
 def fpcalc_bin() -> Optional[str]:
-    return _env_bin("_FPCALC_BIN") or shutil.which("fpcalc")
+    return _memo_bin("fpcalc", lambda: _env_bin("_FPCALC_BIN") or shutil.which("fpcalc"))
 
 
 def ffmpeg_bin() -> Optional[str]:
-    return _env_bin("_FFMPEG_BIN") or shutil.which("ffmpeg")
+    return _memo_bin("ffmpeg", lambda: _env_bin("_FFMPEG_BIN") or shutil.which("ffmpeg"))
 
 
 def ffprobe_bin() -> Optional[str]:
+    return _memo_bin("ffprobe", _find_ffprobe)
+
+
+def _find_ffprobe() -> Optional[str]:
     """Locate ffprobe by swapping only the FILENAME of the ffmpeg path.
 
     A blanket `str.replace("ffmpeg", "ffprobe")` rewrites EVERY "ffmpeg" segment of the

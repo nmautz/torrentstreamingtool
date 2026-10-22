@@ -1,5 +1,20 @@
 # Changelog
 
+## [20.26.8] — 2026-10-22
+
+### Fixed
+- The admin Compression card no longer freezes the server for up to 0.33 s.
+  Every status poll (every 2 s) looked up where ffmpeg is installed, which reads
+  the settings file and checks the disk. Where ffmpeg, ffprobe and fpcalc are is
+  now remembered for 5 minutes (1 minute while one is missing, so a new install
+  is still found quickly).
+
+### Changed
+- The vitals line now says how long its own disk and process sampling took
+  (`samp=<disk>+<processes>ms/<count>p`). Under load the server pauses for
+  0.15-0.2 s in the same second as nearly every vitals line, and this shows
+  which half of the sampling is responsible.
+
 ## [20.26.7] — 2026-10-22
 
 ### Changed

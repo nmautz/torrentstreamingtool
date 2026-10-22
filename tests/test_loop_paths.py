@@ -307,8 +307,37 @@ for fn in ("_enumerate_bundle_files", "_dir_size_bytes", "_storage_breakdown_syn
     check(f"{fn} lists with os.scandir (size from the directory read)",
           "os.scandir(" in body and ".iterdir()" not in body and ".rglob(" not in body)
 
-import asyncio, time                      # noqa: E402
+print("where ffmpeg is, is remembered (20.26.8)")
 sys.path.insert(0, str(ROOT))
+import mediabin                           # noqa: E402
+_looks = []
+_clock = [1000.0]
+_real = (mediabin._env_bin, mediabin.shutil.which, mediabin.time.monotonic)
+mediabin._env_bin = lambda k: (_looks.append(k), "C:/tools/ffmpeg.exe" if "FFMPEG" in k else None)[1]
+mediabin.shutil.which = lambda name: (_looks.append(name), None)[1]
+mediabin.time.monotonic = lambda: _clock[0]
+mediabin._bin_memo.clear()
+try:
+    a = mediabin.ffmpeg_bin(); b = mediabin.ffmpeg_bin()
+    check("a found binary is looked up once", a == b == "C:/tools/ffmpeg.exe" and _looks == ["_FFMPEG_BIN"])
+    _clock[0] += mediabin._BIN_TTL_FOUND_S + 1
+    mediabin.ffmpeg_bin()
+    check("and again after its TTL", _looks.count("_FFMPEG_BIN") == 2)
+    _looks.clear()
+    mediabin.fpcalc_bin(); mediabin.fpcalc_bin()
+    check("a missing one is remembered too", len(_looks) == 2)      # env + PATH, once
+    _clock[0] += mediabin._BIN_TTL_MISSING_S + 1
+    mediabin.fpcalc_bin()
+    check("but re-checked sooner, so an install is noticed",
+          len(_looks) == 4 and mediabin._BIN_TTL_MISSING_S < mediabin._BIN_TTL_FOUND_S)
+finally:
+    mediabin._env_bin, mediabin.shutil.which, mediabin.time.monotonic = _real
+    mediabin._bin_memo.clear()
+fb = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_ffprobe_bin")
+check("main's ffprobe lookup goes through the memo",
+      "mediabin._memo_bin(" in ast.get_source_segment(src, fb))
+
+import asyncio, time                      # noqa: E402
 import epgroups                           # noqa: E402
 
 READS = []

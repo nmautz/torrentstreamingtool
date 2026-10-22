@@ -42,6 +42,7 @@ from typing import AsyncGenerator, Optional
 from urllib.parse import quote, unquote, urlparse
 
 import httpx
+import mediabin
 from starlette.requests import ClientDisconnect
 import importlib.util
 
@@ -30650,13 +30651,16 @@ def _hls_video_variants(info: dict, heights: Optional[list[int]] = None) -> list
 
 
 def _ffprobe_bin() -> Optional[str]:
-    """Locate ffprobe alongside ffmpeg (or via PATH)."""
-    ffm = analyzer.ffmpeg_bin()
-    if ffm:
-        sib = Path(ffm).with_name("ffprobe" + Path(ffm).suffix)
-        if sib.exists():
-            return str(sib)
-    return shutil.which("ffprobe")
+    """Locate ffprobe alongside ffmpeg (or via PATH). Remembered like the other
+    binaries (`mediabin._memo_bin`): it stats the disk and is asked on the loop."""
+    def _find() -> Optional[str]:
+        ffm = analyzer.ffmpeg_bin()
+        if ffm:
+            sib = Path(ffm).with_name("ffprobe" + Path(ffm).suffix)
+            if sib.exists():
+                return str(sib)
+        return shutil.which("ffprobe")
+    return mediabin._memo_bin("ffprobe-beside-ffmpeg", _find)
 
 
 async def _ffmpeg_version() -> Optional[tuple[int, int]]:
