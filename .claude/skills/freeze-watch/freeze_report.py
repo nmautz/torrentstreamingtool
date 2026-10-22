@@ -23,6 +23,10 @@ PROBE_HARD_MS = 500    # /healthz self-probe this slow with the loop free: lock 
                        # answers in 10-15 ms from the LAN), so it can't share HARD_MS
 GAP_S = 45             # vitals lines further apart than this: the process (or machine) stalled
 SLOW_REQ_S = 5         # a request this slow with the loop free: a slow endpoint, listed, not a freeze
+# Requests a person waits on (20.26.11+, user-set 2026-10-22; perfwatch.py logs them)
+UI_HARD_S = 2.0        # one interactive request this slow: a finding
+UI_SOFT_S = 0.5        # ... this slow, the same route SOFT_REPEAT times in a window: a finding
+PLAY_HARD_S = {"tv-vlc": 2.0, "tv-kiosk": 5.0}   # tap to first frame; the kiosk may be on-demand (JIT)
 
 TS = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")
 FRAME = re.compile(r'^\s*File "([^"]+)", line (\d+), in (\S+)')
@@ -148,6 +152,98 @@ def parse_app(text, since):
     return sorted(final, key=lambda b: b["t"]), slow, lock, pool, disk, errors, dumps, gcs
 
 
+SLOW_UI = re.compile(r"SLOW UI ([\d.]+)s (\S+ \S+) status=(\d+) lock=([\d.]+)s lib=([\d.]+)s "
+                     r"pool=([\d.]+)s other=([\d.]+)s")
+PLAY = re.compile(r"PLAY START (\S+) ([\d.]+)s( \(VLC never confirmed[^)]*\))? (.*)$")
+
+
+def parse_perf(text, since):
+    """The 20.26.11 timing lines: SLOW UI, REQ STATS, PLAY START, PREP TIME,
+    DOWNLOAD TIME, PHONE DOWNLOAD, SEARCH TIME."""
+    out = {"ui": [], "stats": None, "play": [], "prep": [], "dl": [], "phone": [], "search": []}
+    for ln in text.splitlines():
+        t = when(ln)
+        if not t or t < since:
+            continue
+        if "SLOW UI " in ln:
+            m = SLOW_UI.search(ln)
+            if m:
+                split = dict(zip(("lock", "lib", "pool", "other"), map(float, m.group(4, 5, 6, 7))))
+                out["ui"].append((t, float(m.group(1)), m.group(2), split))
+        elif "REQ STATS " in ln:
+            out["stats"] = (t, ln.split("REQ STATS ", 1)[1])
+        elif "PLAY START " in ln:
+            m = PLAY.search(ln)
+            if m:
+                out["play"].append((t, m.group(1), float(m.group(2)), bool(m.group(3)), m.group(4)))
+        elif "PREP TIME " in ln:
+            m = re.search(r"PREP TIME (.*): queued (\d+)s, encoded (\d+)s \(([\d.]+)x realtime", ln)
+            if m:
+                out["prep"].append((t, m.group(1), int(m.group(2)), int(m.group(3)), float(m.group(4))))
+        elif "DOWNLOAD TIME " in ln:
+            out["dl"].append((t, ln.split("DOWNLOAD TIME ", 1)[1]))
+        elif "PHONE DOWNLOAD " in ln:
+            out["phone"].append((t, ln.split("PHONE DOWNLOAD ", 1)[1]))
+        elif "SEARCH TIME " in ln:
+            m = re.search(r"SEARCH TIME ([\d.]+)s (.*)$", ln)
+            if m:
+                out["search"].append((t, float(m.group(1)), m.group(2)))
+    return out
+
+
+def perf_section(perf, act):
+    """Report lines for what a person waits on; findings go into `act`."""
+    out = []
+    ui = perf["ui"]
+    hard = [x for x in ui if x[1] >= UI_HARD_S]
+    soft = [x for x in ui if x[1] < UI_HARD_S]
+    out.append(f"ui       requests >= {UI_SOFT_S * 1000:.0f} ms: {len(ui)} | >= {UI_HARD_S:.0f} s: {len(hard)}")
+    by = collections.defaultdict(list)
+    for x in ui:
+        by[x[2]].append(x)
+    for route, xs in sorted(by.items(), key=lambda kv: -max(x[1] for x in kv[1])):
+        worst = max(xs, key=lambda x: x[1])
+        top = max(worst[3], key=worst[3].get)
+        n_hard = sum(1 for x in xs if x[1] >= UI_HARD_S)
+        n_soft = len(xs) - n_hard
+        tag = "HARD" if n_hard else ("REPEAT" if n_soft >= SOFT_REPEAT else "soft")
+        out.append(f"  {tag:6} {len(xs)}x worst {worst[1]:.2f} s  {route}  "
+                   f"[most of it: {top} {worst[3][top]:.2f} s]  (last {xs[-1][0]:%H:%M:%S})")
+        if tag != "soft":
+            act.append(f"{tag}: slow request {route} ({len(xs)}x, worst {worst[1]:.2f} s, "
+                       f"mostly {top})")
+    if perf["stats"]:
+        out.append(f"  stats  {perf['stats'][0]:%H:%M:%S} {perf['stats'][1][:300]}")
+    plays = perf["play"]
+    if plays:
+        parts = []
+        for kind in sorted({p[1] for p in plays}):
+            xs = [p for p in plays if p[1] == kind]
+            bar = PLAY_HARD_S.get(kind, 2.0)
+            bad = [p for p in xs if p[2] >= bar or p[3]]
+            parts.append(f"{kind} n={len(xs)} worst {max(p[2] for p in xs):.1f} s"
+                         + (f" ({len(bad)} >= {bar:.0f} s)" if bad else ""))
+            for p in bad:
+                act.append(f"HARD: play start {kind} {p[2]:.1f} s at {p[0]:%H:%M:%S} ({p[4][:60]})"
+                           + (" - VLC never confirmed" if p[3] else ""))
+        out.append("play     " + " | ".join(parts))
+    else:
+        out.append("play     none started in the window")
+    waits = []
+    if perf["prep"]:
+        q = max(x[2] for x in perf["prep"]); sp = min(x[4] for x in perf["prep"])
+        waits.append(f"prep n={len(perf['prep'])} queued worst {q / 60:.0f} min, slowest {sp:.1f}x realtime")
+    if perf["search"]:
+        w = max(perf["search"], key=lambda x: x[1])
+        waits.append(f"search n={len(perf['search'])} worst {w[1]:.1f} s ({w[2][:80]})")
+    out.append("waits    " + (" | ".join(waits) or "-"))
+    for t, line in perf["dl"][-4:]:
+        out.append(f"  dl     {t:%H:%M:%S} {line[:120]}")
+    for t, line in perf["phone"][-4:]:
+        out.append(f"  phone  {t:%H:%M:%S} {line[:120]}")
+    return out
+
+
 def report(ver, logs, stall_files, since_arg):
     rows = parse_vitals(logs["vitals.log"])
     since = datetime.strptime(since_arg, "%Y-%m-%d %H:%M:%S") if since_arg else last_restart(rows)
@@ -237,6 +333,8 @@ def report(ver, logs, stall_files, since_arg):
         agg[re.sub(r"[0-9a-f]{16,}|[0-9a-f-]{36}", "{id}", req.split("?")[0])].append(s)
     for req, ss in sorted(agg.items(), key=lambda kv: -max(kv[1])):
         out.append(f"  slow   {len(ss)}x worst {max(ss):.0f} s  {req}")
+    # 5. What a person waits on (20.26.11+): interactive requests, play start, waits.
+    out.extend(perf_section(parse_perf(logs["streamlink_app.log"], since), act))
     out.append(f"errors   {len(errors)} ERROR/CRITICAL lines, {len(dumps)} stall dumps")
     for t, e in errors[:8]:
         out.append(f"  {t:%H:%M:%S} {e}")
@@ -246,7 +344,8 @@ def report(ver, logs, stall_files, since_arg):
     verdict = "ACT" if act else "PASS"
     kinds = collections.Counter(x.split(":", 1)[0] for x in act)
     named = [x.split(": ", 1)[1] for x in dict.fromkeys(act)
-             if x.startswith(("HARD: ", "REPEAT: ")) and (".py:" in x or "garbage" in x)]
+             if x.startswith(("HARD: ", "REPEAT: ")) and (".py:" in x or "garbage" in x
+                                                         or "slow request" in x or "play start" in x)]
     head = f"VERDICT: {verdict}"
     if act:
         head += (f"  ({len(hard_l)} loop freezes >= {HARD_MS} ms, worst {max(lm, default=0):.0f} ms; "

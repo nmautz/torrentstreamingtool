@@ -865,6 +865,37 @@ The same middleware feeds the **Devices** tab (next section): its `finally` call
 
 ---
 
+## What a person waits on (20.27.0, #104)
+
+The freeze lines say when the server stopped answering. These say when it answered
+slowly enough to notice. All in `streamlink_app.log`; the freeze watch judges them
+(`.claude/skills/freeze-watch/SKILL.md`).
+
+- **`SLOW UI 0.62s GET /api/library/{item_id}/files status=200 lock=0.40s lib=0.05s pool=0.00s other=0.17s`**:
+  an interactive request (`perfwatch.classify` → `ui`) of 500 ms or more, by route
+  template. `lock` = waiting for the library lock, `lib` = library reads/writes
+  (`lib_io`), `pool` = queued for a shared worker thread (`diag.TimedExecutor`),
+  `other` = the rest (the handler, its own disk calls, qBit / TMDb round trips).
+  The split rides a context variable (`diag.cost_begin` in `diag_track_requests`).
+- **`REQ STATS 5m ui n=412: GET /api/library n=40 p50=30ms p95=210ms max=800ms; ... | media n=900 max=3000ms`**:
+  every 5 minutes (`PERF_SUMMARY_S`), the slowest interactive routes by p95 and a
+  total for each other kind.
+- **`PLAY START tv-vlc 1.20s <file>`**: `/play` to VLC confirming it plays the file;
+  `(VLC never confirmed; gave up waiting)` if it never did. **`PLAY START tv-kiosk 3.10s`**:
+  the TV kiosk's play to its first `playing` state post. The phone and browser
+  players are phase 2 (#105).
+- **`PREP TIME <file>: queued 600s, encoded 300s (4.7x realtime, 23 min of video)`**:
+  one per finished prep (`queued_at` is kept when `started_at` is re-baselined).
+- **`DOWNLOAD TIME <title>: first episode playable after 312s`** and **`: all N file(s)
+  done after …`**: from `added_at`, only for items this process saw while still
+  downloading (`_DL_TIMES`).
+- **`PHONE DOWNLOAD <file>: 1312 files, 640 MB in 340s (1.9 MB/s) dev=…`**: from the
+  first `bundle-manifest` for that device + bundle to the last distinct file of it
+  served (`_phone_dl_begin` / `_phone_dl_fetch`, counted in the request middleware).
+  A download abandoned for `PHONE_DL_TTL_S` (6 h) is dropped silently.
+- **`SEARCH TIME 9.1s 'query': yts 1.1s 20r, 1337x 8.9s 40r, eztv pending`**: when
+  results were returned, then each indexer's own time.
+
 ## Devices (admin tab, 19.0.0)
 
 **Who is connected, what are they doing, and what did they send.** Before this

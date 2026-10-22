@@ -1,5 +1,25 @@
 # Changelog
 
+## [20.27.0] — 2026-10-22
+
+### Added
+- **The server now times what a person waits on, not only when it freezes**
+  (#104). The freeze watch caught the server not answering. A screen that takes
+  a second to load was invisible to it. Now:
+  - Any request that loads a screen or answers a button and takes 0.5 s or more
+    is logged with where its time went: waiting for the library, reading or
+    saving the library, waiting for a worker, or the request's own work. Every
+    5 minutes there is a summary of the slowest pages.
+  - The time from Play to the picture on the TV, through VLC or the TV's
+    on-screen player.
+  - Background waits: how long a prep waited in the queue and how fast it ran,
+    how long a download took until its first episode could play, how long an
+    episode took to reach the phone, and how long a search took, per indexer.
+  The freeze watch reports all of it. A screen that takes 2 s, the same one
+  taking 0.5 s three times, or a play that takes over 2 s to start, counts as
+  a finding to fix, like a freeze. Timings from the phone and the browser
+  themselves come next (#105), then an admin Performance card (#106).
+
 ## [20.26.10] — 2026-10-22
 
 ### Fixed

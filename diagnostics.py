@@ -62,6 +62,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Optional
 
+import perfwatch
+
 try:
     import psutil
 except Exception:                                    # pragma: no cover
@@ -559,17 +561,63 @@ def uvicorn_log_config(log_dir: Path) -> dict:
     }
 
 
+# ── Where a request's time went (20.26.11, #104) ─────────────────────────────
+# Each request carries a small dict: seconds waiting for the library lock, in
+# library reads/writes, and queued for a worker thread. What is left of its
+# duration is the handler itself (and the network calls it makes). A mutable
+# dict in a context variable reaches the handler's task (Starlette copies the
+# context, not the dict) and every worker job submitted from it.
+_req_cost: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
+    "streamlink_req_cost", default=None)
+_perf = perfwatch.Stats()
+PERF_SUMMARY_S = 300.0                      # a REQ STATS line this often
+
+
+def cost_begin() -> dict:
+    d = {"lock": 0.0, "lib": 0.0, "pool": 0.0}
+    _req_cost.set(d)
+    return d
+
+
+def cost_add(key: str, secs: float) -> None:
+    d = _req_cost.get()
+    if d is not None:
+        d[key] = d.get(key, 0.0) + secs
+
+
+from concurrent.futures import ThreadPoolExecutor as _TPE
+
+
+class TimedExecutor(_TPE):
+    """The shared `to_thread` pool, charging each job's wait for a free worker to
+    the request that submitted it (`pool=` on a SLOW UI line)."""
+
+    def submit(self, fn, /, *args, **kwargs):
+        d = _req_cost.get()
+        if d is None:
+            return super().submit(fn, *args, **kwargs)
+        t = time.monotonic()
+
+        def run():
+            d["pool"] = d.get("pool", 0.0) + (time.monotonic() - t)
+            return fn(*args, **kwargs)
+        return super().submit(run)
+
+
 def note_request_start(req_id: int, method: str, path: str) -> None:
     state.inflight[req_id] = (time.monotonic(), f"{method} {path}")
     state.requests_total += 1
 
 
-def note_request_end(req_id: int, status: int) -> None:
+def note_request_end(req_id: int, status: int, method: str = "", tmpl: str = "",
+                     cost: Optional[dict] = None) -> None:
     """Close out a request, logging it if it was pathologically slow.
 
     A slow request is the earliest visible symptom of the starvation modes this
     module exists to catch, and it names the endpoint — which a vitals sample
-    can't.
+    can't. With `tmpl` (the route template) it is also counted per route, and an
+    interactive one of `perfwatch.SLOW_UI_S` or more gets a SLOW UI line saying
+    where its time went (20.26.11).
     """
     started, label = state.inflight.pop(req_id, (0.0, ""))
     if not started:
@@ -578,6 +626,14 @@ def note_request_end(req_id: int, status: int) -> None:
     if dur >= REQUEST_SLOW_S:
         state.requests_slow += 1
         log.warning("SLOW REQUEST %.1fs status=%s %s", dur, status, label)
+    if tmpl:
+        try:
+            kind = perfwatch.classify(method, tmpl)
+            _perf.record(kind, method, tmpl, dur)
+            if kind == "ui" and dur >= perfwatch.SLOW_UI_S:
+                log.warning("%s", perfwatch.slow_line(method, tmpl, dur, status, cost))
+        except Exception:                   # never let timing break a request
+            pass
 
 
 def _is_patient(label: str) -> bool:
@@ -656,11 +712,13 @@ class InstrumentedLock:
         p = self._probe
         p.waiters += 1
         p.total_waits += 1
+        t0 = time.monotonic()
         try:
             await self._lock.acquire()
         finally:
             p.waiters -= 1
         p.acquired_at = time.monotonic()
+        cost_add("lock", p.acquired_at - t0)
         try:
             task = asyncio.current_task()
             p.holder = task.get_name() if task else "?"
@@ -1599,9 +1657,16 @@ async def vitals_loop() -> None:
     swallowed — see the handler below for why that distinction matters.
     """
     consecutive_failures = 0
+    perf_at = time.monotonic()
     while True:
         await asyncio.sleep(VITALS_INTERVAL_S)
         try:
+            if time.monotonic() - perf_at >= PERF_SUMMARY_S:
+                mins = (time.monotonic() - perf_at) / 60.0
+                perf_at = time.monotonic()
+                summ = perfwatch.summary_line(_perf.drain(), mins)
+                if summ:
+                    log.info("%s", summ)
             await disk_sample_async()
             s = snapshot()
             line = snapshot_line(s)

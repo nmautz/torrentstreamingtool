@@ -506,8 +506,12 @@ async def lib_io(fn, *args):
         _LIB_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="library-io")
     import contextvars
     ctx = contextvars.copy_context()
-    return await asyncio.get_running_loop().run_in_executor(
-        _LIB_POOL, lambda: ctx.run(fn, *args))
+    t0 = time.monotonic()
+    try:
+        return await asyncio.get_running_loop().run_in_executor(
+            _LIB_POOL, lambda: ctx.run(fn, *args))
+    finally:
+        diag.cost_add("lib", time.monotonic() - t0)     # `lib=` on a SLOW UI line
 
 
 async def get_library() -> dict:

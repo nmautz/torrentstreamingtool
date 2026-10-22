@@ -2,7 +2,6 @@
 
 import asyncio
 import base64
-import concurrent.futures
 import contextvars
 import copy
 import functools
@@ -5113,6 +5112,8 @@ async def _apply_night_mode(enabled: bool) -> None:
         first_uri = await asyncio.to_thread(vlc_file_uri, first_resolved)
         play_task = asyncio.create_task(vlc("in_play", input=first_uri))
         ready = await _vlc_wait_until_ready(first_resolved, timeout=10.0)
+        log.info("PLAY START tv-vlc %.2fs%s %s", time.monotonic() - t_play,
+                 "" if ready else " (VLC never confirmed; gave up waiting)", first.name)
 
         state.stream_status = "playing"
         state.current_audio_track = -1
@@ -11233,6 +11234,36 @@ _monitor_err_at = 0.0
 _DL_PROGRESS_LAST: dict[str, dict] = {}
 
 
+# Download -> playable, as a person waits for it (20.26.11, #104). Seen per item
+# by this process: an item already part-done when the server started is not
+# credited with a time it didn't measure.
+_DL_TIMES: dict = {}                # item id -> {"first": bool logged, "done": bool logged}
+
+
+def _note_download_time(item: dict, qfiles: list, all_done: bool) -> None:
+    iid = item.get("id", "")
+    try:
+        have = sum(1 for q in (qfiles or [])
+                   if Path(q.get("name", "")).suffix.lower() in VIDEO_EXTS
+                   and float(q.get("progress", 0) or 0) >= 1.0
+                   and int(q.get("priority", 1) or 0) > 0)
+        seen = _DL_TIMES.get(iid)
+        if seen is None:
+            _DL_TIMES[iid] = {"first": have > 0, "done": bool(all_done)}
+            return
+        start = _parse_iso_dt(item.get("added_at"))
+        age = (datetime.now(timezone.utc) - start).total_seconds() if start else 0.0
+        title = item.get("title", "") or iid
+        if have and not seen["first"]:
+            seen["first"] = True
+            log.info("DOWNLOAD TIME %s: first episode playable after %.0fs", title, age)
+        if all_done and not seen["done"]:
+            seen["done"] = True
+            log.info("DOWNLOAD TIME %s: all %d file(s) done after %.0fs", title, have, age)
+    except Exception:
+        pass
+
+
 async def library_download_monitor() -> None:
     """Poll qBit every 5 s for pending library downloads and mark them complete."""
     global _stream_focus_idle_ticks
@@ -11426,6 +11457,7 @@ async def library_download_monitor() -> None:
                 # idle-deferred files haven't fetched yet; flipping ready on that would
                 # both mislabel a partial download as whole and fingerprint a missing set.
                 nonskip_done = _all_nonskip_complete(item, qfiles, save_path)
+                _note_download_time(item, qfiles, nonskip_done)
                 if nonskip_done:
                     # qBit's 100 % is a claim, not a file. Check the bytes are
                     # really there before calling the item ready (rare: runs only
@@ -13425,7 +13457,7 @@ def _warm_endpoint_sources_sync(app: FastAPI) -> int:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
     runtime._MAIN_LOOP = asyncio.get_running_loop()
-    runtime._MAIN_LOOP.set_default_executor(concurrent.futures.ThreadPoolExecutor(
+    runtime._MAIN_LOOP.set_default_executor(diag.TimedExecutor(
         max_workers=DEFAULT_POOL_WORKERS, thread_name_prefix="asyncio"))
     sys.setswitchinterval(GIL_SWITCH_INTERVAL_S)
     # Log lines are written by a thread from here on (20.26.4): uvicorn's and
@@ -13655,6 +13687,7 @@ async def diag_track_requests(request: Request, call_next):
     """
     rid = next(_req_seq)
     diag.note_request_start(rid, request.method, request.url.path)
+    cost = diag.cost_begin()       # where its time goes: lock / lib / pool (20.26.11)
     status = 0
     t0 = time.perf_counter()
     try:
@@ -13665,7 +13698,19 @@ async def diag_track_requests(request: Request, call_next):
         status = 500
         raise
     finally:
-        diag.note_request_end(rid, status)
+        # The route template (`/api/library/{item_id}/files`) groups requests by
+        # endpoint; the static files mount has none.
+        route = request.scope.get("route")
+        tmpl = getattr(route, "path", "") or (
+            request.url.path if request.url.path.startswith("/api/") else "(static)")
+        diag.note_request_end(rid, status, request.method, tmpl, cost)
+        if _PHONE_DL and tmpl in _PHONE_DL_ROUTES and status in (200, 206):
+            try:
+                pp = request.scope.get("path_params") or {}
+                _phone_dl_fetch(pp.get("cache_key", ""), pp.get("filename", ""),
+                                diag.scope_device_id(request.scope))
+            except Exception:
+                pass
         try:
             _dev_capture(request, status, (time.perf_counter() - t0) * 1000.0)
         except Exception:
@@ -18618,6 +18663,7 @@ async def _library_play_launch(
        call finish first (correct playlist order); that wait is invisible since
        the user is already watching the first file.
     """
+    t_play = time.monotonic()     # PLAY START tv-vlc (20.26.11, #104)
     first = Path(playlist[0])
     first_resolved = await asyncio.to_thread(first.resolve)   # opens the file on Windows
     # Clear any stale playlist items first (incl. the bg video) so VLC's list
@@ -20678,6 +20724,17 @@ async def _indexer_query(q: str, lib: dict, *, profile_id: str = "",
                 pending.append(ixid)
 
     await _apply_indexer_health(health)
+    # Search -> results, per indexer (20.26.11, #104).
+    try:
+        log.info("SEARCH TIME %.1fs %r: %s", time.monotonic() - t0,
+                 str(params.get("Query", ""))[:60],
+                 ", ".join(f"{h.get('name') or h.get('id')} "
+                           + ("pending" if h.get("pending") else
+                              f"{float(h.get('secs') or 0):.1f}s {int(h.get('results') or 0)}r"
+                              + ("" if h.get("ok", True) else " failed"))
+                           for h in health))
+    except Exception:
+        pass
 
     # Only error out when *every* indexer failed — otherwise show whatever came back.
     if health and all(not h["ok"] for h in health):
@@ -22474,6 +22531,10 @@ async def tv_local_state(req: TvLocalStateReq) -> JSONResponse:
     state.tv_local_seen_at = time.time()
     state.tv_local_ack_at = state.tv_local_seen_at   # this beat is from the page
     _tv_local_note_stall(req)
+    if req.playback == "playing" and "tv-kiosk" in _PLAY_START:
+        t0, name = _PLAY_START.pop("tv-kiosk")
+        if time.monotonic() - t0 < 120:
+            log.info("PLAY START tv-kiosk %.2fs %s", time.monotonic() - t0, name)
     if not req.active:
         await _tv_local_clear("page reported inactive")
         await broadcast("state", state_snapshot())
@@ -22600,6 +22661,11 @@ async def _tv_local_open_pump(payload: dict, on_give_up=None) -> None:
                             exc_info=True)
 
 
+# Play -> first frame on the TV kiosk: started here, ended by the kiosk's first
+# `playing` state post (20.26.11, #104).
+_PLAY_START: dict = {}
+
+
 async def _tv_local_start_play(item: dict, playlist: list, seek_sec, req,
                                on_give_up=None) -> bool:
     """Open a "play on the TV" on the kiosk's own player. False ⇒ couldn't, use VLC.
@@ -22610,8 +22676,10 @@ async def _tv_local_start_play(item: dict, playlist: list, seek_sec, req,
     has to be set before `stop()` kicks off its focus/background churn, or
     `background_video_loop` takes the display in the gap.
     """
+    _PLAY_START["tv-kiosk"] = (time.monotonic(), Path(playlist[0]).name)
     await _tv_ui_show("play on the TV (on-device surface)")
     if not state.tv_ui_active:
+        _PLAY_START.pop("tv-kiosk", None)
         log.warning("tv-local: kiosk wouldn't come up — playing on VLC instead")
         return False
     if _tv_anything_playing():
@@ -32210,7 +32278,9 @@ async def _run_offline_job(job_id: str) -> None:
             return
         job["status"] = "processing"
         # Re-baseline started_at to when the work actually begins so per-job
-        # ETAs reflect real ffmpeg throughput, not queue wait time.
+        # ETAs reflect real ffmpeg throughput, not queue wait time. The queue
+        # time is kept for the PREP TIME line (20.26.11).
+        job.setdefault("queued_at", job["started_at"])
         job["started_at"] = time.time()
         src = Path(job["src"])
         # On-demand-only backstop: if this file's item was flagged while the job was
@@ -32979,6 +33049,13 @@ async def _run_offline_job(job_id: str) -> None:
                 "job %s DONE in %.1fs encoder=%s size=%.1f MB src=%s",
                 job_id, time.time() - job["started_at"], job["encoder"], size_mb, src,
             )
+            # A background wait the user feels: from queued to playable on a phone.
+            enc_s = max(0.001, time.time() - job["started_at"])
+            log.info("PREP TIME %s: queued %.0fs, encoded %.0fs (%.1fx realtime, "
+                     "%.0f min of video) encoder=%s", src.name,
+                     job["started_at"] - job.get("queued_at", job["started_at"]),
+                     enc_s, (duration / enc_s) if duration else 0.0, duration / 60,
+                     job["encoder"])
             # Auto-generate subtitles for sources that have none usable. Reuses
             # the ffprobe we already ran; enqueues a bulk STT job that runs after
             # this HLS encode releases the shared concurrency slot. Best-effort —
@@ -37338,6 +37415,45 @@ async def subpack_file(cache_key: str, sub_idx: int, filename: str) -> Response:
                         filename=p.name)
 
 
+# Save to Phone -> on the phone, timed from the server's side (20.26.11, #104): the
+# first bundle-manifest for a (device, bundle) starts the clock, and the request
+# middleware counts each distinct file of it served to that device. All files
+# served -> one PHONE DOWNLOAD line. A re-asked manifest (the app retrying) keeps
+# the first start time; an abandoned one is dropped after PHONE_DL_TTL_S.
+_PHONE_DL: dict = {}
+PHONE_DL_TTL_S = 6 * 3600
+_PHONE_DL_ROUTES = ("/api/library/offline-cache/{cache_key}/{filename}",
+                    "/StreamLinkBundles/{cache_key}/{filename}")
+
+
+def _phone_dl_begin(key: str, n: int, total: int, device: str, name: str) -> None:
+    now = time.monotonic()
+    for k in [k for k, e in _PHONE_DL.items() if now - e["t0"] > PHONE_DL_TTL_S]:
+        _PHONE_DL.pop(k, None)
+    if n and (device, key) not in _PHONE_DL:
+        _PHONE_DL[(device, key)] = {"t0": now, "n": n, "bytes": total, "name": name,
+                                    "seen": set()}
+
+
+def _phone_dl_fetch(key: str, filename: str, device: str) -> None:
+    k = (device, key)
+    if k not in _PHONE_DL:
+        # The app's background downloader may not name the device the way its
+        # web view did; one download of this bundle in progress is enough.
+        ks = [x for x in _PHONE_DL if x[1] == key]
+        if len(ks) != 1:
+            return
+        k = ks[0]
+    e = _PHONE_DL[k]
+    e["seen"].add(filename)
+    if len(e["seen"]) >= e["n"]:
+        _PHONE_DL.pop(k, None)
+        took = max(0.001, time.monotonic() - e["t0"])
+        log.info("PHONE DOWNLOAD %s: %d files, %.0f MB in %.0fs (%.1f MB/s) dev=%s",
+                 e["name"], e["n"], e["bytes"] / 1e6, took, e["bytes"] / 1e6 / took,
+                 k[0] or "-")
+
+
 def _bundle_manifest_open_sync(target: dict) -> tuple:
     """`(bundle dir or None, built, meta)` for bundle_manifest. Thread."""
     out_dir = _bundle_dir_for_file(target)
@@ -37655,6 +37771,8 @@ async def bundle_manifest(item_id: str, request: Request, file_path: str = "", p
             pass
     files, total, master_text = await asyncio.to_thread(
         _bundle_select_rung, out_dir, files, meta, keep_name)
+    _phone_dl_begin(key, len(files), total, diag.scope_device_id(request.scope),
+                    target.get("name", src.name))
     # Sidecar subs live beside the SOURCE, so an evicted file has none to offer —
     # the subs it does have were copied into the bundle by `_mirror_sub_into_bundle`
     # and come back in `meta.json` above.

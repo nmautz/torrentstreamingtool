@@ -26,6 +26,10 @@ here together.
 | `/healthz` self-probe (`probe=`) with the loop free | >= 500 ms | **HARD.** The loop was free but requests weren't served: the library lock, the thread pool, or the proxy. The probe's own loopback connect costs the box 140-340 ms (the same request answers in 10-15 ms from the LAN), so its line sits higher. |
 | No vitals line for > 45 s | any | **HARD.** The process (or the whole machine) stopped. Check whether the box itself froze (other processes, `dsk=` in the lines either side) before blaming our code, and file it either way. |
 | One request slow (>= 5 s) with the loop free | - | Not a freeze. Listed; give it an issue if a person waits on it. |
+| Interactive request (`SLOW UI`, 20.27.0+) | **>= 2 s, once** | **HARD.** A screen or button waited that long. The line says where the time went (`lock` / `lib` / `pool` / `other`); fix that part. |
+| Interactive request | 0.5-2 s, **same route >= 3 times in one window** | **REPEAT.** Fix it. Fewer: note it. |
+| Play start (`PLAY START`, tap to first frame) | **>= 2 s** VLC / prepped; **>= 5 s** on the TV kiosk (it may be on-demand) | **HARD.** |
+| Background waits (`PREP TIME`, `DOWNLOAD TIME`, `PHONE DOWNLOAD`, `SEARCH TIME`) | - | Reported, not judged (user's choice, 2026-10-22). Watch the trend. |
 
 Why these numbers: under ~100 ms feels instant; around 250 ms a remote press or a
 tap is visibly late, and at a second it looks ignored and gets pressed again. The
@@ -35,6 +39,11 @@ cause that keeps producing it is a bug waiting for a busier disk, which is how e
 past freeze started (a 3 ms `stat` on an idle disk is a 26 s one on a busy one).
 Steady-state `lagmax=` on the box is 60-130 ms, so the line has headroom without
 being noise.
+The request and play-start bars are the user's too (2026-10-22, "500 ms" for an
+interactive request, 2 s to first frame). "Interactive" is what `perfwatch.classify`
+calls `ui`: video segments, the live-update stream, uploads, bulk admin downloads,
+waits on other services (search, TMDb, OpenSubtitles) and a phone's bundle download
+are counted in `REQ STATS` but never judged.
 Judge by cause, not by the number alone: the same code path can be 5 ms tonight and
 30 s tomorrow.
 

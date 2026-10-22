@@ -41,6 +41,7 @@ test:
 	python3 tests/test_error_heal.py
 	python3 tests/test_loop_paths.py
 	python3 tests/test_compress_skip.py
+	python3 tests/test_perfwatch.py
 	python3 tests/test_vpncheck.py
 	python3 tests/test_storage_volumes.py
 	python3 tests/test_devactivity.py

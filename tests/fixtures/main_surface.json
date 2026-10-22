@@ -526,6 +526,9 @@
   "Optional": {
    "kind": "value"
   },
+  "PHONE_DL_TTL_S": {
+   "kind": "value"
+  },
   "PIN_BACKOFF": {
    "kind": "value"
   },
@@ -1058,6 +1061,9 @@
   "_DL_PROGRESS_LAST": {
    "kind": "value"
   },
+  "_DL_TIMES": {
+   "kind": "value"
+  },
   "_DOWNLOAD_STALL_BOOT_GRACE": {
    "kind": "value"
   },
@@ -1259,7 +1265,16 @@
   "_PB_DEVICE_ID_RE": {
    "kind": "value"
   },
+  "_PHONE_DL": {
+   "kind": "value"
+  },
+  "_PHONE_DL_ROUTES": {
+   "kind": "value"
+  },
   "_PLAYER_SNAPSHOT_FILES": {
+   "kind": "value"
+  },
+  "_PLAY_START": {
    "kind": "value"
   },
   "_PREP_404_SEEN": {
@@ -4080,6 +4095,14 @@
     "info:POSITIONAL_OR_KEYWORD"
    ]
   },
+  "_note_download_time": {
+   "kind": "def",
+   "params": [
+    "item:POSITIONAL_OR_KEYWORD",
+    "qfiles:POSITIONAL_OR_KEYWORD",
+    "all_done:POSITIONAL_OR_KEYWORD"
+   ]
+  },
   "_note_slow_lib_io": {
    "kind": "def",
    "params": [
@@ -4496,6 +4519,24 @@
    "kind": "async def",
    "params": [
     "verdicts:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_phone_dl_begin": {
+   "kind": "def",
+   "params": [
+    "key:POSITIONAL_OR_KEYWORD",
+    "n:POSITIONAL_OR_KEYWORD",
+    "total:POSITIONAL_OR_KEYWORD",
+    "device:POSITIONAL_OR_KEYWORD",
+    "name:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_phone_dl_fetch": {
+   "kind": "def",
+   "params": [
+    "key:POSITIONAL_OR_KEYWORD",
+    "filename:POSITIONAL_OR_KEYWORD",
+    "device:POSITIONAL_OR_KEYWORD"
    ]
   },
   "_pick_active_section": {
@@ -8095,9 +8136,6 @@
   },
   "clientlog": {
    "kind": "module clientlog"
-  },
-  "concurrent": {
-   "kind": "module concurrent"
   },
   "contextvars": {
    "kind": "module contextvars"

@@ -126,7 +126,7 @@ ns = {
     "_recover_library": lambda: None,
     "_migrate_item": _migrate_item,
     "_fold_item_hides": lambda raw: None,
-    "marshal": marshal, "_LIB_CACHE": None, "_LIB_GEN": 0,
+    "marshal": marshal, "_LIB_CACHE": None, "_LIB_GEN": 0, "diag": diag,
 }
 
 pieces, found = [], set()
