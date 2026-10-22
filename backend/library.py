@@ -489,6 +489,27 @@ def _save_lib_raw_inner(data: dict) -> None:
     raise last if last is not None else OSError("library.json write failed")
 
 
+# Library reads and writes get a thread of their own (20.26.1). They run while
+# `_lib_lock` is held, and the shared `to_thread` pool is exactly what fills up
+# under load: on 2026-10-22 four phone downloads listed their bundles on it for
+# minutes, `get_library` queued behind them holding the lock, and 20 requests
+# queued behind that (118 s). The lock already serialises every load and save,
+# so one thread costs nothing in parallelism.
+_LIB_POOL = None
+
+
+async def lib_io(fn, *args):
+    """`asyncio.to_thread(fn, *args)` on the library's own thread."""
+    global _LIB_POOL
+    if _LIB_POOL is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _LIB_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="library-io")
+    import contextvars
+    ctx = contextvars.copy_context()
+    return await asyncio.get_running_loop().run_in_executor(
+        _LIB_POOL, lambda: ctx.run(fn, *args))
+
+
 async def get_library() -> dict:
     # The read + json.loads + _migrate_item-over-every-item is O(library size)
     # and was previously run inline on the event loop. Hot loops call this every
@@ -500,14 +521,14 @@ async def get_library() -> dict:
     caller = sys._getframe(1).f_code.co_name
     async with runtime._lib_lock:
         runtime._lib_lock.set_holder(f"{caller} [get_library]")
-        return await asyncio.to_thread(_load_lib_raw)
+        return await lib_io(_load_lib_raw)
 
 
 async def put_library(data: dict) -> None:
     caller = sys._getframe(1).f_code.co_name
     async with runtime._lib_lock:
         runtime._lib_lock.set_holder(f"{caller} [put_library]")
-        await asyncio.to_thread(_save_lib_raw, data)
+        await lib_io(_save_lib_raw, data)
 
 
 class LibraryUnchanged(Exception):
@@ -585,7 +606,7 @@ async def _library_txn(caller: str):
         outcome = "aborted"
         try:
             runtime._lib_lock.set_holder(f"{caller} [load]")
-            lib = await asyncio.to_thread(_load_lib_raw)
+            lib = await lib_io(_load_lib_raw)
             t_loaded = clock()
             runtime._lib_lock.set_holder(f"{caller} [body]")
             try:
@@ -595,7 +616,7 @@ async def _library_txn(caller: str):
                 return
             t_body = clock()
             runtime._lib_lock.set_holder(f"{caller} [save]")
-            await asyncio.to_thread(_save_lib_raw, lib)
+            await lib_io(_save_lib_raw, lib)
             outcome = "saved"
         finally:
             _note_slow_txn(caller, outcome, t_ask, t_in, t_loaded, t_body, clock())

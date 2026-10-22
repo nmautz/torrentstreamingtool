@@ -734,6 +734,16 @@ already loaded, a zero-timeout `select`). Any collection of `GC_PAUSE_LOG_S` (0.
 or more is also logged to `streamlink_app.log` as `GC PAUSE 0.31s gen2 at HH:MM:SS on
 <thread>: N collected`. Timed by a `gc.callbacks` hook (`_gc_callback`); the log lines
 are written by `vitals_loop`, never from inside the callback.
+From 20.26.1 the start-up heap is frozen out of full collections
+(`freeze_startup_heap`, the end of lifespan), and a pause of `GC_CENSUS_HARD_S`
+(0.25 s) or more is followed by `GC CENSUS after a 0.31s pause: N objects in gen2,
+M frozen, counts (a, b, c)`, at most once per `GC_CENSUS_EVERY_S` (10 min). N is
+what a full pass walks; it grows with every parsed library copy alive at the time.
+
+**Stall dumps are written off the loop (20.26.1).** `dump_stalled_state` collects
+task and thread stacks on the loop (frame walks only) and hands rendering and the
+file write to its own `diag-dump` thread, so the dump can appear a moment after the
+`VITALS ANOMALY` line that triggered it.
 
 **Who else is using the disk (20.25.3, #96).** The `dsk` / `io` fields come from
 `disk_sample()`, which runs on its own one-thread executor (`diag-disk`, never the

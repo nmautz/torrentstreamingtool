@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import concurrent.futures
 import contextvars
 import copy
 import functools
@@ -288,6 +289,7 @@ from backend.library import (  # noqa: F401
     _steps_note,
     _note_slow_lib_io,
     _save_lib_raw,
+    lib_io,
     get_library,
     put_library,
     LibraryUnchanged,
@@ -2062,11 +2064,15 @@ async def _speech_energy_for(target: dict, budget: float) -> list:
         return hit
     probe, idx = src, target.get("audio_idx")
     bundle = _offline_cache_dir(src)
-    if (bundle / "master.m3u8").exists():
-        auds = _read_meta(bundle).get("audios") or []
-        want = auds[idx] if (idx is not None and idx < len(auds)) else None
-        if want and (bundle / str(want.get("playlist") or "")).exists():
-            probe, idx = bundle / str(want["playlist"]), None
+
+    def _bundle_audio_sync():
+        if (bundle / "master.m3u8").exists():
+            auds = _read_meta(bundle).get("audios") or []
+            want = auds[idx] if (idx is not None and idx < len(auds)) else None
+            if want and (bundle / str(want.get("playlist") or "")).exists():
+                return bundle / str(want["playlist"]), None
+        return probe, idx
+    probe, idx = await asyncio.to_thread(_bundle_audio_sync)
     try:
         energy = await asyncio.wait_for(
             asyncio.to_thread(subsync.speech_energy, str(probe), idx), timeout=budget)
@@ -6004,7 +6010,7 @@ async def _save_track_pref(
     ES IDs drifted, or the next episode of the series) restore from."""
     try:
         async with runtime._lib_lock:
-            lib = await asyncio.to_thread(_load_lib_raw)
+            lib = await lib_io(_load_lib_raw)
             item = next((it for it in lib["items"] if it["id"] == item_id), None)
             if not item:
                 return
@@ -6026,7 +6032,7 @@ async def _save_track_pref(
                 if norm:
                     norm.setdefault("at", _now_iso())   # newest-wins vs series pick
                     fp["audio_sel"] = norm
-            await asyncio.to_thread(_save_lib_raw, lib)
+            await lib_io(_save_lib_raw, lib)
     except Exception:
         pass
 
@@ -6052,7 +6058,7 @@ async def _set_shuffle_pref(item_id: str, profile_id: str, shuffle: bool, scope:
         return
     try:
         async with runtime._lib_lock:
-            lib = await asyncio.to_thread(_load_lib_raw)
+            lib = await lib_io(_load_lib_raw)
             item = next((it for it in lib["items"] if it["id"] == item_id), None)
             if not item:
                 return
@@ -6060,7 +6066,7 @@ async def _set_shuffle_pref(item_id: str, profile_id: str, shuffle: bool, scope:
                 prof = member.setdefault("progress", {}).setdefault(profile_id, {})
                 prof["shuffle"] = bool(shuffle)
                 prof["shuffle_scope"] = scope or "" if shuffle else ""
-            await asyncio.to_thread(_save_lib_raw, lib)
+            await lib_io(_save_lib_raw, lib)
     except Exception:
         pass
 
@@ -6187,7 +6193,7 @@ async def _save_series_sub_sel(profile_id: str, series: str, sel: Optional[dict]
     sel.setdefault("at", _now_iso())
     try:
         async with runtime._lib_lock:
-            lib = await asyncio.to_thread(_load_lib_raw)
+            lib = await lib_io(_load_lib_raw)
             prof = next((p for p in lib.get("profiles", []) if p.get("id") == profile_id), None)
             if not prof:
                 return
@@ -6204,7 +6210,7 @@ async def _save_series_sub_sel(profile_id: str, series: str, sel: Optional[dict]
             if groups:
                 entry["groups"] = groups
             prefs[series] = entry
-            await asyncio.to_thread(_save_lib_raw, lib)
+            await lib_io(_save_lib_raw, lib)
     except Exception:
         pass
 
@@ -6293,7 +6299,7 @@ async def _save_series_audio_sel(profile_id: str, series: str, sel: Optional[dic
     sel.setdefault("at", _now_iso())
     try:
         async with runtime._lib_lock:
-            lib = await asyncio.to_thread(_load_lib_raw)
+            lib = await lib_io(_load_lib_raw)
             prof = next((p for p in lib.get("profiles", []) if p.get("id") == profile_id), None)
             if not prof:
                 return
@@ -6310,7 +6316,7 @@ async def _save_series_audio_sel(profile_id: str, series: str, sel: Optional[dic
             if groups:
                 entry["groups"] = groups
             prefs[series] = entry
-            await asyncio.to_thread(_save_lib_raw, lib)
+            await lib_io(_save_lib_raw, lib)
     except Exception:
         pass
 
@@ -6358,13 +6364,13 @@ async def _learn_profile_audio_pref(profile_id: str, sel: Optional[dict]) -> Non
         return
     try:
         async with runtime._lib_lock:
-            lib = await asyncio.to_thread(_load_lib_raw)
+            lib = await lib_io(_load_lib_raw)
             prof = next((p for p in lib.get("profiles", []) if p.get("id") == profile_id), None)
             if not prof:
                 return
             prof["audio_language_pref"] = {
                 "lang": lang, "idx": idx, "count": count, "at": _now_iso()}
-            await asyncio.to_thread(_save_lib_raw, lib)
+            await lib_io(_save_lib_raw, lib)
     except Exception:
         pass
 
@@ -13382,6 +13388,13 @@ async def _retire_ai_subtitles() -> None:
 # throughput and gives the loop its turn five times sooner.
 GIL_SWITCH_INTERVAL_S = 0.001
 
+# The shared `to_thread` pool. CPython sizes it cpu_count + 4: 8 on the box. Its
+# jobs are almost all disk waits (which hold no GIL), so 8 is how many disk
+# waits may be outstanding, not how much CPU we use. On 2026-10-22 one phone
+# download of ten episodes plus prep and qBit filled all 8 for minutes, and
+# every request that needed a thread queued behind them.
+DEFAULT_POOL_WORKERS = 32
+
 
 def _warm_endpoint_sources_sync(app: FastAPI) -> int:
     """FastAPI reads each endpoint's source (`inspect.getsourcelines`) on its
@@ -13405,6 +13418,8 @@ def _warm_endpoint_sources_sync(app: FastAPI) -> int:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
     runtime._MAIN_LOOP = asyncio.get_running_loop()
+    runtime._MAIN_LOOP.set_default_executor(concurrent.futures.ThreadPoolExecutor(
+        max_workers=DEFAULT_POOL_WORKERS, thread_name_prefix="asyncio"))
     sys.setswitchinterval(GIL_SWITCH_INTERVAL_S)
     await asyncio.to_thread(_warm_endpoint_sources_sync, app)
     # Route asyncio's own callback errors into the app log (and demote the benign
@@ -13415,8 +13430,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     _raise_own_priority()
     await _log_version_banner()
     # Instrumented so contention is visible: `get_library()` holds this lock
-    # across `asyncio.to_thread(_load_lib_raw)`, so a saturated thread pool
-    # stalls every library-touching request while the pure-async VLC/qBit
+    # across the load (`lib_io`, its own thread since 20.26.1; before that a
+    # saturated shared thread pool
+    # stalled every library-touching request) while the pure-async VLC/qBit
     # pollers carry on at full cadence — a box that looks healthy in the logs
     # and is dead to every client. See docs/DIAGNOSTICS.md.
     runtime._lib_lock = diag.InstrumentedLock(asyncio.Lock(), "library")
@@ -13584,6 +13600,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
                 log.warning("power-button raw-input listener failed to start",
                             exc_info=True)
 
+    # Everything built so far lives as long as the process: keep it out of full
+    # collections (20.26.1, see diag.freeze_startup_heap).
+    diag.freeze_startup_heap()
     yield
 
     for t in (guard, broadcaster, dl_monitor, dvbackfill, animefill, vlc_tracker, bg_loop,
@@ -19592,7 +19611,7 @@ async def sync_progress(req: SyncProgressReq, request: Request) -> JSONResponse:
                    "local_subtitle_idx", "audio_offset_ms")
 
     async with runtime._lib_lock:
-        lib = await asyncio.to_thread(_load_lib_raw)
+        lib = await lib_io(_load_lib_raw)
         items_by_id = {it["id"]: it for it in lib.get("items", [])}
 
         for ev in req.events:
@@ -19717,7 +19736,7 @@ async def sync_progress(req: SyncProgressReq, request: Request) -> JSONResponse:
                 },
             })
 
-        await asyncio.to_thread(_save_lib_raw, lib)
+        await lib_io(_save_lib_raw, lib)
 
     return JSONResponse({"applied": applied, "conflicts": conflicts, "server_updated_at": now})
 
@@ -19802,7 +19821,7 @@ async def sync_resolve(req: SyncResolveReq, request: Request) -> JSONResponse:
                    "local_subtitle_idx", "audio_offset_ms")
 
     async with runtime._lib_lock:
-        lib = await asyncio.to_thread(_load_lib_raw)
+        lib = await lib_io(_load_lib_raw)
         items_by_id = {it["id"]: it for it in lib.get("items", [])}
 
         for rz in req.resolutions:
@@ -19872,7 +19891,7 @@ async def sync_resolve(req: SyncResolveReq, request: Request) -> JSONResponse:
                 },
             })
 
-        await asyncio.to_thread(_save_lib_raw, lib)
+        await lib_io(_save_lib_raw, lib)
 
     return JSONResponse({"resolved": resolved})
 
@@ -19920,7 +19939,7 @@ async def set_local_tracks(item_id: str, req: LocalTracksReq) -> JSONResponse:
     """
     series = ""
     async with runtime._lib_lock:
-        lib = await asyncio.to_thread(_load_lib_raw)
+        lib = await lib_io(_load_lib_raw)
         item = next((it for it in lib["items"] if it["id"] == item_id), None)
         if not item:
             raise HTTPException(404, "Item not found.")
@@ -19958,7 +19977,7 @@ async def set_local_tracks(item_id: str, req: LocalTracksReq) -> JSONResponse:
                 # otherwise outrank this newer descriptor on the next VLC play
                 # (_apply_track_prefs prefers the raw ES ID when present).
                 fp.pop("subtitle_track", None)
-        await asyncio.to_thread(_save_lib_raw, lib)
+        await lib_io(_save_lib_raw, lib)
     # Remember this kind of subtitle for the rest of the series (separate lock)
     # — but only for a deliberate viewer pick (see LocalTracksReq.sub_series).
     if req.subtitle_sel is not None and req.sub_series and series:
@@ -24624,9 +24643,8 @@ async def _mirror_sub_into_bundle(src: Path, sidecar: Path, lang: str, label: st
     surfaces already list the sidecar itself. Best-effort: a bundle that isn't
     built, or a meta.json we can't parse, just means online-only as before."""
     bundle = _offline_cache_dir(src)
-    if not (bundle / "master.m3u8").exists():
-        return
-    meta = _read_meta(bundle)
+    meta = await asyncio.to_thread(
+        lambda: _read_meta(bundle) if (bundle / "master.m3u8").exists() else {})
     if not meta:
         return
     subs = list(meta.get("subtitles") or [])
@@ -27585,7 +27603,7 @@ async def diag_client_log(request: Request) -> JSONResponse:
     # own clock, so nothing is being compared across clocks — and rows written
     # AFTER the clear are strictly newer and survive, which is why this drops a
     # prefix instead of discarding the whole body.
-    pending = _client_pending_read()
+    pending = await asyncio.to_thread(_client_pending_read)
     entry = pending.get(slug) or {}
     clear_local = bool(entry)
     mark = str(entry.get("hwm") or "") if isinstance(entry, dict) else ""
@@ -27614,7 +27632,7 @@ async def diag_client_log(request: Request) -> JSONResponse:
 
     if clear_local:
         pending.pop(slug, None)
-        _client_pending_write(pending)
+        await asyncio.to_thread(_client_pending_write, pending)
 
     log.info("Client log from %s: +%d new row(s), %d already held, %d pre-clear "
              "dropped (%d total).",
@@ -27697,27 +27715,32 @@ async def admin_client_logs_clear(request: Request, device: str = "") -> JSONRes
     the app deletes its own copy too. Omit `device` to clear all of them.
     """
     _require_admin(request)
-    targets = [_client_slug(device)] if device else [d["device"] for d in _client_devices()]
-    cleared, errors = [], []
-    marks: dict = {}
-    for slug in targets:
-        p = _client_log_path(slug)
-        try:
-            # Record how far this transcript got BEFORE deleting it. The device
-            # still holds these rows and will re-send them; the mark is what lets
-            # the next upload drop exactly them and keep anything newer.
-            if p.is_file():
-                marks[slug] = clientlog.high_water(p.read_text(encoding="utf-8"))
-                p.unlink()
-            else:
-                marks[slug] = ""
-            cleared.append(slug)
-        except OSError as exc:
-            errors.append({"device": slug, "error": str(exc)})
-    pending = _client_pending_read()
-    for slug in cleared:
-        pending[slug] = {"at": int(time.time()), "hwm": marks.get(slug, "")}
-    _client_pending_write(pending)
+
+    def _clear_sync():
+        targets = [_client_slug(device)] if device else [d["device"] for d in _client_devices()]
+        cleared, errors = [], []
+        marks: dict = {}
+        for slug in targets:
+            p = _client_log_path(slug)
+            try:
+                # Record how far this transcript got BEFORE deleting it. The device
+                # still holds these rows and will re-send them; the mark is what lets
+                # the next upload drop exactly them and keep anything newer.
+                if p.is_file():
+                    marks[slug] = clientlog.high_water(p.read_text(encoding="utf-8"))
+                    p.unlink()
+                else:
+                    marks[slug] = ""
+                cleared.append(slug)
+            except OSError as exc:
+                errors.append({"device": slug, "error": str(exc)})
+        pending = _client_pending_read()
+        for slug in cleared:
+            pending[slug] = {"at": int(time.time()), "hwm": marks.get(slug, "")}
+        _client_pending_write(pending)
+        return cleared, errors, pending
+
+    cleared, errors, pending = await asyncio.to_thread(_clear_sync)
     log.info("Admin cleared client logs: %s", ", ".join(cleared) or "(none)")
     return JSONResponse({"ok": True, "cleared": cleared, "errors": errors,
                          "awaiting_device_clear": sorted(pending)})
@@ -36079,16 +36102,25 @@ def _dir_size_bytes(p: Path) -> int:
     bundles, but we recurse anyway for safety). Missing/unreadable files
     contribute 0 — used by the admin cache view, where best-effort is fine.
     """
+    # os.scandir: the size comes with the directory read on Windows. rglob +
+    # is_file + stat cost two disk round trips per segment, across every bundle
+    # in the cache, every 5 min from cache_autopurge_loop (#101, 20.26.1).
     total = 0
-    try:
-        for entry in p.rglob("*"):
-            try:
-                if entry.is_file():
-                    total += entry.stat().st_size
-            except OSError:
-                pass
-    except OSError:
-        pass
+    stack = [p]
+    while stack:
+        d = stack.pop()
+        try:
+            with os.scandir(d) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        elif entry.is_file():
+                            total += entry.stat().st_size
+                    except OSError:
+                        pass
+        except OSError:
+            pass
     return total
 
 
@@ -36224,7 +36256,7 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
 
     if (out_dir / "master.m3u8").exists():
         _bundle_index_register(key, out_dir)
-        meta = _read_meta(out_dir)
+        meta = await asyncio.to_thread(_read_meta, out_dir)
         # Nothing in the preferred language? Look one up while the viewer starts
         # watching (see _maybe_auto_fetch_for_device). Interactive plays only:
         # `bulk` is "prep for later", and prepping a season would otherwise fire
@@ -36669,9 +36701,10 @@ async def offline_job_status(job_id: str) -> JSONResponse:
     if job["status"] == "done":
         out_dir = Path(job["out"])
         key = out_dir.name
-        meta = _read_meta(out_dir)
+        meta, stamp = await asyncio.to_thread(
+            lambda: (_read_meta(out_dir), _bundle_stamp(out_dir)))
         out["master_url"]        = f"/api/library/offline-cache/{key}/master.m3u8"
-        out["stamp"]             = _bundle_stamp(out_dir)
+        out["stamp"]             = stamp
         # Native-AVPlayer view (subs as HLS renditions) — see offline_prepare.
         out["native_master_url"] = f"/api/library/offline-cache/{key}/{_NATIVE_MASTER_NAME}"
         out["duration_sec"]      = meta.get("duration_sec", 0)
@@ -37226,6 +37259,16 @@ async def subpack_file(cache_key: str, sub_idx: int, filename: str) -> Response:
                         filename=p.name)
 
 
+def _bundle_manifest_open_sync(target: dict) -> tuple:
+    """`(bundle dir or None, built, meta)` for bundle_manifest. Thread."""
+    out_dir = _bundle_dir_for_file(target)
+    if out_dir is None:
+        return None, False, {}
+    if not (out_dir / "master.m3u8").exists():
+        return out_dir, False, {}
+    return out_dir, True, _read_meta(out_dir)
+
+
 def _enumerate_bundle_files(out_dir: Path) -> tuple[list[dict], int]:
     """Flat list of the downloadable files in a built HLS bundle + total bytes.
 
@@ -37238,12 +37281,18 @@ def _enumerate_bundle_files(out_dir: Path) -> tuple[list[dict], int]:
     """
     files: list[dict] = []
     total = 0
-    for entry in sorted(out_dir.iterdir()):
-        if not entry.is_file():
-            continue
-        if not _BUNDLE_FILE_RE.match(entry.name):
-            continue
+    # os.scandir, not Path.iterdir: on Windows the directory read already carries
+    # each entry's type and size, so `is_file()` / `stat()` cost nothing. The
+    # Path form stat-ed every segment twice: a 1,300-segment bundle was 2,600
+    # round trips, 231 s with qBit writing to the same disk (2026-10-22).
+    with os.scandir(out_dir) as it:
+        entries = sorted(it, key=lambda e: e.name)
+    for entry in entries:
         try:
+            if not entry.is_file():
+                continue
+            if not _BUNDLE_FILE_RE.match(entry.name):
+                continue
             size = entry.stat().st_size
         except OSError:
             continue
@@ -37487,11 +37536,14 @@ async def bundle_manifest(item_id: str, request: Request, file_path: str = "", p
     # phone — which is the one surface eviction is meant to leave fully intact.
     # `_bundle_dir_for_file` resolves from the stored key when there is no source
     # to stat; None means neither answer is available.
-    out_dir = _bundle_dir_for_file(target)
+    # One thread hop for the source stat, the master check and meta.json: the
+    # phone asks for ten of these at once, and on 2026-10-22 the meta.json read
+    # alone held the loop 4-6 s each with qBit writing to the same disk.
+    out_dir, built, meta = await asyncio.to_thread(_bundle_manifest_open_sync, target)
     if out_dir is None:
         raise HTTPException(404, "File not on disk.")
     key = out_dir.name
-    if not (out_dir / "master.m3u8").exists():
+    if not built:
         return JSONResponse(
             {
                 "ready": False,
@@ -37503,7 +37555,6 @@ async def bundle_manifest(item_id: str, request: Request, file_path: str = "", p
     # Register so the app's subsequent segment fetches resolve by key without a rescan.
     _bundle_index_register(key, out_dir)
 
-    meta = _read_meta(out_dir)
     files, total = await asyncio.to_thread(_enumerate_bundle_files, out_dir)
     # The full ABR ladder annotated with per-rung download sizes, so the app's
     # download-quality chooser can list only the qualities that actually exist.

@@ -363,6 +363,59 @@ ok("only the slow one is logged, named as the loop's",
 ok("draining empties it", diag.drain_gc_pauses() == [])
 ok("a stop with no start is ignored", diag._gc_callback("stop", {"generation": 1}) is None)
 
+print("GC census after a hard pause (20.26.1)")
+diag._gc_census_last = -1e18
+ok("nothing slow, no census", diag.gc_census_line([]) is None
+   and diag.gc_census_line([0.12, 0.2]) is None)
+_c = diag.gc_census_line([0.12, 0.31])
+ok("a pause at the hard line counts gen2", bool(_c) and _c.startswith("GC CENSUS after a 0.31s pause: ")
+   and "objects in gen2" in _c and "frozen" in _c, repr(_c))
+ok("at most once per interval", diag.gc_census_line([0.4]) is None)
+
+
+print("the stall dump renders off the event loop (20.26.1)")
+import tempfile, linecache, threading as _th
+_td = Path(tempfile.mkdtemp())
+diag._log_dir = _td
+diag.state.last_stall_dump = -1e9
+_seen = []
+_real_getline = linecache.getline
+
+
+def _getline(*a, **k):
+    _seen.append(_th.current_thread().name)
+    return _real_getline(*a, **k)
+
+
+diag.linecache.getline = _getline
+
+
+async def _dump_from_loop():
+    async def _parked():
+        await asyncio.sleep(30)
+    t = asyncio.ensure_future(_parked())
+    await asyncio.sleep(0)
+    path = diag.dump_stalled_state("test reason")
+    on_loop = list(_seen)
+    t.cancel()
+    return path, on_loop
+
+
+_path, _on_loop = asyncio.run(_dump_from_loop())
+diag._dump_pool.shutdown(wait=True)
+diag._dump_pool = None
+diag.linecache.getline = _real_getline
+ok("no source line is read on the loop", "MainThread" not in _seen, repr(set(_seen)))
+ok("source lines are read on the dump's own thread",
+   bool(_seen) and all(n.startswith("diag-dump") for n in _seen), repr(set(_seen)))
+_txt = _path.read_text(encoding="utf-8") if _path and _path.exists() else ""
+ok("the dump is written, with tasks, threads and source lines",
+   "reason: test reason" in _txt and "=== asyncio tasks ===" in _txt
+   and "in _parked" in _txt and "await asyncio.sleep(30)" in _txt
+   and "--- thread MainThread" in _txt, _txt[:400])
+_ = _on_loop
+ok("a second dump inside the cooldown is skipped", diag.dump_stalled_state("again") is None)
+
 
 print("%d passed, %d failed" % (_PASS, len(_FAIL)))
 for f in _FAIL:

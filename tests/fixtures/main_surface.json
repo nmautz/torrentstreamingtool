@@ -171,6 +171,9 @@
   "DEFAULT_HLS_LADDER_HEIGHTS": {
    "kind": "value"
   },
+  "DEFAULT_POOL_WORKERS": {
+   "kind": "value"
+  },
   "DEVICE_COOKIE": {
    "kind": "value"
   },
@@ -2098,6 +2101,12 @@
    "kind": "def",
    "params": [
     "f:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_bundle_manifest_open_sync": {
+   "kind": "def",
+   "params": [
+    "target:POSITIONAL_OR_KEYWORD"
    ]
   },
   "_bundle_meta_for_file": {
@@ -8063,6 +8072,9 @@
   "clientlog": {
    "kind": "module clientlog"
   },
+  "concurrent": {
+   "kind": "module concurrent"
+  },
   "contextvars": {
    "kind": "module contextvars"
   },
@@ -8464,6 +8476,13 @@
    "kind": "def",
    "params": [
     "files:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "lib_io": {
+   "kind": "async def",
+   "params": [
+    "fn:POSITIONAL_OR_KEYWORD",
+    "args:VAR_POSITIONAL"
    ]
   },
   "library_air_loop": {

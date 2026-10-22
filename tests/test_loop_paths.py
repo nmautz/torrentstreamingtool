@@ -1,6 +1,7 @@
 """Matching a playing file to the library touches no disk in the usual case, and
 the playback paths keep their disk calls off the event loop (20.25.17), as does
-every async caller of the episode-group homes (20.25.19).
+every async caller of the episode-group homes (20.25.19), the bundle manifest
+and the library's own load and save (20.26.1).
 
     python tests/test_loop_paths.py      (or `make test`)
 
@@ -195,6 +196,66 @@ check("lifespan reads the endpoints' source on a worker thread, before serving",
 check("a missing sniffio is stubbed, so httpcore's per-request import never searches the disk",
       'sys.modules.setdefault("sniffio", None)' in src
       and src.index('sys.modules.setdefault("sniffio", None)') < src.index("\napp = FastAPI("))
+
+print("a phone downloading ten episodes doesn't stall the box (20.26.1)")
+# meta.json and the client-log pending file were read on the loop: 4-7 s each
+# with qBit writing to the same disk on 2026-10-22.
+NEVER_ON_LOOP = {"_read_meta", "_client_pending_read", "_client_pending_write",
+                 "_client_devices", "_enumerate_bundle_files", "_dir_size_bytes",
+                 "_bundle_manifest_open_sync"}
+for n in ast.walk(tree):
+    if isinstance(n, ast.AsyncFunctionDef):
+        bad = sorted(NEVER_ON_LOOP & set(_direct_calls(n)))
+        if bad:
+            check(f"{n.name} calls {bad[0]} on the loop", False)
+check("no async function reads a bundle's meta.json or the client-log state on the loop",
+      True)
+# The library's load and save run while `_lib_lock` is held. On the shared pool a
+# lock holder queued behind four bundle listings for 118 s with 20 waiting.
+check("library loads and saves never go through the shared pool",
+      "to_thread(_load_lib_raw" not in src and "to_thread(_save_lib_raw" not in src)
+check("they run on the library's own thread",
+      src.count("lib_io(_load_lib_raw)") >= 3 and src.count("lib_io(_save_lib_raw, ") >= 3)
+check("lifespan widens the shared pool before anything uses it",
+      "set_default_executor(" in life_src
+      and life_src.index("set_default_executor(") < life_src.index("to_thread("))
+check("lifespan freezes the start-up heap just before serving",
+      "diag.freeze_startup_heap()" in life_src
+      and life_src.index("diag.freeze_startup_heap()") < life_src.index("yield")
+      and life_src.index("diag.freeze_startup_heap()") > life_src.index("start_power_listener"))
+
+import os, re, tempfile                   # noqa: E402
+bns = {"os": os, "re": re, "Path": Path}
+bpieces = []
+for node in tree.body:
+    if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "_BUNDLE_FILE_RE"
+                                            for t in node.targets):
+        bpieces.append(ast.get_source_segment(src, node))
+    if isinstance(node, ast.FunctionDef) and node.name in ("_enumerate_bundle_files",
+                                                           "_dir_size_bytes"):
+        bpieces.append(ast.get_source_segment(src, node))
+exec("\n\n".join(bpieces), bns)
+with tempfile.TemporaryDirectory() as td:
+    b = Path(td) / "bundle"
+    b.mkdir()
+    for name, size in (("seg_video_00002.m4s", 30), ("master.m3u8", 5),
+                       ("seg_video_00001.m4s", 20), ("meta.json", 7), ("bad name!.txt", 3)):
+        (b / name).write_bytes(b"x" * size)
+    (b / "sub").mkdir()
+    (b / "sub" / "deep.vtt").write_bytes(b"y" * 11)
+    files_, total_ = bns["_enumerate_bundle_files"](b)
+    check("the bundle listing has every servable file, sorted, with sizes",
+          files_ == [{"name": "master.m3u8", "size": 5}, {"name": "meta.json", "size": 7},
+                     {"name": "seg_video_00001.m4s", "size": 20},
+                     {"name": "seg_video_00002.m4s", "size": 30}] and total_ == 62)
+    check("the cache size counts every file, subfolders included",
+          bns["_dir_size_bytes"](b) == 5 + 7 + 20 + 30 + 3 + 11)
+    check("a missing folder is 0, not an error", bns["_dir_size_bytes"](b / "nope") == 0)
+for fn in ("_enumerate_bundle_files", "_dir_size_bytes"):
+    body = next(ast.get_source_segment(src, n) for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == fn)
+    check(f"{fn} lists with os.scandir (size from the directory read)",
+          "os.scandir(" in body and ".iterdir()" not in body and ".rglob(" not in body)
 
 import asyncio, time                      # noqa: E402
 sys.path.insert(0, str(ROOT))

@@ -30,8 +30,8 @@ tree = ast.parse(src)
 WANT = {"_write_durable", "_steps_note", "_note_slow_lib_io", "_save_lib_raw",
         "_save_lib_raw_inner", "_lib_file_key",
         "_load_lib_raw", "mutate_library", "_library_txn", "_note_slow_txn",
-        "LibraryUnchanged", "get_library", "put_library"}
-CONSTS = {"_LIB_IO_SLOW_S", "_SAVE_RETRY_DELAYS"}
+        "LibraryUnchanged", "get_library", "put_library", "lib_io"}
+CONSTS = {"_LIB_IO_SLOW_S", "_SAVE_RETRY_DELAYS", "_LIB_POOL"}
 
 fails = []
 

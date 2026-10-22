@@ -47,6 +47,7 @@ import contextvars
 import faulthandler
 import gc
 import io
+import linecache
 import logging
 import os
 import re
@@ -711,6 +712,47 @@ def await_chain(task: "asyncio.Task", limit: int = 40) -> tuple[list, Any]:
 
 
 
+def _frame_rows(frame, limit: int) -> list:
+    """`(file, line, function)` for the innermost `limit` frames, outermost first.
+
+    Pure memory: no source lookup. `traceback.format_stack` stats every file in
+    the stack (`linecache.checkcache`) on every call, and the stall dump made one
+    call per task: 170 tasks on a busy F: held the event loop 33.7 s on
+    2026-10-22, which is how the dump of a stall became the worst stall."""
+    rows = []
+    while frame is not None and len(rows) < limit:
+        rows.append((frame.f_code.co_filename, frame.f_lineno, frame.f_code.co_name))
+        frame = frame.f_back
+    rows.reverse()
+    return rows
+
+
+def _format_rows(rows: list) -> str:
+    """`traceback.format_stack`'s layout, from `_frame_rows`. Reads source lines."""
+    out = []
+    for fn, ln, name in rows:
+        out.append(f'  File "{fn}", line {ln}, in {name}\n')
+        line = linecache.getline(fn, ln).strip() if ln else ""
+        if line:
+            out.append(f"    {line}\n")
+    return "".join(out)
+
+
+_dump_pool = None                           # one thread: renders and writes stall dumps
+
+
+def _write_stall_dump(path: Path, parts: list, reason: str) -> None:
+    """Render the collected parts (strings and stacks) and write the file. Thread."""
+    buf = io.StringIO()
+    for p in parts:
+        buf.write(_format_rows(p) if isinstance(p, list) else p)
+    try:
+        path.write_text(buf.getvalue(), encoding="utf-8")
+        log.critical("STALL DUMP written to %s (reason: %s)", path.name, reason)
+    except OSError as exc:
+        log.error("Could not write stall dump: %s", exc)
+
+
 def dump_stalled_state(reason: str) -> Optional[Path]:
     """Write every asyncio task stack + every thread stack to `logs/stall_<ts>.txt`.
 
@@ -718,7 +760,13 @@ def dump_stalled_state(reason: str) -> Optional[Path]:
     trivially diagnosable *if* you know what each task was awaiting, and
     impossible to diagnose from poll logs alone. Rate-limited so a long outage
     produces a handful of dumps, not thousands.
+
+    Runs on the event loop, so it only COLLECTS here (frame walks, no disk): the
+    source lines and the file write happen on a thread of its own (20.26.1), not
+    the shared pool, which is often the thing that is full when a dump is due.
+    Returns the path the dump is being written to.
     """
+    global _dump_pool
     now = time.monotonic()
     if now - state.last_stall_dump < STALL_DUMP_COOLDOWN_S:
         return None
@@ -727,60 +775,58 @@ def dump_stalled_state(reason: str) -> Optional[Path]:
         return None
 
     path = _log_dir / f"stall_{time.strftime('%Y%m%d-%H%M%S')}.txt"
-    buf = io.StringIO()
-    buf.write(f"=== STALL DUMP === {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-    buf.write(f"reason: {reason}\n")
-    buf.write(f"{snapshot_line()}\n\n")
+    parts: list = []
+    w = parts.append
+    w(f"=== STALL DUMP === {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    w(f"reason: {reason}\n")
+    w(f"{snapshot_line()}\n\n")
 
-    buf.write("=== in-flight requests ===\n")
+    w("=== in-flight requests ===\n")
     now_m = time.monotonic()
     for started, label in sorted(state.inflight.values()):
-        buf.write(f"  {now_m - started:8.1f}s  {label}\n")
+        w(f"  {now_m - started:8.1f}s  {label}\n")
     if not state.inflight:
-        buf.write("  (none)\n")
+        w("  (none)\n")
 
-    buf.write("\n=== locks ===\n")
+    w("\n=== locks ===\n")
     for p in state.locks.values():
-        buf.write(f"  {p.name}: held={p.held_for():.1f}s holder={p.holder or '-'} "
-                  f"waiters={p.waiters} max_held={p.max_held_s:.1f}s\n")
+        w(f"  {p.name}: held={p.held_for():.1f}s holder={p.holder or '-'} "
+          f"waiters={p.waiters} max_held={p.max_held_s:.1f}s\n")
 
     if state.last_block:
-        buf.write("\n=== last loop block (sampled while it was happening) ===\n")
-        buf.write(state.last_block + "\n")
+        w("\n=== last loop block (sampled while it was happening) ===\n")
+        w(state.last_block + "\n")
 
-    buf.write("\n=== asyncio tasks ===\n")
+    w("\n=== asyncio tasks ===\n")
     try:
         for t in asyncio.all_tasks():
-            buf.write(f"\n--- task {t.get_name()} done={t.done()} ---\n")
+            w(f"\n--- task {t.get_name()} done={t.done()} ---\n")
             try:
                 frames, leaf = await_chain(t)
-                for frame in frames:
-                    buf.write("".join(traceback.format_stack(frame, limit=1)))
+                w([r for frame in frames for r in _frame_rows(frame, 1)])
                 if leaf is not None:
-                    buf.write(f"  waiting on: {type(leaf).__name__}\n")
+                    w(f"  waiting on: {type(leaf).__name__}\n")
             except Exception as exc:
-                buf.write(f"  <stack unavailable: {exc}>\n")
+                w(f"  <stack unavailable: {exc}>\n")
     except Exception as exc:
-        buf.write(f"  <task enumeration failed: {exc}>\n")
+        w(f"  <task enumeration failed: {exc}>\n")
 
-    buf.write("\n=== threads ===\n")
+    w("\n=== threads ===\n")
     try:
         frames = sys._current_frames()
         for th in threading.enumerate():
-            buf.write(f"\n--- thread {th.name} (id={th.ident}) ---\n")
+            w(f"\n--- thread {th.name} (id={th.ident}) ---\n")
             fr = frames.get(th.ident or -1)
             if fr is not None:
-                buf.write("".join(traceback.format_stack(fr, limit=25)))
+                w(_frame_rows(fr, 25))
     except Exception as exc:
-        buf.write(f"  <thread enumeration failed: {exc}>\n")
+        w(f"  <thread enumeration failed: {exc}>\n")
 
-    try:
-        path.write_text(buf.getvalue(), encoding="utf-8")
-        log.critical("STALL DUMP written to %s (reason: %s)", path.name, reason)
-        return path
-    except OSError as exc:
-        log.error("Could not write stall dump: %s", exc)
-        return None
+    if _dump_pool is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _dump_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="diag-dump")
+    _dump_pool.submit(_write_stall_dump, path, parts, reason)
+    return path
 
 
 def enable_faulthandler(log_dir: Path) -> None:
@@ -1191,6 +1237,46 @@ def start_gc_watch() -> None:
         gc.callbacks.append(_gc_callback)
 
 
+def freeze_startup_heap() -> int:
+    """Move everything alive now into the permanent generation (`gc.freeze`).
+
+    Called once start-up is done. Modules, routes and models live for the whole
+    process, and every full collection re-walked them for nothing. Acyclic
+    objects are still freed by reference counting; only a cycle that was alive
+    at start-up and dies later is never collected, which costs nothing here.
+    Returns how many objects were frozen."""
+    gc.freeze()
+    n = gc.get_freeze_count()
+    log.info("GC: froze %d start-up objects out of full collections", n)
+    return n
+
+
+GC_CENSUS_EVERY_S = 600.0
+GC_CENSUS_HARD_S = 0.25           # a pause this long also logs a GC CENSUS
+_gc_census_last = 0.0
+
+
+def gc_census_line(slow: list) -> Optional[str]:
+    """After a full collection at the hard line, what it had to walk (20.26.1).
+
+    `len(gc.get_objects(2))` builds a list of every old object: tens of ms for
+    millions, so at most once per `GC_CENSUS_EVERY_S`. `slow` is the drained
+    `GC PAUSE` lines' durations."""
+    global _gc_census_last
+    if not slow or max(slow) < GC_CENSUS_HARD_S:
+        return None
+    now = time.monotonic()
+    if now - _gc_census_last < GC_CENSUS_EVERY_S:
+        return None
+    _gc_census_last = now
+    try:
+        old = len(gc.get_objects(2))
+    except Exception:
+        return None
+    return (f"GC CENSUS after a {max(slow):.2f}s pause: {old} objects in gen2, "
+            f"{gc.get_freeze_count()} frozen, counts {gc.get_count()}")
+
+
 def drain_gc_pauses() -> list[str]:
     """The slow collections since the last call, as log lines (pure formatting)."""
     rows, state.gc_slow = state.gc_slow, []
@@ -1312,8 +1398,12 @@ async def vitals_loop() -> None:
             line = snapshot_line(s)
             state.loop_lag_peak_s = 0.0      # `lagmax=` covers one line each
             state.gc_peak_s, state.gc_peak_gen = 0.0, -1
+            slow_gc = [d for _, d, _, _, _ in state.gc_slow]
             for gl in drain_gc_pauses():
                 log.warning("%s", gl)
+            census = gc_census_line(slow_gc)
+            if census:
+                log.warning("%s", census)
             if _vitals_log:
                 _vitals_log.info(line)
             bad = _anomalies(s)

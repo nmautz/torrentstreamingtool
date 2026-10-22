@@ -1,5 +1,37 @@
 # Changelog
 
+## [20.26.1] — 2026-10-22
+
+### Fixed
+- **Saving episodes to the phone no longer stalls the server.** Ten episodes
+  queued for download while South Park downloaded froze the box for up to
+  34 s and left requests waiting up to 4 minutes (the app showed "Waiting
+  for DESKTOP-1BVID4G to answer"). Five causes, all fixed:
+  - Listing a bundle's files checked each file on disk twice. A bundle has
+    about 1,300 files and the disk was busy, so each listing took minutes.
+    The directory read already carries what it needs, so the listing now
+    reads only that.
+  - The offline-cache size check (every 5 min, and the admin cache view) did
+    the same for every bundle (#101).
+  - Reading or saving the library waited for a free worker thread while
+    holding the library lock. The bundle listings had all eight threads, so
+    one wait held the lock for 2 minutes with 20 requests behind it. Library
+    reads and saves now have a thread of their own, and the shared pool has
+    32 threads instead of 8.
+  - Each episode's `meta.json`, and the phone's diagnostic-log state, were
+    read on the thread that answers every request (4-7 s each with the disk
+    busy).
+  - The stall report itself froze the server for 34 s: it looked up source
+    lines file by file on that same thread. It now does that on a thread of
+    its own.
+
+### Changed
+- Python's garbage collector no longer re-checks the objects built at
+  start-up on every full pass. Under use, full passes reached 0.37 s
+  (0.1 s idle). A full pass of 0.25 s or more now also logs how many
+  objects it had to check (`GC CENSUS`), to show whether the library is
+  what makes them slow.
+
 ## [20.26.0] — 2026-10-21
 
 ### Changed
@@ -10,6 +42,7 @@
   TV and picks the episode up on this device at the same moment, on the
   on-demand (JIT) stream, within seconds. The full prep still gets queued in
   the background, as every on-demand play already does.
+
 ## [20.25.24] — 2026-10-20
 
 ### Fixed

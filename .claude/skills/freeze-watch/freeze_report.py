@@ -202,6 +202,11 @@ def report(ver, logs, stall_files, since_arg):
             for (gen, who), n in by_g.most_common():
                 worst = max(g for _, g, gn, w in xs if (gn, w) == (gen, who)) * 1000
                 out.append(f"  {tag:6} {n}x worst {worst:.0f} ms  gen{gen} collection on {who}")
+        # 20.26.1+: what a hard full collection had to walk (at most one per 10 min)
+        for ln in logs["streamlink_app.log"].splitlines():
+            t = when(ln)
+            if t and t >= since and "GC CENSUS" in ln:
+                out.append(f"  census {t:%H:%M:%S} " + ln.split("GC CENSUS ", 1)[-1][:110])
 
     # 2. The server not answering although the loop was free.
     pr = [r for r in rows if r["probe"] >= PROBE_HARD_MS and r["lagmax"] * 1000 < SOFT_MS]
