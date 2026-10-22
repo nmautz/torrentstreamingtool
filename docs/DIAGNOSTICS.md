@@ -746,6 +746,15 @@ Both run on the `diag-disk` thread, but a C call that holds the GIL stops the lo
 its whole length. On 2026-10-22, under load, 12 of 14 unexplained 0.15-0.21 s loop
 blocks fell in the same second as a vitals line.
 
+**On Windows the process walk is one call (20.26.10).** The first `samp=` lines
+showed `0+250ms/180p`: the disk counters are free, the per-process `io_counters()`
+walk is not, and the loop stalled in the same second. `_win_proc_io` reads every
+process's name, pid and I/O counters with one `NtQuerySystemInformation
+(SystemProcessInformation)` call through ctypes (the GIL is released during the
+call) and `_parse_spi` reads the x64 layout. The first result must agree with
+psutil for this process (`_spi_check`), or a log line says why and the psutil walk
+stays. `io_denied` is 0 on this path: the call needs no handle to the process.
+
 **Log lines are written by the `log-writer` thread (20.26.5).** `defer_log_writes`
 moves every stream and file handler's writes onto it at the start of lifespan, so a
 line can land in the file a moment after it was logged; order is kept.

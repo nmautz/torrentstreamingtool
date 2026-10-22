@@ -52,6 +52,7 @@ import logging
 import os
 import re
 import socket
+import struct
 import sys
 import threading
 import time
@@ -1056,6 +1057,127 @@ def _skip_disk(name: str) -> bool:
         and not name.startswith("nvme") and not name.startswith("mmcblk"))
 
 
+# ── Every process's I/O in one call (Windows, 20.26.10) ───────────────────────
+# psutil asks each process for its I/O counters one at a time, and for a process
+# it may not open it falls back to a system-wide query every time. With ~180
+# processes that walk took 250-270 ms on the box under load, and the event loop
+# stalled 0.15-0.21 s in the same second as nearly every vitals line: the calls
+# hold the GIL. NtQuerySystemInformation(SystemProcessInformation) returns every
+# process's name, pid and IO_COUNTERS in one call, through ctypes, which lets
+# other threads run while Windows answers. The first result is checked against
+# psutil for this process; any disagreement, or a pointer outside the buffer,
+# turns it off for good and the psutil walk carries on.
+
+_SPI_CLASS = 5                              # SystemProcessInformation
+_SPI_OFF = {"name_len": 56, "name_ptr": 64, "pid": 80, "read": 232, "write": 240}
+_SPI_MIN_ENTRY = 256
+_spi_state = {"ok": None, "size": 1 << 20}  # ok: None = untested, True, False
+
+
+def _parse_spi(raw: bytes, base: int, read_name) -> Optional[dict]:
+    """`{pid: (name, read_bytes, write_bytes)}` from a SystemProcessInformation
+    buffer (x64 layout) at address `base`. None if the layout doesn't hold.
+    `read_name(ptr, chars)` reads a UTF-16 string from memory."""
+    out: dict = {}
+    off, end = 0, len(raw)
+    for _ in range(100000):
+        if off + _SPI_MIN_ENTRY > end:
+            return None
+        nxt, = struct.unpack_from("<I", raw, off)
+        nlen, = struct.unpack_from("<H", raw, off + _SPI_OFF["name_len"])
+        nptr, = struct.unpack_from("<Q", raw, off + _SPI_OFF["name_ptr"])
+        pid, = struct.unpack_from("<Q", raw, off + _SPI_OFF["pid"])
+        rd, wr = struct.unpack_from("<qq", raw, off + _SPI_OFF["read"])
+        if nptr:
+            if not (base <= nptr and nptr + nlen <= base + end) or nlen % 2:
+                return None                 # not a pointer into our buffer: wrong layout
+            name = read_name(nptr, nlen // 2)
+        else:
+            name = "System Idle Process" if pid == 0 else "System"
+        if rd < 0 or wr < 0:
+            return None
+        out[pid] = (name, rd, wr)
+        if not nxt:
+            return out
+        if nxt < _SPI_MIN_ENTRY:
+            return None
+        off += nxt
+    return None
+
+
+def _win_proc_io_raw() -> Optional[dict]:
+    import ctypes
+    if ctypes.sizeof(ctypes.c_void_p) != 8:
+        return None
+    fn = ctypes.WinDLL("ntdll").NtQuerySystemInformation
+    fn.restype = ctypes.c_long
+    fn.argtypes = [ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong,
+                   ctypes.POINTER(ctypes.c_ulong)]
+    size = _spi_state["size"]
+    for _ in range(6):
+        buf = ctypes.create_string_buffer(size)
+        need = ctypes.c_ulong(0)
+        st = fn(_SPI_CLASS, buf, size, ctypes.byref(need)) & 0xFFFFFFFF
+        if st == 0:
+            _spi_state["size"] = size
+            return _parse_spi(buf.raw, ctypes.addressof(buf),
+                              lambda ptr, n: ctypes.wstring_at(ptr, n))
+        if st != 0xC0000004:                # STATUS_INFO_LENGTH_MISMATCH
+            return None
+        size = max(int(need.value) + (256 << 10), size * 2)
+    return None
+
+
+def _win_proc_io() -> Optional[dict]:
+    """Every process's (name, read, write) from one call, or None to use psutil."""
+    if sys.platform != "win32" or _spi_state["ok"] is False:
+        return None
+    try:
+        procs = _win_proc_io_raw()
+    except Exception as exc:
+        procs, why = None, f"{type(exc).__name__}: {exc}"
+    else:
+        why = "the buffer did not parse"
+    if procs is not None and _spi_state["ok"] is None:
+        why = _spi_check(procs)
+        if why is None:
+            _spi_state["ok"] = True
+            log.info("disk sample: process I/O from one NtQuerySystemInformation "
+                     "call (%d processes)", len(procs))
+            return procs
+        procs = None
+    if procs is None:
+        if _spi_state["ok"] is None:
+            _spi_state["ok"] = False
+            log.warning("disk sample: one-call process I/O is off (%s); using psutil", why)
+        return None
+    return procs
+
+
+def _spi_check(procs: dict) -> Optional[str]:
+    """None when the one-call result agrees with psutil for this process."""
+    me = procs.get(os.getpid())
+    if me is None:
+        return "this process is not in it"
+    try:
+        p = psutil.Process()
+        name, io = p.name(), p.io_counters()
+    except Exception as exc:
+        return f"psutil could not read this process: {exc}"
+    if me[0].lower() != name.lower():
+        return f"name {me[0]!r} is not {name!r}"
+    for got, want, what in ((me[1], io.read_bytes, "read"), (me[2], io.write_bytes, "write")):
+        if abs(got - want) > max(8 << 20, want // 20):
+            return f"{what} bytes {got} vs psutil {want}"
+    try:
+        pids = set(psutil.pids())
+    except Exception:
+        return None
+    if pids and len(pids & set(procs)) < 0.8 * len(pids):
+        return f"only {len(pids & set(procs))} of {len(pids)} pids"
+    return None
+
+
 def disk_sample() -> dict:
     """Each drive's average time per I/O and MB/s since the last call, and the
     processes that moved the most bytes. Blocking (it walks every process): run it
@@ -1081,17 +1203,19 @@ def disk_sample() -> dict:
         # same second as nearly every vitals line under load, with no Python
         # running elsewhere, so one of these C calls is holding the GIL.
         t_disk = time.monotonic()
-        procs: dict = {}
         denied = 0
-        for p in psutil.process_iter(["name"]):
-            try:
-                io = p.io_counters()
-            except psutil.AccessDenied:
-                denied += 1
-                continue
-            except Exception:                       # gone, zombie, unsupported
-                continue
-            procs[p.pid] = ((p.info.get("name") or "?"), io.read_bytes, io.write_bytes)
+        procs = _win_proc_io()
+        if procs is None:
+            procs = {}
+            for p in psutil.process_iter(["name"]):
+                try:
+                    io = p.io_counters()
+                except psutil.AccessDenied:
+                    denied += 1
+                    continue
+                except Exception:                       # gone, zombie, unsupported
+                    continue
+                procs[p.pid] = ((p.info.get("name") or "?"), io.read_bytes, io.write_bytes)
 
         t_proc = time.monotonic()
         samp = (round((t_disk - now) * 1000), round((t_proc - t_disk) * 1000), len(procs) + denied)

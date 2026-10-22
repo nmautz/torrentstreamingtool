@@ -417,6 +417,48 @@ _ = _on_loop
 ok("a second dump inside the cooldown is skipped", diag.dump_stalled_state("again") is None)
 
 
+print("every process's I/O from one call: the buffer parser (20.26.10)")
+import struct as _st
+_BASE = 0x10000000
+
+
+def _entry(pid, name, rd, wr, last=False):
+    nb = name.encode("utf-16-le")
+    e = bytearray(256)
+    _st.pack_into("<H", e, 56, len(nb))
+    _st.pack_into("<Q", e, 80, pid)
+    _st.pack_into("<qq", e, 232, rd, wr)
+    return e, nb
+
+
+def _buf(entries):
+    raw = bytearray()
+    offs = []
+    for i, (pid, name, rd, wr) in enumerate(entries):
+        e, nb = _entry(pid, name, rd, wr)
+        start = len(raw)
+        size = 256 + len(nb) + (8 - len(nb) % 8) % 8
+        if nb:
+            _st.pack_into("<Q", e, 64, _BASE + start + 256)
+        _st.pack_into("<I", e, 0, 0 if i == len(entries) - 1 else size)
+        raw += e + nb + bytes(size - 256 - len(nb))
+    return bytes(raw)
+
+
+_raw = _buf([(0, "", 0, 0), (4, "", 10, 20), (812, "qbittorrent.exe", 5 << 30, 7 << 30)])
+_names = lambda ptr, n: _raw[ptr - _BASE:ptr - _BASE + 2 * n].decode("utf-16-le")
+_got = diag._parse_spi(_raw, _BASE, _names)
+ok("names, pids and byte counts come out of the buffer",
+   _got == {0: ("System Idle Process", 0, 0), 4: ("System", 10, 20),
+            812: ("qbittorrent.exe", 5 << 30, 7 << 30)}, repr(_got))
+_bad = bytearray(_raw)
+_st.pack_into("<Q", _bad, 256 * 2 + 64, 0xDEAD0000)          # name pointer outside the buffer
+ok("a pointer outside the buffer means the layout is wrong",
+   diag._parse_spi(bytes(_bad), _BASE, _names) is None)
+ok("a truncated buffer is refused", diag._parse_spi(_raw[:300], _BASE, _names) is None)
+ok("off Windows nothing changes", sys.platform == "win32" or diag._win_proc_io() is None)
+
+
 print("log lines are written by the log-writer thread (20.26.4)")
 import logging as _logging, io as _io
 _buf = _io.StringIO()

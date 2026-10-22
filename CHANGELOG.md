@@ -1,5 +1,17 @@
 # Changelog
 
+## [20.26.10] — 2026-10-22
+
+### Fixed
+- **The server's own health monitor no longer freezes it every 30 s under
+  load.** To see which programs are using the disk, it asked each of the
+  ~180 processes on the box for its read and write counts, one at a time. On
+  Windows that took 250-270 ms, and the server stalled for up to 0.21 s while
+  it ran (17 times in two hours). It now gets every process's counts in a
+  single Windows call that lets the server keep working meanwhile. On first
+  use the new numbers are checked against the old method; if they disagree,
+  the old method is used and the log says why.
+
 ## [20.26.9] — 2026-10-22
 
 ### Fixed
