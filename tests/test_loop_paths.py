@@ -266,7 +266,42 @@ with tempfile.TemporaryDirectory() as td:
     check("the cache size counts every file, subfolders included",
           bns["_dir_size_bytes"](b) == 5 + 7 + 20 + 30 + 3 + 11)
     check("a missing folder is 0, not an error", bns["_dir_size_bytes"](b / "nope") == 0)
-for fn in ("_enumerate_bundle_files", "_dir_size_bytes"):
+print("the storage breakdown lists each folder once (20.26.6)")
+sns = {"os": os, "Path": Path, "VIDEO_EXTS": {".mkv", ".mp4"},
+       "_file_evicted": lambda f: bool(f.get("evicted")),
+       "_item_display_names": lambda it: [it.get("title", "")]}
+seg = next(ast.get_source_segment(src, n) for n in tree.body
+           if isinstance(n, ast.FunctionDef) and n.name == "_storage_breakdown_sync")
+exec(seg, sns)
+with tempfile.TemporaryDirectory() as td:
+    d = Path(td) / "Show" / "Season 01"
+    d.mkdir(parents=True)
+    for name, size in (("Show.S01E01.mkv", 100), ("Show.S01E01.en.srt", 7),
+                       ("Show.S01E01-poster.jpg", 5), ("Show.S01E02.mkv", 50),
+                       ("Show.S01E10.mkv", 9), ("other.txt", 3)):
+        (d / name).write_bytes(b"x" * size)
+    lib = {"items": [{"id": "a", "title": "Show", "files": [
+        {"path": str(d / "Show.S01E01.mkv")}, {"path": str(d / "Show.S01E02.mkv")},
+        {"path": str(d / "Show.S01E03.mkv"), "size_bytes": 999},     # not on disk
+        {"path": str(d / "Show.S01E10.mkv"), "evicted": True}]}]}
+    real_stat = os.stat
+    stats = []
+    os.stat = lambda *a, **k: (stats.append(a[0]), real_stat(*a, **k))[1]
+    try:
+        out = sns["_storage_breakdown_sync"](lib, {str(d / "Show.S01E02.mkv"): 40})
+    finally:
+        os.stat = real_stat
+    rows = {Path(f["path"]).name: f for f in out["items"][0]["files"]}
+    check("sizes, sidecars and bundle bytes are counted as before",
+          rows["Show.S01E01.mkv"]["source_bytes"] == 100
+          and rows["Show.S01E01.mkv"]["extra_bytes"] == 12
+          and rows["Show.S01E02.mkv"]["total_bytes"] == 90
+          and "Show.S01E03.mkv" not in rows and "Show.S01E10.mkv" not in rows
+          and out["total_bytes"] == 202)
+    check("a file in the listing is not stat-ed again",
+          not any("S01E01" in str(x) or "S01E02" in str(x) for x in stats))
+
+for fn in ("_enumerate_bundle_files", "_dir_size_bytes", "_storage_breakdown_sync"):
     body = next(ast.get_source_segment(src, n) for n in tree.body
                 if isinstance(n, ast.FunctionDef) and n.name == fn)
     check(f"{fn} lists with os.scandir (size from the directory read)",

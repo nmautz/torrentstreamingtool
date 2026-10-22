@@ -38927,21 +38927,31 @@ def _storage_breakdown_sync(lib: dict, bundle_by_path: dict[str, int]) -> dict:
 
     Returns `items` sorted by total bytes descending, each carrying its own
     per-file breakdown so the UI can drill into a series without a second request.
-    Source/extra stats are one `stat()` per file plus one `iterdir()` per distinct
-    directory — cheap next to the recursive bundle walk the inventory already did,
+    Source/extra sizes come from one `os.scandir` per distinct directory — cheap next to the recursive bundle walk the inventory already did,
     but still offloaded to a worker thread by the caller because a large library is
     a lot of stats.
     """
     # One directory listing per parent dir, reused across that dir's files so a
     # season folder isn't re-listed once per episode.
-    dir_cache: dict[Path, list[Path]] = {}
+    # os.scandir: each entry's size comes with the directory read on Windows, so
+    # a season folder costs one listing, not a stat per file (20.26.6; the Path
+    # form was a stat for is_file and another for the size, 39 s under load).
+    dir_cache: dict[Path, dict[str, int]] = {}
 
-    def _siblings(d: Path) -> list[Path]:
+    def _siblings(d: Path) -> dict[str, int]:
         if d not in dir_cache:
+            sizes: dict[str, int] = {}
             try:
-                dir_cache[d] = [p for p in d.iterdir() if p.is_file()]
+                with os.scandir(d) as it:
+                    for e in it:
+                        try:
+                            if e.is_file():
+                                sizes[e.name] = e.stat().st_size
+                        except OSError:
+                            pass
             except OSError:
-                dir_cache[d] = []
+                pass
+            dir_cache[d] = sizes
         return dir_cache[d]
 
     items_out: list[dict] = []
@@ -38961,8 +38971,10 @@ def _storage_breakdown_sync(lib: dict, bundle_by_path: dict[str, int]) -> dict:
                 # reclaimed as still in use — the Storage tab would show the sweep
                 # having freed nothing at all.
                 sbytes = 0
+            elif src.name in _siblings(src.parent):
+                sbytes = _siblings(src.parent)[src.name]
             else:
-                try:
+                try:                      # not in the listing: a case difference, or gone
                     sbytes = src.stat().st_size
                 except FileNotFoundError:
                     # Not there: deleted (Delete Watched leaves the row, marked
@@ -38978,16 +38990,14 @@ def _storage_breakdown_sync(lib: dict, bundle_by_path: dict[str, int]) -> dict:
             # video file itself and any other video.
             ebytes = 0
             stem = src.stem
-            for sib in _siblings(src.parent):
-                if (sib.name != src.name
+            for name, size in _siblings(src.parent).items():
+                sib = Path(name)
+                if (name != src.name
                         and sib.suffix.lower() not in VIDEO_EXTS
                         and (sib.stem == stem
-                             or sib.name.startswith(stem + ".")
-                             or sib.name.startswith(stem + "-"))):
-                    try:
-                        ebytes += sib.stat().st_size
-                    except OSError:
-                        pass
+                             or name.startswith(stem + ".")
+                             or name.startswith(stem + "-"))):
+                    ebytes += size
             total = sbytes + bbytes + ebytes
             if not total:
                 continue                  # nothing of this file is on the host

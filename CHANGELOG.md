@@ -1,5 +1,13 @@
 # Changelog
 
+## [20.26.6] — 2026-10-22
+
+### Fixed
+- The admin Storage tab's per-show breakdown loads faster on a busy disk. It
+  checked every file in every show's folder on disk twice, once to see that it
+  was a file and once for its size: 39 s while a download, a delete and a
+  compression were running. One read of each folder now gives both.
+
 ## [20.26.5] — 2026-10-22
 
 ### Fixed
