@@ -1,5 +1,16 @@
 # Changelog
 
+## [20.26.7] — 2026-10-22
+
+### Changed
+- **Compression skips files it has already compressed.** A run stopped part
+  way, for example by a server restart, had to be started again by hand, and it
+  then re-encoded every episode it had already finished: a second lossy pass,
+  usually a little smaller, so it replaced the file and lost more quality.
+  Those files are now left out, and the card says how many. Tick "Also
+  re-compress files already compressed" to include them on purpose. Files
+  compressed before this version are recognised if they came from a torrent.
+
 ## [20.26.6] — 2026-10-22
 
 ### Fixed
@@ -6607,7 +6618,6 @@ tool, `cropdetect` included, cheerfully confirms there is ink no client can see)
 in `ObeliskMdITC TT.ttf` silently cost 6 of 9 fonts, and missing fonts don't fail a render,
 they just substitute, so the pack comes out subtly in the wrong typeface.
 
-
 ## [14.1.1] — 2026-09-15
 **The monitor was mirroring the blackout.**
 
@@ -6644,7 +6654,6 @@ did. Which one a given adapter honours through a lock isn't
 decidable from the host, so it's a setting rather than a guess — and it rides the `am=`
 seed across the proxied loopback origin like the other playback prefs. `nativeStarted`
 and `displays()` now report which path actually ran.
-
 
 ## [14.1.0] — 2026-09-15
 **Get it from where you noticed it was missing.**

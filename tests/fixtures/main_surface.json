@@ -1691,6 +1691,12 @@
     "save_path:POSITIONAL_OR_KEYWORD"
    ]
   },
+  "_already_compressed": {
+   "kind": "def",
+   "params": [
+    "f:POSITIONAL_OR_KEYWORD"
+   ]
+  },
   "_analyzable_files": {
    "kind": "def",
    "params": [
@@ -2375,7 +2381,8 @@
    "params": [
     "scope:POSITIONAL_OR_KEYWORD",
     "level:POSITIONAL_OR_KEYWORD",
-    "codec:POSITIONAL_OR_KEYWORD"
+    "codec:POSITIONAL_OR_KEYWORD",
+    "recompress:POSITIONAL_OR_KEYWORD"
    ]
   },
   "_compress_lock_key": {
@@ -5537,7 +5544,8 @@
     "scope:POSITIONAL_OR_KEYWORD",
     "crf:POSITIONAL_OR_KEYWORD",
     "codec:POSITIONAL_OR_KEYWORD",
-    "max_height:POSITIONAL_OR_KEYWORD"
+    "max_height:POSITIONAL_OR_KEYWORD",
+    "recompress:POSITIONAL_OR_KEYWORD"
    ]
   },
   "_run_file_repair": {
@@ -9901,7 +9909,7 @@
    "kind": "module zipfile"
   }
  },
- "openapi_sha256": "1526c2b0d9de784fc438fddb253abb3ce26cb4d436d2d867147f4a300fd07621",
+ "openapi_sha256": "601a7e113b44ac3ca96a79bd0eca7f67747d24ed9b604441ccf71da3963bce9b",
  "routes": [
   {
    "endpoint": "openapi",

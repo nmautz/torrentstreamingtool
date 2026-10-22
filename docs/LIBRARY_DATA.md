@@ -694,6 +694,7 @@ in the `/files` response. See [STREAMING.md](STREAMING.md).
                                          //   Seasons view, play order (`sort_key`) and the app's Downloads tab list it there
   "compressed": true,                    // optional; set true when this file was re-encoded IN PLACE by the compression tool — see below
   "compressed_at": "2026-06-25T18:00:00Z", // optional; when the in-place re-encode replaced the original
+  "compressed_with": {"codec": "hevc", "crf": 28, "at": "2026-10-22T12:00:00Z"}, // optional (20.26.7); set on EVERY file the tool compressed (torrent-backed or not); the next run skips it unless `recompress`
   "validation": {                        // optional; written by the file validator
     "status": "ok",                      //   ok | damaged | missing
     "error":  "",                        //   ffmpeg/ffprobe tail when damaged
@@ -1031,6 +1032,8 @@ episode picker.
 Canonical file order is `episodes.sort_key` — seasons ascending, season-0 buckets last and grouped by
 label, then episode, then name. Used by `build_file_list`, the migration, `/files` and
 `/series/{key}`.
+
+`compressed_with` (20.26.7) records that the tool compressed a file at all, for every file; `compressed` stays torrent-backed only, because Delete Watched and the qBit paths read it. A compression run leaves out a file with either field unless the admin ticks "Also re-compress" (`recompress`): a second lossy pass loses more quality for little space.
 
 `compressed` marks a file the Storage & Compression tool re-encoded **in place**. Because the new
 bytes no longer match the torrent's pieces, the file is **no longer torrent-backed** even though the

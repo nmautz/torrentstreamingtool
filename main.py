@@ -28545,7 +28545,7 @@ async def admin_compress_estimate(request: Request, body: CompressEstimateReq) -
     if codec not in ("h264", "hevc"):
         raise HTTPException(400, "Unknown codec.")
     scope = (body.scope or "all").strip() or "all"
-    return JSONResponse(await _compress_estimate(scope, level, codec))
+    return JSONResponse(await _compress_estimate(scope, level, codec, bool(body.recompress)))
 
 
 @app.post("/api/admin/compress-files")
@@ -28573,12 +28573,13 @@ async def admin_start_compress_files(request: Request, body: CompressFilesReq) -
     state.file_compression = {
         "running": True, "scope": scope, "level": level, "codec": codec,
         "crf": crf, "max_height": max_height,
+        "recompress": bool(body.recompress), "already_compressed": 0,
         "total": 0, "scanned": 0, "current_name": "",
         "results": [], "bytes_before": 0, "bytes_after": 0,
         "stopped": False, "error": "", "started_at": _now_iso(), "finished_at": None,
     }
     state.file_compression_task = asyncio.create_task(
-        _run_file_compression(scope, crf, codec, max_height))
+        _run_file_compression(scope, crf, codec, max_height, bool(body.recompress)))
     return JSONResponse(_file_compression_status())
 
 
@@ -35571,8 +35572,15 @@ async def _compress_one_file_inner(ffmpeg: str, path: str, *, crf: int, codec: s
     return "compressed", (f"{codec.upper()} CRF {crf}"), before, after
 
 
+def _already_compressed(f: dict) -> bool:
+    """This file was re-encoded by the compression tool before. `compressed_with`
+    (20.26.7) is written for every file; `compressed` only for torrent-backed
+    ones, so it also covers files compressed before 20.26.7."""
+    return bool(f.get("compressed_with") or f.get("compressed"))
+
+
 async def _run_file_compression(scope: str, crf: int, codec: str,
-                                 max_height: Optional[int]) -> None:
+                                 max_height: Optional[int], recompress: bool = False) -> None:
     """Walk the library (or one item) and compress each video in turn, updating
     state.file_compression in place so the admin card can poll progress."""
     fc = state.file_compression
@@ -35587,6 +35595,11 @@ async def _run_file_compression(scope: str, crf: int, codec: str,
             for f in item.get("files", []):
                 p = f.get("path", "")
                 if Path(p).suffix.lower() not in VIDEO_EXTS:
+                    continue
+                # A second lossy pass costs quality for little space, and a run cut
+                # short by a restart would otherwise redo everything it finished.
+                if not recompress and _already_compressed(f):
+                    fc["already_compressed"] = fc.get("already_compressed", 0) + 1
                     continue
                 targets.append((_item_display_names(item)[0], p, f.get("name") or Path(p).name, torrent))
                 await asyncio.sleep(0)
@@ -35612,13 +35625,18 @@ async def _run_file_compression(scope: str, crf: int, codec: str,
             # read from disk, re-download is blocked, and recheck/recover/delete refuse
             # it. Only torrent-backed files need the marker — an uploaded file already
             # has no hash. Re-fetch under the lock so we don't clobber concurrent edits.
-            if status == "compressed" and torrent:
+            # `compressed_with` goes on every compressed file: it is what the next
+            # run skips (see _already_compressed).
+            if status == "compressed":
                 async with mutate_library() as lib2:
                     for it in lib2.get("items", []):
                         for ff in it.get("files", []):
                             if ff.get("path") == path:
-                                ff["compressed"] = True
-                                ff["compressed_at"] = _now_iso()
+                                now = _now_iso()
+                                ff["compressed_with"] = {"codec": codec, "crf": crf, "at": now}
+                                if torrent:
+                                    ff["compressed"] = True
+                                    ff["compressed_at"] = now
             fc["results"].append({
                 "path": path, "name": name, "item_title": title, "torrent": torrent,
                 "status": status, "detail": detail, "before": before, "after": after,
@@ -35639,7 +35657,8 @@ async def _run_file_compression(scope: str, crf: int, codec: str,
         state.file_compression_proc = None
 
 
-async def _compress_estimate(scope: str, level: str, codec: str) -> dict:
+async def _compress_estimate(scope: str, level: str, codec: str,
+                             recompress: bool = False) -> dict:
     """Estimate the disk space a compression run would reclaim across the target
     files — both the re-encoded SOURCE (a bitrate model — the real result depends
     on content) and the current HLS bundle (deleted on replace, re-built smaller on
@@ -35648,12 +35667,16 @@ async def _compress_estimate(scope: str, level: str, codec: str) -> dict:
     hevc_factor = 0.6 if codec == "hevc" else 1.0
     lib = await get_library()
     paths: list[str] = []
+    skipped = 0
     for item in lib.get("items", []):
         if scope not in ("", "all") and item.get("id") != scope:
             continue
         for f in item.get("files", []):
             p = f.get("path", "")
             if Path(p).suffix.lower() in VIDEO_EXTS:
+                if not recompress and _already_compressed(f):
+                    skipped += 1
+                    continue
                 paths.append(p)
 
     cur_src = est_src = cur_hls = 0
@@ -35661,7 +35684,7 @@ async def _compress_estimate(scope: str, level: str, codec: str) -> dict:
     for p in paths:
         src = Path(p)
         try:
-            size = src.stat().st_size
+            size = (await asyncio.to_thread(src.stat)).st_size
         except OSError:
             continue
         info = await asyncio.to_thread(_ffprobe_full, p)
@@ -35686,6 +35709,7 @@ async def _compress_estimate(scope: str, level: str, codec: str) -> dict:
     src_saved = max(0, cur_src - est_src)
     return {
         "files": counted,
+        "already_compressed": skipped,
         "current_source_bytes": cur_src,
         "est_source_bytes": est_src,
         "est_source_saved": src_saved,

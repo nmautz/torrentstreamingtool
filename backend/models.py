@@ -394,12 +394,14 @@ class CompressFilesReq(BaseModel):
     level: str = "balanced"                     # light | balanced | maximum (ignored when `crf` is set)
     codec: str = "h264"                         # h264 | hevc
     crf: Optional[int] = None                   # Advanced override (18–32); disables the preset's down-scaling
+    recompress: bool = False                    # also re-encode files this tool already compressed (20.26.7)
 
 
 class CompressEstimateReq(BaseModel):
     scope: Optional[str] = None
     level: str = "balanced"
     codec: str = "h264"
+    recompress: bool = False
 
 
 class HlsTrimReq(BaseModel):

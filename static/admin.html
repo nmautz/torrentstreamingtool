@@ -731,6 +731,10 @@
         </div>
 
         <label class="flex items-center gap-2 text-[11px] text-gray-400 cursor-pointer select-none">
+          <input type="checkbox" id="fcRecompress" class="accent-indigo-500">
+          Also re-compress files already compressed (each pass loses more quality)
+        </label>
+        <label class="flex items-center gap-2 text-[11px] text-gray-400 cursor-pointer select-none">
           <input type="checkbox" id="fcAdvanced" onchange="_fcAdvancedChanged()" class="accent-indigo-500">
           Advanced: set CRF manually (no savings estimate)
         </label>
@@ -4449,12 +4453,14 @@ function _renderCompression(d){
   const okN = res.filter(x=>x.status === "compressed").length;
   if(running){
     const cur = d.current_name ? ` · ${escHtml(_fileLabel(d.current_name))}` : "";
-    status.innerHTML = `<span class="text-emerald-400 font-bold">Compressing</span> · ${scanned}/${total}${cur} · ${okN} done · ${_fmtBytes(freed)} freed`;
+    const left = d.already_compressed ? ` · ${d.already_compressed} already compressed, skipped` : "";
+    status.innerHTML = `<span class="text-emerald-400 font-bold">Compressing</span> · ${scanned}/${total}${cur} · ${okN} done · ${_fmtBytes(freed)} freed${left}`;
   } else if(d && d.error){
     status.innerHTML = `<span class="text-red-400 font-bold">Error:</span> ${escHtml(d.error)}`;
   } else if(d && d.finished_at){
     const stopped = d.stopped ? " (stopped early)" : "";
-    status.innerHTML = `<span class="text-emerald-400 font-bold">${okN} compressed</span> · ${_fmtBytes(freed)} freed${stopped}.`;
+    const left = d.already_compressed ? ` · ${d.already_compressed} already compressed, skipped` : "";
+    status.innerHTML = `<span class="text-emerald-400 font-bold">${okN} compressed</span> · ${_fmtBytes(freed)} freed${left}${stopped}.`;
   } else {
     status.textContent = "Not run yet.";
   }
@@ -4726,6 +4732,7 @@ async function estimateCompression(){
         body: JSON.stringify({
           scope: document.getElementById("fcItem").value || "all",
           level: _fcLevel, codec: document.getElementById("fcCodec").value,
+          recompress: document.getElementById("fcRecompress").checked,
         }),
       });
       const d = await r.json().catch(()=>({}));
@@ -4734,7 +4741,8 @@ async function estimateCompression(){
         + `Source files: ${_fmtBytes(d.current_source_bytes)} → ~${_fmtBytes(d.est_source_bytes)} `
         + `(save ~<span class="text-emerald-400 font-bold">${_fmtBytes(d.est_source_saved)}</span>)<br>`
         + `On-device bundles freed now: ${_fmtBytes(d.current_hls_bytes)}<br>`
-        + `<span class="font-bold">Total reclaimed: ~${_fmtBytes(d.est_total_saved)}</span> across ${d.files} file(s).`;
+        + `<span class="font-bold">Total reclaimed: ~${_fmtBytes(d.est_total_saved)}</span> across ${d.files} file(s).`
+        + (d.already_compressed ? `<br>${d.already_compressed} already-compressed file(s) left out.` : "");
     }catch(_){ box.textContent = "Estimate failed."; }
   });
 }
@@ -4747,7 +4755,8 @@ async function startCompression(){
   const adv = document.getElementById("fcAdvanced").checked;
   const scopeLabel = scope ? `"${sel.selectedOptions[0]?.text || "this item"}"` : "the WHOLE library";
   if(!confirm(`Compress ${scopeLabel}?\n\nThis permanently re-encodes source files (lossy — cannot be undone) and rewrites them in place. Torrent-backed files will STOP seeding. A file is only replaced if the result decodes cleanly and is actually smaller.\n\nProceed?`)) return;
-  const body = {scope: scope || "all", codec};
+  const body = {scope: scope || "all", codec,
+                recompress: document.getElementById("fcRecompress").checked};
   if(adv) body.crf = parseInt(document.getElementById("fcCrf").value, 10);
   else    body.level = _fcLevel;
   await withInflight("compress_files", btn, async ()=>{

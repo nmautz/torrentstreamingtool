@@ -129,6 +129,7 @@ make test                 # pure unit tests for the leaf modules (no deps, no ve
                           #   python tests/test_prep_space.py
                           #   python tests/test_error_heal.py
                           #   python tests/test_loop_paths.py
+                          #   python tests/test_compress_skip.py
                           #   python tests/test_vpncheck.py
                           #   python tests/test_storage_volumes.py
                           #   python tests/test_devactivity.py
