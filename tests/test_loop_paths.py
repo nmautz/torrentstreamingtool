@@ -228,6 +228,12 @@ check("they run on the library's own thread",
 check("lifespan widens the shared pool before anything uses it",
       "set_default_executor(" in life_src
       and life_src.index("set_default_executor(") < life_src.index("to_thread("))
+check("lifespan moves log writes to their thread before anything else logs much",
+      "diag.defer_log_writes()" in life_src
+      and life_src.index("diag.defer_log_writes()") < life_src.index("_warm_endpoint_sources_sync"))
+check("a phone that drops a log upload is not a 500 (its traceback was 0.31 s)",
+      "except ClientDisconnect:" in ast.get_source_segment(src, next(
+          n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "diag_client_log")))
 check("lifespan freezes the start-up heap just before serving",
       "diag.freeze_startup_heap()" in life_src
       and life_src.index("diag.freeze_startup_heap()") < life_src.index("yield")

@@ -150,6 +150,9 @@
   "CacheAutopurgeReq": {
    "kind": "class"
   },
+  "ClientDisconnect": {
+   "kind": "class"
+  },
   "ClientLogAutoReq": {
    "kind": "class"
   },

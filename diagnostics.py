@@ -829,6 +829,81 @@ def dump_stalled_state(reason: str) -> Optional[Path]:
     return path
 
 
+# ── Log writes off the event loop (20.26.4) ─────────────────────────────────
+# Every log line from the loop was a write and a flush to F: on the loop thread,
+# and with qBit and prep writing there a flush took 0.25 s (2026-10-22). Worse, a
+# line with a traceback formats it where it is logged, which reads each source
+# file in the stack from disk: 0.31 s for one ClientDisconnect. Each file / stream
+# handler keeps its place (the admin "clear logs" endpoint finds them by type) but
+# its `handle` now only queues the record; one writer thread does the rest, in
+# order. The message is merged when it is logged, so a mutable argument can't
+# change what the line says.
+
+import queue as _queue
+
+_log_q: "Optional[_queue.SimpleQueue]" = None
+_log_writer: Optional[threading.Thread] = None
+_DEFERRED = "_streamlink_deferred"
+
+
+def _log_writer_main() -> None:
+    while True:
+        item = _log_q.get()
+        if item is None:
+            return
+        handle, record = item
+        try:
+            handle(record)
+        except Exception:                       # pragma: no cover - never die
+            pass
+
+
+def _defer(h: logging.Handler) -> None:
+    real = h.handle
+
+    def handle(record, _real=real):
+        try:
+            record.msg = record.getMessage()
+            record.args = None
+        except Exception:
+            pass                                # let the writer report it
+        _log_q.put((_real, record))
+        return True
+    h.handle = handle
+    setattr(h, _DEFERRED, real)
+
+
+def defer_log_writes() -> int:
+    """Hand every stream / file handler's writes to the log-writer thread.
+    Idempotent; returns how many handlers were moved."""
+    global _log_q, _log_writer
+    if _log_q is None:
+        _log_q = _queue.SimpleQueue()
+        _log_writer = threading.Thread(target=_log_writer_main, name="log-writer",
+                                       daemon=True)
+        _log_writer.start()
+        import atexit
+        atexit.register(flush_deferred_logs)
+    loggers = [logging.getLogger()] + [lg for lg in logging.root.manager.loggerDict.values()
+                                       if isinstance(lg, logging.Logger)]
+    n = 0
+    for lg in loggers:
+        for h in lg.handlers:
+            if isinstance(h, logging.StreamHandler) and not hasattr(h, _DEFERRED):
+                _defer(h)
+                n += 1
+    return n
+
+
+def flush_deferred_logs(timeout: float = 5.0) -> None:
+    """Wait (up to `timeout`) for the writer to catch up. Used at exit and by tests."""
+    if _log_q is None or _log_writer is None or not _log_writer.is_alive():
+        return
+    done = threading.Event()
+    _log_q.put((lambda _r: done.set(), None))
+    done.wait(timeout)
+
+
 def enable_faulthandler(log_dir: Path) -> None:
     """Keep a native-level fault log, so a hard interpreter crash leaves a trace.
 

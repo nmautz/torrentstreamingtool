@@ -42,6 +42,7 @@ from typing import AsyncGenerator, Optional
 from urllib.parse import quote, unquote, urlparse
 
 import httpx
+from starlette.requests import ClientDisconnect
 import importlib.util
 
 # httpcore asks for `sniffio` on every lock and event it sets up, from inside a
@@ -13426,6 +13427,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     runtime._MAIN_LOOP.set_default_executor(concurrent.futures.ThreadPoolExecutor(
         max_workers=DEFAULT_POOL_WORKERS, thread_name_prefix="asyncio"))
     sys.setswitchinterval(GIL_SWITCH_INTERVAL_S)
+    # Log lines are written by a thread from here on (20.26.4): uvicorn's and
+    # our handlers all exist by now.
+    log.info("Log writes moved off the event loop: %d handler(s)", diag.defer_log_writes())
     await asyncio.to_thread(_warm_endpoint_sources_sync, app)
     # Route asyncio's own callback errors into the app log (and demote the benign
     # Windows WinError 10054 disconnect churn that used to flood it at ERROR).
@@ -27594,6 +27598,11 @@ async def diag_client_log(request: Request) -> JSONResponse:
         raw = await asyncio.wait_for(request.body(), timeout=CLIENT_LOG_BODY_TIMEOUT)
     except asyncio.TimeoutError:
         raise HTTPException(408, "Upload stalled.")
+    except ClientDisconnect:
+        # The phone went away mid-upload (locked, backgrounded). It sends the
+        # whole log again next time. Unhandled, this was a 500 whose traceback
+        # was formatted on the loop: 0.31 s reading source files (2026-10-22).
+        return JSONResponse({"ok": False, "reason": "client_disconnected"}, status_code=400)
     if len(raw) > 8 * 1024 * 1024:
         raise HTTPException(413, "Log too large.")
     incoming = raw.decode("utf-8", "replace")

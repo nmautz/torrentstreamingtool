@@ -740,6 +740,11 @@ From 20.26.1 the start-up heap is frozen out of full collections
 M frozen, counts (a, b, c)`, at most once per `GC_CENSUS_EVERY_S` (10 min). N is
 what a full pass walks; it grows with every parsed library copy alive at the time.
 
+**Log lines are written by the `log-writer` thread (20.26.5).** `defer_log_writes`
+moves every stream and file handler's writes onto it at the start of lifespan, so a
+line can land in the file a moment after it was logged; order is kept.
+`flush_deferred_logs` waits for it (atexit does).
+
 **Stall dumps are written off the loop (20.26.1).** `dump_stalled_state` collects
 task and thread stacks on the loop (frame walks only) and hands rendering and the
 file write to its own `diag-dump` thread, so the dump can appear a moment after the

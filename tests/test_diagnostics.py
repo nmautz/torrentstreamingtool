@@ -417,6 +417,37 @@ _ = _on_loop
 ok("a second dump inside the cooldown is skipped", diag.dump_stalled_state("again") is None)
 
 
+print("log lines are written by the log-writer thread (20.26.4)")
+import logging as _logging, io as _io
+_buf = _io.StringIO()
+_h = _logging.StreamHandler(_buf)
+_h.setFormatter(_logging.Formatter("%(message)s"))
+_writer_threads = []
+_real_emit = _h.emit
+_h.emit = lambda r: (_writer_threads.append(_th.current_thread().name), _real_emit(r))
+_lg = _logging.getLogger("test.deferred")
+_lg.propagate = False
+_lg.setLevel(_logging.INFO)
+_lg.addHandler(_h)
+_n = diag.defer_log_writes()
+ok("the handler was moved", _n >= 1 and hasattr(_h, diag._DEFERRED))
+ok("a second call moves nothing again", diag.defer_log_writes() == 0)
+_args = {"v": 1}
+_lg.info("value %s", _args)
+_args["v"] = 2                       # changed after logging: the line keeps 1
+try:
+    raise ValueError("boom")
+except ValueError:
+    _lg.exception("failed")
+_lg.info("third")
+diag.flush_deferred_logs()
+_out = _buf.getvalue()
+ok("lines arrive in order, with the message as it was when logged",
+   _out.startswith("value {'v': 1}\nfailed\n") and _out.rstrip().endswith("third"), repr(_out[:120]))
+ok("the traceback is formatted on the writer", "ValueError: boom" in _out
+   and set(_writer_threads) == {"log-writer"}, repr(set(_writer_threads)))
+
+
 print("%d passed, %d failed" % (_PASS, len(_FAIL)))
 for f in _FAIL:
     print("FAIL:", f)

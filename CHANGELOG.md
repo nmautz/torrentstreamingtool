@@ -1,5 +1,17 @@
 # Changelog
 
+## [20.26.5] — 2026-10-22
+
+### Fixed
+- **Writing to the server's logs no longer stops it.** Every log line was
+  written to disk by the thread that answers every request. With downloads
+  and prep keeping that disk busy, a single write took up to 0.25 s. Log
+  lines are now written by a thread of their own, still in order.
+- A phone that stops halfway through sending its diagnostic log is no
+  longer a server error. Logging that error read the source of every file
+  in its traceback from disk, on the same thread (0.31 s). The phone sends
+  its whole log again next time.
+
 ## [20.26.4] — 2026-10-22
 
 ### Fixed
