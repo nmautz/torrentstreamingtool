@@ -1,5 +1,11 @@
 # Changelog
 
+## [20.27.1] — 2026-10-22
+
+### Fixed
+- The 5-minute request summary no longer counts the server's own health check
+  (every 10 s) as a page someone loaded.
+
 ## [20.27.0] — 2026-10-22
 
 ### Added

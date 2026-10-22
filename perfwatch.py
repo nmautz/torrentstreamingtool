@@ -51,7 +51,9 @@ def _matches(tmpl: str, rules: tuple) -> bool:
 
 
 def classify(method: str, tmpl: str) -> str:
-    """`ui` | `media` | `stream` | `upload` | `external` | `background` | `bulk`."""
+    """`ui` | `media` | `stream` | `upload` | `external` | `background` | `bulk` | `probe`."""
+    if tmpl == "/healthz":                  # the server's own self-probe, every 10 s
+        return "probe"
     if _matches(tmpl, _STREAM):
         return "stream"
     if _matches(tmpl, _MEDIA):
