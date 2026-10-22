@@ -206,7 +206,9 @@ NEVER_ON_LOOP = {"_read_meta", "_client_pending_read", "_client_pending_write",
                  "_bundle_manifest_open_sync",
                  # 20.26.2: 0.25-0.5 s each under load
                  "_needs_bundle_check", "_any_bundle_check_needed", "_file_sig",
-                 "_prep_status_rows_sync", "_bundle_audit_locate_sync"}
+                 "_prep_status_rows_sync", "_bundle_audit_locate_sync",
+                 # 20.26.3: numpy cross-correlation, 0.67 s
+                 "align", "parse_cues"}
 for n in ast.walk(tree):
     if isinstance(n, ast.AsyncFunctionDef):
         bad = sorted(NEVER_ON_LOOP & set(_direct_calls(n)))

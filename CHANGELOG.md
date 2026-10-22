@@ -1,5 +1,13 @@
 # Changelog
 
+## [20.26.4] — 2026-10-22
+
+### Fixed
+- The automatic subtitle fetch no longer freezes the server for 0.67 s
+  while it checks a subtitle's timing against the episode's audio. That
+  check, and reading the downloaded subtitle file, now run on a worker
+  thread.
+
 ## [20.26.3] — 2026-10-22
 
 ### Fixed

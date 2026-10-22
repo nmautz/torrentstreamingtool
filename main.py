@@ -2122,15 +2122,20 @@ async def _fetch_subtitle(target: dict, lang: str, *, candidates: list[dict],
         if not link:
             continue
         data = await _os_download(link)
-        text = subsearch.decode(data)
-        fmt = subsearch.sniff_format(text)
-        cues = subsearch.parse_cues(text, fps=float(r.get("MovieFPS") or 0) or 23.976)
+        fps = float(r.get("MovieFPS") or 0) or 23.976
+
+        def _read_sub(data=data, fps=fps):
+            text = subsearch.decode(data)
+            return text, subsearch.sniff_format(text), subsearch.parse_cues(text, fps=fps)
+        text, fmt, cues = await asyncio.to_thread(_read_sub)
         if not fmt or len(cues) < 5:
             log.info("subtitle candidate %s is not a usable subtitle file", r.get("SubFileName"))
             continue
-        if energy is None and subsync.available():
+        if energy is None and await asyncio.to_thread(subsync.available):
             energy = await _speech_energy_for(target, energy_budget)
-        fit = subsync.align(cues, energy) if energy else None
+        # numpy cross-correlation (and numpy's first imports): 0.67 s on the
+        # loop on 2026-10-22, so on a thread.
+        fit = (await asyncio.to_thread(subsync.align, cues, energy)) if energy else None
         if auto and not (fit and fit["verified"]):
             log.info("subtitle candidate %s not verified against the audio (conf %s)",
                      r.get("SubFileName"), (fit or {}).get("conf"))
