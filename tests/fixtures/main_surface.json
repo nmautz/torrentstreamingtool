@@ -2033,6 +2033,12 @@
     "allowed_srcs:POSITIONAL_OR_KEYWORD"
    ]
   },
+  "_bundle_audit_locate_sync": {
+   "kind": "def",
+   "params": [
+    "src:POSITIONAL_OR_KEYWORD"
+   ]
+  },
   "_bundle_audit_status": {
    "kind": "def",
    "params": []
@@ -4660,6 +4666,12 @@
    "params": [
     "free:POSITIONAL_OR_KEYWORD",
     "size:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_prep_status_rows_sync": {
+   "kind": "def",
+   "params": [
+    "files:POSITIONAL_OR_KEYWORD"
    ]
   },
   "_prep_summary": {

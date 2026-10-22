@@ -1,5 +1,17 @@
 # Changelog
 
+## [20.26.3] — 2026-10-22
+
+### Fixed
+- Four more short freezes (0.25-0.5 s) that only appeared while the disk was
+  busy with downloads and prep. Each one was a file check on the thread that
+  answers every request:
+  - the prep status the app polls checked that each episode's file exists;
+  - the background bundle check looked at every prepped file in the library;
+  - "Prep all" checked each file before queueing it;
+  - a finished prep renamed its folder into place.
+  All four now run on a worker thread.
+
 ## [20.26.2] — 2026-10-22
 
 ### Fixed

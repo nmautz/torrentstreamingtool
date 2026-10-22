@@ -32942,9 +32942,13 @@ async def _run_offline_job(job_id: str) -> None:
             # output first; the master.m3u8 guard at the top of this function
             # handles the "another worker beat us" race separately. The recursive
             # drop of a prior bundle runs in a thread so it doesn't stall the loop.
-            if out_dir.exists():
-                await asyncio.to_thread(shutil.rmtree, out_dir, ignore_errors=True)
-            tmp_dir.rename(out_dir)
+            def _swap_into_place():
+                # All on a thread: the rename alone held the loop 0.34 s with the
+                # disk busy (2026-10-22).
+                if out_dir.exists():
+                    shutil.rmtree(out_dir, ignore_errors=True)
+                tmp_dir.rename(out_dir)
+            await asyncio.to_thread(_swap_into_place)
             # The bundle now lives beside the source — make the serving index aware
             # of it so the player can fetch segments by key without a rescan.
             _bundle_index_register(out_dir.name, out_dir)
@@ -34151,6 +34155,19 @@ def _any_bundle_check_needed(lib: dict) -> bool:
                for it in lib.get("items", []) for f in it.get("files", []))
 
 
+def _bundle_audit_locate_sync(src: Path):
+    """`(key, bundle dir, built)` for one audit target, or None when the source
+    is gone. Thread: three stats."""
+    try:
+        if not src.exists():
+            return None
+        key = _offline_cache_key(src)
+        bundle = _offline_cache_dir(src)
+        return key, bundle, (bundle / "master.m3u8").exists()
+    except OSError:
+        return None
+
+
 async def _run_bundle_audit(scope: str = "all", *, auto: bool = False,
                             dry_run: bool = False) -> None:
     """Structurally audit prepped bundles, and repair the damaged ones.
@@ -34179,17 +34196,23 @@ async def _run_bundle_audit(scope: str = "all", *, auto: bool = False,
     repaired: list = []
     try:
         lib = await get_library()
-        targets: list = []       # (item_id, item_title, path, name)
-        for item in lib.get("items", []):
-            if scope not in ("", "all") and item.get("id") != scope:
-                continue
-            for f in item.get("files", []):
-                if auto and not _needs_bundle_check(f):
+
+        def _targets_sync() -> list:
+            # `_needs_bundle_check` stats each file twice: on a thread, since the
+            # auto sweep walks the whole library (0.37 s blocks under load,
+            # 2026-10-22).
+            out: list = []       # (item_id, item_title, path, name, file)
+            for item in lib.get("items", []):
+                if scope not in ("", "all") and item.get("id") != scope:
                     continue
-                targets.append((item.get("id", ""), _item_display_names(item)[0],
+                for f in item.get("files", []):
+                    if auto and not _needs_bundle_check(f):
+                        continue
+                    out.append((item.get("id", ""), _item_display_names(item)[0],
                                 f.get("path", ""),
                                 f.get("name") or Path(f.get("path", "")).name, f))
-                await asyncio.sleep(0)
+            return out
+        targets = await asyncio.to_thread(_targets_sync)
         ba["total"] = len(targets)
         ba["scanned"] = 0
         for (iid, title, path, name, fsnap) in targets:
@@ -34200,16 +34223,12 @@ async def _run_bundle_audit(scope: str = "all", *, auto: bool = False,
                 break
             ba["current_name"] = name
             src = Path(path)
-            try:
-                if not src.exists():
-                    ba["scanned"] += 1
-                    continue
-                key = _offline_cache_key(src)
-                bundle = _offline_cache_dir(src)
-            except OSError:
+            found = await asyncio.to_thread(_bundle_audit_locate_sync, src)
+            if found is None:
                 ba["scanned"] += 1
                 continue
-            if not (bundle / "master.m3u8").exists():
+            key, bundle, built = found
+            if not built:
                 records[path] = None          # no bundle ⇒ retire any old verdict
                 ba["scanned"] += 1
                 continue
@@ -36505,9 +36524,12 @@ async def prep_all(item_id: str) -> JSONResponse:
         raise HTTPException(404, "Item not found.")
     prep_cfg = _prep_cfg(item)
     out = []
+    present = await asyncio.to_thread(
+        lambda: {f.get("path", "") for f in item.get("files", [])
+                 if Path(f.get("path", "")).exists()})
     for f in item.get("files", []):
         p = Path(f.get("path", ""))
-        if not p.exists():
+        if f.get("path", "") not in present:
             out.append({"file_path": f.get("path", ""), "name": f.get("name", ""), "status": "missing"})
             continue
         prio = _PREP_PRIO_NUM.get(_effective_prep_priority(prep_cfg, f.get("path", "")), 1)
@@ -36527,15 +36549,21 @@ async def prep_status(item_id: str) -> JSONResponse:
     item = next((it for it in lib["items"] if it["id"] == item_id), None)
     if not item:
         raise HTTPException(404, "Item not found.")
+    out = await asyncio.to_thread(_prep_status_rows_sync, item.get("files", []))
+    return JSONResponse({"files": out, **_prep_summary(out)})
+
+
+def _prep_status_rows_sync(files: list) -> list:
+    """prep_status's per-file rows. Thread: an exists() per file was 0.5 s on
+    the loop with the disk busy (2026-10-22), and the app polls this."""
     out = []
-    for f in item.get("files", []):
+    for f in files:
         p = Path(f.get("path", ""))
         if not p.exists():
             out.append({"file_path": f.get("path", ""), "name": f.get("name", ""), "status": "missing"})
             continue
-        st = await asyncio.to_thread(_peek_prep_state, p)
-        out.append({"file_path": f["path"], "name": f.get("name", ""), **st})
-    return JSONResponse({"files": out, **_prep_summary(out)})
+        out.append({"file_path": f["path"], "name": f.get("name", ""), **_peek_prep_state(p)})
+    return out
 
 
 def _prep_summary(files: list[dict]) -> dict:

@@ -203,7 +203,10 @@ print("a phone downloading ten episodes doesn't stall the box (20.26.1)")
 # with qBit writing to the same disk on 2026-10-22.
 NEVER_ON_LOOP = {"_read_meta", "_client_pending_read", "_client_pending_write",
                  "_client_devices", "_enumerate_bundle_files", "_dir_size_bytes",
-                 "_bundle_manifest_open_sync"}
+                 "_bundle_manifest_open_sync",
+                 # 20.26.2: 0.25-0.5 s each under load
+                 "_needs_bundle_check", "_any_bundle_check_needed", "_file_sig",
+                 "_prep_status_rows_sync", "_bundle_audit_locate_sync"}
 for n in ast.walk(tree):
     if isinstance(n, ast.AsyncFunctionDef):
         bad = sorted(NEVER_ON_LOOP & set(_direct_calls(n)))
@@ -211,6 +214,9 @@ for n in ast.walk(tree):
             check(f"{n.name} calls {bad[0]} on the loop", False)
 check("no async function reads a bundle's meta.json or the client-log state on the loop",
       True)
+oj = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "_run_offline_job")
+check("a finished prep is moved into place on a thread",
+      "rename" not in _direct_calls(oj) and "_swap_into_place" in ast.get_source_segment(src, oj))
 # The library's load and save run while `_lib_lock` is held. On the shared pool a
 # lock holder queued behind four bundle listings for 118 s with 20 waiting.
 check("library loads and saves never go through the shared pool",
