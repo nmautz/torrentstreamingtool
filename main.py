@@ -37259,13 +37259,13 @@ def _prep_404_note(lib: dict, item_id: str, item: Optional[dict],
                 why, item_id, name, req.bulk, extra)
 
 
-@app.post("/api/library/{item_id}/offline-prepare")
 def _prep_out_dir_sync(out_dir: Path) -> bool:
     """Make the bundle's parent folder; True when the bundle is already built."""
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     return (out_dir / "master.m3u8").exists()
 
 
+@app.post("/api/library/{item_id}/offline-prepare")
 async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
     """Decide what processing a file needs for HLS browser playback.
 

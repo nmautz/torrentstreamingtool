@@ -545,6 +545,16 @@ hns["_ep_homes_memo"][sid] = (time.monotonic() - hns["_EP_HOMES_WARM"] - 1, None
 asyncio.run(hns["_warm_ep_homes"]([show]))
 check("a memo near its expiry is re-read by the warm-up", len(READS) == 1)
 
+# 20.30.2 slid `_prep_out_dir_sync` in between `@app.post(".../offline-prepare")`
+# and its handler, so the route served the helper: every prep and resume got a
+# 422 for a missing `out_dir`. A route is never a private helper.
+routed = [n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+          and any(ast.get_source_segment(src, d).startswith(("app.get(", "app.post(", "app.put(",
+                                                              "app.delete(", "app.patch("))
+                  for d in n.decorator_list)]
+check("no route is bound to a private helper", not [n for n in routed if n.startswith("_")])
+check("offline-prepare is served by offline_prepare", "offline_prepare" in routed)
+
 print()
 if fails:
     print(f"{len(fails)} FAILED"); sys.exit(1)

@@ -10281,7 +10281,7 @@
    "kind": "module zipfile"
   }
  },
- "openapi_sha256": "a469752b9cb410d4f7f2f931e9be8190ae210d55560c9f1bd8fe33f38ea6ac12",
+ "openapi_sha256": "88a79dcf15ecc4ba70685cdd95602229b71595e92ab48f1f176ff9a484ab9da7",
  "routes": [
   {
    "endpoint": "openapi",
@@ -17490,23 +17490,28 @@
    "type": "APIRoute"
   },
   {
-   "endpoint": "_prep_out_dir_sync",
+   "endpoint": "offline_prepare",
    "include_in_schema": true,
    "methods": [
     "POST"
    ],
-   "name": "_prep_out_dir_sync",
+   "name": "offline_prepare",
    "params": {
-    "body": [],
-    "cookie": [],
-    "header": [],
-    "path": [],
-    "query": [
+    "body": [
      [
-      "out_dir",
-      "Path"
+      "req",
+      "OfflinePrepareReq"
      ]
     ],
+    "cookie": [],
+    "header": [],
+    "path": [
+     [
+      "item_id",
+      "str"
+     ]
+    ],
+    "query": [],
     "request": null
    },
    "path": "/api/library/{item_id}/offline-prepare",

@@ -1,5 +1,17 @@
 # Changelog
 
+## [20.30.4] — 2026-10-22
+
+### Fixed
+- **Playing or resuming a prepped stream works again ("[object Object]" error).**
+  20.30.2 put the new `_prep_out_dir_sync` helper between
+  `@app.post("/api/library/{item_id}/offline-prepare")` and `offline_prepare`, so
+  the route served the helper and every call got a 422 for a missing `out_dir`
+  (the page showed the error object as "[object Object]"; retries made the item
+  flicker). The decorator is back on the handler, and tests/test_loop_paths.py
+  now fails when any route is bound to a private helper. The surface snapshot
+  showed the change at 20.30.2 and was re-pinned without reading it.
+
 ## [20.30.3] — 2026-10-22
 
 ### Fixed
