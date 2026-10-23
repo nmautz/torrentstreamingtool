@@ -18,11 +18,12 @@
 
   M2 offline routing: on launch with a saved host we PROBE its reachability
   (hostReachable) before navigating. Reachable ⇒ go to the dashboard as before.
-  Unreachable (Airplane Mode / host down) ⇒ route to `downloads.html`, the bundled
-  offline library that plays downloaded bundles via LocalMediaServer with no
-  network. The remote dashboard can't load offline (it's served by the host), so
-  this local page is the offline entry point. A "View downloads (offline)" button
-  is always available too.
+  Unreachable (Airplane Mode / host down) ⇒ the offline player: the dashboard
+  itself, served from the phone by LocalMediaServer (goToCachedPlayer). The copy
+  downloaded from the server is used when one is complete; otherwise the starter
+  copy built into the app (20.30.0, `public/player/`, staged from static/ by
+  stage-player.sh). The old separate offline page (downloads.html) is gone. An
+  "Open downloads" button is always available too.
 
   20.0.0: the phone has ONE server it opens at launch (the "primary") and one
   account pinned to each server it uses. Both live in the native OfflineStore
@@ -280,7 +281,7 @@
       if (dl) {
         try {
           for (const it of ((await dl.list()).items || [])) {
-            if (it.itemId === "__player__" || !it.complete) continue;
+            if (PLAYER_SLOTS.includes(it.itemId) || !it.complete) continue;
             const sid = (it.meta && it.meta.server_id) || REG.primary || "";
             if (sid) downloads.set(sid, (downloads.get(sid) || 0) + 1);
           }
@@ -585,32 +586,48 @@
       window.location.replace(url.replace(/\/+$/, "") + "/?launch=1");
     }
 
-    function goToDownloads() { window.location.replace("downloads.html"); }
+    // The player snapshot's two download slots (_APP_PLAYER_SLOTS in
+    // static/index.html, `playerKeys` in BundleDownloader.swift).
+    const PLAYER_SLOTS = ["__player__", "__player2__"];
 
-    // Offline cached player (docs/PLAYER_CACHE_PLAN.md): if a complete snapshot
-    // of the host dashboard is on the device, serve it from LocalMediaServer in
-    // player mode and open it — the SAME player UI the host serves, booted
-    // Downloads-only via ?offline=1 (the original host rides ?host= so the page
-    // can probe for reconnection; its loopback localStorage is empty).
-    // Returns false when there's no usable snapshot → caller falls back to the
-    // frozen downloads.html.
+    // Offline cached player (docs/PLAYER_CACHE_PLAN.md): serve the dashboard from
+    // LocalMediaServer in player mode and open it — the SAME player UI the host
+    // serves, booted Downloads-only via ?offline=1 (the original host rides
+    // ?host= so the page can probe for reconnection; its loopback localStorage is
+    // empty). Which copy:
+    //   1. the newest COMPLETE snapshot downloaded from a server (newer player
+    //      work reaches offline play without an app build);
+    //   2. else the starter copy built into this app. It is as old as the app,
+    //      and the only copy guaranteed to match this build's native code.
+    // Returns false only when neither will start.
     async function goToCachedPlayer(hostUrl) {
-      try {
-        const dl = plugin("BundleDownloader"), lms = plugin("LocalMediaServer");
-        if (!dl || !lms) return false;
-        const local = await dl.getLocal({ itemId: "__player__", filePath: "__player__" });
-        if (!(local && local.found && local.complete && local.dir)) return false;
-        const { url } = await lms.start({ playerRoot: local.dir });
+      const dl = plugin("BundleDownloader"), lms = plugin("LocalMediaServer");
+      if (!lms) return false;
+      const open = (url) => {
         const base = String(url || "").replace(/\/+$/, "");
         if (!base) return false;
         window.location.replace(base + "/index.html?offline=1&host=" + encodeURIComponent(hostUrl || ""));
         return true;
-      } catch (_) { return false; }
+      };
+      try {
+        const snap = ((dl && (await dl.list()).items) || [])
+          .filter((it) => PLAYER_SLOTS.includes(it.itemId) && it.complete && it.dir)
+          .sort((a, b) => ((b.meta && b.meta.at) || 0) - ((a.meta && a.meta.at) || 0))[0];
+        if (snap && open((await lms.start({ playerRoot: snap.dir })).url)) return true;
+      } catch (_) {}
+      try {
+        if (open((await lms.start({ bundledPlayer: "player" })).url)) return true;
+      } catch (_) {}
+      return false;
     }
 
-    // The offline entry point: cached dashboard first, downloads.html fallback.
+    // The offline entry point. Failing both copies means a build made without
+    // `cap copy` (Xcode alone), which never staged the starter copy.
     async function goOffline(hostUrl) {
-      if (!(await goToCachedPlayer(hostUrl || (primaryRec() || {}).url || localStorage.getItem(KEY_URL) || ""))) goToDownloads();
+      if (await goToCachedPlayer(hostUrl || (primaryRec() || {}).url || localStorage.getItem(KEY_URL) || "")) return;
+      const msg = "There is no offline player on this phone yet. Connect to your server once and it is saved.";
+      if (connEl.classList.contains("show")) $("connectStatus").textContent = msg;
+      else showError(msg);
     }
 
     // Is the saved host actually reachable? A no-cors probe that ALWAYS resolves

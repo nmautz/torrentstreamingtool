@@ -1,5 +1,33 @@
 # Changelog
 
+## [20.30.0] — 2026-10-22
+
+### Fixed
+- **Offline, the app could open the old bare player instead of the real one.**
+  When the server moved to a new version, the app deleted its saved copy of the
+  player *before* downloading the new one. If that download was interrupted (on
+  2026-10-22 Low Power Mode paused it at 42% four seconds after the app went to
+  the background), the phone had no player to use offline and fell back to the
+  old `downloads.html`. Now a new version downloads into a second slot, and the
+  working copy is replaced only once the new one is complete.
+- The player copy now ignores the battery / Low Power / charger gate in the
+  background too, not only while the app is open. It is a few MB and decides
+  whether offline playback works at all. Episode downloads are still gated.
+
+### Changed
+- **The app ships with its own copy of the player.** Every build carries the
+  dashboard player as it was at build time (`ios-app/stage-player.sh`, run by
+  Capacitor before every `cap copy`/`cap sync`). Offline, the app uses the copy
+  downloaded from your server when one is complete, and this built-in copy
+  otherwise, so a fresh install, or a phone whose download never finished, still
+  gets the real player.
+- **`downloads.html` is gone.** The old separate offline player is no longer
+  needed. If neither copy can start (only possible with a build made without
+  `cap copy`), the connect screen says so.
+- A new server version now downloads only the player files that changed
+  (usually just the 1.8 MB page): `/api/player-manifest` lists a `sha256` per
+  file, and the app copies unchanged files from its other slot on the phone.
+
 ## [20.29.0] — 2026-10-22
 
 ### Added

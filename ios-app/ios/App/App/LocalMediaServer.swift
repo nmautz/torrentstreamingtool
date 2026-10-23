@@ -12,7 +12,7 @@
 //  interface only, so nothing on the LAN can reach it.
 //
 //  JS surface (Capacitor plugin "LocalMediaServer"):
-//    start({ path? , bundledPath? , playerRoot? , proxyHost? , proxyDeviceId? }) -> { url, port, root }
+//    start({ path? , bundledPath? , playerRoot? , bundledPlayer? , proxyHost? , proxyDeviceId? }) -> { url, port, root }
 //    stop()                          -> {}
 //    info()                          -> { running, url?, port?, root? }
 //    ensureRunning()                 -> { running, url?, port?, healed }
@@ -23,6 +23,11 @@
 //  `playerRoot`  offline cached-dashboard snapshot dir (docs/PLAYER_CACHE_PLAN.md):
 //                served at /, with the StreamLinkBundles storage dir mounted at
 //                /StreamLinkBundles/.
+//  `bundledPlayer` (20.30.0) the same player mode, served from the STARTER copy
+//                of the dashboard shipped inside the app ("public/<bundledPlayer>",
+//                staged from static/ by ios-app/stage-player.sh on every cap
+//                copy). Used offline when no downloaded snapshot is complete.
+//                The bundles dir is mounted exactly as for `playerRoot`.
 //  `proxyHost`   + `proxyDeviceId` (v8.7 — proxied playback session): when set, ANY
 //                request that isn't a local snapshot/bundle file is reverse-proxied
 //                to this host (e.g. https://192.168.1.20:8000), carrying X-Device-Id
@@ -67,6 +72,19 @@ public class LocalMediaServer: CAPPlugin, CAPBridgedPlugin {
             // while it's serving the page itself.
             root = URL(fileURLWithPath: pr, isDirectory: true)
             bundlesMount = root.deletingLastPathComponent()
+        } else if let bp = call.getString("bundledPlayer"), !bp.isEmpty {
+            // Player mode from the starter copy inside the app. Its parent is the
+            // read-only app bundle, so the bundles mount is named explicitly: the
+            // same Application Support/StreamLinkBundles that BundleDownloader
+            // writes, and that a downloaded snapshot's parent would have been.
+            guard let base = Bundle.main.url(forResource: "public", withExtension: nil) else {
+                call.reject("Bundled web assets not found.")
+                return
+            }
+            root = base.appendingPathComponent(bp, isDirectory: true)
+            bundlesMount = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("StreamLinkBundles", isDirectory: true)
+            try? FileManager.default.createDirectory(at: bundlesMount!, withIntermediateDirectories: true)
         } else if let p = call.getString("path"), !p.isEmpty {
             root = URL(fileURLWithPath: p, isDirectory: true)
         } else if let bp = call.getString("bundledPath"), !bp.isEmpty {
@@ -76,7 +94,7 @@ public class LocalMediaServer: CAPPlugin, CAPBridgedPlugin {
             }
             root = base.appendingPathComponent(bp, isDirectory: true)
         } else {
-            call.reject("start() requires `playerRoot`, `path` or `bundledPath`.")
+            call.reject("start() requires `playerRoot`, `bundledPlayer`, `path` or `bundledPath`.")
             return
         }
 
@@ -112,6 +130,7 @@ public class LocalMediaServer: CAPPlugin, CAPBridgedPlugin {
                 DiagLog.shared.write("lms-start", [
                     "port": Int(port), "root": root.path,
                     "mode": bundlesMount != nil ? "player" : "bundle",
+                    "starter": call.getString("bundledPlayer") != nil,
                     "proxied": proxyURL != nil,
                 ], cat: "offline")
                 call.resolve(["url": url, "port": Int(port), "root": root.path])

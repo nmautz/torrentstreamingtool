@@ -7,8 +7,8 @@
 //  `navigator.vibrate` does not exist on iOS, so the page asks us. Every call is
 //  fire-and-forget; the page throttles its own calls (see _hap in
 //  static/index.html). Download completion buzzes from here directly, because
-//  the downloader already knows and the page may be downloads.html, the offline
-//  snapshot or the host dashboard.
+//  the downloader already knows and the page may be the offline player or the
+//  host dashboard.
 //
 //  QUICK ACTIONS (long-press the app icon)
 //  Declared statically in Info.plist (UIApplicationShortcutItems), delivered to

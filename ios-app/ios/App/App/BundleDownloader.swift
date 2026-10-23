@@ -221,13 +221,18 @@ public class BundleDownloader: CAPPlugin, CAPBridgedPlugin {
 
         // Optional series/episode metadata (+ inlined poster) for the offline picker.
         let meta = call.getObject("meta")?.reduce(into: [String: Any]()) { $0[$1.key] = $1.value }
+        // Optional {name: absolute path} of files already on the device with the
+        // right content (the player snapshot's other slot): copied in, not fetched.
+        let seed = call.getObject("seed")?.reduce(into: [String: String]()) { acc, kv in
+            if let v = kv.value as? String { acc[kv.key] = v }
+        }
 
         do {
             let res = try BundleDownloadManager.shared.startDownload(
                 itemId: itemId, filePath: filePath, cacheKey: cacheKey,
                 name: call.getString("name") ?? filePath,
                 baseUrl: baseUrl, files: files, deviceId: call.getString("deviceId"),
-                masterContent: call.getString("masterContent"), meta: meta)
+                masterContent: call.getString("masterContent"), meta: meta, seed: seed)
             call.resolve(["sha": cacheKey, "dir": res.dir, "alreadyComplete": res.alreadyComplete])
         } catch {
             call.reject("Could not start download: \(error.localizedDescription)")
@@ -243,7 +248,12 @@ public class BundleDownloader: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func list(_ call: CAPPluginCall) {
-        call.resolve(["items": BundleDownloadManager.shared.list()])
+        // `playerKeys` (20.30.0) tells the page this build knows both snapshot
+        // slots. An older build would treat the second one as an ordinary
+        // download (Live Activity, haptic, gated), so the page uses one slot
+        // there, the old way.
+        call.resolve(["items": BundleDownloadManager.shared.list(),
+                      "playerKeys": Array(BundleDownloadManager.playerKeys).sorted()])
     }
 
     @objc func remove(_ call: CAPPluginCall) {
@@ -878,18 +888,9 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         queue.async {
             self.appActive = false
             guard !self.jobs.isEmpty else { return }
-            // The snapshot's gate bypass is foreground-only, so behind a shut gate
-            // it stops here instead of migrating. Its job is kept; `pump` restarts
-            // it on the next foreground.
-            if self.gate != .go, let job = self.jobs[Self.playerKey], !job.tasks.isEmpty {
-                self.migGen += 1
-                for (file, task) in Array(job.tasks) {
-                    task.cancel()
-                    job.tasks[file] = nil
-                    job.liveBytes[file] = nil
-                }
-                DiagLog.shared.write("dl-player-bg", ["gate": self.gate.rawValue], cat: "offline")
-            }
+            // The snapshot ignores the gate in the background too (see
+            // `bypassesGate`), so behind a shut gate its transfers are the only
+            // ones left, and `migrateTasks` below moves them like any other.
             // THE ASSERTION IS NOT RE-TAKEN WHEN IT EXPIRES. beginBgTaskIfNeeded
             // ran only from startDownload, so the first `dl-bgtask-expired`
             // (measured 06:37:26, five seconds after a `left: 9` grant) left
@@ -1106,21 +1107,26 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     /// you want: one watchable episode beats twenty-one half-episodes.
     private var jobOrder: [String] = []
 
-    /// The player snapshot's cache key (`_APP_PLAYER_KEY` in static/index.html):
+    /// The player snapshot's cache keys (`_APP_PLAYER_SLOTS` in static/index.html):
     /// the device copy of the dashboard that the shell serves when the host is
-    /// unreachable. A few MB, refreshed on every connect.
-    static let playerKey = "__player__"
-    /// THE PLAYER SNAPSHOT IGNORES THE GATE — but only in the foreground. The gate
+    /// unreachable. A few MB, refreshed on every connect. TWO slots: a new
+    /// version is fetched into the one not being served, so the working copy is
+    /// never deleted before its replacement is whole.
+    static let playerKeys: Set<String> = ["__player__", "__player2__"]
+    static func isPlayer(_ sha: String) -> Bool { playerKeys.contains(sha) }
+    /// THE PLAYER SNAPSHOT IGNORES THE GATE, foreground AND background. The gate
     /// exists to stop a 17 GB queue spending battery or mobile data. It was never
     /// meant to stop a few MB that decide whether the app works offline at all, and
     /// a stale snapshot is precisely what you find out about with no signal.
-    /// Foreground only: the refresh is kicked off from an open app, and nothing
-    /// about it is worth a background session. Content stays gated either way.
+    /// Until 20.30.0 this was foreground-only, and the transcript of 2026-10-22
+    /// shows the cost: the refresh began four seconds after the app went to the
+    /// background, Low Power Mode at 20% shut the gate, and it sat at 42% until
+    /// the phone was offline with no player. Content stays gated either way.
     /// Assumes `queue`.
-    private func bypassesGate(_ sha: String) -> Bool { sha == Self.playerKey && appActive }
+    private func bypassesGate(_ sha: String) -> Bool { Self.isPlayer(sha) }
     /// The jobs that count as downloads to the user. The snapshot is never shown:
     /// no Live Activity, no haptic, no continued-processing grant.
-    private var contentJobs: [Job] { jobs.filter { $0.key != Self.playerKey }.map { $0.value } }
+    private var contentJobs: [Job] { jobs.filter { !Self.isPlayer($0.key) }.map { $0.value } }
 
     /// THE FLOOD. `startDownload` gave every pending file a live
     /// URLSessionDownloadTask the moment the job was created, with no ceiling
@@ -1317,7 +1323,8 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     func startDownload(itemId: String, filePath: String, cacheKey: String,
                        name: String, baseUrl: String, files: [BundleFile],
                        deviceId: String?, masterContent: String? = nil,
-                       meta: [String: Any]? = nil) throws -> StartResult {
+                       meta: [String: Any]? = nil,
+                       seed: [String: String]? = nil) throws -> StartResult {
         var result: StartResult!
         var thrown: Error?
         queue.sync {
@@ -1334,6 +1341,34 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             // byte size) is then seen as already-complete and skipped.
             if let mc = masterContent, let data = mc.data(using: .utf8) {
                 try? data.write(to: dir.appendingPathComponent("master.m3u8"), options: .atomic)
+            }
+
+            // SEED: files the caller already holds elsewhere on the device, copied
+            // in before the resume scan so it counts them as done. The player
+            // snapshot uses it to carry the unchanged vendor files (~4 MB) across
+            // from its other slot; the caller compared sha256, this checks the
+            // size and that the source is inside our own storage. A copy that
+            // fails is simply fetched.
+            if let seed = seed, !seed.isEmpty {
+                let rootPath = root.standardizedFileURL.path + "/"
+                var seeded = 0
+                for f in files {
+                    guard let src = seed[f.name] else { continue }
+                    let from = URL(fileURLWithPath: src).standardizedFileURL
+                    guard from.path.hasPrefix(rootPath), !from.path.hasPrefix(dir.standardizedFileURL.path + "/") else { continue }
+                    let size = (try? from.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { Int64($0) } ?? -1
+                    guard size >= 0, f.size <= 0 || size == f.size else { continue }
+                    let dest = dir.appendingPathComponent(f.name)
+                    if fm.fileExists(atPath: dest.path) { continue }
+                    do {
+                        try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+                        try fm.copyItem(at: from, to: dest)
+                        seeded += 1
+                    } catch { continue }
+                }
+                DiagLog.shared.write("bundle-seed", [
+                    "sha": cacheKey, "offered": seed.count, "seeded": seeded,
+                ], cat: "offline")
             }
 
             // Record (or refresh) the index entry up front so getLocal/list see it
@@ -1382,7 +1417,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             ], cat: "offline")
             job.pending = Set(toFetch.map { $0.name })
             jobs[cacheKey] = job
-            let isPlayer = cacheKey == Self.playerKey
+            let isPlayer = Self.isPlayer(cacheKey)
             beginBgTaskIfNeeded()
             // The snapshot goes to the FRONT: it is a few MB and should never wait
             // behind hours of bundles.
@@ -1467,7 +1502,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
                     // Its place in the transfer order while it is being
                     // fetched (0 = next), -1 otherwise. The Downloads list
                     // sorts by it, so "Next" visibly moves the row.
-                    "order": jobOrder.filter { $0 != Self.playerKey }.firstIndex(of: sha) ?? -1,
+                    "order": jobOrder.filter { !Self.isPlayer($0) }.firstIndex(of: sha) ?? -1,
                 ]
                 if let m = entry["meta"] { row["meta"] = m }
                 return row
@@ -1505,9 +1540,9 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     /// frees after this goes to `sha` first, because `pump` walks `jobOrder`.
     func prioritize(sha: String) {
         queue.sync {
-            guard jobs[sha] != nil, sha != Self.playerKey else { return }
+            guard jobs[sha] != nil, !Self.isPlayer(sha) else { return }
             jobOrder.removeAll { $0 == sha }
-            let at = (jobOrder.first == Self.playerKey) ? 1 : 0
+            let at = jobOrder.prefix(while: Self.isPlayer).count
             jobOrder.insert(sha, at: at)
             DiagLog.shared.write("dl-prioritize", ["sha": sha, "jobs": jobOrder.count], cat: "offline")
             pump()
@@ -1570,7 +1605,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         // gate stops us choosing to use cellular, this stops us doing it by
         // accident in the window before a path change is delivered.
         // The snapshot is exempt (see `bypassesGate`).
-        req.allowsCellularAccess = policy.allowCellular || sha == Self.playerKey
+        req.allowsCellularAccess = policy.allowCellular || Self.isPlayer(sha)
         // Foreground ⇒ fast in-process default session; suspended ⇒ background
         // session that survives suspend. A migration passes the destination explicitly.
         //
@@ -1724,7 +1759,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         emit("bundleComplete", ["sha": sha, "itemId": job.itemId, "filePath": job.filePath, "dir": bundleDir(sha).path])
         // The snapshot is not a download to the user: no buzz on every boot, and
         // no Live Activity frame of its own.
-        if sha == Self.playerKey { return }
+        if Self.isPlayer(sha) { return }
         Haptics.downloadFinished()
         // End the Live Activity (terminal frame) when the last job finishes, else
         // keep it showing the remaining downloads.
@@ -1775,7 +1810,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         jobOrder.removeAll { $0 == sha }
         endBgTaskIfIdle()
         emit("bundleError", ["sha": sha, "itemId": job.itemId, "filePath": job.filePath, "message": message])
-        if sha == Self.playerKey { return }
+        if Self.isPlayer(sha) { return }
         if contentJobs.isEmpty {
             DownloadLiveActivity.shared.end(title: job.name, finished: false, failed: true,
                                             filesDone: job.doneBytes.count, fileCount: job.files.count,

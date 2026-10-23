@@ -21320,7 +21320,7 @@ async function _appSeedFromServer() {
   try {
     const { items } = await _cap.dl.list();
     const files = (items || [])
-      .filter((it) => it.complete && it.itemId !== _APP_PLAYER_KEY && _appBundleServer(it) === _srvId)
+      .filter((it) => it.complete && !_appIsPlayerKey(it.itemId) && _appBundleServer(it) === _srvId)
       .map((it) => ({ item_id: it.itemId, file_path: it.filePath }));
     if (!files.length) return;
     const r = await fetch("/api/sync/pull", {
@@ -21801,9 +21801,32 @@ async function _appLmsHeal() {
   } catch (_) {
   } finally { _appLmsHealing = false; }
 }
-// Sentinel bundle key the player snapshot is stored under in BundleDownloader —
-// it must never surface in any downloads UI or the durable-queue resumer.
-const _APP_PLAYER_KEY = "__player__";
+// The bundle keys the player snapshot is stored under in BundleDownloader. Two
+// SLOTS, so a new version is fetched into the one not being served and the
+// working copy is never deleted first (20.30.0: a phone wiped its only copy on a
+// version change, the refetch was paused by Low Power Mode, and offline it got
+// no player at all). Neither may surface in any downloads UI or the
+// durable-queue resumer: filter with _appIsPlayerKey, never by one name.
+// BundleDownloader.swift (`isPlayer`) and the shell (ios-app/www/index.html)
+// know the same two names.
+const _APP_PLAYER_SLOTS = ["__player__", "__player2__"];
+function _appIsPlayerKey(id) { return _APP_PLAYER_SLOTS.includes(id); }
+// Every player slot on the device, newest first (by when the copy was started;
+// `meta.at`, absent on a copy from before 20.30.0, reads as oldest). `two` says
+// whether this app build knows the second slot (`playerKeys` on list()): an
+// older one would treat `__player2__` as an episode download, with a Live
+// Activity and a buzz, so there the refresh keeps to `__player__`.
+async function _appPlayerSlots() {
+  let r = {};
+  try { r = (await _cap.dl.list()) || {}; } catch (_) {}
+  const slots = (r.items || []).filter((it) => _appIsPlayerKey(it.itemId))
+    .sort((a, b) => ((b.meta && b.meta.at) || 0) - ((a.meta && a.meta.at) || 0));
+  return { slots, two: Array.isArray(r.playerKeys) && r.playerKeys.includes(_APP_PLAYER_SLOTS[1]) };
+}
+// The copy to serve: the newest COMPLETE slot, or null.
+async function _appPlayerSnapshot() {
+  return (await _appPlayerSlots()).slots.find((it) => it.complete && it.dir) || null;
+}
 
 // offKey(itemId,filePath) → { complete?, downloading?, prepping?, fraction?, sha?, dir?, bytesTotal?, bytesDone? }
 const offlineBundles = new Map();
@@ -23133,8 +23156,8 @@ async function _appTryLocalHandoff(itemId, filePath, seekTo, queue) {
     if (!(local && local.complete && local.dir)) return false;
     // …and so must the player snapshot (it serves the same-origin page). Without
     // it there's nothing to load over the loopback, so stream from the host.
-    const snap = await _cap.dl.getLocal({ itemId: _APP_PLAYER_KEY, filePath: _APP_PLAYER_KEY });
-    if (!(snap && snap.complete && snap.dir)) return false;
+    const snap = await _appPlayerSnapshot();
+    if (!snap) return false;
     _appSyncSetProfile();   // the native store's fallback account: the pinned one
     // Start the LMS in PROXY mode: snapshot + bundles local, everything else
     // forwarded to this host with the device bearer token injected.
@@ -23871,7 +23894,7 @@ async function _appInitOfflineBundles() {
   if (!isApp) return;
   try {
     _cap.dl.addListener("bundleProgress", (ev) => {
-      if (ev.itemId === _APP_PLAYER_KEY) return;   // snapshot refresh — not a content download
+      if (_appIsPlayerKey(ev.itemId)) return;   // snapshot refresh — not a content download
       const key = offKey(ev.itemId, ev.filePath);
       const e = offlineBundles.get(key) || {};
       e.downloading = true; e.prepping = false; e.waiting = false;   // bytes flowing ⇒ connected
@@ -23883,7 +23906,7 @@ async function _appInitOfflineBundles() {
       _appTabBadgePaint();
     });
     _cap.dl.addListener("bundleComplete", (ev) => {
-      if (ev.itemId === _APP_PLAYER_KEY) return;
+      if (_appIsPlayerKey(ev.itemId)) return;
       offlineBundles.set(offKey(ev.itemId, ev.filePath),
         { complete: true, sha: ev.sha, dir: ev.dir });
       _appQueueClear(ev.itemId, ev.filePath);   // fully on disk — drop the durable intent
@@ -23894,7 +23917,7 @@ async function _appInitOfflineBundles() {
       showAlert("Saved to this phone: " + fileLabel(ev.filePath, ev.itemId).short, "ok");
     });
     _cap.dl.addListener("bundleError", (ev) => {
-      if (ev.itemId === _APP_PLAYER_KEY) return;   // snapshot refresh failure is silent (retried next connect)
+      if (_appIsPlayerKey(ev.itemId)) return;   // snapshot refresh failure is silent (retried next connect)
       // The native side now retries transient (network) failures indefinitely, so a
       // bundleError is a PERMANENT failure — give up. Kept in the Downloads list
       // as failed (reason + Retry); on an older shell the intent is cleared.
@@ -23926,7 +23949,7 @@ async function _appInitOfflineBundles() {
     });
     const { items } = await _cap.dl.list();
     for (const it of (items || [])) {
-      if (it.itemId === _APP_PLAYER_KEY) continue;   // player snapshot — never UI state
+      if (_appIsPlayerKey(it.itemId)) continue;   // player snapshot — never UI state
       // A partial bundle reconstructed from disk at launch is NOT actively
       // transferring: the page (and native `jobs`) that drove it died with the
       // previous app session, and iOS cancels background-URLSession tasks on app
@@ -24014,9 +24037,16 @@ async function _appResumeDownloadQueue() {
 
 // ── Player snapshot refresh (docs/PLAYER_CACHE_PLAN.md) ──────────────────────
 // While ONLINE in the app, keep the device copy of this page + its vendor assets
-// fresh so the shell can serve it offline. Runs on every boot: a version
-// mismatch wipes the old snapshot first; a same-version run is a cheap heal
-// (BundleDownloader skips files already on disk at the manifest size).
+// fresh so the shell can serve it offline. Runs on every boot:
+//   • a slot already holding this version (complete or part-fetched) is re-run:
+//     a cheap heal, or the rest of an interrupted fetch (BundleDownloader skips
+//     files already on disk at the manifest size);
+//   • otherwise the new version goes into the OTHER slot, never the one being
+//     served. That slot is emptied first (size-match resume would keep a stale
+//     file that happens to be the same size), then every file whose sha256 the
+//     served copy already holds is copied across on the device (`seed`), so a
+//     version bump fetches index.html and little else. An app older than
+//     20.30.0 has one slot and no `seed`: delete, then fetch everything, as before.
 // Fire-and-forget; a failure just means the previous snapshot stays.
 async function _appRefreshPlayerSnapshot() {
   if (!isApp || _appOffline || !_cap.dl) return;
@@ -24025,21 +24055,40 @@ async function _appRefreshPlayerSnapshot() {
     if (!r.ok) return;
     const man = await r.json();
     if (!man || !man.version || !Array.isArray(man.files) || !man.files.length) return;
-    let local = null;
-    try { local = await _cap.dl.getLocal({ itemId: _APP_PLAYER_KEY, filePath: _APP_PLAYER_KEY }); } catch (_) {}
-    const cachedVer = local && local.found && local.meta && local.meta.version;
-    if (local && local.found && cachedVer !== man.version) {
-      try { await _cap.dl.remove({ itemId: _APP_PLAYER_KEY, filePath: _APP_PLAYER_KEY }); } catch (_) {}
+    const { slots, two } = await _appPlayerSlots();
+    const live = slots.find((it) => it.complete && it.dir) || null;
+    const same = slots.find((it) => it.meta && it.meta.version === man.version);
+    let key, meta, seed = null;
+    if (same) {
+      key = same.itemId;
+      meta = Object.assign({}, same.meta, { hashes: _appPlayerHashes(man) });
+    } else {
+      // An app without the second slot: the old way, delete then refetch.
+      key = two ? _APP_PLAYER_SLOTS.find((k) => !live || k !== live.itemId) : _APP_PLAYER_SLOTS[0];
+      if (slots.some((it) => it.itemId === key)) {
+        try { await _cap.dl.remove({ itemId: key, filePath: key }); } catch (_) {}
+      }
+      meta = { version: man.version, player_snapshot: true, at: Date.now(), hashes: _appPlayerHashes(man) };
+      const had = (live && live.itemId !== key && live.meta && live.meta.hashes) || {};
+      for (const f of man.files) {
+        if (f.sha256 && had[f.name] === f.sha256) (seed = seed || {})[f.name] = live.dir + "/" + f.name;
+      }
     }
     await _cap.dl.download({
-      itemId: _APP_PLAYER_KEY, filePath: _APP_PLAYER_KEY, cacheKey: _APP_PLAYER_KEY,
+      itemId: key, filePath: key, cacheKey: key,
       name: "Player snapshot",
       baseUrl: window.location.origin + "/",   // the StaticFiles mount serves every manifest entry
-      files: man.files,
+      files: man.files.map((f) => ({ name: f.name, size: f.size })),
+      seed: seed || undefined,
       deviceId: _pbDeviceId(),
-      meta: { version: man.version, player_snapshot: true },
+      meta,
     });
   } catch (_) {}
+}
+function _appPlayerHashes(man) {
+  const h = {};
+  for (const f of man.files) if (f.sha256) h[f.name] = f.sha256;
+  return h;
 }
 
 // ── Offline cached-player boot (docs/PLAYER_CACHE_PLAN.md) ───────────────────
@@ -24333,7 +24382,7 @@ async function _dlRenderNow() {
   if (os) { try { events = (await os.all()).events || []; } catch (_) {} }
   if (activeTab !== "downloads") return;
 
-  items = items.filter((it) => it.itemId !== _APP_PLAYER_KEY);   // the player snapshot isn't content
+  items = items.filter((it) => !_appIsPlayerKey(it.itemId));   // the player snapshot isn't content
   _dlItems = new Map(); _dlQueue = new Map();
   const per = new Map();   // server id → { n, bytes } of what is on the phone
   for (const it of items) {
@@ -25875,7 +25924,7 @@ async function _appTabShow() {
   if (_cap && _cap.dl) {
     try {
       for (const it of ((await _cap.dl.list()).items || [])) {
-        if (it.itemId === _APP_PLAYER_KEY || !it.complete) continue;
+        if (_appIsPlayerKey(it.itemId) || !it.complete) continue;
         const sid = _appBundleServer(it);
         const p = per.get(sid) || { n: 0, bytes: 0 };
         p.n++; p.bytes += it.bytesTotal || it.bytesDone || 0;
@@ -26188,7 +26237,7 @@ async function _appAutoApply(byKey, keep, toStart, q) {
   let ondevice = [];
   try { ondevice = (await _cap.dl.list()).items || []; } catch (_) {}
   for (const it of ondevice) {
-    if (!it.complete || it.itemId === _APP_PLAYER_KEY) continue;
+    if (!it.complete || _appIsPlayerKey(it.itemId)) continue;
     const k = offKey(it.itemId, it.filePath);
     if (keep.has(k)) continue;
     const f = byKey.get(k);
@@ -26237,7 +26286,7 @@ async function _appAutoSweepRun() {
     // can run off the end of one season's item and into the next.
     const shows = new Map();   // seriesKey → Set(itemId)
     for (const it of ondevice) {
-      if (!it.itemId || it.itemId === _APP_PLAYER_KEY) continue;
+      if (!it.itemId || _appIsPlayerKey(it.itemId)) continue;
       const key = _appSeriesKeyOf(it.itemId, (it.meta || {}).series);
       if (!key) continue;                                  // a film — never managed
       if (!shows.has(key)) shows.set(key, new Set());
@@ -27535,7 +27584,7 @@ async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope, items
       try {
         const { items } = isApp ? await _cap.dl.list() : { items: [] };
         const eps = (items || [])
-          .filter(it => it.itemId === itemId && it.complete && it.itemId !== _APP_PLAYER_KEY)
+          .filter(it => it.itemId === itemId && it.complete && !_appIsPlayerKey(it.itemId))
           .sort((a, b) => {
             const am = a.meta || {}, bm = b.meta || {};
             return (_bundleSeason(am) - _bundleSeason(bm)) || (_bundlePos(am) - _bundlePos(bm));
@@ -33816,6 +33865,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.29.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.30.0</div>
 </body>
 </html>

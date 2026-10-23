@@ -26123,24 +26123,42 @@ _PLAYER_SNAPSHOT_FILES = [
 # "// <div data-ui-version>) and compares against /api/version" much earlier in
 # the page, and first-match-wins made the reported version a slice of source.
 _UI_BADGE_RE = re.compile(r'<div[^>]*\bdata-ui-version\b[^>]*>([^<]*)</div>')
+# (name, size, mtime_ns) -> sha256 hex. The app asks on every boot; the files
+# only change on a deploy, so each one is hashed once per change.
+_PLAYER_SHA_MEMO: dict[tuple, str] = {}
 
 
 @app.get("/api/player-manifest")
 async def player_manifest(request: Request) -> JSONResponse:
     """Manifest for the iOS app's offline player snapshot (docs/PLAYER_CACHE_PLAN.md).
 
-    Returns {version, files:[{name,size}]} — the app compares `version` against
-    its cached snapshot's and re-downloads on mismatch (BundleDownloader's
-    size-match resume makes a same-version refresh a no-op). The version is read
-    from the live index.html badge (the file on disk is the source of truth;
-    the UI_VERSION constant historically drifts)."""
+    Returns {version, files:[{name,size,sha256}]} — the app compares `version`
+    against its cached snapshot's and fetches a new copy into its OTHER slot on
+    a mismatch, copying across every file whose `sha256` it already holds (a
+    version bump usually changes index.html only). The version is read from the
+    live index.html badge (the file on disk is the source of truth; the
+    UI_VERSION constant historically drifts)."""
+
+    def _sha(path: Path, st: os.stat_result) -> str:
+        key = (str(path), st.st_size, st.st_mtime_ns)
+        got = _PLAYER_SHA_MEMO.get(key)
+        if got is None:
+            h = hashlib.sha256()
+            with open(path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            got = h.hexdigest()
+            _PLAYER_SHA_MEMO[key] = got
+        return got
 
     def _build() -> tuple[str, list[dict]]:
         static_dir = ROOT / "static"
         files: list[dict] = []
         for name in _PLAYER_SNAPSHOT_FILES:
+            path = static_dir / name
             try:
-                files.append({"name": name, "size": (static_dir / name).stat().st_size})
+                st = path.stat()
+                files.append({"name": name, "size": st.st_size, "sha256": _sha(path, st)})
             except OSError:
                 continue   # optional asset missing — the snapshot just omits it
         version = UI_VERSION

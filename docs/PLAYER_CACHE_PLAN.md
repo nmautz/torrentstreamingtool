@@ -16,6 +16,16 @@
 > test for M1 per §4-M1. See [GOTCHAS.md](GOTCHAS.md) § "Offline cached-player
 > mode" for the invariants.
 >
+> **20.30.0 changes three decisions below.** `downloads.html` is deleted (§1's
+> "stays as a feature-frozen fallback"): the app now ships a **starter copy** of
+> the player (`ios-app/stage-player.sh`, served with
+> `LocalMediaServer.start({bundledPlayer})`), used when no downloaded snapshot is
+> complete. The snapshot lives in **two slots** (`__player__` / `__player2__`) so
+> a version change never deletes the served copy first, and unchanged files are
+> copied across by `sha256` (`seed`). And the snapshot ignores the download gate
+> in the background too. Current behaviour: [STREAMING.md](STREAMING.md) §
+> Offline entry point and [GOTCHAS.md](GOTCHAS.md) § Offline cached-player mode.
+>
 > This document remains the design reference for the feature. Each milestone
 > lands as a versioned patch (version badge + `CHANGELOG.md` + doc updates per
 > [CLAUDE.md](../CLAUDE.md)).

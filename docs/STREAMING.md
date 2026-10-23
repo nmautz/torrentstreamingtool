@@ -3650,12 +3650,24 @@ player UI works with no host. The pieces:
 
 - **Snapshot refresh** (`_appRefreshPlayerSnapshot`, static/index.html): every
   online in-app boot fetches `GET /api/player-manifest` ({version, allowlisted
-  files+sizes} — see [API.md](API.md)); a version mismatch removes the old
-  snapshot, then `BundleDownloader.download` fetches everything from the root
-  StaticFiles mount under the sentinel key **`__player__`** (nested `vendor/…`
-  names; the native side creates intermediate dirs). Same-version runs are a
-  cheap heal (size-match resume). The sentinel is filtered out of the Downloads
-  overlay, the durable-queue resumer, and downloads.html's list.
+  files + sizes + sha256} — see [API.md](API.md)) and `BundleDownloader.download`s
+  from the root StaticFiles mount (nested `vendor/…` names; the native side
+  creates intermediate dirs). **Two slots, `__player__` and `__player2__`**
+  (20.30.0): a slot already holding this version is re-run (a cheap heal, or the
+  rest of an interrupted fetch); otherwise the new version goes into the slot
+  that is NOT being served, which is emptied first, and every file whose
+  `sha256` the served copy recorded (`meta.hashes`) is passed as `seed` and
+  copied across on the device, so a version bump fetches `index.html` and little
+  else. The served copy is the newest complete slot (`meta.at`). Before 20.30.0 a
+  version change removed the only copy first, and an interrupted refetch left
+  the phone with no player offline (seen 2026-10-22: Low Power Mode paused it at
+  42%). An app that does not report `playerKeys` on `list()` (older than
+  20.30.0) would treat `__player2__` as an episode download, so for it the page
+  keeps the old single-slot remove-then-fetch. The snapshot **ignores the
+  download gate** (battery / Low Power / charger / cellular) in the foreground
+  and, since 20.30.0, the background (`bypassesGate` in BundleDownloader.swift).
+  Both slot names are filtered out of every downloads surface
+  (`_appIsPlayerKey`).
 - **Serving — LMS "player mode"** (`start({playerRoot})`,
   [LocalMediaServer.swift](../ios-app/ios/App/App/LocalMediaServer.swift)): the
   snapshot dir is the server root (so the page's absolute `/vendor/*` paths
@@ -3728,11 +3740,22 @@ player UI works with no host. The pieces:
   its new address. No id, no scan. No network interface, the scan returns at once.
   Diagnostics: a `netmap` row per launch (interfaces, routes read, nets that would be
   swept) and a `discover` row per scan, both `cat: "app"`.
-- **Shell routing** (`ios-app/www/index.html`): probe fails → `goOffline()`
-  prefers the snapshot (`goToCachedPlayer`) and falls back to
-  **`downloads.html`** — which is now a **feature-frozen fallback** (first-ever
-  offline launch / corrupt cache only; new player features belong in
-  static/index.html where offline mode inherits them).
+- **Shell routing** (`ios-app/www/index.html`): probe fails → `goOffline()` →
+  `goToCachedPlayer`, which opens, in order: the newest **complete downloaded
+  snapshot** (`start({playerRoot})`), else the **starter copy built into the
+  app** (20.30.0, `start({bundledPlayer: "player"})`). The starter copy is
+  `static/index.html` + `static/vendor/` as they were at build time, staged into
+  `www/player/` by `ios-app/stage-player.sh`, which Capacitor runs before every
+  `cap copy` / `cap sync` (the `capacitor:copy:before` script in
+  `ios-app/package.json`). So `./build-ipa.sh` and a manual `npx cap sync ios`
+  before an Xcode build both carry it; an Xcode build with no sync does not, and
+  then the connect screen says there is no offline player. The starter copy is
+  as old as the app, and the only copy guaranteed to match its native code; the
+  downloaded one is preferred because it carries newer player work. The old
+  separate offline player, `downloads.html`, was deleted in 20.30.0. The
+  proxied playback session below still needs a downloaded snapshot: it runs the
+  full online boot against the host's API, which a page older than the host
+  should not.
 
 **Device-copy playback is always SAME-ORIGIN.** The on-device bundle plays from the
 loopback `LocalMediaServer` **only when it can be loaded same-origin** — because

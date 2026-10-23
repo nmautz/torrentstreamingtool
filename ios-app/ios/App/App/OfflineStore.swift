@@ -3,7 +3,7 @@
 //  StreamLink iOS — M3 (offline progress + auto-sync)
 //
 //  A small, durable, native key/value log of watch progress captured while the
-//  device is offline. The offline player (www/downloads.html) writes progress
+//  device is offline. The offline player (the dashboard served from the phone) writes progress
 //  here during playback (the host dashboard can't load with no network, so this
 //  is the only place offline history can live), and so does NativePlayback while
 //  it holds an offline episode (18.21.7) — with the phone locked the page's timers
@@ -12,8 +12,8 @@
 //  POST /api/sync/progress and records each file's new `base_synced_at`
 //  watermark via markSynced().
 //
-//  Why native (not localStorage): downloads.html (file:// bundle) and the host
-//  dashboard (http://host) are different origins and do NOT share localStorage.
+//  Why native (not localStorage): the offline player (a loopback origin whose
+//  port changes per run) and the host dashboard (http://host) are different origins and do NOT share localStorage.
 //  A native plugin is the only store both can read/write, and it survives an app
 //  kill. Stored in Application Support (non-evictable), excluded from backup.
 //

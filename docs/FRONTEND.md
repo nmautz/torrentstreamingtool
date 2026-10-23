@@ -1125,7 +1125,7 @@ Playback switches write through `_appPrefSet` and are restored from the native s
 boot by `_appPrefsRestore` (20.6.4): `localStorage` is only their working copy. See
 docs/GOTCHAS.md § A web view's storage is not the app's.
 
-**The shell** (`ios-app/www/index.html`, `downloads.html`) uses the dashboard's palette
+**The shell** (`ios-app/www/index.html`) uses the dashboard's palette
 by hand (no Tailwind there). The Connect screen reads the registry: it marks the phone's
 own server, says which account each opens as and how many downloads the phone holds from
 it, and launch goes to the primary's address.
