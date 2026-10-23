@@ -391,6 +391,22 @@ try:
     m2 = am.AnimeMap(m.root)
     eq("a second reader parses from disk", len(m2.entries_for(203737)), 3)
 
+    # 20.30.9: the stat behind the memo runs at most once per RECHECK_S.
+    stats = []
+    real_mtime = m2.mtime
+    m2.mtime = lambda: (stats.append(1), real_mtime())[1]
+    m2._checked_at = float("-inf")
+    for _ in range(50):
+        m2.entries_for(46298)
+    eq("fifty lookups stat the file once", len(stats), 1)
+    m2._checked_at -= am.RECHECK_S + 1
+    m2.entries_for(46298)
+    eq("and again once the recheck is due", len(stats), 2)
+    m3 = am.AnimeMap(os.path.join(root, "store-late"))
+    eq("a store with no file yet has no entries", m3.entries_for(46298), [])
+    eq("a table stored within the recheck is seen at once",
+       (m3.store(padded), len(m3.entries_for(46298))), (True, 1))
+
     eq("an unwritable root is harmless",
        am.AnimeMap(os.path.join(root, "\0bad")).entries_for(46298), [])
 finally:

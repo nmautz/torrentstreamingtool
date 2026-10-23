@@ -1,5 +1,22 @@
 # Changelog
 
+## [20.30.9] — 2026-10-22
+
+### Fixed
+- **A merged show's page opened right after a boot no longer takes 10 s.** 20.30.7
+  asks qBit once for the whole show, then fetches each member's file list. When
+  qBit wasn't running yet, those fetches still went out, and each paid Windows'
+  2 s refused connect once the 3 s hold from 20.30.8 ran out. South Park took
+  9.96 s. When the one `torrents/info` call gets no answer, the page now treats
+  every member as "qBit unknown" and asks for nothing more.
+- **The anime table is parsed before the server answers anything.** The start-up
+  parse was a background task. The TV's first episode list after a boot got
+  there first and parsed the 1.7 MB XML on the event loop (`LOOP BLOCKED 0.20s`
+  in `animemap.parse`). The lifespan now awaits the parse on its thread before
+  it starts any task. The file's mtime, which every TV show's episode list
+  checked on the loop, is now looked at once a minute at most
+  (`animemap.RECHECK_S`). `store` is its only writer and updates the memo itself.
+
 ## [20.30.8] — 2026-10-22
 
 ### Fixed

@@ -659,6 +659,17 @@ check("each file list is fetched once", sorted(u for u in qv_calls if u.startswi
 check("a hash matches whatever its case", view["AAA"][0] == {"hash": "aaa", "state": "uploading"})
 check("a torrent qBit does not know reads as no info", view["ccc"][0] is None)
 check("no hashes, no calls", asyncio.run(qv_ns["_qbit_view"](["", ""])) == {})
+
+
+async def _down_qreq(method, url, **kw):
+    qv_calls.append(url)
+    return None
+
+qv_calls.clear()
+qv_ns["qreq"] = _down_qreq
+down = asyncio.run(qv_ns["_qbit_view"](["aaa", "bbb"]))
+check("qBit unreachable: no file lists asked for, every member reads as unknown (20.30.9)",
+      len(qv_calls) == 1 and down == {"aaa": (None, []), "bbb": (None, [])})
 gsf = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "get_series_files")
 gsf_src = ast.get_source_segment(src, gsf)
 check("the series page builds every member from one view",
@@ -727,6 +738,14 @@ check("after the hold it tries again", r is not None and r.status_code == 200 an
 print("an on-demand play of a file set to never builds no bundle (20.30.8)")
 check("the background prep is skipped for never",
       sod_src.index('!= "never"') < sod_src.index("await _maybe_start_prep_job(src, item_id)"))
+
+print("the anime table is parsed before anything can ask for it (20.30.9)")
+# A background warm-up lost the race to the kiosk's first episode list after a
+# boot, which parsed 1.7 MB of XML on the loop (0.20 s).
+check("lifespan awaits the parse before it starts any task",
+      "await _anime_map_warm()" in life_src
+      and life_src.index("await _anime_map_warm()") < life_src.index("asyncio.create_task(")
+      and "_spawn_bg(_anime_map_warm())" not in life_src)
 
 print()
 if fails:

@@ -68,6 +68,8 @@ ANIME_LIST_URL = (
 #: mapping is corrected — neither is urgent, and a week keeps us off GitHub's
 #: raw endpoint. A copy older than this is still *used*; it is just refetched.
 REFRESH_AFTER = 7 * 24 * 3600
+# Once looked at, the cached file's mtime is not looked at again for this long.
+RECHECK_S = 60.0
 
 #: Refuse a download that isn't plausibly this file. ~1.7 MB as of 2026-09.
 MIN_BYTES = 200_000
@@ -523,7 +525,9 @@ class AnimeMap:
     can't be fetched or can't be written leaves every show reading the way it
     read before this module existed, which is the pre-17.1.0 behaviour and never
     a failure. The parse is memoised on the file's mtime, so the hot attribution
-    path costs a `stat()` rather than a 1.7 MB XML parse.
+    path costs a `stat()` rather than a 1.7 MB XML parse, and that `stat()` runs
+    at most once per RECHECK_S (20.30.9: every episode list of a TV show asked,
+    on the event loop, and `store` is the only writer anyway).
     """
 
     FILENAME = "anime-list-full.xml"
@@ -532,6 +536,7 @@ class AnimeMap:
         self.root = Path(root)
         self._index: dict[int, list[dict]] = {}
         self._loaded_mtime: float = -1.0
+        self._checked_at: float = float("-inf")     # time.monotonic() of the last stat
 
     @property
     def path(self) -> Path:
@@ -583,13 +588,19 @@ class AnimeMap:
                 pass
             return False
         self._index, self._loaded_mtime = index, self.mtime() or -1.0
+        self._checked_at = time.monotonic()
         return True
 
     def index(self) -> dict[int, list[dict]]:
         """The parsed table, `{tmdb_tv_id: [entry, …]}`. `{}` when there is no
         usable copy on disk."""
+        now = time.monotonic()
+        if now - self._checked_at < RECHECK_S:
+            return self._index
         m = self.mtime()
+        self._checked_at = now
         if m is None:
+            self._index, self._loaded_mtime = {}, -1.0
             return {}
         if m != self._loaded_mtime:
             try:

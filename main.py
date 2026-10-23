@@ -13554,6 +13554,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # Where ffmpeg / ffprobe / fpcalc are, found before the first request asks on
     # the loop (20.30.1; mediabin `_memo_bin`).
     await asyncio.to_thread(_warm_media_bins_sync)
+    # Parse the cached anime table before anything can ask for it (20.30.9). It
+    # was a background task, and the kiosk's first episode list after a boot got
+    # there first and parsed it on the loop (0.20 s). Before any task starts, so
+    # nothing races the thread into a second parse on the loop.
+    try:
+        await _anime_map_warm()
+    except Exception as exc:
+        log.warning("Anime season map not parsed at start-up: %s", exc)
     # Route asyncio's own callback errors into the app log (and demote the benign
     # Windows WinError 10054 disconnect churn that used to flood it at ERROR).
     diag.install_loop_exception_handler(runtime._MAIN_LOOP)
@@ -13683,9 +13691,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # week old. Fire-and-forget: attribution reads whatever is on disk at the
     # time, and a box that never reaches GitHub simply keeps the old behaviour.
     _spawn_bg(_anime_map_refresh())
-    # …and parse whatever is already cached, so the first library page doesn't
-    # pay for it on the event loop. No-op when the refresh above just did it.
-    _spawn_bg(_anime_map_warm())
     subupgrade_loop = asyncio.create_task(subtitle_upgrade_loop())
     od_reaper_loop  = asyncio.create_task(_od_reaper())
     maint_loop      = asyncio.create_task(background_maintenance_loop())
@@ -14955,8 +14960,13 @@ async def _qbit_view(hashes: list) -> dict:
     if not hashes:
         return {}
     r = await qreq("GET", "/api/v2/torrents/info?hashes=" + "|".join(hashes))
+    if r is None:
+        # qBit unreachable (20.30.9: right after a boot, before the watchdog starts
+        # it): don't ask it for 54 file lists, each a refused connect once the
+        # qreq hold runs out. The page took 10 s.
+        return {h: (None, []) for h in hashes}
     infos: dict = {}
-    if r and r.status_code == 200:
+    if r.status_code == 200:
         infos = {str(t.get("hash", "")).lower(): t for t in r.json()}
     sem = asyncio.Semaphore(QBIT_VIEW_PARALLEL)
 
