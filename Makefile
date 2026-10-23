@@ -56,6 +56,7 @@ test:
 	python3 tests/test_voicepick.py
 	python3 tests/test_backend_layout.py
 	python3 tests/test_player_snapshot.py
+	python3 tests/test_service_wrapper.py
 
 # The backend's outside surface (routes in order, request models, every name
 # main exports) against tests/fixtures/main_surface.json. Imports main, so it

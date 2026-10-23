@@ -205,10 +205,13 @@ async def _launch_servers():
     http_srv.install_signal_handlers = lambda: None
     coros = [http_srv.serve()]
     if _has_cert:
+        # timeout_keep_alive: uvicorn's 5 s default dropped HTTPS requests sent on a
+        # connection right after a long download over it (20.30.11). run.py too.
         https_cfg = _uvicorn.Config(
             "https_proxy:app", host="0.0.0.0", port=443,
             ssl_certfile=str(_CERT), ssl_keyfile=str(_KEY),
             log_level=_UV_LOG_LEVEL, log_config=_UV_LOG_CFG,
+            timeout_keep_alive=75,
         )
         https_srv = _uvicorn.Server(https_cfg)
         https_srv.install_signal_handlers = lambda: None

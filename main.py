@@ -13581,9 +13581,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     runtime._analysis_gate = asyncio.Semaphore(ANALYSIS_CONCURRENCY)
     _load_profile_sessions()   # PIN-verified profile sessions (survive a restart)
     # qBit is on this machine: a connect either lands in milliseconds or qBit isn't
-    # listening. With one 10 s timeout for everything, the first call after a boot
-    # (qBit not started yet) hung up to 10 s; the South Park page took 9.8 s on two
-    # boots (20.30.10). The connect now gives up in 2 s and arms qreq's hold.
+    # listening, so it gives up in 2 s and arms qreq's hold (20.30.10). Added for the
+    # South Park page's 9.8 s after a boot, which its split later put on cold disk
+    # reads instead (qbit=0.00s); kept as a cheap guard.
     runtime.qbit = _http_client(timeout=httpx.Timeout(10.0, connect=QBIT_CONNECT_TIMEOUT_S))
     _vlc_http()   # build the persistent keep-alive VLC client up front
     await qbit_login()

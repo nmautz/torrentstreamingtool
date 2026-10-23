@@ -147,6 +147,7 @@ make test                 # pure unit tests for the leaf modules (no deps, no ve
                           #   python tests/test_voicepick.py
                           #   python tests/test_backend_layout.py
                           #   python tests/test_player_snapshot.py
+                          #   python tests/test_service_wrapper.py
 make surface              # the backend's routes / request models / exported
                           # names vs tests/fixtures/main_surface.json. Needs the
                           # venv: .venv\Scripts\python tests\surface_snapshot.py

@@ -1,5 +1,22 @@
 # Changelog
 
+## [20.30.11] — 2026-10-23
+
+### Fixed
+- **HTTPS no longer drops a request sent right after a long download on the same
+  connection.** Downloading a prepped bundle over HTTPS, 24 files at a time as
+  the phone app does, lost 84 of 482 requests. The server closed each connection
+  without answering ("Server disconnected without sending a response"). Every one
+  succeeded on a retry. A browser player fetching one segment at a time over
+  HTTPS while that ran lost 2 of 11. Over plain HTTP the same download lost none,
+  and a client keep-alive of 3 s didn't help. So the 443 server, not the client,
+  was closing connections still in use; the exact trigger isn't proven. The
+  HTTPS server (the in-process proxy) now keeps a connection open for 75 s, not
+  uvicorn's default 5 (`timeout_keep_alive`, in daemon.py's service wrapper and
+  in run.py). `tests/test_service_wrapper.py` (new) checks that the wrapper the
+  updater writes compiles and serves both ports, since a broken wrapper is a box
+  that doesn't start.
+
 ## [20.30.10] — 2026-10-22
 
 ### Changed
@@ -10,13 +27,13 @@
   ep-homes= nudge=` to the app log when it takes 1 s or more (`SERIES_SLOW_S`).
 
 ### Fixed
-- **The first qBit call after a boot gives up its connect in 2 s, not 10.** The
-  qBit client had one 10 s timeout for everything. Before the watchdog starts
-  qBit, a connect can hang until it times out, and South Park's page finished
-  only ~2 s after qBit came up on both boots. The connect timeout is now 2 s
-  (`QBIT_CONNECT_TIMEOUT_S`); reads keep 10 s. The connect error arms `qreq`'s
-  3 s hold, so the calls after it don't wait either. The lifespan's own
-  `qbit_login` waits less too.
+- **The qBit client gives up a connect in 2 s, not 10.** It had one 10 s timeout
+  for everything, and a local connect either lands in milliseconds or isn't going
+  to. The connect timeout is now 2 s (`QBIT_CONNECT_TIMEOUT_S`); reads keep 10 s.
+  The connect error arms `qreq`'s 3 s hold. *Correction (20.30.11):* this was
+  added because South Park's page took 9.8 s after a boot. The split above, on the
+  next boot, put that time on cold disk reads (`prepped=8.33s ep-homes=1.15s
+  qbit=0.00s`), not on qBit, so the change is a guard, not the fix. See #110.
 
 ## [20.30.9] — 2026-10-22
 

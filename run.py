@@ -1333,6 +1333,9 @@ def main():
                 ssl_keyfile=str(KEY),
                 log_level="info",  # access lines are INFO; "warning" hides them
                 log_config=_uv_log_cfg,
+                # uvicorn's 5 s default dropped HTTPS requests sent on a connection
+                # right after a long download over it (20.30.11). daemon.py too.
+                timeout_keep_alive=75,
             )
             https_srv = _uvicorn.Server(https_cfg)
             https_srv.install_signal_handlers = lambda: None
