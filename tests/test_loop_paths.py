@@ -555,6 +555,19 @@ routed = [n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.Async
 check("no route is bound to a private helper", not [n for n in routed if n.startswith("_")])
 check("offline-prepare is served by offline_prepare", "offline_prepare" in routed)
 
+# The page answers `metadata_update` by re-reading the series' files, and that
+# read spawns the section fetch again. Announcing an unchanged result looped at
+# 11 events a second (20.30.5).
+ssf = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_spawn_section_fetch")
+ssf_src = ast.get_source_segment(src, ssf)
+check("the section fetch announces only what it stored",
+      "wrote=wrote" in ssf_src and "if wrote:" in ssf_src
+      and "if await _fetch_section_metadata(" not in ssf_src)
+fsm = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "_fetch_section_metadata")
+fsm_src = ast.get_source_segment(src, fsm)
+check("and it says so only after its write",
+      fsm_src.index("wrote.append(True)") > fsm_src.index("async with mutate_library()"))
+
 print()
 if fails:
     print(f"{len(fails)} FAILED"); sys.exit(1)

@@ -1,5 +1,16 @@
 # Changelog
 
+## [20.30.5] — 2026-10-22
+
+### Fixed
+- **An open episode list no longer redraws itself ten times a second.** For a show
+  with more than one section (Steins;Gate), reading its files starts the section
+  lookup, and the lookup sent `metadata_update` even when it found nothing new.
+  The page answers that event by reading the files again, so the two kept each
+  other going: 170 events in 15 s, every episode row rebuilt each time, the prep
+  spinner restarting and rows flickering too fast to click. The event now goes
+  out only when the lookup stored something (`_spawn_section_fetch`).
+
 ## [20.30.4] — 2026-10-22
 
 ### Fixed

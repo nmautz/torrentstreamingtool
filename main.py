@@ -3928,7 +3928,8 @@ async def _resolve_movies_section(sec: dict, show_title: str) -> Optional[dict]:
             "files": out}
 
 
-async def _fetch_section_metadata(item_id: str, force: bool = False) -> dict:
+async def _fetch_section_metadata(item_id: str, force: bool = False,
+                                  wrote: Optional[list] = None) -> dict:
     """Resolve and cache TMDb metadata for each of an item's sections.
 
     Runs AFTER the item's own metadata (it needs the parent binding for the
@@ -3989,6 +3990,8 @@ async def _fetch_section_metadata(item_id: str, force: bool = False) -> dict:
             it2 = next((x for x in lib2["items"] if x["id"] == item_id), None)
             if it2 and it2.get("metadata"):
                 it2["metadata"]["sections"] = resolved
+                if wrote is not None:
+                    wrote.append(True)
         for blob in resolved.values():
             if blob.get("source") == "none":
                 continue
@@ -4003,8 +4006,14 @@ def _spawn_section_fetch(item_id: str) -> None:
     the sections render from filenames until it lands, then a `metadata_update`
     SSE event repaints them."""
     async def _run() -> None:
+        # Only when something was stored. The page answers `metadata_update` by
+        # re-reading the series' files, and that read spawns this again: telling
+        # it about an unchanged result was a loop, 11 events a second for an open
+        # Steins;Gate page (2026-10-22), each one rebuilding every episode row.
+        wrote: list = []
         try:
-            if await _fetch_section_metadata(item_id):
+            await _fetch_section_metadata(item_id, wrote=wrote)
+            if wrote:
                 await broadcast("metadata_update", {"item_id": item_id})
         except Exception:
             log.exception("section metadata fetch failed for %s", item_id)

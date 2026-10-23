@@ -3060,7 +3060,8 @@
    "kind": "async def",
    "params": [
     "item_id:POSITIONAL_OR_KEYWORD",
-    "force:POSITIONAL_OR_KEYWORD"
+    "force:POSITIONAL_OR_KEYWORD",
+    "wrote:POSITIONAL_OR_KEYWORD"
    ]
   },
   "_fetch_subtitle": {
