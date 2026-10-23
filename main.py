@@ -1018,12 +1018,20 @@ def state_snapshot() -> dict:
 # ── qBittorrent Client ────────────────────────────────────────────────────────
 
 async def qbit_login() -> bool:
+    """Log in to qBit. Shares `qreq`'s hold: False at once while qBit is known not
+    to be listening, and a refused connect here starts the hold (20.30.12)."""
+    global _qbit_down_until
+    if time.monotonic() < _qbit_down_until:
+        return False
     try:
         r = await runtime.qbit.post(
             f"{settings.qbit_url}/api/v2/auth/login",
             data={"username": settings.qbit_username, "password": settings.qbit_password},
         )
         return r.text.strip() == "Ok."
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        _qbit_down_until = time.monotonic() + QBIT_DOWN_HOLD_S
+        return False
     except Exception:
         return False
 
@@ -26736,6 +26744,9 @@ async def admin_status() -> JSONResponse:
     return JSONResponse({"enabled": bool(settings.admin_password)})
 
 
+SETUP_QBIT_WAIT_S = 1.0   # the setup checklist's longest wait for qBit
+
+
 @app.get("/api/setup-status")
 async def setup_status() -> JSONResponse:
     """First-run health check the dashboard uses to render its 'finish setup'
@@ -26761,10 +26772,14 @@ async def setup_status() -> JSONResponse:
         indexer_ok = True    # key set, and no failing-everything signal
 
     # qBittorrent reachability (best-effort; the streaming backend). Don't let a
-    # slow/absent qBit hang the checklist — qbit_login already has its own timeout.
+    # slow/absent qBit hang the checklist. It logged in on every call, so each
+    # dashboard load opened a qBit session, and right after a boot (qBit not
+    # started yet) it waited out the connect: 1.3-2.0 s on every boot (20.30.12).
+    # `qreq` logs in only on a 403 and answers at once while qBit is known down.
     try:
-        qbit_ok = await qbit_login()
-    except Exception:
+        r = await asyncio.wait_for(qreq("GET", "/api/v2/app/version"), SETUP_QBIT_WAIT_S)
+        qbit_ok = r is not None and r.status_code == 200
+    except (asyncio.TimeoutError, Exception):
         qbit_ok = False
 
     items = [

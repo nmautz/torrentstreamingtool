@@ -698,8 +698,8 @@ print("a qBit that is not listening costs one refused connect, not one per call 
 qr = [ast.get_source_segment(src, n) for n in tree.body
       if (isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)
           and n.targets[0].id in ("QBIT_DOWN_HOLD_S", "_qbit_down_until"))
-      or (isinstance(n, ast.AsyncFunctionDef) and n.name == "qreq")]
-check("qreq and its hold were found", len(qr) == 3)
+      or (isinstance(n, ast.AsyncFunctionDef) and n.name in ("qreq", "qbit_login"))]
+check("qreq, qbit_login and their hold were found", len(qr) == 4)
 
 
 class _ConnErr(Exception):
@@ -717,12 +717,16 @@ async def _qr_request(method, url, **kw):
     qr_calls.append(url)
     if qr_ns["_refuse"]:
         raise _ConnErr("refused")
-    return types.SimpleNamespace(status_code=200)
+    return types.SimpleNamespace(status_code=200, text="Ok.")
+
+
+async def _qr_post(url, **kw):
+    return await _qr_request("POST", url, **kw)
 
 qr_ns = {"httpx": types.SimpleNamespace(ConnectError=_ConnErr, ConnectTimeout=_ConnTimeout,
                                         Response=object),
          "time": types.SimpleNamespace(monotonic=lambda: qr_clock[0]),
-         "runtime": types.SimpleNamespace(qbit=types.SimpleNamespace(request=_qr_request)),
+         "runtime": types.SimpleNamespace(qbit=types.SimpleNamespace(request=_qr_request, post=_qr_post)),
          "settings": types.SimpleNamespace(qbit_url="http://q"), "Optional": __import__("typing").Optional,
          "_refuse": True}
 exec("\n\n".join(qr), qr_ns)
@@ -734,6 +738,19 @@ qr_ns["_refuse"] = False
 qr_clock[0] += qr_ns["QBIT_DOWN_HOLD_S"] + 0.1
 r = asyncio.run(qr_ns["qreq"]("GET", "/c"))
 check("after the hold it tries again", r is not None and r.status_code == 200 and len(qr_calls) == 2)
+qr_ns["settings"].qbit_username = qr_ns["settings"].qbit_password = "x"
+qr_ns["_refuse"] = True
+qr_clock[0] += qr_ns["QBIT_DOWN_HOLD_S"] + 0.1
+check("a refused login starts the hold too (20.30.12)",
+      asyncio.run(qr_ns["qbit_login"]()) is False and len(qr_calls) == 3
+      and asyncio.run(qr_ns["qreq"]("GET", "/d")) is None and len(qr_calls) == 3)
+check("and a login inside the hold connects to nothing",
+      asyncio.run(qr_ns["qbit_login"]()) is False and len(qr_calls) == 3)
+ss = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "setup_status")
+ss_src = ast.get_source_segment(src, ss)
+check("the setup checklist asks qBit through qreq with a short wait, and logs in only on a 403",
+      "qbit_login()" not in ss_src and 'qreq("GET", "/api/v2/app/version")' in ss_src
+      and "SETUP_QBIT_WAIT_S" in ss_src)
 
 print("an on-demand play of a file set to never builds no bundle (20.30.8)")
 check("the background prep is skipped for never",

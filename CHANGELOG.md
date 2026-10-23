@@ -1,5 +1,17 @@
 # Changelog
 
+## [20.30.12] — 2026-10-23
+
+### Fixed
+- **The setup checklist no longer logs in to qBit on every dashboard load.**
+  `/api/setup-status` ran a full `qbit_login` on each call, so every page load
+  opened another qBit session. Right after a boot, before qBit was listening, it
+  waited out the connect: 1.3–2.0 s on every boot tonight, 2.01 s on 20.30.11's.
+  It now asks qBit for its version through `qreq`, which logs in only on a 403 and
+  answers at once while qBit is known to be down, capped at 1 s
+  (`SETUP_QBIT_WAIT_S`). `qbit_login` also shares `qreq`'s 3 s hold: it answers
+  False at once inside the hold, and a refused connect starts the hold.
+
 ## [20.30.11] — 2026-10-23
 
 ### Fixed

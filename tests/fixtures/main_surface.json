@@ -743,6 +743,9 @@
   "SERIES_SLOW_S": {
    "kind": "value"
   },
+  "SETUP_QBIT_WAIT_S": {
+   "kind": "value"
+  },
   "SHOTSCAN_IDLE_SEC": {
    "kind": "value"
   },
