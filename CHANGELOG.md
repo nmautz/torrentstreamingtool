@@ -1,5 +1,20 @@
 # Changelog
 
+## [20.29.0] — 2026-10-22
+
+### Added
+- **The day's weather under the slideshow's clock.** Once a city is set: the
+  temperature now, an icon and the condition, then today's high and low and the
+  chance of rain (when it's 10% or more). °F for the US, °C elsewhere, or pick
+  one in Admin → Background, where the weather can also be turned off. It comes
+  from Open-Meteo (no key), at most every 20 minutes; if it can't be reached the
+  last forecast stays up for up to 6 hours. With the clock turned off the
+  forecast still shows.
+
+### Changed
+- Setting a city no longer ticks "My city this season": the city is also what
+  the weather and the seasons use, and you may want those without its photos.
+
 ## [20.28.0] — 2026-10-22
 
 ### Added

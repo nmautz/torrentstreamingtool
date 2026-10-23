@@ -727,6 +727,19 @@
       letter-spacing: .02em; font-variant-numeric: tabular-nums; }
     #ambDate { margin-top: .6rem; font-size: .95rem; font-weight: 800;
       text-transform: uppercase; letter-spacing: .22em; opacity: .85; }
+    /* The day's forecast under the clock (/api/ambient/weather). */
+    #ambWx { margin-top: 1.1rem; }
+    #ambWx[hidden] { display: none; }
+    #ambWxNow { display: flex; align-items: center; justify-content: flex-end; gap: .6rem; }
+    #ambWxNow .ic { width: 2.5rem; height: 2.5rem; vertical-align: 0;
+      filter: drop-shadow(0 2px 8px rgba(0,0,0,.5)); }
+    #ambWxTemp { font-size: 2.4rem; font-weight: 900; line-height: 1;
+      font-variant-numeric: tabular-nums; }
+    #ambWxLabel { font-size: 1rem; font-weight: 800; text-transform: uppercase;
+      letter-spacing: .16em; opacity: .9; }
+    #ambWxDay { margin-top: .5rem; font-size: .95rem; font-weight: 800;
+      text-transform: uppercase; letter-spacing: .18em; opacity: .8;
+      font-variant-numeric: tabular-nums; }
     #ambCaption { left: 5vw; right: 32vw; bottom: 6vh; }
     #ambTheme { display: inline-flex; align-items: center; gap: .5rem;
       font-size: .68rem; font-weight: 900; text-transform: uppercase;
@@ -1358,6 +1371,15 @@
   <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 2.8 19 9.8l-1.7 1.7-4.1-4.1V21h-2.4V7.4l-4.1 4.1L5 9.8z"/></symbol>
   <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 21.2 5 14.2l1.7-1.7 4.1 4.1V3h2.4v13.6l4.1-4.1 1.7 1.7z"/></symbol>
   <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></symbol>
+  <!-- Weather, for the idle slideshow's forecast (slideshow.condition names them). -->
+  <symbol id="i-wx-sun" viewBox="0 0 24 24"><path d="M12 7a5 5 0 1 0 0 10 5 5 0 0 0 0-10zM11 1h2v3.2h-2zM11 19.8h2V23h-2zM1 11h3.2v2H1zM19.8 11H23v2h-3.2zM3.5 4.9l1.4-1.4 2.3 2.3-1.4 1.4zM16.8 18.2l1.4-1.4 2.3 2.3-1.4 1.4zM3.5 19.1l2.3-2.3 1.4 1.4-2.3 2.3zM16.8 5.8l2.3-2.3 1.4 1.4-2.3 2.3z"/></symbol>
+  <symbol id="i-wx-moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></symbol>
+  <symbol id="i-wx-cloud" viewBox="0 0 24 24"><path d="M6.5 20a5 5 0 0 1-.7-9.95A6.5 6.5 0 0 1 18.4 8.6 5.7 5.7 0 0 1 18 20z"/></symbol>
+  <symbol id="i-wx-partly" viewBox="0 0 24 24"><path d="M8 3.2a4.3 4.3 0 0 0-2.6 7.7 6.4 6.4 0 0 1 6.5-4A4.3 4.3 0 0 0 8 3.2zM7 .5h2v2H7zM.5 7h2v2h-2zM1.9 3.3l1.4-1.4 1.4 1.4-1.4 1.4zM12.7 1.9l1.4 1.4-1.4 1.4-1.4-1.4zM8.5 21a4.2 4.2 0 0 1-.6-8.37A5.6 5.6 0 0 1 18.8 11.7 4.65 4.65 0 0 1 18.5 21z"/></symbol>
+  <symbol id="i-wx-rain" viewBox="0 0 24 24"><path d="M7 14.5a4.5 4.5 0 0 1-.6-8.96A5.5 5.5 0 0 1 17 5.1a4.2 4.2 0 0 1 .2 9.4zM7.6 16.5h2l-1.4 5h-2zM11.6 16.5h2l-1.4 5h-2zM15.6 16.5h2l-1.4 5h-2z"/></symbol>
+  <symbol id="i-wx-snow" viewBox="0 0 24 24"><path d="M7 14.5a4.5 4.5 0 0 1-.6-8.96A5.5 5.5 0 0 1 17 5.1a4.2 4.2 0 0 1 .2 9.4zM7 17h2.2v2.2H7zM15 17h2.2v2.2H15zM11 19.3h2.2v2.2H11zM8 21.3h2.2V23.5H8zM14 21.3h2.2V23.5H14z"/></symbol>
+  <symbol id="i-wx-storm" viewBox="0 0 24 24"><path d="M7 14.5a4.5 4.5 0 0 1-.6-8.96A5.5 5.5 0 0 1 17 5.1a4.2 4.2 0 0 1 .2 9.4zM12.8 13.5h3.4l-2 3.6h2.6l-6.3 6.6 1.9-4.8H9.6z"/></symbol>
+  <symbol id="i-wx-fog" viewBox="0 0 24 24"><path d="M7 12a4 4 0 0 1-.5-7.97A5 5 0 0 1 16.2 4a3.9 3.9 0 0 1 .3 8zM2 14h20v2H2zM4 18h16v2H4zM7 22h10v2H7z"/></symbol>
   <symbol id="i-ban" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M12 1.8a10.2 10.2 0 1 0 0 20.4 10.2 10.2 0 0 0 0-20.4zM4.2 12a7.8 7.8 0 0 1 12.5-6.2L5.8 16.7A7.74 7.74 0 0 1 4.2 12zm7.8 7.8a7.74 7.74 0 0 1-4.7-1.6L18.2 7.3A7.8 7.8 0 0 1 12 19.8z"/></symbol>
   <symbol id="i-lock" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M17.2 9.5V7.2a5.2 5.2 0 0 0-10.4 0v2.3H4.5V22h15V9.5zM9 7.2a3 3 0 0 1 6 0v2.3H9z"/></symbol>
   <symbol id="i-unlock" viewBox="0 0 24 24"><path d="M9 9.5V7.2a3 3 0 0 1 5.9-.7h2.3A5.2 5.2 0 0 0 6.8 7.2v2.3H4.5V22h15V9.5z"/></symbol>
@@ -3324,7 +3346,12 @@
   <div class="amb-layer" id="ambB"></div>
   <div id="ambTopShade"></div>
   <div id="ambShade"></div>
-  <div id="ambClock"><div id="ambTime"></div><div id="ambDate"></div></div>
+  <div id="ambClock"><div id="ambTime"></div><div id="ambDate"></div>
+    <div id="ambWx" hidden>
+      <div id="ambWxNow"><svg class="ic" aria-hidden="true"><use id="ambWxIcon" href="#i-wx-cloud"/></svg><span id="ambWxTemp"></span><span id="ambWxLabel"></span></div>
+      <div id="ambWxDay"></div>
+    </div>
+  </div>
   <div id="ambCaption"><div id="ambTheme"></div><div id="ambTitle"></div><div id="ambCredit"></div></div>
 </div>
 
@@ -4887,7 +4914,7 @@ const AMB_THEME_LABEL = {library:"Your library", daily:"Photo of the day", city:
                          nature:"Seasonal nature", space:"Space"};
 const AMB = {on:false, photos:[], i:0, rev:-1, loadedRev:null, loadedAt:0, interval:30,
              clock:true, timer:null, clockTimer:null, front:0, hideUntil:0, fails:0,
-             swallowClickUntil:0, shownAt:0};
+             swallowClickUntil:0, shownAt:0, weather:false, wxTimer:null};
 async function _ambLoad(){
   try{
     const r = await fetch("/api/ambient/playlist", {cache:"no-store"});
@@ -4897,6 +4924,9 @@ async function _ambLoad(){
     AMB.photos = Array.isArray(d.photos) ? d.photos : [];
     AMB.interval = Math.max(10, Number(d.interval) || 30);
     AMB.clock = d.clock !== false;
+    const wxWas = AMB.weather;
+    AMB.weather = !!d.weather;
+    if(AMB.on && AMB.weather !== wxWas) _ambWeather();
     AMB.loadedRev = d.rev; AMB.loadedAt = Date.now();
     // Carry on after the photo on screen rather than starting the deck over.
     const at = was ? AMB.photos.findIndex(p => p.id === was) : -1;
@@ -4909,9 +4939,35 @@ function _ambApply(want){
   if(want && Date.now() < AMB.hideUntil) return;   // just woken locally; the server catches up
   if(want) _ambShow(); else _ambHide();
 }
+// The forecast under the clock: re-read every 10 minutes while the slideshow
+// shows (the server fetches it at most every 20). Hidden when there is none.
+async function _ambWeather(){
+  clearTimeout(AMB.wxTimer);
+  const box = document.getElementById("ambWx");
+  if(!AMB.on) return;
+  if(!AMB.weather){ box.hidden = true; return; }
+  try{
+    const r = await fetch("/api/ambient/weather", {cache:"no-store"});
+    const w = r.ok ? (await r.json()).weather : null;
+    if(w && AMB.on){
+      document.getElementById("ambWxIcon").setAttribute("href", "#i-wx-" + w.icon);
+      document.getElementById("ambWxTemp").textContent = `${w.temp}°`;
+      document.getElementById("ambWxLabel").textContent = w.label || "";
+      const day = [];
+      if(w.hi != null && w.lo != null) day.push(`H ${w.hi}°  L ${w.lo}°`);
+      if(w.rain != null && w.rain >= 10) day.push(`Rain ${w.rain}%`);
+      document.getElementById("ambWxDay").textContent = day.join("  ·  ");
+      box.hidden = false;
+    } else if(!w) box.hidden = true;
+  }catch(_){}   // keep showing the last forecast
+  if(AMB.on) AMB.wxTimer = setTimeout(_ambWeather, 600000);
+}
 function _ambClockTick(){
   const now = new Date();
-  document.getElementById("ambClock").style.display = AMB.clock ? "" : "none";
+  // Clock off still leaves the forecast's box up.
+  document.getElementById("ambClock").style.display = (AMB.clock || AMB.weather) ? "" : "none";
+  document.getElementById("ambTime").style.display = AMB.clock ? "" : "none";
+  document.getElementById("ambDate").style.display = AMB.clock ? "" : "none";
   document.getElementById("ambTime").textContent = now.toLocaleTimeString([], {hour:"numeric", minute:"2-digit"});
   document.getElementById("ambDate").textContent = now.toLocaleDateString([], {weekday:"long", month:"long", day:"numeric"});
 }
@@ -4922,12 +4978,13 @@ async function _ambShow(){
   document.getElementById("ambient").classList.add("show");
   _ambClockTick();
   AMB.clockTimer = setInterval(_ambClockTick, 5000);
+  _ambWeather();
   _ambNext();
 }
 function _ambHide(){
   if(!AMB.on) return;
   AMB.on = false;
-  clearTimeout(AMB.timer); clearInterval(AMB.clockTimer);
+  clearTimeout(AMB.timer); clearInterval(AMB.clockTimer); clearTimeout(AMB.wxTimer);
   document.getElementById("ambient").classList.remove("show");
   // Let the decoded photos go: the kiosk runs for days.
   for(const id of ["ambA","ambB"]){
@@ -33759,6 +33816,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.28.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.29.0</div>
 </body>
 </html>

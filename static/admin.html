@@ -970,7 +970,7 @@
             class="flex-shrink-0 bg-indigo-600 hover:bg-indigo-500 px-4 py-2 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">Find</button>
         </div>
         <div id="idlCityResults" class="space-y-1"></div>
-        <p class="text-[10px] text-gray-600">Used for "My city this season", the season (and hemisphere) of the nature photos, and the region of the photo of the day.</p>
+        <p class="text-[10px] text-gray-600">Used for the weather under the clock, the "My city this season" photos (tick that theme to get them), the season (and hemisphere) of the nature photos, and the region of the photo of the day.</p>
       </div>
 
       <div class="px-5 py-4 border-b border-gray-800 flex flex-wrap items-center gap-x-6 gap-y-3">
@@ -983,6 +983,18 @@
           <input id="idlClock" type="checkbox" onchange="saveIdle({clock: this.checked})" class="accent-indigo-500"/>
           Show the clock
         </label>
+        <label class="flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-gray-400 cursor-pointer">
+          <input id="idlWeather" type="checkbox" onchange="saveIdle({weather: this.checked})" class="accent-indigo-500"/>
+          Show the weather
+        </label>
+        <label class="flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-gray-400">
+          Units
+          <select id="idlUnits" onchange="saveIdle({units: this.value})"
+            class="bg-gray-950 border border-gray-700 px-2 py-1.5 text-sm text-gray-200 normal-case font-normal">
+            <option value="auto">Auto</option><option value="f">°F</option><option value="c">°C</option>
+          </select>
+        </label>
+        <p id="idlWeatherNote" class="hidden w-full text-[10px] text-gray-600">The weather needs a city: set one above.</p>
       </div>
 
       <div class="px-5 py-4 border-b border-gray-800 flex flex-wrap gap-2">
@@ -8280,6 +8292,11 @@ function renderIdleScreen(){
   const sel = document.getElementById("idlInterval");
   sel.innerHTML = d.intervals.map(v=>`<option value="${v}" ${v===d.interval?"selected":""}>${v < 60 ? v+" seconds" : (v/60)+" minute"+(v===60?"":"s")}</option>`).join("");
   document.getElementById("idlClock").checked = !!d.clock;
+  document.getElementById("idlWeather").checked = !!d.weather;
+  const units = document.getElementById("idlUnits");
+  units.value = d.units || "auto";
+  units.options[0].textContent = `Auto (°${d.unit || "C"})`;
+  document.getElementById("idlWeatherNote").classList.toggle("hidden", !(d.weather && !d.city));
 
   const bits = [];
   if(st.refreshing) bits.push("Fetching photos now…");
@@ -8341,7 +8358,7 @@ async function pickIdleCity(i){
   if(await saveIdle({city: c})){
     document.getElementById("idlCityResults").innerHTML = "";
     document.getElementById("idlCityInput").value = "";
-    showToast(`City set: ${c.name}. Fetching its photos.`);
+    showToast(`City set: ${c.name}.`);
   }
 }
 

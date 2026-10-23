@@ -224,8 +224,8 @@ There is **no one-click bulk purge** — every action is per-row and confirm-gat
 
 **Slideshow** (shown in Slideshow mode; `GET`/`POST /api/admin/idle-screen`):
 - **Themes** — Your library, Photo of the day, My city this season (needs a city), Seasonal nature, Space. Each row shows its photo count, when it was fetched, and the last error if its source failed. A city theme without a Pexels key says that a key (Updates tab → `PEXELS_API_KEY`) would add more.
-- **Your City** — type a name, **Find** (`/api/admin/idle-screen/geocode`, Open-Meteo, biggest places first with region and population so the right Portland is obvious), pick one. Only its name, region, country and coordinates are stored. Setting a city ticks the city theme. **Remove** clears it.
-- **Each photo** (15 s - 5 min) and **Show the clock**.
+- **Your City** — type a name, **Find** (`/api/admin/idle-screen/geocode`, Open-Meteo, biggest places first with region and population so the right Portland is obvious), pick one. Only its name, region, country and coordinates are stored. The city drives the weather, the seasons and the photo-of-the-day region as well as its own photo theme, so setting one does **not** tick "My city this season" (20.29.0). **Remove** clears it.
+- **Each photo** (15 s - 5 min), **Show the clock**, **Show the weather** (the day's forecast under the clock; needs a city, and says so when there is none) and **Units** (Auto picks °F for the US and the few others that use it, °C elsewhere; or force either).
 - **Show on TV** puts the slideshow on the TV now (409 while something plays or "Use My Computer" is on). **Preview here** opens `/?ambient=preview` in a new tab. **Fetch new photos** re-fetches every theme now instead of at the daily refresh.
 - **Review photos** — a grid of every photo the slideshow could show. Clicking one hides it (`idle_screen.hidden`, by id, so it stays hidden when its source offers it again); clicking a hidden one brings it back.
 - The status line: when photos were last fetched and how much disk they use (`.ambient_cache/`).

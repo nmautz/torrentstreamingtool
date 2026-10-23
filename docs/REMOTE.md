@@ -487,6 +487,20 @@ the parsing, the checks and the order; `_ambient_*` in `main.py` fetch and cache
 - **Credit:** every photo carries one (author · licence · source), shown on
   screen. Commons' licences require it, and Pexels' and TMDb's terms do.
 
+### The weather under the clock (20.29.0)
+
+With a city set and `idle_screen.weather` on (the default), the day's forecast
+sits under the clock: the current temperature, an icon and the condition, then
+today's high / low and the chance of rain when it is 10 % or more. Units come
+from the city's country (`temp_unit`: °F for the US and the few others that use
+it) unless the admin forces °F or °C. Source: Open-Meteo's forecast API (no key),
+read by `_ambient_weather` at most every 20 minutes and shared by every kiosk; a
+failed fetch keeps showing the last answer for up to 6 hours, then the forecast
+disappears rather than going stale. `slideshow.condition` maps the WMO weather
+code to a label and one of eight icons (`#i-wx-*` in the sprite); at night the
+sun becomes the moon. The page re-reads `/api/ambient/weather` every 10 minutes
+while the slideshow shows. With the clock turned off, the forecast still shows.
+
 ### The page (`static/index.html`, `_amb*`)
 
 Two stacked layers crossfade over 2 s, each photo drifting slowly (Ken Burns;

@@ -326,10 +326,10 @@ Notes:
 
 ### The idle slideshow
 
-**Automatic.** When nothing is playing, the TV shows photos that refresh themselves once a day: backdrops of what's in your library, the photo of the day, seasonal landscapes and space. Nothing to upload or set up; it needs Chrome or Edge on the host (the same as the TV UI) and an internet connection for anything but your library's backdrops.
+**Automatic.** When nothing is playing, the TV shows photos that refresh themselves once a day: backdrops of what's in your library, the photo of the day, seasonal landscapes and space. A clock sits in the corner, with the day's weather under it once you've set your city. Nothing to upload or set up; it needs Chrome or Edge on the host (the same as the TV UI) and an internet connection for anything but your library's backdrops.
 
 **By hand, if you want it:** in **Admin → Background**,
-- type your **city** to add *My city this season*: photos taken near you at this time of year (and the right hemisphere's seasons for the nature photos);
+- type your **city** for the weather under the clock (°F or °C picked from your country) and the right hemisphere's seasons; tick *My city this season* too for photos taken near you at this time of year;
 - untick themes you don't want, change how long each photo stays, turn the clock off;
 - **Review photos** and click any you never want to see again;
 - or switch the **Idle Screen** to **Video** (your own looping video in VLC) or **Nothing**.

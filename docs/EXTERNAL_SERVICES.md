@@ -49,7 +49,7 @@ Ordered by how much damage a loss does.
 | **Tailscale** | Reaching the box away from home | Free plan | No remote access | Yes: any other VPN into the LAN |
 | **Wikimedia Commons** | Idle slideshow: city, nature, space, picture of the day | Free, no key (descriptive User-Agent required) | Those themes stop getting new photos | Yes: the cached photos keep showing; other themes carry on |
 | **Bing photo of the day** | Idle slideshow: photo of the day | Free, no key, **unofficial** endpoint | Bing's half of that theme stops | Yes: Commons' picture of the day is the other half |
-| **Open-Meteo geocoding** | Idle slideshow: the admin's city search | Free, no key (non-commercial) | A new city can't be looked up | Yes: the chosen city's coordinates are stored |
+| **Open-Meteo** (geocoding + forecast) | Idle slideshow: the admin's city search, the weather under the clock | Free, no key (non-commercial) | A new city can't be looked up; the forecast disappears after 6 h | Yes: the city's coordinates are stored; the slideshow runs without a forecast |
 | **Pexels** (optional) | Idle slideshow: more city photos | Free key, optional | Commons alone serves the city theme | Yes: it is only ever an addition |
 
 ---
@@ -329,6 +329,10 @@ the artwork cache) needs no internet at all.
   years. Could vanish without notice; Commons' picture of the day covers the theme then.
 - *Open-Meteo geocoding*: `geocoding-api.open-meteo.com/v1/search`, keyless, free for
   non-commercial use. Asked once per city the admin picks, never per refresh.
+- *Open-Meteo forecast* (20.29.0): `api.open-meteo.com/v1/forecast` (current
+  temperature / condition / day-night, today's high / low / rain chance), keyless.
+  At most one request per 20 minutes per box (`_ambient_weather`), about 72 a day,
+  far under the free limit (10,000 a day).
 - *Pexels*: free key (200 requests/hour, 20,000/month), search filtered to landscape.
   Their guidelines ask for a link to Pexels and the photographer's credit; the credit
   line carries "Photo by X on Pexels". Optional, and only ever adds to Commons.

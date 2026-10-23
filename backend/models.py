@@ -610,6 +610,8 @@ class IdleScreenReq(BaseModel):
     themes: Optional[list[str]] = None         # slideshow.THEME_IDS
     interval: Optional[int] = None             # seconds per photo, one of slideshow.INTERVALS
     clock: Optional[bool] = None
+    weather: Optional[bool] = None             # the forecast under the clock (needs a city)
+    units: Optional[str] = None                # "auto" | "f" | "c"
     city: Optional[dict] = None                # {name, admin1, country, country_code, lat, lon}
     clear_city: bool = False
 

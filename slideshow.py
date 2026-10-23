@@ -402,6 +402,79 @@ def library_photos(rows: list, img_base: str) -> list:
     return out
 
 
+# ── Weather (Open-Meteo, no key) ──────────────────────────────────────────────
+
+# Where people read °F. Everywhere else reads °C.
+_FAHRENHEIT = {"US", "PR", "GU", "VI", "AS", "MP", "UM", "BS", "BZ", "KY", "PW", "FM", "MH", "LR"}
+
+
+def temp_unit(setting: str, country_code: str) -> str:
+    """"F" or "C". `setting` is the admin's "auto" | "f" | "c"."""
+    if setting in ("f", "c"):
+        return setting.upper()
+    return "F" if (country_code or "").upper() in _FAHRENHEIT else "C"
+
+
+def weather_url(lat: float, lon: float, unit: str) -> str:
+    """Now (temperature, condition, day or night) and today (high, low, the
+    likeliest chance of rain), in the city's own time zone."""
+    return "https://api.open-meteo.com/v1/forecast?" + urlencode({
+        "latitude": f"{lat:.4f}", "longitude": f"{lon:.4f}",
+        "current": "temperature_2m,weather_code,is_day",
+        "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+        "timezone": "auto", "forecast_days": 1,
+        "temperature_unit": "fahrenheit" if unit == "F" else "celsius"})
+
+
+# WMO weather interpretation codes → (label, icon). The icon names are the
+# `wx-*` symbols in static/index.html's sprite.
+_WMO = {
+    0: ("Clear", "sun"), 1: ("Mostly clear", "sun"), 2: ("Partly cloudy", "partly"),
+    3: ("Cloudy", "cloud"), 45: ("Fog", "fog"), 48: ("Freezing fog", "fog"),
+    51: ("Light drizzle", "rain"), 53: ("Drizzle", "rain"), 55: ("Heavy drizzle", "rain"),
+    56: ("Freezing drizzle", "rain"), 57: ("Freezing drizzle", "rain"),
+    61: ("Light rain", "rain"), 63: ("Rain", "rain"), 65: ("Heavy rain", "rain"),
+    66: ("Freezing rain", "rain"), 67: ("Freezing rain", "rain"),
+    71: ("Light snow", "snow"), 73: ("Snow", "snow"), 75: ("Heavy snow", "snow"),
+    77: ("Snow grains", "snow"), 80: ("Showers", "rain"), 81: ("Showers", "rain"),
+    82: ("Heavy showers", "rain"), 85: ("Snow showers", "snow"), 86: ("Snow showers", "snow"),
+    95: ("Thunderstorm", "storm"), 96: ("Thunderstorm, hail", "storm"),
+    99: ("Thunderstorm, hail", "storm"),
+}
+
+
+def condition(code, is_day: bool = True) -> tuple:
+    """(label, icon) for a WMO code. A clear sky by day is "Sunny"; by night the
+    sun becomes the moon and a part-cloudy sky just a cloud."""
+    label, icon = _WMO.get(code if isinstance(code, int) else -1, ("", "cloud"))
+    if not is_day:
+        icon = {"sun": "moon", "partly": "cloud"}.get(icon, icon)
+    elif code == 0:
+        label = "Sunny"
+    return label, icon
+
+
+def parse_weather(js: dict, unit: str) -> Optional[dict]:
+    """`{temp, unit, label, icon, hi, lo, rain}`, rounded for a TV, or None
+    when the answer lacks the current temperature. A missing daily value is
+    None (the page leaves it out), never a made-up 0."""
+    cur = (js or {}).get("current") or {}
+    daily = (js or {}).get("daily") or {}
+    t = cur.get("temperature_2m")
+    if not isinstance(t, (int, float)):
+        return None
+
+    def first(k):
+        v = daily.get(k) or []
+        return round(v[0]) if v and isinstance(v[0], (int, float)) else None
+
+    code = cur.get("weather_code")
+    label, icon = condition(code, bool(cur.get("is_day", 1)))
+    return {"temp": round(t), "unit": unit, "label": label, "icon": icon,
+            "hi": first("temperature_2m_max"), "lo": first("temperature_2m_min"),
+            "rain": first("precipitation_probability_max")}
+
+
 # ── Choosing ──────────────────────────────────────────────────────────────────
 
 def pick_city(photos: list, today: date, seas: str, cap: int = PER_THEME) -> list:

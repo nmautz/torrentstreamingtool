@@ -22335,8 +22335,10 @@ def _idle_cfg(lib: dict) -> dict:
     interval = raw.get("interval")
     if interval not in slideshow.INTERVALS:
         interval = slideshow.DEFAULT_INTERVAL
+    units = raw.get("units") if raw.get("units") in ("auto", "f", "c") else "auto"
     return {"mode": mode, "themes": themes, "city": city, "interval": interval,
             "clock": bool(raw.get("clock", True)),
+            "weather": bool(raw.get("weather", True)), "units": units,
             "hidden": [h for h in (raw.get("hidden") or []) if isinstance(h, str)]}
 
 
@@ -22684,7 +22686,57 @@ async def _ambient_pools(lib: dict, cfg: dict) -> dict:
     return pools
 
 
+# ── Weather under the clock ──
+# Open-Meteo's forecast for the admin's city (no key). One fetch serves every
+# kiosk for 20 minutes; when Open-Meteo can't be reached, the last answer is
+# shown for up to 6 hours rather than nothing, then nothing.
+_WX_TTL = 20 * 60
+_WX_STALE = 6 * 3600
+_AMBIENT_WX: dict = {"key": None, "at": 0.0, "data": None, "tried": 0.0}
+_AMBIENT_WX_LOCK: Optional[asyncio.Lock] = None
+
+
+async def _ambient_weather(cfg: dict) -> Optional[dict]:
+    global _AMBIENT_WX_LOCK
+    city = cfg["city"]
+    if not city or not cfg["weather"]:
+        return None
+    unit = slideshow.temp_unit(cfg["units"], city.get("country_code", ""))
+    key = (city["lat"], city["lon"], unit)
+    if _AMBIENT_WX_LOCK is None:
+        _AMBIENT_WX_LOCK = asyncio.Lock()
+    async with _AMBIENT_WX_LOCK:
+        wx, now = _AMBIENT_WX, time.time()
+        same = wx["key"] == key
+        if same and wx["data"] and now - wx["at"] < _WX_TTL:
+            return wx["data"]
+        # A failed fetch is not retried for 5 minutes (every kiosk poll would).
+        if not (same and now - wx["tried"] < 300):
+            wx["tried"] = now
+            try:
+                async with _http_client(timeout=10.0,
+                                        headers={"User-Agent": slideshow.USER_AGENT}) as c:
+                    r = await c.get(slideshow.weather_url(float(city["lat"]), float(city["lon"]), unit))
+                    r.raise_for_status()
+                    data = slideshow.parse_weather(r.json(), unit)
+                if data:
+                    wx.update(key=key, at=now, data=data)
+                    return data
+            except Exception as e:
+                log.info("Slideshow: weather fetch failed (%s)", e)
+        if same and wx["data"] and now - wx["at"] < _WX_STALE:
+            return wx["data"]
+        return None
+
+
 # ── Routes ──
+
+@app.get("/api/ambient/weather")
+async def ambient_weather() -> JSONResponse:
+    """The forecast under the slideshow's clock: `{weather: {temp, unit, label,
+    icon, hi, lo, rain} | null}`. Null with no city set or the weather turned off."""
+    return JSONResponse({"weather": await _ambient_weather(_idle_cfg(await get_library()))})
+
 
 @app.get("/api/ambient/playlist")
 async def ambient_playlist() -> JSONResponse:
@@ -22698,7 +22750,8 @@ async def ambient_playlist() -> JSONResponse:
                             slideshow.day_seed(datetime.now().date()))
     return JSONResponse({
         "photos": [{k: p.get(k, "") for k in ("id", "src", "title", "credit", "theme")} for p in pl],
-        "interval": cfg["interval"], "clock": cfg["clock"], "rev": _AMBIENT_REV,
+        "interval": cfg["interval"], "clock": cfg["clock"],
+        "weather": bool(cfg["weather"] and cfg["city"]), "rev": _AMBIENT_REV,
     })
 
 
@@ -22752,6 +22805,7 @@ async def admin_get_idle_screen(request: Request) -> JSONResponse:
         "intervals": list(slideshow.INTERVALS),
         "season": slideshow.season(today, (cfg["city"] or {}).get("lat")),
         "pexels_key": bool(settings.pexels_api_key),
+        "unit": slideshow.temp_unit(cfg["units"], (cfg["city"] or {}).get("country_code", "")),
         "tv_ui": bool(settings.tv_ui),
         "on_screen": _ambient_visible(),
         "status": _ambient_status(await _ambient_manifest(), cfg, lib),
@@ -22765,6 +22819,8 @@ async def admin_set_idle_screen(request: Request, req: IdleScreenReq) -> JSONRes
         raise HTTPException(400, "mode must be slideshow, video or off.")
     if req.interval is not None and req.interval not in slideshow.INTERVALS:
         raise HTTPException(400, "Unsupported interval.")
+    if req.units is not None and req.units not in ("auto", "f", "c"):
+        raise HTTPException(400, "units must be auto, f or c.")
     city = None
     if req.city is not None:
         try:
@@ -22791,11 +22847,15 @@ async def admin_set_idle_screen(request: Request, req: IdleScreenReq) -> JSONRes
             raw["interval"] = req.interval
         if req.clock is not None:
             raw["clock"] = bool(req.clock)
+        if req.weather is not None:
+            raw["weather"] = bool(req.weather)
+        if req.units is not None:
+            raw["units"] = req.units
+        # A city is for the weather and the seasons as much as for its photo
+        # theme, so setting one does not tick the theme.
         if req.clear_city:
             raw.pop("city", None)
         elif city:
-            if not prev["city"] and "city" not in raw["themes"]:
-                raw["themes"].append("city")   # setting a city is asking for its photos
             raw["city"] = city
         if raw["mode"] == "video":
             s.setdefault("background_video", {})["enabled"] = True
@@ -22816,7 +22876,8 @@ async def admin_set_idle_screen(request: Request, req: IdleScreenReq) -> JSONRes
     global _AMBIENT_REV
     _AMBIENT_REV += 1                     # interval / clock / themes: the kiosk re-reads
     await broadcast("state", state_snapshot())
-    return JSONResponse({"ok": True, **{k: new[k] for k in ("mode", "themes", "city", "interval", "clock")}})
+    return JSONResponse({"ok": True, **{k: new[k] for k in
+                                        ("mode", "themes", "city", "interval", "clock", "weather", "units")}})
 
 
 @app.get("/api/admin/idle-screen/geocode")

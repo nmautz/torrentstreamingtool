@@ -1001,6 +1001,12 @@
   "_AMBIENT_SHOW_FAILED_AT": {
    "kind": "value"
   },
+  "_AMBIENT_WX": {
+   "kind": "value"
+  },
+  "_AMBIENT_WX_LOCK": {
+   "kind": "value"
+  },
   "_ANIME_MAP_RETRY_BACKOFF": {
    "kind": "value"
   },
@@ -1670,6 +1676,12 @@
   "_WHISPER_MODEL_SIZES": {
    "kind": "value"
   },
+  "_WX_STALE": {
+   "kind": "value"
+  },
+  "_WX_TTL": {
+   "kind": "value"
+  },
   "_YEAR_RE": {
    "kind": "value"
   },
@@ -1859,6 +1871,12 @@
   "_ambient_visible": {
    "kind": "def",
    "params": []
+  },
+  "_ambient_weather": {
+   "kind": "async def",
+   "params": [
+    "cfg:POSITIONAL_OR_KEYWORD"
+   ]
   },
   "_ambient_write_manifest": {
    "kind": "def",
@@ -8264,6 +8282,10 @@
    "kind": "async def",
    "params": []
   },
+  "ambient_weather": {
+   "kind": "async def",
+   "params": []
+  },
   "analyzer": {
    "kind": "module analyzer"
   },
@@ -10182,7 +10204,7 @@
    "kind": "module zipfile"
   }
  },
- "openapi_sha256": "746ddfbbe09122917923af5a0eed3aac0411421b873891ba023cfac2a7e8b74e",
+ "openapi_sha256": "1f6e0e59c338b8d57c93d73ad6118cc8160c4e0dd083cab55cb3b242177e2f62",
  "routes": [
   {
    "endpoint": "openapi",
@@ -12372,6 +12394,26 @@
     "request": "request"
    },
    "path": "/api/stream/save-to-library",
+   "response_class": "JSONResponse",
+   "status_code": null,
+   "type": "APIRoute"
+  },
+  {
+   "endpoint": "ambient_weather",
+   "include_in_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "name": "ambient_weather",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [],
+    "request": null
+   },
+   "path": "/api/ambient/weather",
    "response_class": "JSONResponse",
    "status_code": null,
    "type": "APIRoute"

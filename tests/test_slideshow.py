@@ -197,6 +197,30 @@ got = ss.library_photos([("a", "Dune (2021)", "/abc.jpg"), ("b", "No art", ""),
 eq("library goes through the artwork proxy", [p["src"] for p in got], ["/api/metadata/img/original/abc.jpg"])
 eq("library credits TMDb", got[0]["credit"], "Image: TMDb")
 
+# ── weather ──────────────────────────────────────────────────────────────────
+eq("auto: the US reads °F", ss.temp_unit("auto", "us"), "F")
+eq("auto: Canada reads °C", ss.temp_unit("auto", "CA"), "C")
+eq("auto with no country is °C", ss.temp_unit("auto", ""), "C")
+eq("the admin's choice wins", (ss.temp_unit("c", "US"), ss.temp_unit("f", "DE")), ("C", "F"))
+eq("the url asks for °F", "temperature_unit=fahrenheit" in ss.weather_url(47.6, -122.3, "F"), True)
+eq("the url asks for °C", "temperature_unit=celsius" in ss.weather_url(47.6, -122.3, "C"), True)
+eq("the url is in the city's time zone", "timezone=auto" in ss.weather_url(47.6, -122.3, "C"), True)
+wjs = {"current": {"time": "2026-10-22T17:45", "temperature_2m": 52.8, "weather_code": 3, "is_day": 1},
+       "daily": {"time": ["2026-10-22"], "weather_code": [3], "temperature_2m_max": [56.7],
+                 "temperature_2m_min": [42.1], "precipitation_probability_max": [2]}}
+eq("a real Seattle answer", ss.parse_weather(wjs, "F"),
+   {"temp": 53, "unit": "F", "label": "Cloudy", "icon": "cloud", "hi": 57, "lo": 42, "rain": 2})
+eq("no current temperature, no weather", ss.parse_weather({"daily": wjs["daily"]}, "F"), None)
+eq("a missing daily value is None, not 0",
+   ss.parse_weather({"current": {"temperature_2m": 1.4, "weather_code": 0}}, "C")["hi"], None)
+eq("clear by day is sunny", ss.condition(0, True), ("Sunny", "sun"))
+eq("clear by night is the moon", ss.condition(0, False), ("Clear", "moon"))
+eq("part cloud by night is a cloud", ss.condition(2, False), ("Partly cloudy", "cloud"))
+eq("showers are rain", ss.condition(81)[1], "rain")
+eq("snow showers are snow", ss.condition(85)[1], "snow")
+eq("hail is a storm", ss.condition(99), ("Thunderstorm, hail", "storm"))
+eq("an unknown code is a plain cloud", ss.condition(42), ("", "cloud"))
+
 # ── choosing ─────────────────────────────────────────────────────────────────
 
 
