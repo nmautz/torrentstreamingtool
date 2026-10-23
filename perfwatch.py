@@ -27,12 +27,13 @@ SAMPLES_PER_ROUTE = 600  # per summary period; enough for a stable p95
 # Route templates (FastAPI's `route.path`) by kind. A rule ending in "/" is a
 # prefix; any other rule matches itself and anything under it.
 _MEDIA = ("/api/library/offline-cache/", "/StreamLinkBundles/", "/api/library/ondemand/",
-          "/api/metadata/img/", "/api/library/clip/", "(static)")
+          "/api/metadata/img/", "/api/ambient/img/", "/api/library/clip/", "(static)")
 _STREAM = ("/api/events",)
 _UPLOAD = ("/api/diag/client-log",)
 # Waits on someone else's server (Jackett's indexers, TMDb, OpenSubtitles): the
 # box can't make those faster, so they are reported, not judged.
 _EXTERNAL = ("/api/search", "/api/subtitles/search", "/api/library/{item_id}/subtitles/search",
+             "/api/admin/idle-screen/geocode",
              "/api/library/{item_id}/metadata/search", "/api/tmdb/search",
              "/api/admin/indexers/{indexer_id}/test", "/api/admin/indexers/test-all")
 # A phone downloading a bundle: a background wait, timed end to end elsewhere.

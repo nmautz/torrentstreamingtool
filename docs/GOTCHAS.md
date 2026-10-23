@@ -3950,6 +3950,51 @@ The host display is contested by four surfaces: fullscreen VLC (playback), the i
 - The dashboard kiosk uses its **own Chrome profile dir** (`.tvui_chrome_profile`). Sharing `.tv_chrome_profile` would (a) merge it into the YouTube kiosk's browser instance and (b) get it killed by YouTube's Stop, which matches that path in process cmdlines.
 - The Windows focus code finds the kiosk by **window title marker** (`_TVUI_WINDOW_MARKER` = "StreamLink TV Dashboard", set via `document.title` when `?tv=1`). The markers are substring matches — neither marker may contain the other ("StreamLink TV Player" is the YouTube one), and the frontend must never retitle the page in TV mode.
 
+### The idle slideshow is a layer of the kiosk, and `ambient_active` alone can be stale (20.28.0)
+
+The slideshow is not a fourth screen owner. It is the `?tv=1` kiosk with a layer
+over its grid, so `tv_ui_active` stays true while it shows, and that is what keeps
+`vlc_focus_and_fullscreen` and `background_video_loop` away. Two things follow:
+
+- **Read it through `_ambient_visible()`, never `state.ambient_active`.** Playback
+  takes the screen from the kiosk (`vlc("in_play")`, `youtube_play`) by clearing
+  `tv_ui_active`; a path that forgets `ambient_active` leaves it true under a film.
+  The state snapshot's `ambient` is `_ambient_visible()` (both flags, nothing
+  playing), so a stale flag can never draw photos over a film. The release sites
+  clear it too, but don't rely on that.
+- **Every "show the UI" call lifts it.** `_tv_ui_show(reason)` with the kiosk
+  already up used to return at once; it now switches the layer off first. That is
+  why 🏠, a key, ← Back and a play on the TV all wake the grid without knowing the
+  slideshow exists. Only `ambient=True` puts it up, and it is the one call allowed
+  with `TV_UI=0`.
+
+The page swallows the waking press in the **capture** phase. Without that, the
+first arrow press both lifted the slideshow and moved the D-pad focus, and a click
+landed on whatever tile was under the pointer.
+
+### Slideshow photo sources: what was measured (2026-10-22)
+
+- **Wikimedia refuses a generic User-Agent**, on the API and on thumbnails, and
+  thumbnails must be a standard width (1920 is). Every slideshow request sends
+  `slideshow.USER_AGENT`.
+- **Commons search is effectively alphabetical** without `gsrsort=random`: every
+  refresh would show the same A-to-C slice of a category.
+- **A radius search alone is junk** (flags, an office lobby), and **Quality Images
+  is a technical bar, not a scenic one**: a third of Seattle's were restaurant
+  interiors by one prolific photographer. The city theme asks for Quality Images
+  plus scenery words, then tops up with the season's words, and `scenic()` drops
+  restaurant/shop/interior titles. `incategory:` together with an `OR` list
+  returns nothing at all.
+- **"fall" is not autumn**: it found a bike race called "Fall Freeride" (and every
+  waterfall). The autumn terms are `autumn`, `foliage`, `"fall colors"`.
+- **One shoot floods a theme** ("Fall 2007 023", "024", "026"): `diverse()` keeps
+  two per caption-without-digits.
+- **NASA's APOD API answered every date with the NASA logo** and `DEMO_KEY` now
+  allows 10 requests an hour, so it was dropped. Every downloaded photo is checked
+  by its own header (`image_size`, `shape_ok`), which is what would catch a source
+  doing that again.
+- **Don't geolocate the box by IP**: it is behind a VPN and would get the exit city.
+
 ### "Use My Computer" + TV UI: minimizing VLC reveals the kiosk, and a timed pause must not hard-expire under a busy desktop
 
 Two traps found in 10.10.0, both presenting as "I paused window control but the web UI keeps taking the screen":

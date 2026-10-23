@@ -48,6 +48,9 @@
   "AI_SUBTITLES_RETIRED": {
    "kind": "value"
   },
+  "AMBIENT_DIR": {
+   "kind": "value"
+  },
   "ANALYSIS_CONCURRENCY": {
    "kind": "value"
   },
@@ -389,6 +392,12 @@
    "kind": "class"
   },
   "HostVolumeReq": {
+   "kind": "class"
+  },
+  "IdleScreenHideReq": {
+   "kind": "class"
+  },
+  "IdleScreenReq": {
    "kind": "class"
   },
   "JSONResponse": {
@@ -960,6 +969,36 @@
    "kind": "value"
   },
   "_AIR_REFRESH_SEC": {
+   "kind": "value"
+  },
+  "_AMBIENT_FORCE": {
+   "kind": "value"
+  },
+  "_AMBIENT_KICK": {
+   "kind": "value"
+  },
+  "_AMBIENT_MANIFEST": {
+   "kind": "value"
+  },
+  "_AMBIENT_MAX_BYTES": {
+   "kind": "value"
+  },
+  "_AMBIENT_MEM": {
+   "kind": "value"
+  },
+  "_AMBIENT_REFRESH_AFTER": {
+   "kind": "value"
+  },
+  "_AMBIENT_RETRY_AFTER": {
+   "kind": "value"
+  },
+  "_AMBIENT_REV": {
+   "kind": "value"
+  },
+  "_AMBIENT_RUNNING": {
+   "kind": "value"
+  },
+  "_AMBIENT_SHOW_FAILED_AT": {
    "kind": "value"
   },
   "_ANIME_MAP_RETRY_BACKOFF": {
@@ -1710,6 +1749,121 @@
    "kind": "def",
    "params": [
     "f:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_ambient_candidates": {
+   "kind": "async def",
+   "params": [
+    "c:POSITIONAL_OR_KEYWORD",
+    "theme:POSITIONAL_OR_KEYWORD",
+    "cfg:POSITIONAL_OR_KEYWORD",
+    "today:POSITIONAL_OR_KEYWORD",
+    "seas:POSITIONAL_OR_KEYWORD",
+    "old:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_ambient_download": {
+   "kind": "async def",
+   "params": [
+    "c:POSITIONAL_OR_KEYWORD",
+    "cands:POSITIONAL_OR_KEYWORD",
+    "cap:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_ambient_get": {
+   "kind": "async def",
+   "params": [
+    "c:POSITIONAL_OR_KEYWORD",
+    "url:POSITIONAL_OR_KEYWORD",
+    "headers:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_ambient_idle_tick": {
+   "kind": "async def",
+   "params": []
+  },
+  "_ambient_kick": {
+   "kind": "def",
+   "params": [
+    "force:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_ambient_library_rows": {
+   "kind": "def",
+   "params": [
+    "lib:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_ambient_manifest": {
+   "kind": "async def",
+   "params": []
+  },
+  "_ambient_pools": {
+   "kind": "async def",
+   "params": [
+    "lib:POSITIONAL_OR_KEYWORD",
+    "cfg:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_ambient_prune": {
+   "kind": "def",
+   "params": [
+    "keep:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_ambient_read_manifest": {
+   "kind": "def",
+   "params": []
+  },
+  "_ambient_refresh": {
+   "kind": "async def",
+   "params": [
+    "force:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_ambient_save": {
+   "kind": "async def",
+   "params": [
+    "m:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_ambient_show": {
+   "kind": "async def",
+   "params": [
+    "reason:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_ambient_status": {
+   "kind": "def",
+   "params": [
+    "m:POSITIONAL_OR_KEYWORD",
+    "cfg:POSITIONAL_OR_KEYWORD",
+    "lib:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_ambient_store": {
+   "kind": "def",
+   "params": [
+    "name:POSITIONAL_OR_KEYWORD",
+    "data:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_ambient_theme_sig": {
+   "kind": "def",
+   "params": [
+    "theme:POSITIONAL_OR_KEYWORD",
+    "cfg:POSITIONAL_OR_KEYWORD",
+    "seas:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_ambient_visible": {
+   "kind": "def",
+   "params": []
+  },
+  "_ambient_write_manifest": {
+   "kind": "def",
+   "params": [
+    "m:POSITIONAL_OR_KEYWORD"
    ]
   },
   "_analyzable_files": {
@@ -3339,6 +3493,16 @@
   },
   "_hwdec_probe": {
    "kind": "value"
+  },
+  "_idle_cfg": {
+   "kind": "def",
+   "params": [
+    "lib:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_idle_mode_now": {
+   "kind": "async def",
+   "params": []
   },
   "_imdb_id_for": {
    "kind": "async def",
@@ -6785,7 +6949,8 @@
   "_tv_ui_show": {
    "kind": "async def",
    "params": [
-    "reason:POSITIONAL_OR_KEYWORD"
+    "reason:POSITIONAL_OR_KEYWORD",
+    "ambient:POSITIONAL_OR_KEYWORD"
    ]
   },
   "_tv_wants_device_surface": {
@@ -7433,6 +7598,12 @@
     "request:POSITIONAL_OR_KEYWORD"
    ]
   },
+  "admin_get_idle_screen": {
+   "kind": "async def",
+   "params": [
+    "request:POSITIONAL_OR_KEYWORD"
+   ]
+  },
   "admin_get_indexer_config": {
    "kind": "async def",
    "params": [
@@ -7568,6 +7739,38 @@
    "params": [
     "request:POSITIONAL_OR_KEYWORD",
     "call_next:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "admin_idle_screen_geocode": {
+   "kind": "async def",
+   "params": [
+    "request:POSITIONAL_OR_KEYWORD",
+    "q:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "admin_idle_screen_hide": {
+   "kind": "async def",
+   "params": [
+    "request:POSITIONAL_OR_KEYWORD",
+    "req:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "admin_idle_screen_photos": {
+   "kind": "async def",
+   "params": [
+    "request:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "admin_idle_screen_refresh": {
+   "kind": "async def",
+   "params": [
+    "request:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "admin_idle_screen_show": {
+   "kind": "async def",
+   "params": [
+    "request:POSITIONAL_OR_KEYWORD"
    ]
   },
   "admin_indexer_catalog": {
@@ -7741,6 +7944,13 @@
    "params": [
     "request:POSITIONAL_OR_KEYWORD",
     "body:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "admin_set_idle_screen": {
+   "kind": "async def",
+   "params": [
+    "request:POSITIONAL_OR_KEYWORD",
+    "req:POSITIONAL_OR_KEYWORD"
    ]
   },
   "admin_set_missing_content": {
@@ -8035,6 +8245,24 @@
     "request:POSITIONAL_OR_KEYWORD",
     "file:POSITIONAL_OR_KEYWORD"
    ]
+  },
+  "ambient_image": {
+   "kind": "async def",
+   "params": [
+    "name:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "ambient_playlist": {
+   "kind": "async def",
+   "params": []
+  },
+  "ambient_refresh_loop": {
+   "kind": "async def",
+   "params": []
+  },
+  "ambient_wake": {
+   "kind": "async def",
+   "params": []
   },
   "analyzer": {
    "kind": "module analyzer"
@@ -9431,6 +9659,9 @@
     "req:POSITIONAL_OR_KEYWORD"
    ]
   },
+  "slideshow": {
+   "kind": "module slideshow"
+  },
   "socket": {
    "kind": "module socket"
   },
@@ -9951,7 +10182,7 @@
    "kind": "module zipfile"
   }
  },
- "openapi_sha256": "601a7e113b44ac3ca96a79bd0eca7f67747d24ed9b604441ccf71da3963bce9b",
+ "openapi_sha256": "746ddfbbe09122917923af5a0eed3aac0411421b873891ba023cfac2a7e8b74e",
  "routes": [
   {
    "endpoint": "openapi",
@@ -12141,6 +12372,226 @@
     "request": "request"
    },
    "path": "/api/stream/save-to-library",
+   "response_class": "JSONResponse",
+   "status_code": null,
+   "type": "APIRoute"
+  },
+  {
+   "endpoint": "ambient_playlist",
+   "include_in_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "name": "ambient_playlist",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [],
+    "request": null
+   },
+   "path": "/api/ambient/playlist",
+   "response_class": "JSONResponse",
+   "status_code": null,
+   "type": "APIRoute"
+  },
+  {
+   "endpoint": "ambient_image",
+   "include_in_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "name": "ambient_image",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [
+     [
+      "name",
+      "str"
+     ]
+    ],
+    "query": [],
+    "request": null
+   },
+   "path": "/api/ambient/img/{name}",
+   "response_class": "JSONResponse",
+   "status_code": null,
+   "type": "APIRoute"
+  },
+  {
+   "endpoint": "ambient_wake",
+   "include_in_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "name": "ambient_wake",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [],
+    "request": null
+   },
+   "path": "/api/tv/ambient/wake",
+   "response_class": "JSONResponse",
+   "status_code": null,
+   "type": "APIRoute"
+  },
+  {
+   "endpoint": "admin_get_idle_screen",
+   "include_in_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "name": "admin_get_idle_screen",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [],
+    "request": "request"
+   },
+   "path": "/api/admin/idle-screen",
+   "response_class": "JSONResponse",
+   "status_code": null,
+   "type": "APIRoute"
+  },
+  {
+   "endpoint": "admin_set_idle_screen",
+   "include_in_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "name": "admin_set_idle_screen",
+   "params": {
+    "body": [
+     [
+      "req",
+      "IdleScreenReq"
+     ]
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [],
+    "request": "request"
+   },
+   "path": "/api/admin/idle-screen",
+   "response_class": "JSONResponse",
+   "status_code": null,
+   "type": "APIRoute"
+  },
+  {
+   "endpoint": "admin_idle_screen_geocode",
+   "include_in_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "name": "admin_idle_screen_geocode",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     [
+      "q",
+      "str"
+     ]
+    ],
+    "request": "request"
+   },
+   "path": "/api/admin/idle-screen/geocode",
+   "response_class": "JSONResponse",
+   "status_code": null,
+   "type": "APIRoute"
+  },
+  {
+   "endpoint": "admin_idle_screen_photos",
+   "include_in_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "name": "admin_idle_screen_photos",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [],
+    "request": "request"
+   },
+   "path": "/api/admin/idle-screen/photos",
+   "response_class": "JSONResponse",
+   "status_code": null,
+   "type": "APIRoute"
+  },
+  {
+   "endpoint": "admin_idle_screen_hide",
+   "include_in_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "name": "admin_idle_screen_hide",
+   "params": {
+    "body": [
+     [
+      "req",
+      "IdleScreenHideReq"
+     ]
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [],
+    "request": "request"
+   },
+   "path": "/api/admin/idle-screen/hide",
+   "response_class": "JSONResponse",
+   "status_code": null,
+   "type": "APIRoute"
+  },
+  {
+   "endpoint": "admin_idle_screen_refresh",
+   "include_in_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "name": "admin_idle_screen_refresh",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [],
+    "request": "request"
+   },
+   "path": "/api/admin/idle-screen/refresh",
+   "response_class": "JSONResponse",
+   "status_code": null,
+   "type": "APIRoute"
+  },
+  {
+   "endpoint": "admin_idle_screen_show",
+   "include_in_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "name": "admin_idle_screen_show",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [],
+    "request": "request"
+   },
+   "path": "/api/admin/idle-screen/show",
    "response_class": "JSONResponse",
    "status_code": null,
    "type": "APIRoute"

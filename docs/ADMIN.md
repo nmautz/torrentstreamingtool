@@ -218,17 +218,27 @@ Endpoints (all `_require_admin`):
 
 There is **no one-click bulk purge** — every action is per-row and confirm-gated by design.
 
-### 5. Background Video
+### 5. Background (Idle Screen)
 
-Single-file uploader for an idle background video that plays on the TV in VLC whenever nothing else is. Stored at `.background/<filename>` (the directory is wiped on every upload so only one file ever exists). Settings live under `library.json → settings.background_video` and survive restarts.
+**Idle Screen** picks what the TV shows when nothing plays (`settings.idle_screen.mode`): **Slideshow** (the default; see [REMOTE.md § Idle slideshow](REMOTE.md#idle-slideshow)), **Video** (the uploader below), or **Nothing** (the TV dashboard stays up, or VLC is left idle). Changing it hands the screen over at once: leaving the slideshow lifts it (to the grid for Nothing, to VLC for Video), leaving Video stops the idle video. A note appears when Video is picked with no file uploaded, or when the slideshow runs with the TV UI turned off.
+
+**Slideshow** (shown in Slideshow mode; `GET`/`POST /api/admin/idle-screen`):
+- **Themes** — Your library, Photo of the day, My city this season (needs a city), Seasonal nature, Space. Each row shows its photo count, when it was fetched, and the last error if its source failed. A city theme without a Pexels key says that a key (Updates tab → `PEXELS_API_KEY`) would add more.
+- **Your City** — type a name, **Find** (`/api/admin/idle-screen/geocode`, Open-Meteo, biggest places first with region and population so the right Portland is obvious), pick one. Only its name, region, country and coordinates are stored. Setting a city ticks the city theme. **Remove** clears it.
+- **Each photo** (15 s - 5 min) and **Show the clock**.
+- **Show on TV** puts the slideshow on the TV now (409 while something plays or "Use My Computer" is on). **Preview here** opens `/?ambient=preview` in a new tab. **Fetch new photos** re-fetches every theme now instead of at the daily refresh.
+- **Review photos** — a grid of every photo the slideshow could show. Clicking one hides it (`idle_screen.hidden`, by id, so it stays hidden when its source offers it again); clicking a hidden one brings it back.
+- The status line: when photos were last fetched and how much disk they use (`.ambient_cache/`).
+
+**Idle Background Video** — single-file uploader for an idle background video that plays on the TV in VLC when the idle screen is set to Video. Stored at `.background/<filename>` (the directory is wiped on every upload so only one file ever exists). Settings live under `library.json → settings.background_video` and survive restarts.
 
 UI elements:
 - **Current File** — name + size of the uploaded video, and an `ON SCREEN` chip when `state.background_playing` is true. **Remove** clears the file and the settings entry.
 - **Upload** — multipart POST to `/api/admin/background-video`. Accepts the same `VIDEO_EXTS` as the rest of the app (mp4/mkv/mov/m4v/avi/ts/m2ts/webm/wmv). Progress bar is XHR-driven (fetch has no upload progress API). If bg is currently playing, the new file is hot-swapped immediately.
 - **Background Volume** — 0–200 slider. Independent of the regular playback volume. Capped by `settings.max_volume`. Saved on `change` (release), not `input`, so dragging only POSTs once.
-- **Background Playback** toggle — disables the feature without deleting the file. When toggled off while bg is on screen, VLC is stopped.
+- The old **Background Playback** on/off toggle is the Idle Screen's Video / Nothing choice since 20.28.0 (`POST /api/admin/background-video/enabled` still works and is what `enabled` in the settings means).
 
-Loop mechanics: `background_video_loop` polls every 3 s. If the video file exists, the feature is enabled, `stream_status != "buffering"`, and `vlc_status().state` is anything other than `playing`/`paused`, the loop calls `_play_background_video()`. That helper sets `state.background_playing=True`, snapshots the user's volume into `state.user_volume_before_bg` (on first transition), pushes the bg volume to VLC, then `in_play`s the file. The next user-initiated `vlc("in_play", …)` automatically restores `state.vlc_volume` from the snapshot and flips `background_playing` back to `False` — see the bg-aware branch in the `vlc()` helper.
+Loop mechanics: `background_video_loop` polls every 3 s. In Slideshow mode it hands over to `_ambient_idle_tick` instead (see REMOTE.md). In Video mode, if the video file exists, the feature is enabled, `stream_status != "buffering"`, and `vlc_status().state` is anything other than `playing`/`paused`, the loop calls `_play_background_video()`. That helper sets `state.background_playing=True`, snapshots the user's volume into `state.user_volume_before_bg` (on first transition), pushes the bg volume to VLC, then `in_play`s the file. The next user-initiated `vlc("in_play", …)` automatically restores `state.vlc_volume` from the snapshot and flips `background_playing` back to `False` — see the bg-aware branch in the `vlc()` helper.
 
 ### 6. Profile PINs ([static/admin.html:182](../static/admin.html#L182))
 

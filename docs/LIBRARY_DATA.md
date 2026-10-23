@@ -29,6 +29,16 @@ The only persistent server-side state. Lives at the project root. Accessed via `
       "volume":  50,                    // 0–200, separate from user playback volume
       "enabled": true                   // when false, VLC stays idle on stop
     },
+    "idle_screen": {                    // what the TV shows when nothing plays (20.28.0; docs/REMOTE.md § Idle slideshow)
+      "mode":     "slideshow",          // "slideshow" | "video" | "off". Absent: "video" if a background video exists
+                                        //   (or "off" if it is disabled), else "slideshow"
+      "themes":   ["library", "daily", "city", "nature", "space"],  // absent: all but "city" (+ "city" once a city is set)
+      "city":     {"name": "Seattle", "admin1": "Washington", "country": "United States",
+                   "country_code": "US", "lat": 47.6062, "lon": -122.3321},   // optional; from the admin's city search
+      "interval": 30,                   // seconds per photo: 15 | 30 | 60 | 120 | 300
+      "clock":    true,
+      "hidden":   ["commons:File:X.jpg"]  // photo ids the admin hid (last 2000 kept)
+    },
     "admin_overrides": {
       "indexer_categories": "0",        // overrides .env INDEXER_CATEGORIES at search time
       "tmdb_api_key": "abc123",         // overrides .env TMDB_API_KEY; set/cleared in admin UI

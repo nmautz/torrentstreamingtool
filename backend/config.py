@@ -81,5 +81,10 @@ class Settings(BaseSettings):
     tv_ui: bool = True
     tv_ui_idle_secs: int = 120
 
+    # Optional Pexels API key (free, instant). Only the idle slideshow's "My city
+    # this season" theme uses it, and only to add to what Wikimedia Commons
+    # finds without one. See slideshow.py and docs/REMOTE.md § Idle slideshow.
+    pexels_api_key: str = ""
+
 
 settings = Settings()

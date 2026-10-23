@@ -3,7 +3,8 @@
 How a cheap "Air Fly Mouse"-style wireless remote drives the host TV box —
 both direct playback control (media keys → VLC/YouTube) and the
 **Firestick-style TV UI** (the dashboard itself in a fullscreen kiosk, woken
-by any button, handed back to the idle background video when unused).
+by any button, handed back to the idle screen when unused: the photo slideshow,
+or the background video). See [§ Idle slideshow](#idle-slideshow).
 
 Code: [remote_input.py](../remote_input.py) (global input listener) + three
 areas of `main.py`: the `_remote_should_handle` / `_remote_key_action` pair
@@ -223,6 +224,10 @@ The dashboard itself, opened by the backend in a fullscreen Chrome kiosk at
 **`http://127.0.0.1/?tv=1`**, driven from the couch with the remote's pointer
 and buttons. The host display cycles between three surfaces:
 
+With the idle screen set to the **slideshow** (the default since 20.28.0), "the
+background video" below reads "the slideshow layer of the same kiosk": see
+[§ Idle slideshow](#idle-slideshow).
+
 ```
 idle background video ──any remote button/click──▶ TV UI (dashboard kiosk)
 TV UI ── no input for TV_UI_IDLE_SECS (120 s) ───▶ background video
@@ -403,6 +408,94 @@ Mechanics (`main.py`):
   (`libViewMode="card"`) regardless of the kiosk's stored preference — list
   view's dense rows and action strips are touchscreen chrome.
 - Everything else is the stock dashboard — profiles, search, library.
+
+## Idle slideshow
+
+**What the TV shows when nothing plays**, since 20.28.0, unless the admin picks
+the background video. Most households never upload a video; this needs no
+setup. The admin ticks themes in Admin → Background (and types a city for one
+of them), and the box keeps a rotating set of photos fresh by itself.
+
+`settings.idle_screen.mode` is `slideshow` | `video` | `off` (`_idle_cfg`). A box
+with no mode saved keeps its background video if it has one (or keeps it off, if
+it was disabled) and gets the slideshow otherwise.
+
+### Where it lives: a layer of the TV UI kiosk
+
+The slideshow is not a fourth surface. It is a full-screen layer (`#ambient`)
+over the `?tv=1` grid, shown while `state.ambient_active` is set. So:
+
+- **Every existing screen rule already holds.** `tv_ui_active` stays true while
+  it shows, which is what keeps `vlc_focus_and_fullscreen` and
+  `background_video_loop` off the display.
+- **Waking is instant.** A press only has to lift the layer; the grid is already
+  under it. `_tv_ui_show(reason)` lifts it, so 🏠, ← Back, any key or click, and
+  a play on the TV all do it without knowing the layer exists.
+  `_tv_ui_show(reason, ambient=True)` puts it up.
+- **`ambient_active` alone can be stale.** Playback takes the screen from the
+  kiosk without clearing it, so "is it on the TV" is `_ambient_visible()`
+  (`ambient_active` and `tv_ui_active` and nothing playing). That is what the
+  state snapshot's `ambient` carries and what the page obeys.
+
+| When | What happens |
+|---|---|
+| Idle, kiosk not up (boot, after a VLC film ends, after Stop) | `background_video_loop` → `_ambient_idle_tick` → `_ambient_show`: launches/fronts the kiosk with the layer up. An idle video left on VLC from before the switch is stopped first |
+| Kiosk grid, no input for `TV_UI_IDLE_SECS` | `tv_ui_loop` → `_ambient_show` (the layer goes up; the kiosk keeps the screen) |
+| Any key / click | host hook → `_tv_input_event` → `_tv_ui_show` lifts it. The page swallows the same press in the capture phase (it must not also move the D-pad focus) and POSTs `/api/tv/ambient/wake`, which covers a keyboard or mouse the hook can't see (macOS without Input Monitoring). A bare modifier key and anything in the layer's first 1.5 s are ignored by the page: on Windows `_bring_tvui_to_front` injects an Alt press as it fronts the kiosk, which the hook can tell is injected and the page cannot |
+| ⏻ Power | slideshow ⇄ grid; during playback: stop, then straight to the slideshow |
+| ← Back, 🏠 Home | lift it (Home also stops playback, as before) |
+| Kiosk died under it | `tv_ui_loop` checks `_tvui_kiosk_alive` once a minute while it is up and releases the screen, so the idle loop relaunches it |
+| "Use My Computer" ends | `_ambient_show` directly (not `vlc_focus_and_fullscreen`, which would flash an empty VLC first) |
+
+**With the TV UI off (`TV_UI=0`)** the kiosk is still launched for the
+slideshow (`_tv_ui_show(..., ambient=True)` is the one call allowed then) and
+only ever shows photos: input does not wake it, `/api/tv/ambient/wake` answers
+`ambient: true`, and the page puts the layer back. Playback takes the screen
+from it as usual (VLC, since on-device TV playback needs the TV UI).
+
+**A kiosk that won't launch** (no Chrome/Edge) is not retried every 3 s:
+`_ambient_show` backs off 5 minutes (`_AMBIENT_SHOW_FAILED_AT`).
+
+### The photos
+
+`slideshow.py` (pure, stdlib only, `tests/test_slideshow.py`) holds the sources,
+the parsing, the checks and the order; `_ambient_*` in `main.py` fetch and cache.
+
+| Theme | Source | Key | Notes |
+|---|---|---|---|
+| `library` | TMDb backdrops of library items | — | Not downloaded: shown through `/api/metadata/img/original/…`, which already caches them under TMDb's six-month rule. Admin-only items are left out |
+| `daily` | Bing photo of the day (region from the city's country) + Wikimedia Commons picture of the day | — | Bing's pool grows a day at a time (`merge_dated`); Commons' arrives undated and holds up to half |
+| `city` | Commons near the city: Quality Images + scenery words, 15 → 40 → 80 km; then the season's words; then Featured pictures within 150 km | Pexels (optional) | Ranked by capture month, this month ± 1 first (`pick_city`). A Pexels key adds `"<city> <region> <season>"` results |
+| `nature` | Commons Featured pictures naming the season | — | Season from the date and the city's hemisphere; none in the tropics (\|lat\| < 15) |
+| `space` | Commons Featured / Quality astronomy, Webb telescope images | — | NASA's APOD API was dropped (see docs/EXTERNAL_SERVICES.md) |
+
+- **Refresh:** `ambient_refresh_loop` wakes every 30 min (or on `_ambient_kick`)
+  and re-fetches a theme when its pool is 20 h old or was built for another
+  city / season / market (`_ambient_theme_sig`). A failed theme keeps its old
+  photos and is retried after 2 h. Nothing is fetched unless the slideshow is the
+  idle screen.
+- **Cache:** `.ambient_cache/` (gitignored). Up to 40 photos per theme, about
+  750 KB each (~120 MB for four themes). A file is named by the hash of the
+  photo's id, so a photo is downloaded once; files no pool uses are deleted after
+  each refresh, which is also how a theme switched off loses its photos.
+- **Checked after download:** `image_size` reads the JPEG/PNG header and
+  `shape_ok` wants ≥ 1200 wide, ratio 1.25-2.4. A source that answers with an
+  error page or a logo never reaches the TV.
+- **Order:** `playlist` shuffles each theme by the day (`day_seed`) and deals
+  them round-robin, so the screen mixes themes. Hidden photos
+  (`idle_screen.hidden`, by id) are left out.
+- **Credit:** every photo carries one (author · licence · source), shown on
+  screen. Commons' licences require it, and Pexels' and TMDb's terms do.
+
+### The page (`static/index.html`, `_amb*`)
+
+Two stacked layers crossfade over 2 s, each photo drifting slowly (Ken Burns;
+off under `prefers-reduced-motion`). A clock (optional) top right, the theme,
+caption and credit bottom left. Both shift a few pixels with every photo: an idle
+TV shows them for hours, and a static block of white text burns into an OLED
+panel. The page re-reads `/api/ambient/playlist` when the state's `ambient_rev`
+moves (a refresh landed, a setting or a hidden photo changed) or after an hour.
+`/?ambient=preview` shows the layer in any browser (the admin's Preview).
 
 ## Platform behaviour (Windows first)
 

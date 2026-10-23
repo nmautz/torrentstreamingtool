@@ -84,6 +84,7 @@ import ixwait
 import reltracks
 import srcevict
 import reaper
+import slideshow
 import stt
 import subpack
 import subsearch
@@ -186,6 +187,8 @@ from backend.models import (  # noqa: F401
     AdminSkipDataReq,
     BackgroundVolumeReq,
     BackgroundEnabledReq,
+    IdleScreenReq,
+    IdleScreenHideReq,
     ProfileSimpleUiReq,
 )
 from backend.resume import (  # noqa: F401
@@ -392,6 +395,16 @@ ENV_KEY_FEATURES: list[dict] = [
         "attr": "tmdb_api_key",
         "label": "Episode metadata",
         "description": "Optional TMDb v3 API key for backdrops/posters/episode titles.",
+        "required": False,
+        "secret": True,
+    },
+    {
+        "key": "PEXELS_API_KEY",
+        "attr": "pexels_api_key",
+        "label": "Slideshow city photos",
+        "description": "Optional free Pexels API key (pexels.com/api). Adds Pexels photos to the "
+                       "idle slideshow's \"My city this season\" theme. Without it that theme "
+                       "uses Wikimedia Commons only.",
         "required": False,
         "secret": True,
     },
@@ -959,6 +972,10 @@ def state_snapshot() -> dict:
         # so the dashboard's fullscreen controls render against the same fields
         # whichever surface is playing.
         "tv_local_active": state.tv_local_active,
+        # Idle slideshow: the ?tv=1 kiosk shows it while this is true, and
+        # re-reads its playlist when the rev moves. See _ambient_visible.
+        "ambient": _ambient_visible(),
+        "ambient_rev": _AMBIENT_REV,
         "tv_local_item_id": state.tv_local_item_id,
         "tv_local_file_path": state.tv_local_file_path,
         "tv_local_label": (_LABEL_MEMO.get(state.tv_local_file_path)
@@ -1564,6 +1581,7 @@ async def vlc(command: str, **params) -> None:
             # happen before the play paths' vlc_focus_and_fullscreen() tasks
             # run their first tv_ui_active check.
             state.tv_ui_active = False
+            state.ambient_active = False
             # The on-device surface loses it too — VLC and the kiosk player must
             # never both be sounding. Tell the page to flush its position and
             # close, then release the claim so the remote's keys go back to VLC.
@@ -9040,7 +9058,13 @@ async def background_video_loop() -> None:
             lib = await get_library()
             bg = lib.get("settings", {}).get("background_video") or {}
             state.background_video_path = bg.get("path", "") or ""
-            if not bg.get("path") or not bg.get("enabled", True):
+            mode = _idle_cfg(lib)["mode"]
+            state.idle_mode = mode
+            if mode == "slideshow":
+                # The idle surface is the kiosk's slideshow, not VLC.
+                await _ambient_idle_tick()
+                continue
+            if mode != "video" or not bg.get("path") or not bg.get("enabled", True):
                 state.background_playing = False
                 continue
             # Don't fight an in-flight stream pipeline about to hand off to VLC
@@ -13609,6 +13633,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     _spawn_bg(_sweep_dead_parts())
     shotscan_task   = asyncio.create_task(shot_scan_loop())
     tvui_task       = asyncio.create_task(tv_ui_loop())
+    ambient_loop    = asyncio.create_task(ambient_refresh_loop())
     rvol_guard      = asyncio.create_task(remote_volume_guard())   # opt-in: no-op unless REMOTE_VOLUME_GUARD=1 (Windows)
 
     # HID wireless remote (air-mouse) input — optional; needs pynput and an
@@ -13650,7 +13675,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     for t in (guard, broadcaster, dl_monitor, dvbackfill, animefill, vlc_tracker, bg_loop,
               jackett_mon, reboot_loop, autoprep_loop, update_loop, dlsched_loop,
               sysmon_loop, cachepurge_loop, subupgrade_loop, od_reaper_loop,
-              maint_loop, evict_loop, devact_loop, bookmark_loop, air_loop, tmdbkeep_loop, shotscan_task, tvui_task, rvol_guard,
+              maint_loop, evict_loop, devact_loop, bookmark_loop, air_loop, tmdbkeep_loop, shotscan_task, tvui_task, ambient_loop, rvol_guard,
               diag_lag, diag_vitals, diag_probe):
         t.cancel()
     if remote_listener is not None:
@@ -22062,13 +22087,29 @@ async def _bring_tvui_to_front() -> None:
         await asyncio.sleep(delay)
 
 
-async def _tv_ui_show(reason: str) -> None:
-    """Put the dashboard kiosk on the screen (launching it if needed)."""
-    if not settings.tv_ui or state.tv_ui_active or window_mgmt_paused():
+async def _tv_ui_show(reason: str, ambient: bool = False) -> None:
+    """Put the dashboard kiosk on the screen (launching it if needed).
+
+    `ambient=True` puts it up showing the idle slideshow over the grid. That is
+    the one use allowed with the TV UI turned off (TV_UI=0): the kiosk then only
+    ever shows photos, and real playback takes the screen from it as usual. With
+    the kiosk already up, a call just switches between the two, so every
+    existing "show the UI" path (🏠, a key, a play on the TV) lifts the
+    slideshow without knowing it exists."""
+    if not (settings.tv_ui or ambient) or window_mgmt_paused():
+        return
+    if state.tv_ui_active:
+        if state.ambient_active != ambient:
+            state.ambient_active = ambient
+            state.tv_input_last = time.time()
+            log.info("TV UI: slideshow %s (%s)", "on" if ambient else "off", reason)
+            await broadcast("state", state_snapshot())
         return
     state.tv_ui_active = True
+    state.ambient_active = ambient
     state.tv_input_last = time.time()
-    log.info("TV UI: showing dashboard kiosk (%s)", reason)
+    log.info("TV UI: showing dashboard kiosk%s (%s)",
+             " with the slideshow" if ambient else "", reason)
     # Silence the idle background video while the UI is up — it keeps its
     # playlist position, background_playing stays True, and the paused state
     # keeps background_video_loop from restarting it underneath the kiosk.
@@ -22080,10 +22121,12 @@ async def _tv_ui_show(reason: str) -> None:
         if not ok:
             log.warning("TV UI: no Chrome/Edge found — cannot show the dashboard kiosk")
             state.tv_ui_active = False
+            state.ambient_active = False
             if state.background_playing:
                 await vlc("pl_forceresume")
             return
     asyncio.create_task(_bring_tvui_to_front())
+    await broadcast("state", state_snapshot())
 
 
 async def _tv_ui_hide(reason: str) -> None:
@@ -22092,6 +22135,7 @@ async def _tv_ui_hide(reason: str) -> None:
     if not state.tv_ui_active:
         return
     state.tv_ui_active = False
+    state.ambient_active = False
     log.info("TV UI: hiding dashboard kiosk (%s)", reason)
     if state.youtube_active:
         asyncio.create_task(_bring_tv_to_front(state.youtube_video_id or ""))
@@ -22142,7 +22186,11 @@ def _tv_input_event(kind: str) -> None:
         return
     if kind in ("move", "media"):
         return
-    if not settings.tv_ui or state.tv_ui_active or window_mgmt_paused():
+    if not settings.tv_ui or window_mgmt_paused():
+        return
+    # The kiosk up showing the grid needs no waking; up showing the slideshow,
+    # a press lifts it (_tv_ui_show switches it off).
+    if state.tv_ui_active and not state.ambient_active:
         return
     if playing:
         return
@@ -22152,9 +22200,12 @@ def _tv_input_event(kind: str) -> None:
 
 
 async def _bg_video_ready() -> bool:
-    """True when the idle background video is configured, enabled, on disk."""
+    """True when the idle background video is the idle screen and is
+    configured, enabled, on disk."""
     try:
         lib = await get_library()
+        if _idle_cfg(lib)["mode"] != "video":
+            return False
         bg = lib.get("settings", {}).get("background_video") or {}
         p = bg.get("path", "")
         return bool(p and bg.get("enabled", True) and Path(p).exists())
@@ -22174,9 +22225,21 @@ async def tv_ui_loop() -> None:
       never idle-hide (a two-hour film gets no keypresses). Reap the surface if
       the page stops beating.
     """
+    ticks = 0
     while True:
         await asyncio.sleep(5)
+        ticks += 1
         try:
+            # A kiosk closed or crashed under the slideshow leaves the screen
+            # claimed and nothing on it (no one presses a key at an idle TV).
+            # Once a minute, release it so background_video_loop relaunches it.
+            if (state.ambient_active and state.tv_ui_active and ticks % 12 == 0
+                    and not await asyncio.to_thread(_tvui_kiosk_alive)):
+                log.warning("TV UI: the slideshow kiosk is gone - releasing the screen")
+                state.tv_ui_active = False
+                state.ambient_active = False
+                await broadcast("state", state_snapshot())
+                continue
             # Checked before the tv_ui_active guard so a surface left claimed by
             # a kiosk that died can always be released.
             if state.tv_local_active:
@@ -22205,11 +22268,639 @@ async def tv_ui_loop() -> None:
             idle_for = time.time() - state.tv_input_last
             if idle_for < max(TV_UI_MIN_IDLE_SECS, settings.tv_ui_idle_secs):
                 continue
+            if await _idle_mode_now() == "slideshow":
+                # The slideshow is the idle surface: it goes up over the grid,
+                # the kiosk keeps the screen.
+                if not state.ambient_active:
+                    await _ambient_show(f"idle {int(idle_for)}s")
+                continue
             if not await _bg_video_ready():
                 continue
             await _tv_ui_hide(f"idle {int(idle_for)}s")
         except Exception:
             pass
+
+
+# ── Idle slideshow (the kiosk's "ambient" layer) ─────────────────────────────
+# The no-setup idle screen (20.28.0): when nothing plays, the TV shows a
+# rotating set of photos instead of looping one background video. It lives IN
+# the TV UI kiosk, as a layer over the grid (`state.ambient_active`), so a press
+# lifts it instantly and every rule that keeps VLC off the kiosk's screen
+# (`tv_ui_active`) already holds. With the TV UI turned off the kiosk is still
+# launched for it and only ever shows photos.
+#
+#   settings.idle_screen.mode   "slideshow" | "video" | "off"  (_idle_cfg)
+#   idle, kiosk not up          background_video_loop → _ambient_idle_tick → _ambient_show
+#   kiosk grid idle N s         tv_ui_loop → _ambient_show
+#   any key / click / 🏠 / ←    _tv_ui_show (switches the layer off)
+#   ⏻                           slideshow ⇄ grid
+#
+# Photos come from slideshow.py's sources, are downloaded into AMBIENT_DIR once
+# a day by ambient_refresh_loop, and are served from there, so the screen keeps
+# working with the internet down. `library` is the exception: it shows TMDb
+# backdrops through the artwork proxy, which already caches them. See
+# docs/REMOTE.md § Idle slideshow.
+
+AMBIENT_DIR = ROOT / ".ambient_cache"
+_AMBIENT_MANIFEST = AMBIENT_DIR / "manifest.json"
+_AMBIENT_REFRESH_AFTER = 20 * 3600     # a theme is re-fetched once a day
+_AMBIENT_RETRY_AFTER = 2 * 3600        # ... and a failed one no sooner than this
+_AMBIENT_MAX_BYTES = 25 * 1024 * 1024  # one photo; anything bigger is not a photo
+_AMBIENT_MEM: Optional[dict] = None    # the manifest, read once
+_AMBIENT_REV = 0                       # bumped when the photos change (the kiosk re-reads)
+_AMBIENT_KICK: Optional[asyncio.Event] = None
+_AMBIENT_FORCE = False
+_AMBIENT_RUNNING = False
+_AMBIENT_SHOW_FAILED_AT = 0.0          # the kiosk would not come up: don't retry every 3 s
+
+
+def _idle_cfg(lib: dict) -> dict:
+    """`settings.idle_screen`, normalised. With no mode saved: a box that has a
+    background video keeps it (or keeps it switched off), every other box gets
+    the slideshow."""
+    s = lib.get("settings", {})
+    raw = s.get("idle_screen") or {}
+    bg = s.get("background_video") or {}
+    mode = raw.get("mode")
+    if mode not in ("slideshow", "video", "off"):
+        if bg.get("path"):
+            mode = "video" if bg.get("enabled", True) else "off"
+        else:
+            mode = "slideshow"
+    city = raw.get("city") if isinstance(raw.get("city"), dict) else None
+    themes = raw.get("themes")
+    if not isinstance(themes, list):
+        themes = list(slideshow.DEFAULT_THEMES) + (["city"] if city else [])
+    themes = [t for t in slideshow.THEME_IDS if t in themes and (t != "city" or city)]
+    interval = raw.get("interval")
+    if interval not in slideshow.INTERVALS:
+        interval = slideshow.DEFAULT_INTERVAL
+    return {"mode": mode, "themes": themes, "city": city, "interval": interval,
+            "clock": bool(raw.get("clock", True)),
+            "hidden": [h for h in (raw.get("hidden") or []) if isinstance(h, str)]}
+
+
+async def _idle_mode_now() -> str:
+    lib = await get_library()
+    state.idle_mode = _idle_cfg(lib)["mode"]
+    return state.idle_mode
+
+
+def _ambient_visible() -> bool:
+    """Is the slideshow on the TV right now. `ambient_active` alone can be left
+    over: the kiosk loses the screen to playback without anyone clearing it."""
+    return bool(state.ambient_active and state.tv_ui_active
+                and not state.tv_local_active and not state.youtube_active
+                and state.stream_status not in ("playing", "buffering"))
+
+
+async def _ambient_show(reason: str) -> bool:
+    """Put the slideshow on the TV. False when something is playing, the
+    desktop is in use, or the kiosk can't be launched."""
+    global _AMBIENT_SHOW_FAILED_AT
+    if window_mgmt_paused() or _real_playback_active() or state.tv_local_active:
+        return False
+    if not state.tv_ui_active and time.time() - _AMBIENT_SHOW_FAILED_AT < 300:
+        return False
+    await _tv_ui_show(reason, ambient=True)
+    if not state.tv_ui_active:
+        _AMBIENT_SHOW_FAILED_AT = time.time()
+        return False
+    return state.ambient_active
+
+
+async def _ambient_idle_tick() -> None:
+    """background_video_loop's turn in slideshow mode, with the kiosk not up:
+    put the slideshow up unless something is on VLC."""
+    if state.stream_status == "buffering":
+        return
+    vs = await vlc_status()
+    if vs is not None and vs.get("state") in ("playing", "paused"):
+        if state.stream_status != "idle":
+            return
+        if state.background_playing:
+            # The idle video from before the switch to the slideshow.
+            state.background_playing = False
+            state.vlc_volume = state.user_volume_before_bg
+            await vlc("pl_stop")
+        else:
+            # Real content the app didn't start (see the video branch of
+            # background_video_loop): leave it on screen, adopt it.
+            await _sync_state_from_vlc()
+            if state.stream_status != "idle":
+                log.info("VLC is playing content while idle - re-adopted it")
+                await broadcast("state", state_snapshot())
+            return
+    await _ambient_show("idle")
+
+
+# ── Photo cache ──
+
+def _ambient_read_manifest() -> dict:
+    try:
+        m = json.loads(_AMBIENT_MANIFEST.read_text(encoding="utf-8"))
+        if isinstance(m, dict) and isinstance(m.get("themes"), dict):
+            return m
+    except Exception:
+        pass
+    return {"themes": {}}
+
+
+def _ambient_write_manifest(m: dict) -> None:
+    AMBIENT_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = _AMBIENT_MANIFEST.with_suffix(".tmp")
+    tmp.write_text(json.dumps(m, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, _AMBIENT_MANIFEST)
+
+
+def _ambient_store(name: str, data: bytes) -> None:
+    AMBIENT_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = AMBIENT_DIR / (name + ".part")
+    tmp.write_bytes(data)
+    os.replace(tmp, AMBIENT_DIR / name)
+
+
+def _ambient_prune(keep: set) -> tuple[int, int]:
+    """Delete photos no pool uses. Returns (files deleted, bytes still kept)."""
+    gone, kept = 0, 0
+    try:
+        entries = list(AMBIENT_DIR.iterdir())
+    except FileNotFoundError:
+        return 0, 0
+    for f in entries:
+        if f.name == _AMBIENT_MANIFEST.name:
+            continue
+        if f.name in keep:
+            try:
+                kept += f.stat().st_size
+            except OSError:
+                pass
+            continue
+        try:
+            f.unlink()
+            gone += 1
+        except OSError:
+            pass
+    return gone, kept
+
+
+async def _ambient_manifest() -> dict:
+    global _AMBIENT_MEM
+    if _AMBIENT_MEM is None:
+        _AMBIENT_MEM = await asyncio.to_thread(_ambient_read_manifest)
+    return _AMBIENT_MEM
+
+
+async def _ambient_save(m: dict) -> None:
+    global _AMBIENT_MEM, _AMBIENT_REV
+    await asyncio.to_thread(_ambient_write_manifest, m)
+    _AMBIENT_MEM = m
+    _AMBIENT_REV += 1
+
+
+def _ambient_kick(force: bool = False) -> None:
+    global _AMBIENT_FORCE
+    if force:
+        _AMBIENT_FORCE = True
+    if _AMBIENT_KICK is not None:
+        _AMBIENT_KICK.set()
+
+
+def _ambient_theme_sig(theme: str, cfg: dict, seas: str) -> str:
+    """What a theme's pool was fetched for; a change re-fetches it at once."""
+    city = cfg["city"] or {}
+    if theme == "city":
+        return slideshow.signature(["city"], city, seas, bool(settings.pexels_api_key))
+    if theme == "nature":
+        return seas
+    if theme == "daily":
+        return slideshow.bing_market(city.get("country_code", ""))
+    return ""
+
+
+async def _ambient_get(c, url: str, headers: Optional[dict] = None):
+    r = await c.get(url, headers=headers)
+    r.raise_for_status()
+    return r.json()
+
+
+async def _ambient_candidates(c, theme: str, cfg: dict, today, seas: str,
+                              old: list) -> list:
+    """Every photo a theme's sources offer today, best first. Raises when a
+    theme got nothing at all, so its old pool is kept."""
+    S = slideshow
+    if theme == "daily":
+        new, errs = [], []
+        for u in S.bing_urls(_ambient_theme_sig("daily", cfg, seas)):
+            try:
+                new += S.parse_bing(await _ambient_get(c, u))
+            except Exception as e:
+                errs.append(e)
+        try:
+            new += S.parse_commons(await _ambient_get(c, S.potd_url(S.recent_days(today, 30))),
+                                   "daily")
+        except Exception as e:
+            errs.append(e)
+            new += [p for p in old if not p.get("date")]
+        if not new and errs:
+            raise errs[0]
+        return S.merge_dated(old, new, cap=S.PER_THEME * 2)
+    if theme == "city":
+        city = cfg["city"]
+        found: list = []
+        if settings.pexels_api_key:
+            try:
+                px = S.parse_pexels(await _ambient_get(
+                    c, S.pexels_url(S.pexels_query(city, seas)),
+                    headers={"Authorization": settings.pexels_api_key}))
+                for p in px:   # the query named the season
+                    p["month"] = today.month if seas else 0
+                found += px
+            except Exception as e:
+                log.info("Slideshow: Pexels search failed (%s) - Commons only", e)
+        ids = {p["id"] for p in found}
+        for q, seasonal in S.city_searches(float(city["lat"]), float(city["lon"]), seas):
+            for p in S.parse_commons(await _ambient_get(c, S.commons_search_url(q)), "city"):
+                if p["id"] not in ids:
+                    ids.add(p["id"])
+                    if seasonal and not p["month"]:
+                        p["month"] = today.month    # its words named the season
+                    found.append(p)
+            in_season = [p for p in found if p["month"] and S.month_gap(p["month"], today.month) <= 1]
+            if len(found) >= S.PER_THEME * 2 and (not seas or len(in_season) >= S.MIN_CITY):
+                break
+        return S.pick_city(found, today, seas, cap=S.PER_THEME * 2)
+    if theme == "nature":
+        return S.diverse(S.parse_commons(
+            await _ambient_get(c, S.commons_search_url(S.nature_search(seas))), "nature"))
+    if theme == "space":
+        out: list = []
+        for q in S.SPACE_SEARCHES:
+            try:
+                out += S.parse_commons(await _ambient_get(c, S.commons_search_url(q)), "space")
+            except Exception:
+                continue        # one collection down is not the theme down
+        if not out:
+            raise RuntimeError("no astronomy photos found")
+        random.shuffle(out)
+        return S.diverse(out)
+    return []
+
+
+async def _ambient_download(c, cands: list, cap: int) -> list:
+    """Keep up to `cap` of `cands`, downloading the ones not already on disk.
+    A photo is kept only if its bytes are a JPEG or PNG of a TV's shape: a
+    source that answers with an error page or a logo is caught here."""
+    kept: list = []
+    for p in cands:
+        if len(kept) >= cap:
+            break
+        name = slideshow.file_name(p["id"])
+        if await asyncio.to_thread((AMBIENT_DIR / name).exists):
+            kept.append({**p, "file": name})
+            continue
+        try:
+            r = await c.get(p["src"])
+            if r.status_code != 200 or len(r.content) > _AMBIENT_MAX_BYTES:
+                continue
+            data = r.content
+        except Exception:
+            continue
+        size = slideshow.image_size(data)
+        if not size or not slideshow.shape_ok(*size, min_w=1200):
+            continue
+        await asyncio.to_thread(_ambient_store, name, data)
+        kept.append({**p, "file": name})
+        await asyncio.sleep(0.2)          # gentle on Wikimedia's thumbnailers
+    return kept
+
+
+async def _ambient_refresh(force: bool = False) -> None:
+    """Re-fetch every ticked theme whose pool is a day old or was built for a
+    different city / season / market. Writes the manifest after each theme, so
+    a first run fills the screen as it goes rather than at the end."""
+    global _AMBIENT_RUNNING
+    if _AMBIENT_RUNNING:
+        return
+    _AMBIENT_RUNNING = True
+    try:
+        cfg = _idle_cfg(await get_library())
+        today = datetime.now().date()
+        seas = slideshow.season(today, (cfg["city"] or {}).get("lat"))
+        m = dict(await _ambient_manifest())
+        themes = dict(m.get("themes") or {})
+        # A theme switched off loses its photos on the next refresh.
+        for t in list(themes):
+            if t not in cfg["themes"]:
+                themes.pop(t)
+        now = time.time()
+        changed = False
+        async with _http_client(timeout=httpx.Timeout(25.0, connect=10.0),
+                                follow_redirects=True,
+                                headers={"User-Agent": slideshow.USER_AGENT}) as c:
+            for theme in ("daily", "nature", "city", "space"):
+                if theme not in cfg["themes"]:
+                    continue
+                pool = themes.get(theme) or {}
+                sig = _ambient_theme_sig(theme, cfg, seas)
+                fresh = (pool.get("sig") == sig
+                         and now - pool.get("fetched_at", 0) < _AMBIENT_REFRESH_AFTER)
+                backing_off = (pool.get("failed_sig") == sig
+                               and now - pool.get("failed_at", 0) < _AMBIENT_RETRY_AFTER)
+                if not force and (fresh or backing_off):
+                    continue
+                old = (pool.get("photos") or []) if pool.get("sig") == sig else []
+                try:
+                    cands = await _ambient_candidates(c, theme, cfg, today, seas, old)
+                    photos = await _ambient_download(c, cands, slideshow.PER_THEME)
+                    if not photos:
+                        raise RuntimeError("no usable photos")
+                    added = len({p["id"] for p in photos} - {p["id"] for p in old})
+                    themes[theme] = {"sig": sig, "fetched_at": now, "photos": photos, "error": ""}
+                    log.info("Slideshow: %s has %d photos (%d new)", theme, len(photos), added)
+                except Exception as e:
+                    msg = slideshow.clean_text(str(e) or type(e).__name__, 200)
+                    # The old photos stay up (a new city's failure keeps the
+                    # last city's) until a fetch for `sig` works.
+                    themes[theme] = {**pool, "sig": pool.get("sig", ""), "failed_sig": sig,
+                                     "failed_at": now, "error": msg}
+                    log.warning("Slideshow: %s refresh failed: %s", theme, msg)
+                m = {**m, "themes": dict(themes), "built_at": now}
+                await _ambient_save(m)
+                changed = True
+        if not changed and set(themes) == set((m.get("themes") or {})):
+            return
+        keep = {p["file"] for t in themes.values() for p in t.get("photos") or [] if p.get("file")}
+        gone, kept = await asyncio.to_thread(_ambient_prune, keep)
+        if gone:
+            log.info("Slideshow: removed %d photos no theme uses (%.0f MB kept)", gone, kept / 1e6)
+        await _ambient_save({**m, "themes": themes, "bytes": kept})
+    finally:
+        _AMBIENT_RUNNING = False
+
+
+async def ambient_refresh_loop() -> None:
+    """Keep the slideshow's photos a day fresh. Only does anything while the
+    slideshow is the idle screen: a box on the background video never calls out."""
+    global _AMBIENT_KICK, _AMBIENT_FORCE
+    _AMBIENT_KICK = asyncio.Event()
+    await asyncio.sleep(20)
+    while True:
+        try:
+            cfg = _idle_cfg(await get_library())
+            if cfg["mode"] == "slideshow" or _AMBIENT_FORCE:
+                force, _AMBIENT_FORCE = _AMBIENT_FORCE, False
+                await _ambient_refresh(force=force)
+        except Exception:
+            log.warning("Slideshow refresh failed", exc_info=True)
+        try:
+            await asyncio.wait_for(_AMBIENT_KICK.wait(), timeout=1800)
+        except asyncio.TimeoutError:
+            pass
+        _AMBIENT_KICK.clear()
+
+
+def _ambient_library_rows(lib: dict) -> list:
+    """(id, name, backdrop) for every item any viewer may see. Admin-only items
+    stay off the shared screen, like everywhere else they are hidden."""
+    rows = []
+    for it in lib.get("items", []):
+        if it.get("admin_only"):
+            continue
+        bp = (it.get("metadata") or {}).get("backdrop_path") or ""
+        if bp:
+            rows.append((it.get("id", ""), _item_display_names(it)[0] or it.get("title", ""), bp))
+    return rows
+
+
+async def _ambient_pools(lib: dict, cfg: dict) -> dict:
+    m = await _ambient_manifest()
+    pools = {}
+    for t, pool in (m.get("themes") or {}).items():
+        pools[t] = [{**p, "src": f"/api/ambient/img/{p['file']}"}
+                    for p in pool.get("photos") or [] if p.get("file")]
+    if "library" in cfg["themes"]:
+        pools["library"] = slideshow.library_photos(_ambient_library_rows(lib), LOCAL_IMG_BASE)
+    return pools
+
+
+# ── Routes ──
+
+@app.get("/api/ambient/playlist")
+async def ambient_playlist() -> JSONResponse:
+    """What the kiosk's slideshow shows, in order. Not gated: it is the TV's
+    screen saver (admin-only items are never in it) and the kiosk has no admin
+    session."""
+    lib = await get_library()
+    cfg = _idle_cfg(lib)
+    pools = await _ambient_pools(lib, cfg)
+    pl = slideshow.playlist(pools, cfg["themes"], cfg["hidden"],
+                            slideshow.day_seed(datetime.now().date()))
+    return JSONResponse({
+        "photos": [{k: p.get(k, "") for k in ("id", "src", "title", "credit", "theme")} for p in pl],
+        "interval": cfg["interval"], "clock": cfg["clock"], "rev": _AMBIENT_REV,
+    })
+
+
+@app.get("/api/ambient/img/{name}")
+async def ambient_image(name: str) -> Response:
+    if not slideshow.FILE_RE.match(name):
+        raise HTTPException(404, "Not found.")
+    path = AMBIENT_DIR / name
+    if not await asyncio.to_thread(path.is_file):
+        raise HTTPException(404, "Not found.")
+    # The name is the photo's id hashed, so it never changes content.
+    return FileResponse(str(path), media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=604800, immutable"})
+
+
+@app.post("/api/tv/ambient/wake")
+async def ambient_wake() -> JSONResponse:
+    """A key or click on the kiosk while the slideshow is up. The host's input
+    hook does the same for the remote; this covers a keyboard or mouse the hook
+    can't see (macOS without Input Monitoring, Linux). With the TV UI off there
+    is no grid to wake to, and the page puts the slideshow back."""
+    if not _ambient_visible():
+        return JSONResponse({"ambient": False})
+    if settings.tv_ui:
+        await _tv_ui_show("kiosk input")
+    return JSONResponse({"ambient": _ambient_visible()})
+
+
+def _ambient_status(m: dict, cfg: dict, lib: dict) -> dict:
+    themes = {}
+    for t in slideshow.THEME_IDS:
+        pool = (m.get("themes") or {}).get(t) or {}
+        themes[t] = {"count": len(pool.get("photos") or []),
+                     "fetched_at": pool.get("fetched_at", 0),
+                     "error": pool.get("error", "")}
+    themes["library"]["count"] = len({r[2] for r in _ambient_library_rows(lib)})
+    return {"themes": themes, "bytes": m.get("bytes", 0), "built_at": m.get("built_at", 0),
+            "refreshing": _AMBIENT_RUNNING}
+
+
+@app.get("/api/admin/idle-screen")
+async def admin_get_idle_screen(request: Request) -> JSONResponse:
+    _require_admin(request)
+    lib = await get_library()
+    cfg = _idle_cfg(lib)
+    today = datetime.now().date()
+    return JSONResponse({
+        **cfg,
+        "hidden": len(cfg["hidden"]),
+        "catalog": list(slideshow.THEMES),
+        "intervals": list(slideshow.INTERVALS),
+        "season": slideshow.season(today, (cfg["city"] or {}).get("lat")),
+        "pexels_key": bool(settings.pexels_api_key),
+        "tv_ui": bool(settings.tv_ui),
+        "on_screen": _ambient_visible(),
+        "status": _ambient_status(await _ambient_manifest(), cfg, lib),
+    })
+
+
+@app.post("/api/admin/idle-screen")
+async def admin_set_idle_screen(request: Request, req: IdleScreenReq) -> JSONResponse:
+    _require_admin(request)
+    if req.mode is not None and req.mode not in ("slideshow", "video", "off"):
+        raise HTTPException(400, "mode must be slideshow, video or off.")
+    if req.interval is not None and req.interval not in slideshow.INTERVALS:
+        raise HTTPException(400, "Unsupported interval.")
+    city = None
+    if req.city is not None:
+        try:
+            city = {"name": str(req.city.get("name") or "")[:80],
+                    "admin1": str(req.city.get("admin1") or "")[:80],
+                    "country": str(req.city.get("country") or "")[:80],
+                    "country_code": str(req.city.get("country_code") or "")[:2].upper(),
+                    "lat": round(float(req.city["lat"]), 4),
+                    "lon": round(float(req.city["lon"]), 4)}
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, "A city needs a name, lat and lon.")
+        if not (-90 <= city["lat"] <= 90 and -180 <= city["lon"] <= 180) or not city["name"]:
+            raise HTTPException(400, "A city needs a name, lat and lon.")
+    async with mutate_library() as lib:
+        prev = _idle_cfg(lib)
+        s = lib.setdefault("settings", {})
+        raw = s.setdefault("idle_screen", {})
+        raw["mode"] = req.mode or prev["mode"]
+        if raw.get("themes") is None:
+            raw["themes"] = prev["themes"]
+        if req.themes is not None:
+            raw["themes"] = [t for t in slideshow.THEME_IDS if t in req.themes]
+        if req.interval is not None:
+            raw["interval"] = req.interval
+        if req.clock is not None:
+            raw["clock"] = bool(req.clock)
+        if req.clear_city:
+            raw.pop("city", None)
+        elif city:
+            if not prev["city"] and "city" not in raw["themes"]:
+                raw["themes"].append("city")   # setting a city is asking for its photos
+            raw["city"] = city
+        if raw["mode"] == "video":
+            s.setdefault("background_video", {})["enabled"] = True
+        new = _idle_cfg(lib)
+    state.idle_mode = new["mode"]
+    # Hand the screen over to the new idle surface.
+    if new["mode"] != "slideshow" and _ambient_visible():
+        if new["mode"] == "off" and settings.tv_ui:
+            await _tv_ui_show("idle screen changed")
+        else:
+            await _tv_ui_hide("idle screen changed")
+    if new["mode"] != "video" and state.background_playing:
+        state.background_playing = False
+        state.vlc_volume = state.user_volume_before_bg
+        await vlc("pl_stop")
+    if new["mode"] == "slideshow":
+        _ambient_kick()
+    global _AMBIENT_REV
+    _AMBIENT_REV += 1                     # interval / clock / themes: the kiosk re-reads
+    await broadcast("state", state_snapshot())
+    return JSONResponse({"ok": True, **{k: new[k] for k in ("mode", "themes", "city", "interval", "clock")}})
+
+
+@app.get("/api/admin/idle-screen/geocode")
+async def admin_idle_screen_geocode(request: Request, q: str = Query(..., min_length=2, max_length=80)) -> JSONResponse:
+    """Places matching what the admin typed, biggest first, from Open-Meteo's
+    geocoder (no key). The admin picks one; only its name and coordinates are
+    stored, so this is asked once per city, never per refresh."""
+    _require_admin(request)
+    try:
+        async with _http_client(timeout=10.0, headers={"User-Agent": slideshow.USER_AGENT}) as c:
+            r = await c.get("https://geocoding-api.open-meteo.com/v1/search",
+                            params={"name": q, "count": 8, "language": "en", "format": "json"})
+            r.raise_for_status()
+            rows = r.json().get("results") or []
+    except Exception as e:
+        raise HTTPException(502, f"City search failed: {e}")
+    return JSONResponse({"results": [{
+        "name": x.get("name", ""), "admin1": x.get("admin1", ""), "country": x.get("country", ""),
+        "country_code": x.get("country_code", ""), "lat": x.get("latitude"),
+        "lon": x.get("longitude"), "population": x.get("population") or 0,
+    } for x in rows if x.get("latitude") is not None]})
+
+
+@app.get("/api/admin/idle-screen/photos")
+async def admin_idle_screen_photos(request: Request) -> JSONResponse:
+    """Every photo the slideshow could show, hidden ones included and marked,
+    for the admin's review grid."""
+    _require_admin(request)
+    lib = await get_library()
+    cfg = _idle_cfg(lib)
+    pools = await _ambient_pools(lib, cfg)
+    hidden = set(cfg["hidden"])
+    out = []
+    for t in cfg["themes"]:
+        for p in pools.get(t) or []:
+            out.append({k: p.get(k, "") for k in ("id", "src", "title", "credit", "theme")}
+                       | {"hidden": p["id"] in hidden})
+    return JSONResponse({"photos": out})
+
+
+@app.post("/api/admin/idle-screen/hide")
+async def admin_idle_screen_hide(request: Request, req: IdleScreenHideReq) -> JSONResponse:
+    """Never show this photo (or show it again). Kept by id, so a hidden photo
+    stays hidden when its source offers it again."""
+    _require_admin(request)
+    pid = req.id.strip()[:300]
+    if not pid:
+        raise HTTPException(400, "id required.")
+    async with mutate_library() as lib:
+        raw = lib.setdefault("settings", {}).setdefault("idle_screen", {})
+        hidden = [h for h in raw.get("hidden") or [] if h != pid]
+        if req.hidden:
+            hidden.append(pid)
+        raw["hidden"] = hidden[-2000:]
+    global _AMBIENT_REV
+    _AMBIENT_REV += 1
+    await broadcast("state", state_snapshot())
+    return JSONResponse({"ok": True, "hidden": req.hidden})
+
+
+@app.post("/api/admin/idle-screen/refresh")
+async def admin_idle_screen_refresh(request: Request) -> JSONResponse:
+    """Fetch every theme again now, instead of when the day is up."""
+    _require_admin(request)
+    _ambient_kick(force=True)
+    return JSONResponse({"ok": True, "running": _AMBIENT_RUNNING})
+
+
+@app.post("/api/admin/idle-screen/show")
+async def admin_idle_screen_show(request: Request) -> JSONResponse:
+    """Put the slideshow on the TV now (to check it from the admin panel)."""
+    _require_admin(request)
+    if await _idle_mode_now() != "slideshow":
+        raise HTTPException(409, "The idle screen is not set to the slideshow.")
+    if window_mgmt_paused():
+        raise HTTPException(409, "Window control is paused (Use My Computer).")
+    if _real_playback_active() or state.tv_local_active:
+        raise HTTPException(409, "Something is playing on the TV.")
+    global _AMBIENT_SHOW_FAILED_AT
+    _AMBIENT_SHOW_FAILED_AT = 0.0
+    ok = await _ambient_show("admin panel")
+    if not ok:
+        raise HTTPException(503, "Couldn't put the kiosk on the screen (no Chrome or Edge?).")
+    return JSONResponse({"ok": True})
 
 
 @app.get("/tv", include_in_schema=False)
@@ -22286,6 +22977,7 @@ async def youtube_play(req: YouTubeReq) -> JSONResponse:
     # own focus loop must not be gated off, and `_bring_tv_to_front` needs the
     # dashboard's claim released).
     state.tv_ui_active = False
+    state.ambient_active = False
     state.active_title = "YouTube"
     state.vlc_time = 0
     state.vlc_duration = 0
@@ -23752,6 +24444,9 @@ async def _remote_key_action(action: str) -> None:
                 if settings.tv_ui:
                     await _tv_ui_show("back key")
                 await stop()
+            elif state.tv_ui_active and state.ambient_active:
+                # The slideshow is up: Back wakes the dashboard, like any key.
+                await _tv_ui_show("back key")
             elif state.tv_ui_active:
                 # Kiosk foreground, nothing playing: navigate back inside the
                 # dashboard. The key was suppressed (Chrome must not
@@ -23773,6 +24468,19 @@ async def _remote_key_action(action: str) -> None:
                      state.tv_ui_active, state.background_playing)
             # Standby toggle between the two idle surfaces — never the OS
             # sleep the key means to Windows (suppressed / neutered while claimed).
+            # With the slideshow as the idle screen the two surfaces are both
+            # the kiosk: slideshow ⇄ grid.
+            if await _idle_mode_now() == "slideshow":
+                if _tv_anything_playing():
+                    await stop()
+                    # Straight to the slideshow. Unlike the idle video, it is
+                    # not VLC, so stop()'s async VLC teardown can't kill it.
+                    await _ambient_show("power key")
+                elif state.tv_ui_active and state.ambient_active:
+                    await _tv_ui_show("power key")
+                elif not await _ambient_show("power key"):
+                    await _tv_ui_show("power key")
+                return
             if _tv_anything_playing():
                 # "Screen off": end playback. background_video_loop brings the
                 # idle video back within ~3 s — starting it here directly would
@@ -27111,14 +27819,20 @@ async def window_control(req: WindowControlReq) -> JSONResponse:
         # VLC alone would just reveal the dashboard instead of the desktop.
         # Best-effort; never blocks the response long.
         state.tv_ui_active = False
+        state.ambient_active = False
         asyncio.create_task(vlc_minimize())
         if platform.system() == "Windows":
             asyncio.create_task(asyncio.to_thread(
                 _minimize_tv_browser_windows, _TVUI_WINDOW_MARKER))
     else:  # resume
         state.window_mgmt_paused_until = 0.0
-        # Bring the background video back to the foreground promptly.
-        asyncio.create_task(vlc_focus_and_fullscreen())
+        # Bring the idle screen back to the foreground promptly: the slideshow
+        # (background_video_loop would put it up within ~3 s anyway, after a
+        # flash of empty VLC), or the background video.
+        if state.idle_mode == "slideshow" and not _real_playback_active():
+            asyncio.create_task(_ambient_show("desktop handed back"))
+        else:
+            asyncio.create_task(vlc_focus_and_fullscreen())
 
     snap = state_snapshot()
     await broadcast("state", snap)

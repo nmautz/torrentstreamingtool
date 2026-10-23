@@ -46,6 +46,7 @@ test:
 	python3 tests/test_storage_volumes.py
 	python3 tests/test_devactivity.py
 	python3 tests/test_bookmarks.py
+	python3 tests/test_slideshow.py
 	python3 tests/test_diagnostics.py
 	python3 tests/test_lib_io_timing.py
 	python3 tests/test_analyzer_fp.py

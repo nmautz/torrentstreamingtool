@@ -604,5 +604,18 @@ class BackgroundVolumeReq(BaseModel):
 class BackgroundEnabledReq(BaseModel):
     enabled: bool
 
+class IdleScreenReq(BaseModel):
+    """POST /api/admin/idle-screen. Every field optional: only what is sent changes."""
+    mode: Optional[str] = None                 # "slideshow" | "video" | "off"
+    themes: Optional[list[str]] = None         # slideshow.THEME_IDS
+    interval: Optional[int] = None             # seconds per photo, one of slideshow.INTERVALS
+    clock: Optional[bool] = None
+    city: Optional[dict] = None                # {name, admin1, country, country_code, lat, lon}
+    clear_city: bool = False
+
+class IdleScreenHideReq(BaseModel):
+    id: str
+    hidden: bool = True
+
 class ProfileSimpleUiReq(BaseModel):
     simple_ui: Optional[bool] = None   # None clears the override (back to the default)

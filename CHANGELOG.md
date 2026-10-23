@@ -1,5 +1,42 @@
 # Changelog
 
+## [20.28.0] — 2026-10-22
+
+### Added
+- **The TV shows a photo slideshow when nothing is playing**, with nothing to set
+  up. It replaces the background video as the default for any box that never
+  uploaded one (a box that has one keeps it). Photos refresh themselves once a
+  day and are kept on the box, so the slideshow still works with the internet
+  down. Themes:
+  - **Your library**: backdrops of the films and shows you have (not
+    admin-only ones).
+  - **Photo of the day**: Bing's daily photo for your region and Wikimedia
+    Commons' picture of the day.
+  - **My city this season**: photos taken near your city at this time of year.
+    Type the city in Admin → Background. A free Pexels key (optional) adds more.
+  - **Seasonal nature**: featured landscape photos of the current season, in
+    your hemisphere.
+  - **Space**: featured astronomy photos and Webb telescope images.
+  Every photo shows who took it and its licence. A clock sits in the corner
+  (optional), and the clock and caption move a little with every photo so an
+  OLED TV doesn't burn them in.
+- **Any button on the remote (or any key or click) wakes the dashboard** from the
+  slideshow instantly, because the slideshow is a layer of the TV dashboard
+  itself. ⏻ switches between the slideshow and the dashboard. After 2 minutes
+  idle the dashboard goes back to the slideshow.
+- **Admin → Background** now starts with **Idle Screen**: Slideshow, Video (the
+  background video, as before) or Nothing. The slideshow card has the themes
+  with their photo counts, a city search, how long each photo stays, the clock,
+  **Show on TV**, **Preview here**, **Fetch new photos**, and **Review photos**,
+  where a click hides a photo for good.
+- With the TV dashboard turned off (`TV_UI=0`) the slideshow still runs, on its
+  own.
+
+### Notes
+- NASA's picture-of-the-day API was tried for the Space theme and dropped: today
+  it answers every date with the NASA logo. The sources, their limits and what
+  happens if one goes away are in docs/EXTERNAL_SERVICES.md.
+
 ## [20.27.1] — 2026-10-22
 
 ### Fixed

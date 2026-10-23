@@ -47,6 +47,10 @@ Ordered by how much damage a loss does.
 | **Mullvad CLI** | VPN check (default mode) | Paid VPN | Downloads refuse to start | Yes: `generic` mode already exists |
 | **Apple / SideStore** | Installing the iOS app | Free Apple ID | App cannot be installed or refreshed | No. The dashboard in a browser still works |
 | **Tailscale** | Reaching the box away from home | Free plan | No remote access | Yes: any other VPN into the LAN |
+| **Wikimedia Commons** | Idle slideshow: city, nature, space, picture of the day | Free, no key (descriptive User-Agent required) | Those themes stop getting new photos | Yes: the cached photos keep showing; other themes carry on |
+| **Bing photo of the day** | Idle slideshow: photo of the day | Free, no key, **unofficial** endpoint | Bing's half of that theme stops | Yes: Commons' picture of the day is the other half |
+| **Open-Meteo geocoding** | Idle slideshow: the admin's city search | Free, no key (non-commercial) | A new city can't be looked up | Yes: the chosen city's coordinates are stored |
+| **Pexels** (optional) | Idle slideshow: more city photos | Free key, optional | Commons alone serves the city theme | Yes: it is only ever an addition |
 
 ---
 
@@ -309,6 +313,34 @@ the loss is the native features (background play, downloads, AirPlay, Siri), not
 that routes to the LAN replaces it; discovery (`discovery.py`) picks Tailscale out by
 subnet and would need the new range added.
 
+**Idle slideshow sources** (20.28.0, `slideshow.py`; checked 2026-10-22). Every one
+goes through `_ambient_candidates` and lands in `.ambient_cache/`, so the slideshow keeps
+showing yesterday's photos when a source is down, and `library` (TMDb backdrops through
+the artwork cache) needs no internet at all.
+- *Wikimedia Commons*: the MediaWiki API (`generator=search` with `nearcoord:` /
+  `incategory:`, `gsrsort=random`) and its thumbnails. Free and keyless, but Wikimedia
+  blocks a generic User-Agent and asks for contact details: we send
+  `slideshow.USER_AGENT`. Thumbnails must be one of the standard widths (1920 is). The
+  licences (mostly CC BY / BY-SA) require the author and licence on screen, which every
+  photo's `credit` carries.
+- *Bing*: `bing.com/HPImageArchive.aspx?format=js`, keyless and **unofficial**. About
+  15 days are reachable at once; the photos are licensed by Bing (Getty etc.) and are
+  shown with their copyright line, for display only, as wallpaper apps have done for
+  years. Could vanish without notice; Commons' picture of the day covers the theme then.
+- *Open-Meteo geocoding*: `geocoding-api.open-meteo.com/v1/search`, keyless, free for
+  non-commercial use. Asked once per city the admin picks, never per refresh.
+- *Pexels*: free key (200 requests/hour, 20,000/month), search filtered to landscape.
+  Their guidelines ask for a link to Pexels and the photographer's credit; the credit
+  line carries "Photo by X on Pexels". Optional, and only ever adds to Commons.
+- *Rejected: NASA APOD API* (`api.nasa.gov/planetary/apod`). On 2026-10-22 every date
+  answered with the NASA logo as its image ("NASA Science"), and the shared `DEMO_KEY`
+  allowed 10 requests an hour. Space uses Commons' astronomy collections instead.
+- *Rejected: The Met and the Art Institute of Chicago* (public-domain art). The Met's
+  search endpoint was retired on 2026-10-01; the Art Institute's API answered with a
+  Cloudflare challenge.
+- *Not used: IP geolocation* for the city. The box sits behind a VPN, so it would name
+  the VPN's exit city. The admin types the city instead.
+
 ---
 
 ## Before adding a new outside dependency
@@ -330,3 +362,6 @@ subnet and would need the new range added.
 - [OpenSubtitles help: about the API](https://opensubtitles.tawk.help/article/about-the-api) (5 / 20 downloads per day)
 - [TVmaze: using the API commercially](https://www.tvmaze.com/threads/6552/using-posters-and-data-from-tvmaze-api-on-a-commercial-website?page=1)
 - [TheTVDB developer FAQ](https://support.thetvdb.com/kb/faq.php?cid=12)
+- [Wikimedia User-Agent policy](https://foundation.wikimedia.org/wiki/Policy:Wikimedia_Foundation_User-Agent_Policy) (checked 2026-10-22)
+- [Pexels API documentation](https://www.pexels.com/api/documentation/) (checked 2026-10-22: 200/hour, 20,000/month, attribution)
+- [Open-Meteo geocoding API](https://open-meteo.com/en/docs/geocoding-api) (checked 2026-10-22)

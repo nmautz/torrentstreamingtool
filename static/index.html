@@ -689,6 +689,56 @@
       -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
     #tvLoadingSub { color: #6b7280; font-size: .8rem; font-weight: 700;
       text-transform: uppercase; letter-spacing: .18em; }
+    /* Idle slideshow (the ?tv=1 kiosk's screen saver; ?ambient=preview in any
+       browser). Two stacked layers crossfade, and each photo drifts slowly
+       (Ken Burns) so a still never looks frozen. The clock and caption shift
+       a little with every photo: an idle TV shows them for hours, and a static
+       block of white text is how an OLED panel gets burn-in. Above everything,
+       #tvLoading included: it is only shown while nothing plays. */
+    #ambient { display: none; position: fixed; inset: 0; z-index: 10010;
+      background: #000; overflow: hidden; cursor: none; }
+    #ambient.show { display: block; }
+    #ambient .amb-layer { position: absolute; inset: -5%; opacity: 0;
+      background: #000 center / cover no-repeat;
+      transition: opacity 2s linear; will-change: opacity, transform; }
+    #ambient .amb-layer.on { opacity: 1; }
+    #ambient .amb-layer.drift-a { animation: ambDriftA var(--amb-dur, 34s) linear forwards; }
+    #ambient .amb-layer.drift-b { animation: ambDriftB var(--amb-dur, 34s) linear forwards; }
+    #ambient .amb-layer.drift-c { animation: ambDriftC var(--amb-dur, 34s) linear forwards; }
+    @keyframes ambDriftA { from { transform: scale(1) translate(0, 0); }
+                           to   { transform: scale(1.07) translate(-1.5%, -1%); } }
+    @keyframes ambDriftB { from { transform: scale(1.07) translate(1.5%, 1%); }
+                           to   { transform: scale(1) translate(0, 0); } }
+    @keyframes ambDriftC { from { transform: scale(1.02) translate(-1%, 1%); }
+                           to   { transform: scale(1.08) translate(1%, -1%); } }
+    @media (prefers-reduced-motion: reduce) {
+      #ambient .amb-layer { animation: none !important; }
+    }
+    #ambShade { position: absolute; left: 0; right: 0; bottom: 0; height: 34%;
+      background: linear-gradient(to top, rgba(0,0,0,.72), rgba(0,0,0,0));
+      pointer-events: none; }
+    #ambTopShade { position: absolute; left: 0; right: 0; top: 0; height: 26%;
+      background: linear-gradient(to bottom, rgba(0,0,0,.45), rgba(0,0,0,0));
+      pointer-events: none; }
+    #ambClock, #ambCaption { position: absolute; color: #fff;
+      text-shadow: 0 2px 14px rgba(0,0,0,.55); transition: transform 2s linear; }
+    #ambClock { top: 6vh; right: 5vw; text-align: right; }
+    #ambTime { font-size: 4.4rem; font-weight: 900; line-height: 1;
+      letter-spacing: .02em; font-variant-numeric: tabular-nums; }
+    #ambDate { margin-top: .6rem; font-size: .95rem; font-weight: 800;
+      text-transform: uppercase; letter-spacing: .22em; opacity: .85; }
+    #ambCaption { left: 5vw; right: 32vw; bottom: 6vh; }
+    #ambTheme { display: inline-flex; align-items: center; gap: .5rem;
+      font-size: .68rem; font-weight: 900; text-transform: uppercase;
+      letter-spacing: .24em; color: rgba(255,255,255,.75); }
+    #ambTheme:empty { display: none; }
+    #ambTheme::before { content: ""; width: .55rem; height: .55rem; background: #818cf8; }
+    #ambTitle { margin-top: .55rem; font-size: 1.2rem; font-weight: 900;
+      text-transform: uppercase; letter-spacing: .1em; line-height: 1.3;
+      overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical; }
+    #ambCredit { margin-top: .4rem; font-size: .74rem; font-weight: 700;
+      letter-spacing: .05em; color: rgba(255,255,255,.72); }
     /* The stage fills the WHOLE player — header, transport, and options panel
        are all absolute overlays on top of the video, so the video always gets
        every pixel of the screen and nothing can overflow the viewport. */
@@ -3267,6 +3317,17 @@
   <div id="tvLoadingSub">Starting playback…</div>
 </div>
 
+<!-- ── Idle slideshow (?tv=1 kiosk, or ?ambient=preview) ── shown while the
+     server's state says `ambient`; drawn by _amb* below. ──────────────────── -->
+<div id="ambient" aria-hidden="true">
+  <div class="amb-layer" id="ambA"></div>
+  <div class="amb-layer" id="ambB"></div>
+  <div id="ambTopShade"></div>
+  <div id="ambShade"></div>
+  <div id="ambClock"><div id="ambTime"></div><div id="ambDate"></div></div>
+  <div id="ambCaption"><div id="ambTheme"></div><div id="ambTitle"></div><div id="ambCredit"></div></div>
+</div>
+
 <!-- ── Player Footer ──────────────────────────────────────────────────────── -->
 <footer class="fixed bottom-0 left-0 right-0 z-40 bg-gray-950 border-t-2 border-gray-800 safe-bottom">
   <!-- Seek bar — flat Metro track -->
@@ -4813,6 +4874,150 @@ let globalMaxVolume = 200;   // global VLC volume cap (0-200); fetched at startu
 // document.title below is the window marker the backend's kiosk focus code
 // looks for (main.py _TVUI_WINDOW_MARKER) — keep the two in sync.
 const TV_MODE = new URLSearchParams(location.search).get("tv") === "1";
+
+// ── Idle slideshow ────────────────────────────────────────────────────────────
+// The kiosk's screen saver: when nothing plays, the server sets `ambient` in the
+// state and this layer covers the grid with a rotating set of photos (chosen and
+// cached by the box: slideshow.py, /api/ambient/playlist). Any key or click lifts
+// it; the host's input hook does the same for the remote, and this page tells the
+// server for a keyboard or mouse the hook can't see. `?ambient=preview` shows it
+// in any browser, for the admin panel's Preview button.
+const AMB_PREVIEW = new URLSearchParams(location.search).get("ambient") === "preview";
+const AMB_THEME_LABEL = {library:"Your library", daily:"Photo of the day", city:"Your city",
+                         nature:"Seasonal nature", space:"Space"};
+const AMB = {on:false, photos:[], i:0, rev:-1, loadedRev:null, loadedAt:0, interval:30,
+             clock:true, timer:null, clockTimer:null, front:0, hideUntil:0, fails:0,
+             swallowClickUntil:0, shownAt:0};
+async function _ambLoad(){
+  try{
+    const r = await fetch("/api/ambient/playlist", {cache:"no-store"});
+    if(!r.ok) return false;
+    const d = await r.json();
+    const was = AMB.photos.length ? AMB.photos[(AMB.i + AMB.photos.length - 1) % AMB.photos.length].id : null;
+    AMB.photos = Array.isArray(d.photos) ? d.photos : [];
+    AMB.interval = Math.max(10, Number(d.interval) || 30);
+    AMB.clock = d.clock !== false;
+    AMB.loadedRev = d.rev; AMB.loadedAt = Date.now();
+    // Carry on after the photo on screen rather than starting the deck over.
+    const at = was ? AMB.photos.findIndex(p => p.id === was) : -1;
+    AMB.i = at >= 0 ? at + 1 : 0;
+    return true;
+  }catch(_){ return false; }
+}
+function _ambApply(want){
+  if(!TV_MODE || AMB_PREVIEW) return;
+  if(want && Date.now() < AMB.hideUntil) return;   // just woken locally; the server catches up
+  if(want) _ambShow(); else _ambHide();
+}
+function _ambClockTick(){
+  const now = new Date();
+  document.getElementById("ambClock").style.display = AMB.clock ? "" : "none";
+  document.getElementById("ambTime").textContent = now.toLocaleTimeString([], {hour:"numeric", minute:"2-digit"});
+  document.getElementById("ambDate").textContent = now.toLocaleDateString([], {weekday:"long", month:"long", day:"numeric"});
+}
+async function _ambShow(){
+  if(AMB.on) return;
+  AMB.on = true;
+  AMB.shownAt = Date.now();
+  document.getElementById("ambient").classList.add("show");
+  _ambClockTick();
+  AMB.clockTimer = setInterval(_ambClockTick, 5000);
+  _ambNext();
+}
+function _ambHide(){
+  if(!AMB.on) return;
+  AMB.on = false;
+  clearTimeout(AMB.timer); clearInterval(AMB.clockTimer);
+  document.getElementById("ambient").classList.remove("show");
+  // Let the decoded photos go: the kiosk runs for days.
+  for(const id of ["ambA","ambB"]){
+    const l = document.getElementById(id);
+    l.classList.remove("on","drift-a","drift-b","drift-c");
+    l.style.backgroundImage = "";
+  }
+}
+async function _ambNext(){
+  clearTimeout(AMB.timer);
+  if(!AMB.on) return;
+  // Themes, interval or hidden photos changed, or the day's refresh landed.
+  if(AMB.loadedRev !== AMB.rev || Date.now() - AMB.loadedAt > 3600e3){
+    await _ambLoad();
+    _ambClockTick();
+  }
+  if(!AMB.on) return;
+  const n = AMB.photos.length;
+  if(!n){
+    // A first start: the box is still fetching. Show the clock and look again.
+    document.getElementById("ambTheme").textContent = "";
+    document.getElementById("ambTitle").textContent = "Gathering photos…";
+    document.getElementById("ambCredit").textContent = "";
+    AMB.timer = setTimeout(()=>{ AMB.loadedAt = 0; _ambNext(); }, 30000);
+    return;
+  }
+  const p = AMB.photos[AMB.i % n];
+  AMB.i = (AMB.i + 1) % n;
+  const img = new Image();
+  img.onload = ()=>{
+    if(!AMB.on) return;
+    AMB.fails = 0;
+    _ambPaint(p);
+    AMB.timer = setTimeout(_ambNext, AMB.interval * 1000);
+  };
+  img.onerror = ()=>{
+    if(!AMB.on) return;
+    // Skip it. If every photo fails (the box is unreachable), slow right down.
+    AMB.fails++;
+    AMB.timer = setTimeout(_ambNext, AMB.fails >= n ? 30000 : 50);
+  };
+  img.src = p.src;
+}
+function _ambPaint(p){
+  const layers = [document.getElementById("ambA"), document.getElementById("ambB")];
+  const back = layers[AMB.front ^ 1], front = layers[AMB.front];
+  back.style.backgroundImage = `url("${String(p.src).replace(/["\\]/g, "")}")`;
+  back.style.setProperty("--amb-dur", (AMB.interval + 4) + "s");
+  back.classList.remove("drift-a","drift-b","drift-c");
+  void back.offsetWidth;              // restart the drift
+  back.classList.add(["drift-a","drift-b","drift-c"][Math.floor(Math.random() * 3)], "on");
+  front.classList.remove("on");
+  AMB.front ^= 1;
+  document.getElementById("ambTheme").textContent = AMB_THEME_LABEL[p.theme] || "";
+  document.getElementById("ambTitle").textContent = p.title || "";
+  document.getElementById("ambCredit").textContent = p.credit || "";
+  // The burn-in nudge: a few pixels each photo, never the same spot for long.
+  const j = () => (Math.random() * 2 - 1).toFixed(2);
+  document.getElementById("ambClock").style.transform = `translate(${j()}vw, ${j()}vh)`;
+  document.getElementById("ambCaption").style.transform = `translate(${j()}vw, ${j()}vh)`;
+}
+// A bare modifier is not a press. On Windows the host's force-foreground
+// cocktail (_bring_tvui_to_front) injects an Alt press as it fronts the kiosk,
+// and the page can't tell it from a real one (the host hook can, and ignores
+// it). For the same reason nothing wakes it in its first 1.5 s on screen.
+const _AMB_MODIFIERS = new Set(["Alt","AltGraph","Control","Shift","Meta","OS"]);
+function _ambWake(e){
+  if(!AMB.on) return;
+  if(e.type === "keydown" && _AMB_MODIFIERS.has(e.key)) return;
+  e.preventDefault(); e.stopImmediatePropagation();
+  if(Date.now() - AMB.shownAt < 1500) return;
+  AMB.swallowClickUntil = Date.now() + 700;   // the click that follows this pointerdown
+  _ambHide();
+  if(AMB_PREVIEW) return;
+  AMB.hideUntil = Date.now() + 4000;
+  fetch("/api/tv/ambient/wake", {method:"POST"}).then(r => r.json()).then(d => {
+    // The TV UI is off on this host: there is no grid to wake to.
+    if(d && d.ambient){ AMB.hideUntil = 0; _ambShow(); }
+  }).catch(()=>{});
+}
+// Capture phase, so the press that wakes the screen is not ALSO a D-pad move or
+// a click on whatever tile is under the pointer. Pointer motion never wakes
+// (an air mouse drifts), same rule as the host.
+for(const t of ["keydown","pointerdown","mousedown","touchstart","wheel"]){
+  window.addEventListener(t, _ambWake, {capture:true, passive:false});
+}
+window.addEventListener("click", e => {
+  if(Date.now() < AMB.swallowClickUntil){ e.preventDefault(); e.stopImmediatePropagation(); }
+}, true);
+if(AMB_PREVIEW) setTimeout(_ambShow, 0);
 
 // ── Simple mode ───────────────────────────────────────────────────────────────
 // Whether the signed-in profile gets the simplified interface. The server
@@ -32935,6 +33140,9 @@ function connectSSE(){
     const idleWas=app.download_idle_open;
     const tvFileWas=app.library_current_file, tvPlayWas=app.is_library_playback;
     Object.assign(app,d);
+    // Idle slideshow (kiosk only). The rev moves when its photos or settings do.
+    if(typeof d.ambient_rev==="number") AMB.rev=d.ambient_rev;
+    if(typeof d.ambient==="boolean") _ambApply(d.ambient);
     // Which surface a TV play opens on — changed from any client (User Settings
     // or the fullscreen More-panel switch), so pick it up live rather than at
     // page load only.
@@ -33551,6 +33759,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.27.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">20.28.0</div>
 </body>
 </html>

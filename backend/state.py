@@ -292,6 +292,8 @@ class AppState:
     # ── TV UI (Firestick-style dashboard kiosk on the host display) ──
     tv_ui_active: bool = False                            # True while the dashboard kiosk should hold the screen; gates every VLC focus assertion (see docs/REMOTE.md)
     tv_input_last: float = 0.0                            # time.time() of the last HID input (key/click/move) — drives the TV UI idle hand-back
+    ambient_active: bool = False                          # True while the kiosk shows the idle slideshow instead of the grid. Only meaningful with tv_ui_active; see _ambient_visible
+    idle_mode: str = ""                                   # "slideshow" | "video" | "off": what the TV shows when idle (settings.idle_screen.mode, mirrored for the hook thread)
     host_volume_expected: Optional[int] = None            # last OS volume WE set/accepted (0-100). Only consumed by the OPT-IN remote_volume_guard (REMOTE_VOLUME_GUARD=1, Windows) which reverts any other change
     # ── On-device TV playback (the kiosk's own <video>, host display) ──
     # The THIRD playback surface, alongside VLC and YouTube-on-TV. Deliberately a

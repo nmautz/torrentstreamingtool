@@ -921,10 +921,91 @@
 
   <!-- ── Background Video Tab ─────────────────────────────────────────────────── -->
   <div id="panelBackground" class="hidden flex-1 overflow-y-auto p-3 sm:p-5 max-w-2xl mx-auto w-full space-y-4">
+    <!-- Idle screen: what the TV shows when nothing plays. See docs/REMOTE.md § Idle slideshow. -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-sm font-black uppercase tracking-wide">Idle Screen</h2>
+        <p class="text-xs text-gray-500 mt-0.5">What the TV shows when nothing is playing. Anything that starts playing replaces it.</p>
+      </div>
+      <div class="px-5 py-4 flex flex-col sm:flex-row gap-2">
+        <button data-mode="slideshow" onclick="setIdleMode('slideshow')" class="idl-mode flex-1 text-left px-4 py-3 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white">
+          <div class="text-xs font-black uppercase tracking-wide">Slideshow</div>
+          <div class="text-[11px] mt-1 opacity-80 normal-case">Photos that refresh themselves. Nothing to set up.</div>
+        </button>
+        <button data-mode="video" onclick="setIdleMode('video')" class="idl-mode flex-1 text-left px-4 py-3 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white">
+          <div class="text-xs font-black uppercase tracking-wide">Video</div>
+          <div class="text-[11px] mt-1 opacity-80 normal-case">Loop a video you upload, in VLC.</div>
+        </button>
+        <button data-mode="off" onclick="setIdleMode('off')" class="idl-mode flex-1 text-left px-4 py-3 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white">
+          <div class="text-xs font-black uppercase tracking-wide">Nothing</div>
+          <div class="text-[11px] mt-1 opacity-80 normal-case">The TV dashboard stays up, or the screen is left idle.</div>
+        </button>
+      </div>
+      <div id="idleModeNote" class="hidden px-5 pb-4 -mt-1 text-[11px] text-amber-300/80"></div>
+    </div>
+
+    <!-- Slideshow -->
+    <div id="idlSlideCard" class="hidden bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-sm font-black uppercase tracking-wide">Slideshow</h2>
+          <p id="idlSummary" class="text-xs text-gray-500 mt-0.5">Loading…</p>
+        </div>
+        <span id="idlOnScreen" class="hidden flex-shrink-0 text-[10px] font-bold uppercase tracking-widest px-2 py-1 border bg-emerald-950 border-emerald-700 text-emerald-300">On Screen</span>
+      </div>
+
+      <div class="px-5 py-4 border-b border-gray-800 space-y-2">
+        <div class="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Themes</div>
+        <div id="idlThemes" class="space-y-1.5"></div>
+      </div>
+
+      <div class="px-5 py-4 border-b border-gray-800 space-y-2">
+        <div class="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Your City</div>
+        <div id="idlCityNow" class="text-sm text-gray-400"></div>
+        <div class="flex gap-2">
+          <input id="idlCityInput" type="text" maxlength="80" placeholder="Search for a city"
+            onkeydown="if(event.key==='Enter') findIdleCity()"
+            class="flex-1 min-w-0 bg-gray-950 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500"/>
+          <button onclick="findIdleCity()" id="idlCityBtn"
+            class="flex-shrink-0 bg-indigo-600 hover:bg-indigo-500 px-4 py-2 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">Find</button>
+        </div>
+        <div id="idlCityResults" class="space-y-1"></div>
+        <p class="text-[10px] text-gray-600">Used for "My city this season", the season (and hemisphere) of the nature photos, and the region of the photo of the day.</p>
+      </div>
+
+      <div class="px-5 py-4 border-b border-gray-800 flex flex-wrap items-center gap-x-6 gap-y-3">
+        <label class="flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-gray-400">
+          Each photo
+          <select id="idlInterval" onchange="saveIdle({interval: parseInt(this.value,10)})"
+            class="bg-gray-950 border border-gray-700 px-2 py-1.5 text-sm text-gray-200 normal-case font-normal"></select>
+        </label>
+        <label class="flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-gray-400 cursor-pointer">
+          <input id="idlClock" type="checkbox" onchange="saveIdle({clock: this.checked})" class="accent-indigo-500"/>
+          Show the clock
+        </label>
+      </div>
+
+      <div class="px-5 py-4 border-b border-gray-800 flex flex-wrap gap-2">
+        <button onclick="showIdleOnTv(this)"
+          class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-indigo-700 bg-indigo-900 text-indigo-200 hover:bg-indigo-800 transition-colors"><svg class="ic" aria-hidden="true"><use href="#i-monitor"/></svg> Show on TV</button>
+        <a href="/?ambient=preview" target="_blank" rel="noopener"
+          class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:text-white transition-colors"><svg class="ic" aria-hidden="true"><use href="#i-ext"/></svg> Preview here</a>
+        <button onclick="refreshIdlePhotos(this)"
+          class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:text-white transition-colors">Fetch new photos</button>
+        <button onclick="toggleIdleReview()" id="idlReviewBtn"
+          class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:text-white transition-colors">Review photos</button>
+      </div>
+      <div id="idlReview" class="hidden px-5 py-4 border-b border-gray-800">
+        <p class="text-[11px] text-gray-500 mb-3">Click a photo to stop it showing (or to bring it back).</p>
+        <div id="idlReviewGrid" class="grid grid-cols-2 sm:grid-cols-3 gap-2"></div>
+      </div>
+      <div id="idlStatus" class="px-5 py-3 text-[11px] text-gray-600"></div>
+    </div>
+
+    <div id="bgVideoCard" class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800">
         <h2 class="text-sm font-black uppercase tracking-wide">Idle Background Video</h2>
-        <p class="text-xs text-gray-500 mt-0.5">Plays on the TV in VLC whenever nothing else is. Replaced automatically the moment any stream or library item starts.</p>
+        <p class="text-xs text-gray-500 mt-0.5">Plays on the TV in VLC when the idle screen is set to Video.</p>
       </div>
 
       <!-- Current file -->
@@ -955,7 +1036,7 @@
       </div>
 
       <!-- Volume -->
-      <div class="px-5 py-4 border-b border-gray-800 space-y-2">
+      <div class="px-5 py-4 space-y-2">
         <div class="flex items-center justify-between gap-3">
           <div class="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Background Volume</div>
           <span id="bgVolLabel" class="text-sm font-mono text-indigo-300">…</span>
@@ -967,18 +1048,6 @@
         <p class="text-[10px] text-gray-600">0 mutes the background. The global max-volume cap still applies.</p>
       </div>
 
-      <!-- Enable / disable -->
-      <div class="px-5 py-4 flex items-center justify-between gap-3">
-        <div class="min-w-0">
-          <div class="text-sm font-bold text-gray-200">Background Playback</div>
-          <div class="text-[11px] text-gray-600 mt-0.5">When off, VLC stays idle when nothing is playing.</div>
-        </div>
-        <button id="bgEnabledBtn" onclick="toggleBgEnabled()"
-          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
-                 bg-gray-800 border-gray-700 text-gray-400 hover:text-white">
-          …
-        </button>
-      </div>
     </div>
   </div>
 
@@ -2345,7 +2414,7 @@ function switchTab(tab){
   if(tab==="storage")    loadStorageCompression();
   else                   stopCompressionPolling();
   if(tab==="cleanup")    loadCleanup();
-  if(tab==="background") loadBackgroundVideo();
+  if(tab==="background"){ loadIdleScreen(); loadBackgroundVideo(); }
   if(tab==="system")   { loadNetwork(); loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadMissingContent(); loadDownloadRace(); loadPackFirst(); loadClientLogAuto(); loadStreamFocus(); loadAutoMaint(); loadPrepValidate(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
   else                 { stopSysHealthPolling(); stopForcePrepPolling(); stopFileValidationPolling(); stopFileRepairPolling(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); if(!_auChangelogLoaded) loadChangelog(); startAutoupdatePolling(); }
@@ -8149,12 +8218,196 @@ async function saveIndexerConfig(){
   }
 }
 
+// ── Idle screen + slideshow ───────────────────────────────────────────────────
+// What the TV shows when nothing plays: the slideshow (slideshow.py, the
+// kiosk's ambient layer), the background video, or nothing.
+let _idl = null;
+
+async function loadIdleScreen(){
+  let r;
+  try{ r = await fetch("/api/admin/idle-screen", {headers: authHeader()}); }catch(_){ return; }
+  if(!r.ok){ showToast(`Idle screen: HTTP ${r.status}`, true); return; }
+  _idl = await r.json();
+  renderIdleScreen();
+}
+
+function renderIdleScreen(){
+  const d = _idl; if(!d) return;
+  document.querySelectorAll(".idl-mode").forEach(b=>{
+    const on = b.dataset.mode === d.mode;
+    b.className = "idl-mode flex-1 text-left px-4 py-3 border transition-colors " + (on
+      ? "bg-indigo-900 border-indigo-600 text-indigo-100"
+      : "bg-gray-800 border-gray-700 text-gray-400 hover:text-white");
+  });
+  const note = document.getElementById("idleModeNote");
+  let msg = "";
+  if(d.mode === "video" && !(_bgState && _bgState.exists)) msg = "No video uploaded yet: upload one below, or the TV stays idle.";
+  else if(d.mode === "slideshow" && !d.tv_ui) msg = "The TV dashboard is turned off on this host (TV_UI=0), so the slideshow runs on its own and a button press doesn't wake anything.";
+  note.textContent = msg; note.classList.toggle("hidden", !msg);
+  document.getElementById("idlSlideCard").classList.toggle("hidden", d.mode !== "slideshow");
+  document.getElementById("bgVideoCard").classList.toggle("opacity-60", d.mode !== "video");
+
+  const st = d.status || {}, th = st.themes || {};
+  const total = d.themes.reduce((n,t)=> n + ((th[t]||{}).count||0), 0);
+  document.getElementById("idlSummary").textContent =
+    `${total} photo${total===1?"":"s"} across ${d.themes.length} theme${d.themes.length===1?"":"s"}`
+    + (d.season ? ` · ${d.season}` : "") + (d.hidden ? ` · ${d.hidden} hidden` : "");
+  document.getElementById("idlOnScreen").classList.toggle("hidden", !d.on_screen);
+
+  document.getElementById("idlThemes").innerHTML = d.catalog.map(t=>{
+    const on = d.themes.includes(t.id);
+    const needCity = t.id === "city" && !d.city;
+    const s = th[t.id] || {};
+    let meta = "";
+    if(on && s.error) meta = `<span class="text-amber-300/80">${escHtml(s.error)}</span>`;
+    else if(on) meta = `${s.count||0} photos` + (s.fetched_at ? ` · ${_fmtAgo(s.fetched_at)}` : "");
+    if(t.id === "city" && on && !d.pexels_key) meta += `${meta?" · ":""}more with a Pexels key (Updates tab)`;
+    return `<label class="flex items-start gap-3 py-1.5 ${needCity?"opacity-50":"cursor-pointer"}">
+      <input type="checkbox" ${on?"checked":""} ${needCity?"disabled":""} onchange="toggleIdleTheme('${t.id}', this.checked)" class="mt-0.5 accent-indigo-500"/>
+      <span class="min-w-0">
+        <span class="block text-sm font-bold text-gray-200">${escHtml(t.label)}</span>
+        <span class="block text-[11px] text-gray-500">${escHtml(t.blurb)}</span>
+        ${meta?`<span class="block text-[10px] text-gray-600 mt-0.5 font-mono">${meta}</span>`:""}
+      </span></label>`;
+  }).join("");
+
+  const c = d.city;
+  document.getElementById("idlCityNow").innerHTML = c
+    ? `<div class="flex items-center justify-between gap-3"><span class="text-gray-200 font-bold">${escHtml([c.name, c.admin1, c.country].filter(Boolean).join(", "))}</span>
+       <button onclick="clearIdleCity()" class="text-[10px] font-bold uppercase tracking-wide px-2 py-1 border border-gray-700 text-gray-400 hover:text-white">Remove</button></div>`
+    : `<span class="text-gray-600 italic">No city set.</span>`;
+
+  const sel = document.getElementById("idlInterval");
+  sel.innerHTML = d.intervals.map(v=>`<option value="${v}" ${v===d.interval?"selected":""}>${v < 60 ? v+" seconds" : (v/60)+" minute"+(v===60?"":"s")}</option>`).join("");
+  document.getElementById("idlClock").checked = !!d.clock;
+
+  const bits = [];
+  if(st.refreshing) bits.push("Fetching photos now…");
+  if(st.built_at) bits.push(`Last fetched ${_fmtAgo(st.built_at)}`);
+  if(st.bytes) bits.push(`${_fmtBytes(st.bytes)} on disk`);
+  bits.push("Refreshed once a day; photos are kept so the slideshow works offline.");
+  document.getElementById("idlStatus").textContent = bits.join(" · ");
+}
+
+async function saveIdle(body){
+  const r = await fetch("/api/admin/idle-screen", {method:"POST",
+    headers:{...authHeader(), "Content-Type":"application/json"}, body: JSON.stringify(body)});
+  if(!r.ok){
+    let msg = `HTTP ${r.status}`;
+    try{ msg = (await r.json()).detail || msg; }catch(_){}
+    showToast(`Couldn't save: ${msg}`, true);
+    return false;
+  }
+  await loadIdleScreen();
+  return true;
+}
+
+async function setIdleMode(mode){
+  if(_idl && _idl.mode === mode) return;
+  if(await saveIdle({mode})) showToast(mode === "slideshow" ? "Slideshow on." : mode === "video" ? "Background video on." : "Idle screen off.");
+}
+
+function toggleIdleTheme(id, on){
+  const themes = new Set(_idl.themes);
+  if(on) themes.add(id); else themes.delete(id);
+  saveIdle({themes: [...themes]});
+}
+
+async function findIdleCity(){
+  const q = document.getElementById("idlCityInput").value.trim();
+  const out = document.getElementById("idlCityResults");
+  if(q.length < 2){ out.innerHTML = ""; return; }
+  const btn = document.getElementById("idlCityBtn");
+  btn.disabled = true;
+  out.innerHTML = `<div class="text-xs text-gray-600">Searching…</div>`;
+  try{
+    const r = await fetch(`/api/admin/idle-screen/geocode?q=${encodeURIComponent(q)}`, {headers: authHeader()});
+    const d = r.ok ? await r.json() : {results: []};
+    window._idlCities = d.results || [];
+    out.innerHTML = _idlCities.length ? _idlCities.map((c,i)=>`
+      <button onclick="pickIdleCity(${i})" class="w-full text-left px-3 py-2 border border-gray-800 bg-gray-950 hover:border-indigo-600 transition-colors">
+        <span class="text-sm font-bold text-gray-200">${escHtml(c.name)}</span>
+        <span class="text-xs text-gray-500">${escHtml([c.admin1, c.country].filter(Boolean).join(", "))}${c.population ? ` · ${Number(c.population).toLocaleString()} people` : ""}</span>
+      </button>`).join("")
+      : `<div class="text-xs text-gray-600">${r.ok ? "No place by that name." : "City search is unavailable (no internet?)."}</div>`;
+  }catch(_){
+    out.innerHTML = `<div class="text-xs text-red-400">Network error.</div>`;
+  }finally{ btn.disabled = false; }
+}
+
+async function pickIdleCity(i){
+  const c = (window._idlCities || [])[i];
+  if(!c) return;
+  if(await saveIdle({city: c})){
+    document.getElementById("idlCityResults").innerHTML = "";
+    document.getElementById("idlCityInput").value = "";
+    showToast(`City set: ${c.name}. Fetching its photos.`);
+  }
+}
+
+function clearIdleCity(){
+  if(confirm("Remove the city? Its photos stop showing.")) saveIdle({clear_city: true});
+}
+
+async function showIdleOnTv(btn){
+  btn.disabled = true;
+  try{
+    const r = await fetch("/api/admin/idle-screen/show", {method:"POST", headers: authHeader()});
+    if(r.ok) showToast("Slideshow is on the TV.");
+    else{ let m = `HTTP ${r.status}`; try{ m = (await r.json()).detail || m; }catch(_){} showToast(m, true); }
+  }finally{ btn.disabled = false; setTimeout(loadIdleScreen, 1500); }
+}
+
+async function refreshIdlePhotos(btn){
+  btn.disabled = true;
+  const r = await fetch("/api/admin/idle-screen/refresh", {method:"POST", headers: authHeader()});
+  btn.disabled = false;
+  if(r.ok){ showToast("Fetching new photos. This takes a minute or two."); setTimeout(loadIdleScreen, 1500); }
+  else showToast("Couldn't start the refresh.", true);
+}
+
+async function toggleIdleReview(){
+  const box = document.getElementById("idlReview");
+  const open = box.classList.toggle("hidden") === false;
+  document.getElementById("idlReviewBtn").textContent = open ? "Hide review" : "Review photos";
+  if(!open) return;
+  const grid = document.getElementById("idlReviewGrid");
+  grid.innerHTML = `<div class="col-span-full text-xs text-gray-600">Loading…</div>`;
+  const r = await fetch("/api/admin/idle-screen/photos", {headers: authHeader()});
+  const d = r.ok ? await r.json() : {photos: []};
+  window._idlPhotos = d.photos || [];
+  grid.innerHTML = _idlPhotos.length ? _idlPhotos.map((p,i)=>`
+    <button onclick="toggleIdlePhoto(${i}, this)" title="${escHtml(p.credit)}"
+      class="relative block aspect-video bg-gray-950 border ${p.hidden?"border-red-800":"border-gray-800 hover:border-indigo-600"} overflow-hidden">
+      <img src="${escHtml(p.src)}" loading="lazy" alt="" class="w-full h-full object-cover ${p.hidden?"opacity-25 grayscale":""}"/>
+      <span class="absolute left-0 right-0 bottom-0 px-1.5 py-1 bg-black/70 text-[10px] text-gray-300 truncate text-left">${escHtml(p.title || p.theme)}</span>
+      ${p.hidden?`<span class="absolute top-1 right-1 text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 bg-red-950 border border-red-800 text-red-300">Hidden</span>`:""}
+    </button>`).join("")
+    : `<div class="col-span-full text-xs text-gray-600">No photos yet.</div>`;
+}
+
+async function toggleIdlePhoto(i, el){
+  const p = (window._idlPhotos || [])[i];
+  if(!p) return;
+  const r = await fetch("/api/admin/idle-screen/hide", {method:"POST",
+    headers:{...authHeader(), "Content-Type":"application/json"},
+    body: JSON.stringify({id: p.id, hidden: !p.hidden})});
+  if(!r.ok){ showToast("Couldn't update.", true); return; }
+  p.hidden = !p.hidden;
+  el.classList.toggle("border-red-800", p.hidden);
+  el.classList.toggle("border-gray-800", !p.hidden);
+  el.querySelector("img").classList.toggle("opacity-25", p.hidden);
+  el.querySelector("img").classList.toggle("grayscale", p.hidden);
+  const tag = el.querySelector("span.absolute.top-1");
+  if(p.hidden && !tag) el.insertAdjacentHTML("beforeend", `<span class="absolute top-1 right-1 text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 bg-red-950 border border-red-800 text-red-300">Hidden</span>`);
+  if(!p.hidden && tag) tag.remove();
+}
+
 // ── Background Video ──────────────────────────────────────────────────────────
 let _bgState = {volume: 50, enabled: true, exists: false};
 
 async function loadBackgroundVideo(){
   const body = document.getElementById("bgCurrentBody");
-  const enabledBtn = document.getElementById("bgEnabledBtn");
   body.textContent = "Loading…";
   let r;
   try{
@@ -8191,14 +8444,7 @@ async function loadBackgroundVideo(){
 
   document.getElementById("bgVolSlider").value = d.volume;
   document.getElementById("bgVolLabel").textContent = `${d.volume}%`;
-
-  if(d.enabled){
-    enabledBtn.innerHTML = ic("check")+" Enabled";
-    enabledBtn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-indigo-900 border-indigo-700 text-indigo-300 hover:bg-indigo-800";
-  } else {
-    enabledBtn.textContent = "Disabled";
-    enabledBtn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-500 hover:text-white";
-  }
+  renderIdleScreen();     // its "no video uploaded" note depends on this
 }
 
 function onBgVolInput(val){
@@ -8216,20 +8462,6 @@ function saveBgVolume(val){
     });
     if(!r.ok) showToast("Failed to save volume.", true);
   }, 150);
-}
-
-async function toggleBgEnabled(){
-  const newVal = !_bgState.enabled;
-  const r = await fetch("/api/admin/background-video/enabled",{
-    method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
-    body: JSON.stringify({enabled: newVal}),
-  });
-  if(r.ok){
-    showToast(newVal ? "Background enabled." : "Background disabled.");
-    loadBackgroundVideo();
-  } else {
-    showToast("Failed to update.", true);
-  }
 }
 
 async function uploadBackground(){
@@ -8280,7 +8512,7 @@ async function uploadBackground(){
 }
 
 async function deleteBackground(btn){
-  if(!confirm("Remove the background video? VLC will go idle when nothing is playing.")) return;
+  if(!confirm("Remove the background video?")) return;
   btn.disabled = true;
   const r = await fetch("/api/admin/background-video",{
     method:"DELETE", headers: authHeader(),
