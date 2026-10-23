@@ -1,5 +1,21 @@
 # Changelog
 
+## [20.30.8] — 2026-10-22
+
+### Fixed
+- **Opening an episode list right after a boot no longer takes 4.6 s.** Until the
+  watchdog starts qBittorrent, about 10 s into a boot, nothing listens on its port.
+  Windows retries a refused connect for about 2 s, so each qBit call cost 2 s and
+  `/files` makes two. Measured on two boots: 4.71 s and 4.60 s, both "other".
+  After a refused connect, `qreq` now answers "unreachable" at once for 3 s
+  (`QBIT_DOWN_HOLD_S`), then tries again. Callers already handle an unreachable
+  qBit; they just learn it sooner.
+- **Playing a file set to "never" on demand no longer builds a bundle for it.** An
+  on-demand start also queues the full background prep. It ignored the file's
+  prep schedule, so every on-demand play of a Hacks S01 episode (all "never")
+  began a bundle the schedule opted out of. The docs already said "never" covers
+  every prep a play starts.
+
 ## [20.30.7] — 2026-10-22
 
 ### Fixed

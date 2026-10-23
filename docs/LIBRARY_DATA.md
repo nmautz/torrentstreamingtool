@@ -666,7 +666,8 @@ Written by `POST /api/library/{id}/prep-schedule`. The per-file mode is surfaced
 `prep_mode` in the `/files` response so the episode-picker prep bar can highlight the
 active segment. Missing/legacy items read as `{files: {}}` (everything defaults to
 `idle`). Note `never` only suppresses *building a bundle ahead of time* — playing a
-"never" file still works via the on-demand (JIT) streaming path. Admin **Force Stream
+"never" file still works via the on-demand (JIT) streaming path, and that play queues
+no background prep for it (20.30.8; before, every on-demand play started a bundle). Admin **Force Stream
 Prep** ignores `never` by design (it's an explicit "prep everything" override).
 
 **Prep priority (queue order).** Independent of the schedule, `priority_default` (the

@@ -664,6 +664,9 @@
   "ProgressReq": {
    "kind": "class"
   },
+  "QBIT_DOWN_HOLD_S": {
+   "kind": "value"
+  },
   "QBIT_VIEW_PARALLEL": {
    "kind": "value"
   },
@@ -5157,6 +5160,9 @@
     "h:POSITIONAL_OR_KEYWORD",
     "why:POSITIONAL_OR_KEYWORD"
    ]
+  },
+  "_qbit_down_until": {
+   "kind": "value"
   },
   "_qbit_let_go": {
    "kind": "async def",
@@ -10312,7 +10318,7 @@
    "kind": "module zipfile"
   }
  },
- "openapi_sha256": "88a79dcf15ecc4ba70685cdd95602229b71595e92ab48f1f176ff9a484ab9da7",
+ "openapi_sha256": "2e8b152ecc983974e240c33c136c9e1665a8d9895e35e13019675c2821157535",
  "routes": [
   {
    "endpoint": "openapi",

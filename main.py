@@ -1028,14 +1028,29 @@ async def qbit_login() -> bool:
         return False
 
 
+# Windows retries a refused connect for ~2 s, so while qBit is not listening
+# (every boot until the watchdog starts it) each call cost 2 s: an episode list
+# opened then took 4.6 s, two calls (20.30.8). After a refused connect, calls
+# answer None at once for QBIT_DOWN_HOLD_S, then try again.
+QBIT_DOWN_HOLD_S = 3.0
+_qbit_down_until = 0.0
+
+
 async def qreq(method: str, path: str, **kw) -> Optional[httpx.Response]:
-    """Make an authenticated qBit API request, re-logging in on 403."""
+    """Make an authenticated qBit API request, re-logging in on 403. None when qBit
+    can't be reached (at once for a few seconds after it refused a connect)."""
+    global _qbit_down_until
+    if time.monotonic() < _qbit_down_until:
+        return None
     try:
         r = await runtime.qbit.request(method, f"{settings.qbit_url}{path}", **kw)
         if r.status_code == 403:
             await qbit_login()
             r = await runtime.qbit.request(method, f"{settings.qbit_url}{path}", **kw)
         return r
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        _qbit_down_until = time.monotonic() + QBIT_DOWN_HOLD_S
+        return None
     except Exception:
         return None
 
@@ -39373,7 +39388,8 @@ class OnDemandReq(BaseModel):
 async def stream_ondemand(item_id: str, req: OnDemandReq) -> JSONResponse:
     """Begin (or re-attach to) a just-in-time HLS session for a file and return a
     master playlist URL the player can load immediately. Also kicks off the normal
-    full background prep so the NEXT play gets the rich ABR/multi-audio bundle."""
+    full background prep so the NEXT play gets the rich ABR/multi-audio bundle,
+    unless the file's prep schedule is "never"."""
     if not HLS_AVAILABLE:
         raise HTTPException(503, HLS_UNAVAILABLE_MSG)
     t0 = time.monotonic()
@@ -39455,10 +39471,13 @@ async def stream_ondemand(item_id: str, req: OnDemandReq) -> JSONResponse:
     # honors the global pause) so a SUBSEQUENT play uses the rich multi-audio/ABR
     # bundle instead of JIT. _maybe_start_prep_job only registers the job + spawns
     # its own task (no long await), so this returns immediately; best-effort.
-    try:
-        await _maybe_start_prep_job(src, item_id)
-    except Exception as exc:
-        hls_log.warning("ondemand %s: background full-prep enqueue skipped: %s", key, exc)
+    # Not for a file set to "never" (20.30.8): that opts it out of every prep a
+    # play starts, and each on-demand play of a Hacks episode built a bundle.
+    if _effective_prep_mode(_prep_cfg(item), target["path"]) != "never":
+        try:
+            await _maybe_start_prep_job(src, item_id)
+        except Exception as exc:
+            hls_log.warning("ondemand %s: background full-prep enqueue skipped: %s", key, exc)
     _mark("prep-enqueue")
 
     sidecar_subs = await asyncio.to_thread(_list_sidecar_subs, src, item_id)
