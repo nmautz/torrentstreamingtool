@@ -31389,14 +31389,25 @@ def _source_nvdec_safe(info: dict) -> bool:
 # codec+pixfmt because support varies by bit depth (e.g. HEVC Main vs Main12);
 # when the codec is unknown we key by the sample path instead.
 _hwdec_probe: dict[str, bool] = {}
+# 20.30.6: a codec NVDEC can't take fails on EVERY frame, and ffmpeg keeps reading
+# the whole file before it gives up: 46 s for a Demon Slayer episode on the
+# GTX 1060, and the first on-demand play of that format after a start waited
+# for it with no picture. The probe now reads at most HWDEC_PROBE_READ_S of the source,
+# and plays that arrive while one runs wait for that one instead of starting more.
+HWDEC_PROBE_READ_S = 3
+HWDEC_PROBE_TIMEOUT_S = 20.0
+_HWDEC_FAIL_MARKS = (b"hwaccel initialisation returned error",
+                     b"Failed setup for format cuda")
+_hwdec_inflight: dict[str, "asyncio.Future"] = {}
 
 
 async def _gpu_can_hwdecode(sample: Path, codec: str = "", pix_fmt: str = "") -> bool:
     """True if NVDEC on this box can hardware-decode `sample`. Probes once per
     codec+pixfmt (or per path when codec is unknown) by hardware-decoding one
-    frame with the transparent `-hwaccel cuda`; rc≠0 ⇒ NVDEC can't handle it, so
-    the caller should CPU-decode (NVENC still encodes). Trivially False without
-    NVENC (no NVIDIA GPU). Cached for the process."""
+    frame with the transparent `-hwaccel cuda` over the first few seconds of the
+    source; rc≠0 or an hwaccel set-up error ⇒ NVDEC can't handle it, so the
+    caller should CPU-decode (NVENC still encodes). Trivially False without
+    NVENC (no NVIDIA GPU). Cached for the process; one probe per key at a time."""
     codec = (codec or "").lower()
     key = f"{codec}:{(pix_fmt or '').lower()}" if codec else f"@{sample}"
     if key in _hwdec_probe:
@@ -31404,22 +31415,32 @@ async def _gpu_can_hwdecode(sample: Path, codec: str = "", pix_fmt: str = "") ->
     if not await _has_nvenc():
         _hwdec_probe[key] = False
         return False
-    ffmpeg = analyzer.ffmpeg_bin()
+    pending = _hwdec_inflight.get(key)
+    if pending is not None:
+        return await asyncio.shield(pending)
+    fut = asyncio.get_running_loop().create_future()
+    _hwdec_inflight[key] = fut
     ok = False
-    if ffmpeg:
-        try:
-            rc, _ = await _probe_run(
-                [ffmpeg, "-hide_banner", "-loglevel", "error",
-                 "-hwaccel", "cuda", "-i", str(sample),
-                 "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-"],
-                keep="", kw=_FFMPEG_SUBPROCESS_KW)
-            ok = (rc == 0)
-        except Exception:
-            ok = False
-    _hwdec_probe[key] = ok
-    if not ok:
-        print(f"[offline] NVDEC can't hardware-decode {codec or sample.name} on "
-              f"this GPU — CPU-decoding it (NVENC still encodes).")
+    try:
+        ffmpeg = analyzer.ffmpeg_bin()
+        if ffmpeg:
+            try:
+                rc, err = await _probe_run(
+                    [ffmpeg, "-hide_banner", "-loglevel", "error",
+                     "-hwaccel", "cuda", "-t", str(HWDEC_PROBE_READ_S), "-i", str(sample),
+                     "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-"],
+                    keep="stderr", kw=_FFMPEG_SUBPROCESS_KW, timeout=HWDEC_PROBE_TIMEOUT_S)
+                ok = rc == 0 and not any(m in (err or b"") for m in _HWDEC_FAIL_MARKS)
+            except Exception:
+                ok = False
+        _hwdec_probe[key] = ok
+        if not ok:
+            print(f"[offline] NVDEC can't hardware-decode {codec or sample.name} on "
+                  f"this GPU — CPU-decoding it (NVENC still encodes).")
+    finally:
+        _hwdec_inflight.pop(key, None)
+        if not fut.done():
+            fut.set_result(ok)        # a cancelled first caller leaves the rest on CPU decode
     return ok
 
 
@@ -39286,6 +39307,9 @@ async def _od_revive(session_key: str) -> Optional[dict]:
         return session
 
 
+OD_START_SLOW_S = 1.0     # a /stream-ondemand slower than this logs where its time went
+
+
 class OnDemandReq(BaseModel):
     file_path: str
     profile_id: str = ""
@@ -39299,6 +39323,12 @@ async def stream_ondemand(item_id: str, req: OnDemandReq) -> JSONResponse:
     full background prep so the NEXT play gets the rich ABR/multi-audio bundle."""
     if not HLS_AVAILABLE:
         raise HTTPException(503, HLS_UNAVAILABLE_MSG)
+    t0 = time.monotonic()
+    split: list = []                     # (stage, seconds), logged when the start is slow
+
+    def _mark(stage: str) -> None:
+        split.append((stage, time.monotonic() - t0 - sum(d for _, d in split)))
+
     lib = await get_library()
     item = next((it for it in lib["items"] if it["id"] == item_id), None)
     if not item:
@@ -39309,8 +39339,10 @@ async def stream_ondemand(item_id: str, req: OnDemandReq) -> JSONResponse:
     src = Path(target["path"])
     await _assert_source_present(target, "Just-in-time streaming")
     _assert_not_compressing(str(src))
+    _mark("lib+source")
 
     info = await asyncio.to_thread(_ffprobe_full, str(src))
+    _mark("ffprobe")
     duration = float(info.get("duration_sec", 0) or 0)
     if not info.get("video"):
         raise HTTPException(422, "No video stream in source.")
@@ -39360,6 +39392,7 @@ async def stream_ondemand(item_id: str, req: OnDemandReq) -> JSONResponse:
     else:
         session["last_access"] = time.time()
         session["sub_idxs"] = sub_idxs   # keep fresh across re-attach
+    _mark("session")
 
     # Kick off the full bundle prep in the background (bulk queue — low priority,
     # honors the global pause) so a SUBSEQUENT play uses the rich multi-audio/ABR
@@ -39369,9 +39402,15 @@ async def stream_ondemand(item_id: str, req: OnDemandReq) -> JSONResponse:
         await _maybe_start_prep_job(src, item_id)
     except Exception as exc:
         hls_log.warning("ondemand %s: background full-prep enqueue skipped: %s", key, exc)
+    _mark("prep-enqueue")
 
     sidecar_subs = await asyncio.to_thread(_list_sidecar_subs, src, item_id)
     await _maybe_auto_fetch_for_device(item, target, _od_subs_meta(info), sidecar_subs)
+    _mark("subs")
+    if time.monotonic() - t0 >= OD_START_SLOW_S:
+        # 20.30.6: a 16 s start right after a boot said only "other". Where it went.
+        hls_log.info("ondemand %s slow start %.2fs: %s src=%s", key, time.monotonic() - t0,
+                     " ".join(f"{k}={d:.2f}s" for k, d in split), src.name)
     return JSONResponse({
         "ready":             True,
         "mode":              "ondemand",

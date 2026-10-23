@@ -1,5 +1,23 @@
 # Changelog
 
+## [20.30.6] — 2026-10-22
+
+### Fixed
+- **The first play of a format the GPU can't decode no longer waits 46 s.** Before
+  an on-demand stream uses GPU decoding, it checks once per format whether the
+  GTX 1060 can decode it. For a format it can't, ffmpeg failed on every frame and
+  kept reading to the end of the episode before saying so: 46 s for a Demon Slayer
+  episode, with the player spinning the whole time. That happened on the first
+  such play after every restart. The check now reads at most 3 s of the file and
+  gives up after 20 s. Three plays starting at once now share one check (each
+  used to run its own). A set-up error now counts as "can't" even when ffmpeg
+  exits cleanly (`_gpu_can_hwdecode`). Prep, repair and compression use the same
+  check.
+- **A slow on-demand start now logs where its time went.** A start taking 1 s or
+  more writes `ondemand <key> slow start` to hls.log, split into library + source
+  check, ffprobe, session (incl. font extraction), prep enqueue and subtitles. The
+  16 s start seen after a boot only reported its time as "other".
+
 ## [20.30.5] — 2026-10-22
 
 ### Fixed

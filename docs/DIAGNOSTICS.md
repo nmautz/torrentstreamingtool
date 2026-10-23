@@ -886,6 +886,10 @@ slowly enough to notice. All in `streamlink_app.log`; the freeze watch judges th
   `(VLC never confirmed; gave up waiting)` if it never did. **`PLAY START tv-kiosk 3.10s`**:
   the TV kiosk's play to its first `playing` state post. The phone and browser
   players are phase 2 (#105).
+- **`ondemand <key> slow start 2.40s: lib+source=0.01s ffprobe=2.10s session=0.20s prep-enqueue=0.00s subs=0.09s`**
+  (hls.log, 20.30.6): a `/stream-ondemand` that took `OD_START_SLOW_S` (1 s) or more,
+  split by stage. It covers the POST only; the wait for the first segment (which
+  includes the once-per-format NVDEC probe) is the request's own `SLOW REQUEST`.
 - **`PREP TIME <file>: queued 600s, encoded 300s (4.7x realtime, 23 min of video)`**:
   one per finished prep (`queued_at` is kept when `started_at` is re-baselined).
 - **`DOWNLOAD TIME <title>: first episode playable after 312s`** and **`: all N file(s)

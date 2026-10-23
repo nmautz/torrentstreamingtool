@@ -385,6 +385,12 @@
   "HTTP_PORT": {
    "kind": "value"
   },
+  "HWDEC_PROBE_READ_S": {
+   "kind": "value"
+  },
+  "HWDEC_PROBE_TIMEOUT_S": {
+   "kind": "value"
+  },
   "HlsResyncReq": {
    "kind": "class"
   },
@@ -497,6 +503,9 @@
    "kind": "value"
   },
   "OD_SESSION_IDLE_SECS": {
+   "kind": "value"
+  },
+  "OD_START_SLOW_S": {
    "kind": "value"
   },
   "OFFLINE_CACHE": {
@@ -1182,6 +1191,9 @@
    "kind": "value"
   },
   "_HTTPX_SSL": {
+   "kind": "value"
+  },
+  "_HWDEC_FAIL_MARKS": {
    "kind": "value"
   },
   "_IMAGE_SUB_CODECS": {
@@ -3533,6 +3545,9 @@
    "params": [
     "kw:VAR_KEYWORD"
    ]
+  },
+  "_hwdec_inflight": {
+   "kind": "value"
   },
   "_hwdec_probe": {
    "kind": "value"

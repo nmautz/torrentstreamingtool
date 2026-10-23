@@ -568,6 +568,67 @@ fsm_src = ast.get_source_segment(src, fsm)
 check("and it says so only after its write",
       fsm_src.index("wrote.append(True)") > fsm_src.index("async with mutate_library()"))
 
+print("the NVDEC probe reads seconds, not the whole file, and runs once (20.30.6)")
+# A codec the GPU can't decode fails on every frame, and ffmpeg read the whole
+# episode before giving up: the first on-demand play of it waited 46 s.
+import asyncio                            # noqa: E402
+hw_names = {"HWDEC_PROBE_READ_S", "HWDEC_PROBE_TIMEOUT_S", "_HWDEC_FAIL_MARKS"}
+hw_src = [ast.get_source_segment(src, n) for n in tree.body
+          if (isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)
+              and n.targets[0].id in hw_names)
+          or (isinstance(n, ast.AsyncFunctionDef) and n.name == "_gpu_can_hwdecode")]
+check("the probe and its limits were found", len(hw_src) == 4)
+hw_runs = []
+
+
+async def _fake_probe_run(cmd, keep="stdout", kw=None, timeout=120.0):
+    hw_runs.append((cmd, keep, timeout))
+    await asyncio.sleep(0.05)
+    return hw_ns["_next"]
+
+
+async def _yes():
+    return True
+
+hw_ns = {"asyncio": asyncio, "Path": Path, "_hwdec_probe": {}, "_hwdec_inflight": {},
+         "_has_nvenc": _yes, "_probe_run": _fake_probe_run, "_FFMPEG_SUBPROCESS_KW": {},
+         "analyzer": types.SimpleNamespace(ffmpeg_bin=lambda: "ffmpeg"),
+         "print": lambda *a, **k: None, "_next": (0, b"")}
+exec("\n\n".join(hw_src), hw_ns)
+gch = hw_ns["_gpu_can_hwdecode"]
+
+
+async def _three():
+    return await asyncio.gather(*(gch(Path("a.mkv"), "h264", "yuv420p10le") for _ in range(3)))
+
+hw_ns["_next"] = (69, b"[h264] hwaccel initialisation returned error.")
+got = asyncio.run(_three())
+check("three plays at once run one probe", len(hw_runs) == 1 and got == [False] * 3)
+cmd = hw_runs[0][0]
+check("it reads only the first seconds of the source",
+      "-t" in cmd and cmd.index("-t") < cmd.index("-i")
+      and cmd[cmd.index("-t") + 1] == str(hw_ns["HWDEC_PROBE_READ_S"]))
+check("and gives up well before the default 120 s", hw_runs[0][2] <= 30)
+check("the answer is kept", asyncio.run(gch(Path("b.mkv"), "h264", "yuv420p10le")) is False
+      and len(hw_runs) == 1)
+hw_ns["_next"] = (0, b"Failed setup for format cuda: hwaccel initialisation returned error")
+check("an hwaccel set-up error is a no even when ffmpeg exits 0",
+      asyncio.run(gch(Path("c.mkv"), "av1", "yuv420p")) is False)
+hw_ns["_next"] = (0, b"")
+check("a clean decode is a yes", asyncio.run(gch(Path("d.mkv"), "hevc", "yuv420p10le")) is True)
+check("and nothing is left in flight", hw_ns["_hwdec_inflight"] == {})
+
+print("a slow on-demand start says where its time went (20.30.6)")
+sod = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "stream_ondemand")
+sod_src = ast.get_source_segment(src, sod)
+stages = [m for m in ("lib+source", "ffprobe", "session", "prep-enqueue", "subs")]
+check("every stage is marked, in order",
+      all(f'_mark("{m}")' in sod_src for m in stages)
+      and [sod_src.index(f'_mark("{m}")') for m in stages]
+      == sorted(sod_src.index(f'_mark("{m}")') for m in stages))
+check("and the line is written past the threshold",
+      "OD_START_SLOW_S" in sod_src and "slow start" in sod_src)
+
 print()
 if fails:
     print(f"{len(fails)} FAILED"); sys.exit(1)
