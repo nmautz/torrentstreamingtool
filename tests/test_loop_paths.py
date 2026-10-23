@@ -226,7 +226,7 @@ check("a finished prep is moved into place on a thread",
 check("library loads and saves never go through the shared pool",
       "to_thread(_load_lib_raw" not in src and "to_thread(_save_lib_raw" not in src)
 check("they run on the library's own thread",
-      src.count("lib_io(_load_lib_raw)") >= 3 and src.count("lib_io(_save_lib_raw, ") >= 3)
+      src.count("lib_io(_load_with_edits, ") >= 3 and src.count("lib_io(_save_lib_raw, ") >= 3)
 check("lifespan widens the shared pool before anything uses it",
       "set_default_executor(" in life_src
       and life_src.index("set_default_executor(") < life_src.index("to_thread("))

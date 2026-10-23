@@ -286,7 +286,7 @@ If a change makes the app stop working with older servers, raise `MIN_SERVER` in
 - **Metro UI** throughout the frontend — flat tiles, no rounded corners, bold uppercase typography, square status dots, no `backdrop-blur`. See [docs/FRONTEND.md](docs/FRONTEND.md).
 - **No emoji/dingbat glyphs in the UI** — they render differently on every OS. Use the inline SVG icon sprite (`<use href="#i-NAME">` in HTML, `ic("NAME")` in JS templates). See [docs/FRONTEND.md § Iconography](docs/FRONTEND.md).
 - Backend uses `asyncio` everywhere — never `time.sleep` inside a request handler or background task. Use `await asyncio.sleep(...)`.
-- Library access goes through `get_library()` / `put_library()` / `mutate_library()` — never read/write `library.json` raw outside them. Edits go in `mutate_library()`: while the lock is held, `get_library()` returns the last finished write without waiting (20.30.1), so its result must never be written back.
+- Library access goes through `get_library()` / `put_library()` / `mutate_library()` — never read/write `library.json` raw outside them. Edits go in `mutate_library()`: while the lock is held, `get_library()` returns the last finished write without waiting (20.30.1), so its result must never be written back. A progress write is a `defer_edit` (20.30.3): seen by every read at once, saved within 3 s; a hand-rolled load-then-save must carry `_pending_edits()` (docs/GOTCHAS.md § A position does not need its own fsync).
 - VLC track IDs are **ES IDs** from the `"Stream N"` keys, not 1/2/3 counters. See [docs/GOTCHAS.md](docs/GOTCHAS.md).
 
 ---

@@ -298,6 +298,11 @@ from backend.library import (  # noqa: F401
     put_library,
     LibraryUnchanged,
     mutate_library,
+    defer_edit,
+    flush_deferred,
+    _pending_edits,
+    _load_with_edits,
+    _edits_saved,
     _library_txn,
     _note_slow_txn,
     _now_iso,
@@ -5130,8 +5135,6 @@ async def _apply_night_mode(enabled: bool) -> None:
         first_uri = await asyncio.to_thread(vlc_file_uri, first_resolved)
         play_task = asyncio.create_task(vlc("in_play", input=first_uri))
         ready = await _vlc_wait_until_ready(first_resolved, timeout=10.0)
-        log.info("PLAY START tv-vlc %.2fs%s %s", time.monotonic() - t_play,
-                 "" if ready else " (VLC never confirmed; gave up waiting)", first.name)
 
         state.stream_status = "playing"
         state.current_audio_track = -1
@@ -6036,7 +6039,8 @@ async def _save_track_pref(
     ES IDs drifted, or the next episode of the series) restore from."""
     try:
         async with runtime._lib_lock:
-            lib = await lib_io(_load_lib_raw)
+            edits = _pending_edits()      # pending progress rides along
+            lib = await lib_io(_load_with_edits, edits)
             item = next((it for it in lib["items"] if it["id"] == item_id), None)
             if not item:
                 return
@@ -6059,6 +6063,7 @@ async def _save_track_pref(
                     norm.setdefault("at", _now_iso())   # newest-wins vs series pick
                     fp["audio_sel"] = norm
             await lib_io(_save_lib_raw, lib)
+            _edits_saved(edits)
     except Exception:
         pass
 
@@ -6084,7 +6089,8 @@ async def _set_shuffle_pref(item_id: str, profile_id: str, shuffle: bool, scope:
         return
     try:
         async with runtime._lib_lock:
-            lib = await lib_io(_load_lib_raw)
+            edits = _pending_edits()      # pending progress rides along
+            lib = await lib_io(_load_with_edits, edits)
             item = next((it for it in lib["items"] if it["id"] == item_id), None)
             if not item:
                 return
@@ -6093,6 +6099,7 @@ async def _set_shuffle_pref(item_id: str, profile_id: str, shuffle: bool, scope:
                 prof["shuffle"] = bool(shuffle)
                 prof["shuffle_scope"] = scope or "" if shuffle else ""
             await lib_io(_save_lib_raw, lib)
+            _edits_saved(edits)
     except Exception:
         pass
 
@@ -6219,7 +6226,8 @@ async def _save_series_sub_sel(profile_id: str, series: str, sel: Optional[dict]
     sel.setdefault("at", _now_iso())
     try:
         async with runtime._lib_lock:
-            lib = await lib_io(_load_lib_raw)
+            edits = _pending_edits()      # pending progress rides along
+            lib = await lib_io(_load_with_edits, edits)
             prof = next((p for p in lib.get("profiles", []) if p.get("id") == profile_id), None)
             if not prof:
                 return
@@ -6237,6 +6245,7 @@ async def _save_series_sub_sel(profile_id: str, series: str, sel: Optional[dict]
                 entry["groups"] = groups
             prefs[series] = entry
             await lib_io(_save_lib_raw, lib)
+            _edits_saved(edits)
     except Exception:
         pass
 
@@ -6325,7 +6334,8 @@ async def _save_series_audio_sel(profile_id: str, series: str, sel: Optional[dic
     sel.setdefault("at", _now_iso())
     try:
         async with runtime._lib_lock:
-            lib = await lib_io(_load_lib_raw)
+            edits = _pending_edits()      # pending progress rides along
+            lib = await lib_io(_load_with_edits, edits)
             prof = next((p for p in lib.get("profiles", []) if p.get("id") == profile_id), None)
             if not prof:
                 return
@@ -6343,6 +6353,7 @@ async def _save_series_audio_sel(profile_id: str, series: str, sel: Optional[dic
                 entry["groups"] = groups
             prefs[series] = entry
             await lib_io(_save_lib_raw, lib)
+            _edits_saved(edits)
     except Exception:
         pass
 
@@ -6390,13 +6401,15 @@ async def _learn_profile_audio_pref(profile_id: str, sel: Optional[dict]) -> Non
         return
     try:
         async with runtime._lib_lock:
-            lib = await lib_io(_load_lib_raw)
+            edits = _pending_edits()      # pending progress rides along
+            lib = await lib_io(_load_with_edits, edits)
             prof = next((p for p in lib.get("profiles", []) if p.get("id") == profile_id), None)
             if not prof:
                 return
             prof["audio_language_pref"] = {
                 "lang": lang, "idx": idx, "count": count, "at": _now_iso()}
             await lib_io(_save_lib_raw, lib)
+            _edits_saved(edits)
     except Exception:
         pass
 
@@ -13717,6 +13730,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         power_listener.stop()
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
+    # Progress accepted in the last ~3 s is still in memory (20.30.3).
+    try:
+        await flush_deferred()
+    except Exception as exc:
+        log.warning("Shutdown: pending progress not saved: %s", exc)
     await runtime.qbit.aclose()
     if runtime.vlc_client is not None:
         await runtime.vlc_client.aclose()
@@ -18736,6 +18754,8 @@ async def _library_play_launch(
         # in_play reply). Falls through after the timeout and flips optimistically
         # — the command is already on its way — so the UI never sticks.
         ready = await _vlc_wait_until_ready(first_resolved, timeout=10.0)
+        log.info("PLAY START tv-vlc %.2fs%s %s", time.monotonic() - t_play,
+                 "" if ready else " (VLC never confirmed; gave up waiting)", first.name)
 
         state.stream_status = "playing"
         await broadcast("stream_status", {"status": "playing", "message": f"Playing: {first.name}"})
@@ -19615,49 +19635,70 @@ async def set_shuffle_pref(item_id: str, req: ShufflePrefReq) -> JSONResponse:
 
 @app.post("/api/library/{item_id}/progress")
 async def update_progress(item_id: str, req: ProgressReq) -> JSONResponse:
-    async with mutate_library() as lib:
-        item = next((it for it in lib["items"] if it["id"] == item_id), None)
-        if not item:
-            raise HTTPException(404, "Item not found.")
-        # Sanitise BEFORE anything reads them: these two are the only numbers in
-        # the app that get written to library.json straight off the wire, and a
-        # non-finite value there breaks /api/library for every client (see
-        # _finite). Negative positions are equally meaningless.
-        req.position_sec = max(0.0, _finite(req.position_sec, 0.0))
-        req.duration_sec = max(0.0, _finite(req.duration_sec, 0.0))
-        prof_prog = item.setdefault("progress", {}).setdefault(req.profile_id, {})
-        prof_prog["last_file"] = req.file_path
-        file_progress = prof_prog.setdefault("file_progress", {})
-        existing = file_progress.get(req.file_path, {})
-        # `completed` is monotonic — a late/out-of-order progress POST (e.g. the
-        # on-device player flushing a stale position after a resume) must never
-        # un-finish an episode, or find_resume_hint jumps back into one already
-        # watched. `_watch_state` keeps it so.
-        #
-        # This endpoint is where the on-device player's scrub bar lands: it POSTs
-        # on every `seeked`, and on `ended` it POSTs pos == dur. Both used to credit
-        # the episode outright; the played-time half of `_watch_state` is what now
-        # tells a seek into the last seconds apart from watching up to them.
-        already_done = bool(existing.get("completed"))
-        now_iso = _now_iso()
-        played, done = _watch_state(item, req.file_path, existing,
-                                    req.position_sec, req.duration_sec, now_iso)
-        file_progress[req.file_path] = {
-            # Keep a finished episode pinned at the end rather than stamping the
-            # incoming (older) mid position, so its resume point stays past-the-end.
-            "position_sec": round(req.duration_sec if already_done
-                                  else req.position_sec, 1),
-            "duration_sec": round(req.duration_sec, 1),
-            "completed": done,
-            "played_sec": played,
-            "updated_at": now_iso,
-            # Preserve VLC + local-player track picks across progress writes —
-            # these are sibling keys in the same file_progress dict. subtitle_sel
-            # is the resolvable descriptor the on-device player restores from;
-            # dropping it here reset subs to off on the next replay.
-            **{k: v for k, v in existing.items() if k in _TRACK_PREF_KEYS},
-        }
+    # Accepted at once, saved within ~3 s (20.30.3): a position used to be its own
+    # load + save + fsync, and on a busy disk those queued for up to 12 s (the
+    # app's native player gives up after 8). Every read sees it straight away.
+    # See backend/library.py "Progress doesn't wait for the disk". An item that
+    # is gone by the time the edit runs is skipped; this no longer 404s.
+    #
+    # Sanitise BEFORE anything reads them: these two are the only numbers in
+    # the app that get written to library.json straight off the wire, and a
+    # non-finite value there breaks /api/library for every client (see
+    # _finite). Negative positions are equally meaningless.
+    pos = max(0.0, _finite(req.position_sec, 0.0))
+    dur = max(0.0, _finite(req.duration_sec, 0.0))
+    defer_edit(functools.partial(_apply_progress, item_id, req.profile_id,
+                                 req.file_path, pos, dur, _now_iso()))
     return JSONResponse({"ok": True})
+
+
+def _apply_progress(item_id: str, profile_id: str, file_path: str,
+                    position_sec: float, duration_sec: float, now_iso: str,
+                    lib: dict) -> None:
+    """One progress POST, applied to `lib`. A `defer_edit`: pure, and its clock
+    is the POST's (`now_iso`), so applying it to a read and again to the save
+    gives the same answer."""
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        return
+    prof_prog = item.setdefault("progress", {}).setdefault(profile_id, {})
+    prof_prog["last_file"] = file_path
+    file_progress = prof_prog.setdefault("file_progress", {})
+    existing = file_progress.get(file_path, {})
+    # Stamped later than this POST: this edit is already in (a save can write the
+    # file and still raise, which keeps the edit pending), or a later write
+    # replaced it. Every other writer applies the pending edits before its own,
+    # so nothing written after this POST was accepted can be older than it.
+    prev_at = _parse_iso_dt(existing.get("updated_at"))
+    this_at = _parse_iso_dt(now_iso)
+    if prev_at and this_at and prev_at > this_at:
+        return
+    # `completed` is monotonic — a late/out-of-order progress POST (e.g. the
+    # on-device player flushing a stale position after a resume) must never
+    # un-finish an episode, or find_resume_hint jumps back into one already
+    # watched. `_watch_state` keeps it so.
+    #
+    # This endpoint is where the on-device player's scrub bar lands: it POSTs
+    # on every `seeked`, and on `ended` it POSTs pos == dur. Both used to credit
+    # the episode outright; the played-time half of `_watch_state` is what now
+    # tells a seek into the last seconds apart from watching up to them.
+    already_done = bool(existing.get("completed"))
+    played, done = _watch_state(item, file_path, existing,
+                                position_sec, duration_sec, now_iso)
+    file_progress[file_path] = {
+        # Keep a finished episode pinned at the end rather than stamping the
+        # incoming (older) mid position, so its resume point stays past-the-end.
+        "position_sec": round(duration_sec if already_done else position_sec, 1),
+        "duration_sec": round(duration_sec, 1),
+        "completed": done,
+        "played_sec": played,
+        "updated_at": now_iso,
+        # Preserve VLC + local-player track picks across progress writes —
+        # these are sibling keys in the same file_progress dict. subtitle_sel
+        # is the resolvable descriptor the on-device player restores from;
+        # dropping it here reset subs to off on the next replay.
+        **{k: v for k, v in existing.items() if k in _TRACK_PREF_KEYS},
+    }
 
 
 # ── Batch progress sync (iOS offline → server, plan A2) ──────────────────────
@@ -19725,7 +19766,8 @@ async def sync_progress(req: SyncProgressReq, request: Request) -> JSONResponse:
                    "local_subtitle_idx", "audio_offset_ms")
 
     async with runtime._lib_lock:
-        lib = await lib_io(_load_lib_raw)
+        edits = _pending_edits()      # pending progress rides along
+        lib = await lib_io(_load_with_edits, edits)
         items_by_id = {it["id"]: it for it in lib.get("items", [])}
 
         for ev in req.events:
@@ -19851,6 +19893,7 @@ async def sync_progress(req: SyncProgressReq, request: Request) -> JSONResponse:
             })
 
         await lib_io(_save_lib_raw, lib)
+        _edits_saved(edits)
 
     return JSONResponse({"applied": applied, "conflicts": conflicts, "server_updated_at": now})
 
@@ -19935,7 +19978,8 @@ async def sync_resolve(req: SyncResolveReq, request: Request) -> JSONResponse:
                    "local_subtitle_idx", "audio_offset_ms")
 
     async with runtime._lib_lock:
-        lib = await lib_io(_load_lib_raw)
+        edits = _pending_edits()      # pending progress rides along
+        lib = await lib_io(_load_with_edits, edits)
         items_by_id = {it["id"]: it for it in lib.get("items", [])}
 
         for rz in req.resolutions:
@@ -20006,6 +20050,7 @@ async def sync_resolve(req: SyncResolveReq, request: Request) -> JSONResponse:
             })
 
         await lib_io(_save_lib_raw, lib)
+        _edits_saved(edits)
 
     return JSONResponse({"resolved": resolved})
 
@@ -20053,7 +20098,8 @@ async def set_local_tracks(item_id: str, req: LocalTracksReq) -> JSONResponse:
     """
     series = ""
     async with runtime._lib_lock:
-        lib = await lib_io(_load_lib_raw)
+        edits = _pending_edits()      # pending progress rides along
+        lib = await lib_io(_load_with_edits, edits)
         item = next((it for it in lib["items"] if it["id"] == item_id), None)
         if not item:
             raise HTTPException(404, "Item not found.")
@@ -20092,6 +20138,7 @@ async def set_local_tracks(item_id: str, req: LocalTracksReq) -> JSONResponse:
                 # (_apply_track_prefs prefers the raw ES ID when present).
                 fp.pop("subtitle_track", None)
         await lib_io(_save_lib_raw, lib)
+        _edits_saved(edits)
     # Remember this kind of subtitle for the rest of the series (separate lock)
     # — but only for a deliberate viewer pick (see LocalTracksReq.sub_series).
     if req.subtitle_sel is not None and req.sub_series and series:

@@ -166,6 +166,17 @@ check("a downloader that names no device still matches the one download of that 
       len(lines) == 1, str(lines))
 ns["_phone_dl_fetch"]("nope", "a", "dev1")
 check("a bundle nobody asked a manifest for is ignored", len(lines) == 1)
+# 20.27.0 put this line in _apply_night_mode, where `t_play` doesn't exist: a
+# night-mode toggle mid-play raised NameError, and no VLC start was ever timed.
+src_lines = src.splitlines()
+for fn in tree.body:
+    if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        body = "\n".join(src_lines[fn.lineno - 1:fn.end_lineno])
+        if "PLAY START tv-vlc" in body:
+            check(f"PLAY START tv-vlc is logged where its clock starts ({fn.name})",
+                  "t_play = time.monotonic()" in body)
+        if fn.name == "_library_play_launch":
+            check("the VLC library play is timed", "PLAY START tv-vlc" in body)
 
 print()
 if fails:

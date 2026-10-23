@@ -4,7 +4,10 @@
 in the lifespan) around every read and write; never read or write library.json
 outside them (CLAUDE.md § Style conventions). A `get_library` while the lock is
 held is answered from the last finished write instead (see "Reads don't queue
-behind a save"), so edits belong in `mutate_library`. Saves are atomic and durable
+behind a save"), so edits belong in `mutate_library`. A progress write is a
+`defer_edit`: accepted at once, seen by every read, and saved with the next
+transaction or within `_DEFERRED_FLUSH_S` (see "Progress doesn't wait for the
+disk"). Saves are atomic and durable
 (`_save_lib_raw`, with a bounded Windows retry), snapshotted to
 library_backups/, and recovered from a snapshot when the file will not parse.
 `_migrate_item` brings an item read from disk up to the current schema
@@ -314,6 +317,115 @@ _LIB_GEN = 0
 _LIB_LAST: Optional[bytes] = None
 
 
+# ── Progress doesn't wait for the disk (20.30.3) ─────────────────────────────
+#
+# Every player POSTs its position every few seconds, and each POST was a whole
+# transaction: load, edit, save, fsync. On a busy F: drive the fsync alone takes
+# 2-6 s, and the writers queue behind each other: on 2026-10-22 one progress POST
+# waited 12 s, and the app's native player gives up on one after 8 s. A position
+# does not need its own fsync, it needs to be on disk soon and never to damage the
+# library on the way. So `defer_edit` takes the edit as a function of the library
+# dict and returns at once. The edit is:
+#   * SEEN by every read: `get_library` applies the pending edits to what it
+#     loaded (both paths), so a screen never shows a position older than a POST
+#     that already returned ok;
+#   * SAVED by the next transaction of anyone (`_library_txn` applies them after
+#     its load and drops them once its save succeeds), or by `_flush_deferred_later`
+#     `_DEFERRED_FLUSH_S` after the first one, whichever comes first. That save is
+#     the ordinary durable one, fsync and all.
+# A power cut loses at most the last few seconds of positions and never the file.
+# An edit must be a pure function of the dict it is given (it is applied to every
+# read, and again by the save), skip an item that is gone instead of raising, and
+# take its clock from when it was accepted, not when it runs. A save that fails
+# keeps the edits pending, and the next pass tries again.
+_DEFERRED: list = []                 # [(seq, fn)], oldest first; loop thread only
+_DEFERRED_SEQ = 0
+_DEFERRED_FLUSH_S = 3.0
+_DEFERRED_MAX = 20000                # a disk that refuses every save for hours
+_deferred_task: Optional["asyncio.Task"] = None
+
+
+def defer_edit(fn) -> None:
+    """Accept an edit to the library now and save it within `_DEFERRED_FLUSH_S`.
+
+    Call on the event loop. `fn(lib)` edits the dict in place; see the block
+    comment above for what it must and must not do."""
+    global _DEFERRED_SEQ, _deferred_task
+    _DEFERRED_SEQ += 1
+    _DEFERRED.append((_DEFERRED_SEQ, fn))
+    if len(_DEFERRED) > _DEFERRED_MAX:
+        del _DEFERRED[:len(_DEFERRED) - _DEFERRED_MAX]
+        log.warning("library: %d edits waiting for a save, the oldest dropped", _DEFERRED_MAX)
+    if _deferred_task is None or _deferred_task.done():
+        _deferred_task = asyncio.ensure_future(_flush_deferred_later())
+
+
+def _pending_edits() -> tuple:
+    """The edits a load-then-save made by hand (not through `mutate_library`) must
+    carry: load with `_load_with_edits(edits)`, then `_edits_saved(edits)` after
+    its save succeeds."""
+    return tuple(_DEFERRED)
+
+
+def _apply_edits(lib: dict, edits: tuple) -> dict:
+    for _seq, fn in edits:
+        try:
+            fn(lib)
+        except Exception:                       # one bad edit never blocks the rest
+            log.exception("library: a deferred edit failed")
+    return lib
+
+
+def _edits_saved(edits: tuple) -> None:
+    """Drop the edits a successful save carried; later ones stay pending."""
+    if edits:
+        upto = edits[-1][0]
+        _DEFERRED[:] = [e for e in _DEFERRED if e[0] > upto]
+
+
+def _load_with_edits(edits: tuple) -> dict:
+    return _apply_edits(_load_lib_raw(), edits)
+
+
+def _loads_with_edits(snap: bytes, edits: tuple) -> dict:
+    return _apply_edits(marshal.loads(snap), edits)
+
+
+async def _flush_deferred_later() -> None:
+    while _DEFERRED:
+        await asyncio.sleep(_DEFERRED_FLUSH_S)
+        try:
+            await flush_deferred()
+        except Exception as exc:                # kept; the next pass tries again
+            log.warning("library: saving %d pending edits failed: %s", len(_DEFERRED), exc)
+
+
+async def flush_deferred() -> None:
+    """Save the pending edits now (a no-op when another save already took them).
+
+    Also called at shutdown, so a clean stop loses none."""
+    if not _DEFERRED:
+        return
+    t_ask = time.monotonic()
+    async with runtime._lib_lock:
+        t_in = time.monotonic()
+        edits = tuple(_DEFERRED)
+        if not edits:
+            return
+        runtime._lib_lock.set_holder("flush_deferred [load]")
+        lib = await lib_io(_load_with_edits, edits)
+        t_loaded = time.monotonic()
+        runtime._lib_lock.set_holder("flush_deferred [save]")
+        outcome = "aborted"
+        try:
+            await lib_io(_save_lib_raw, lib)
+            _edits_saved(edits)
+            outcome = "saved"
+        finally:
+            _note_slow_txn(f"flush_deferred ({len(edits)} edits)", outcome, t_ask, t_in,
+                           t_loaded, t_loaded, time.monotonic())
+
+
 def _lib_file_key() -> Optional[tuple]:
     try:
         st = LIBRARY_FILE.stat()
@@ -544,17 +656,20 @@ async def get_library() -> dict:
     #
     # While someone holds the lock, the last finished write is served instead of
     # waiting for theirs (see "Reads don't queue behind a save").
-    snap = _LIB_LAST
+    #
+    # Either way the pending progress edits are applied on top ("Progress doesn't
+    # wait for the disk"), captured together with the snapshot they go on.
+    snap, edits = _LIB_LAST, tuple(_DEFERRED)
     if snap is not None and runtime._lib_lock.locked():
         t0 = time.monotonic()
         try:
-            return await asyncio.to_thread(marshal.loads, snap)
+            return await asyncio.to_thread(_loads_with_edits, snap, edits)
         finally:
             diag.cost_add("lib", time.monotonic() - t0)
     caller = sys._getframe(1).f_code.co_name
     async with runtime._lib_lock:
         runtime._lib_lock.set_holder(f"{caller} [get_library]")
-        return await lib_io(_load_lib_raw)
+        return await lib_io(_load_with_edits, tuple(_DEFERRED))
 
 
 async def put_library(data: dict) -> None:
@@ -639,7 +754,10 @@ async def _library_txn(caller: str):
         outcome = "aborted"
         try:
             runtime._lib_lock.set_holder(f"{caller} [load]")
-            lib = await lib_io(_load_lib_raw)
+            # The pending progress edits ride along with every transaction and
+            # are dropped once its save succeeds ("Progress doesn't wait").
+            edits = tuple(_DEFERRED)
+            lib = await lib_io(_load_with_edits, edits)
             t_loaded = clock()
             runtime._lib_lock.set_holder(f"{caller} [body]")
             try:
@@ -650,6 +768,7 @@ async def _library_txn(caller: str):
             t_body = clock()
             runtime._lib_lock.set_holder(f"{caller} [save]")
             await lib_io(_save_lib_raw, lib)
+            _edits_saved(edits)
             outcome = "saved"
         finally:
             _note_slow_txn(caller, outcome, t_ask, t_in, t_loaded, t_body, clock())

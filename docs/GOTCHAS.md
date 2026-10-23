@@ -7890,8 +7890,47 @@ holder's own unfinished one, and a caller still reads its own finished writes.
   in `mutate_library()`, which reads under the lock (§ Every library mutation).
 - With the lock free, `get_library()` takes it and checks the file as before, so
   an outside edit of library.json is still seen.
-- Writers still queue: a progress save waits for the save before it. Making the
-  save itself cheaper is #96.
+- Writers still queue: a save waits for the save before it. Making the save
+  itself cheaper is #96. Progress no longer queues (next section).
+
+## A position does not need its own fsync (20.30.3)
+
+Every player POSTs its position every few seconds. Each POST used to be a full
+transaction: load, edit, save, fsync. With F: busy the fsync alone took 2-6 s,
+the POSTs queued behind each other, and one waited 12 s on 2026-10-22. The app's
+native player gives up after 8 s and records a lost position.
+
+Skipping the fsync for these saves is NOT the fix. An `os.replace` of a file
+that was never fsynced can leave library.json empty or torn after a power cut,
+and recovery then restores a snapshot up to 15 minutes old, losing every change
+since, not just a position. Instead `update_progress` hands the edit to
+`defer_edit` (backend/library.py) and returns:
+
+- **Every read sees it.** `get_library` applies the pending edits on top of what
+  it loaded, on both paths (the `_LIB_LAST` copy and the locked load), captured
+  together with the snapshot they go on.
+- **Any save carries it.** `_library_txn` applies the pending edits right after
+  its load (so the body sees them too) and drops them once its save succeeds.
+  `_flush_deferred_later` saves what is left `_DEFERRED_FLUSH_S` (3 s) after the
+  first one. A failed save keeps them, and the next pass tries again.
+- **A hand-rolled load-then-save must carry them too.** The track-pref and sync
+  helpers in main.py take `_lib_lock` themselves: they load with
+  `_load_with_edits(_pending_edits())` and call `_edits_saved(edits)` after the
+  save. A save that skips them writes no pending edit, and those edits then
+  land later on top of a newer write (tests/test_lib_io_timing.py checks the
+  pairing).
+- **An edit is a pure function of the dict.** It runs on every read and again
+  in the save, on the library thread, so it does no I/O, takes its clock from
+  when it was accepted (`now_iso` captured in the handler), and skips an item
+  that is gone instead of raising. It must also come out the same when it is
+  applied twice, which happens when a save writes the file and then raises
+  (the edits stay pending but are already on disk). `_apply_progress` does
+  nothing when the file's `updated_at` is newer than its own clock: every other
+  writer applies the pending edits before its own, so a newer stamp means this
+  edit is already in.
+- **Only progress is deferred.** An endpoint whose answer depends on the write
+  (404 on a missing item, a 500 when the save fails) can't be, and
+  `/progress` gave up its 404 for this.
 
 ## The first lookup is the slow one (20.30.1)
 

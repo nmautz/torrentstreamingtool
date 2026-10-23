@@ -1985,6 +1985,18 @@
     "enabled:POSITIONAL_OR_KEYWORD"
    ]
   },
+  "_apply_progress": {
+   "kind": "def",
+   "params": [
+    "item_id:POSITIONAL_OR_KEYWORD",
+    "profile_id:POSITIONAL_OR_KEYWORD",
+    "file_path:POSITIONAL_OR_KEYWORD",
+    "position_sec:POSITIONAL_OR_KEYWORD",
+    "duration_sec:POSITIONAL_OR_KEYWORD",
+    "now_iso:POSITIONAL_OR_KEYWORD",
+    "lib:POSITIONAL_OR_KEYWORD"
+   ]
+  },
   "_apply_race_upgrade": {
    "kind": "async def",
    "params": [
@@ -2849,6 +2861,12 @@
    "kind": "def",
    "params": [
     "lib:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_edits_saved": {
+   "kind": "def",
+   "params": [
+    "edits:POSITIONAL_OR_KEYWORD"
    ]
   },
   "_effective_file_mode": {
@@ -3882,6 +3900,12 @@
    "kind": "def",
    "params": []
   },
+  "_load_with_edits": {
+   "kind": "def",
+   "params": [
+    "edits:POSITIONAL_OR_KEYWORD"
+   ]
+  },
   "_lock_failure_desc": {
    "kind": "def",
    "params": [
@@ -4699,6 +4723,10 @@
    "params": [
     "src:POSITIONAL_OR_KEYWORD"
    ]
+  },
+  "_pending_edits": {
+   "kind": "def",
+   "params": []
   },
   "_persist_bundle_checks": {
    "kind": "async def",
@@ -8463,6 +8491,12 @@
   "datetime": {
    "kind": "class"
   },
+  "defer_edit": {
+   "kind": "def",
+   "params": [
+    "fn:POSITIONAL_OR_KEYWORD"
+   ]
+  },
   "delete_item_files": {
    "kind": "async def",
    "params": [
@@ -8618,6 +8652,10 @@
     "items:POSITIONAL_OR_KEYWORD",
     "profile_id:POSITIONAL_OR_KEYWORD"
    ]
+  },
+  "flush_deferred": {
+   "kind": "async def",
+   "params": []
   },
   "functools": {
    "kind": "module functools"

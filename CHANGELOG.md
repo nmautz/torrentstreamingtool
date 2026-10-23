@@ -1,5 +1,24 @@
 # Changelog
 
+## [20.30.3] — 2026-10-22
+
+### Fixed
+- **Saving a position no longer waits for the disk.** Every player POSTs its
+  position every few seconds, and each POST was a whole library save with its
+  own fsync. On a busy F: drive that is 2-6 s, the saves queued, and on
+  2026-10-22 one POST waited 12 s (the app's native player gives up after 8 s and
+  counts the position as lost). `POST /api/library/{id}/progress` now returns at
+  once. Its edit is shown by every read straight away, and is saved with the
+  next library save, or within 3 s (`defer_edit`, `_DEFERRED_FLUSH_S`), still
+  fsynced. A power cut can cost the last ~3 s of position, never the library.
+  A clean stop saves what is pending. An item that is gone is skipped, so the
+  endpoint no longer 404s.
+- **Toggling night mode during VLC playback no longer fails.** 20.27.0 put the
+  `PLAY START tv-vlc` log line in `_apply_night_mode`, where its clock does not
+  exist, so the toggle raised NameError after relaunching VLC: playback was not
+  marked playing and the resume seek was skipped. The line is now in
+  `_library_play_launch`, so VLC starts are timed for the first time.
+
 ## [20.30.2] — 2026-10-22
 
 ### Fixed

@@ -30,7 +30,8 @@ tree = ast.parse(src)
 WANT = {"_write_durable", "_steps_note", "_note_slow_lib_io", "_save_lib_raw",
         "_save_lib_raw_inner", "_lib_file_key",
         "_load_lib_raw", "mutate_library", "_library_txn", "_note_slow_txn",
-        "LibraryUnchanged", "get_library", "put_library", "lib_io"}
+        "LibraryUnchanged", "get_library", "put_library", "lib_io",
+        "_apply_edits", "_edits_saved", "_load_with_edits", "_loads_with_edits"}
 CONSTS = {"_LIB_IO_SLOW_S", "_SAVE_RETRY_DELAYS", "_LIB_POOL"}
 
 fails = []
@@ -127,6 +128,7 @@ ns = {
     "_migrate_item": _migrate_item,
     "_fold_item_hides": lambda raw: None,
     "marshal": marshal, "_LIB_CACHE": None, "_LIB_GEN": 0, "diag": diag,
+    "_DEFERRED": [],
 }
 
 pieces, found = [], set()
@@ -403,7 +405,9 @@ rns = {"Optional": Optional, "Path": Path, "time": time, "json": json, "sys": sy
        "_parse_library_bytes": lambda b: json.loads(b) if b else None,
        "_recover_library": lambda: None, "_migrate_item": lambda it: it,
        "_fold_item_hides": lambda raw: None, "_note_slow_lib_io": lambda *a: None,
-       "_lock_failure_desc": lambda e: "", "_lock_holders_note": lambda: ""}
+       "_lock_failure_desc": lambda e: "", "_lock_holders_note": lambda: "",
+       "_DEFERRED": [], "_DEFERRED_SEQ": 0, "_DEFERRED_FLUSH_S": 0.1,
+       "_DEFERRED_MAX": 20000, "_deferred_task": None}
 FSYNC = threading.Event()
 SAVE_FAILS = [False]
 
@@ -419,7 +423,9 @@ rns["_save_lib_raw_inner"] = _inner
 rpieces = [ast.get_source_segment(src, n) for n in tree.body
            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.name in
            {"_lib_file_key", "_load_lib_raw", "_save_lib_raw", "get_library", "lib_io",
-            "mutate_library", "_library_txn", "_note_slow_txn", "LibraryUnchanged"}]
+            "mutate_library", "_library_txn", "_note_slow_txn", "LibraryUnchanged",
+            "_pending_edits", "_apply_edits", "_edits_saved", "_load_with_edits",
+            "_loads_with_edits", "defer_edit", "_flush_deferred_later", "flush_deferred"}]
 rns["_library_txn"] = None
 exec("\n\n".join(p if not p.startswith("async def _library_txn") else "@asynccontextmanager\n" + p
                   for p in rpieces), rns)
@@ -474,6 +480,180 @@ retire = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef)
               and n.name == "_retire_ai_subtitles")
 check("no caller writes back what get_library returned",
       "put_library(lib)" not in ast.get_source_segment(src, retire))
+
+
+print("progress doesn't wait for the disk (20.30.3)")
+SAVES = [0]
+_inner_reads = rns["_save_lib_raw_inner"]
+
+
+def _counting_inner(data):
+    SAVES[0] += 1
+    _inner_reads(data)
+
+
+rns["_save_lib_raw_inner"] = _counting_inner
+
+
+def _pos(v):
+    """An edit like update_progress's: pure, skips a missing item."""
+    def fn(lib):
+        it = next((i for i in lib["items"] if i["id"] == "a"), None)
+        if it is not None:
+            it["pos"] = v
+    return fn
+
+
+def _disk_pos():
+    return next((i.get("pos") for i in json.loads(rns["LIBRARY_FILE"].read_text())["items"]
+                 if i["id"] == "a"), None)
+
+
+async def deferred_case():
+    rns["runtime"] = types.SimpleNamespace(_lib_lock=diag.InstrumentedLock(asyncio.Lock(), "defer"))
+    rns["LIBRARY_FILE"].write_text(json.dumps({"items": [{"id": "a"}], "v": 1}))
+    rns["_LIB_CACHE"], rns["_LIB_LAST"] = None, None
+    out = {}
+    FSYNC.set()
+    SAVE_FAILS[0] = False
+    SAVES[0] = 0
+
+    rns["defer_edit"](_pos(10))
+    out["read_free"] = (await rns["get_library"]())["items"][0].get("pos")
+    out["disk_before"] = _disk_pos()
+    await asyncio.sleep(0.3)
+    out["disk_after"], out["pending_after"], out["saves1"] = _disk_pos(), len(rns["_DEFERRED"]), SAVES[0]
+
+    # A save stuck in its fsync: the POST still returns at once, a read sees it.
+    FSYNC.clear()
+
+    async def writer(body=None):
+        async with rns["mutate_library"]() as lib:
+            if body:
+                body(lib)
+
+    seen = {}
+    w = asyncio.ensure_future(writer(lambda lib: seen.update(v=lib["items"][0].get("pos"))))
+    await asyncio.sleep(0.05)
+    t0 = time.monotonic()
+    rns["defer_edit"](_pos(20))
+    out["defer_s"] = time.monotonic() - t0
+    t0 = time.monotonic()
+    out["read_locked"] = (await rns["get_library"]())["items"][0].get("pos")
+    out["read_locked_s"] = time.monotonic() - t0
+    FSYNC.set()
+    await w
+    out["pending_mid"] = len(rns["_DEFERRED"])      # 20 arrived after that load
+    await asyncio.sleep(0.3)
+    out["disk_mid"], out["pending_mid2"] = _disk_pos(), len(rns["_DEFERRED"])
+
+    # Another writer's transaction carries the pending edit, and its body sees it.
+    SAVES[0] = 0
+    rns["defer_edit"](_pos(30))
+    await writer(lambda lib: seen.update(w2=lib["items"][0].get("pos")))
+    out["carried"], out["pending_c"] = _disk_pos(), len(rns["_DEFERRED"])
+    await asyncio.sleep(0.3)
+    out["saves_c"] = SAVES[0]                         # the flusher found nothing left
+
+    # A writer that decides not to write keeps the edit pending.
+    rns["defer_edit"](_pos(40))
+
+    async def unchanged():
+        async with rns["mutate_library"]():
+            raise rns["LibraryUnchanged"]()
+    await unchanged()
+    out["unchanged_pending"] = len(rns["_DEFERRED"])
+    await asyncio.sleep(0.3)
+    out["after_unchanged"] = _disk_pos()
+
+    # A save that fails keeps it; the next pass saves it.
+    SAVE_FAILS[0] = True
+    rns["defer_edit"](_pos(50))
+    await asyncio.sleep(0.25)
+    out["failed_pending"], out["failed_disk"] = len(rns["_DEFERRED"]), _disk_pos()
+    out["failed_read"] = (await rns["get_library"]())["items"][0].get("pos")
+    SAVE_FAILS[0] = False
+    await asyncio.sleep(0.3)
+    out["recovered"], out["pending_end"] = _disk_pos(), len(rns["_DEFERRED"])
+
+    # An edit for an item that is gone is skipped, not an error.
+    rns["defer_edit"](lambda lib: next(i for i in lib["items"] if i["id"] == "gone"))
+    rns["defer_edit"](_pos(60))
+    await rns["flush_deferred"]()
+    out["after_bad"], out["pending_bad"] = _disk_pos(), len(rns["_DEFERRED"])
+    SAVES[0] = 0
+    await rns["flush_deferred"]()
+    out["empty_flush_saves"] = SAVES[0]
+    out["seen"] = seen
+    return out
+
+
+r = asyncio.run(deferred_case())
+check("a POST is seen by the next read before it is on disk",
+      r["read_free"] == 10 and r["disk_before"] is None, str(r))
+check("and is on disk within the flush delay, nothing left pending",
+      r["disk_after"] == 10 and r["pending_after"] == 0 and r["saves1"] == 1, str(r))
+check("accepting one never waits for a save in its fsync", r["defer_s"] < 0.01, str(r))
+check("a read during that save sees it at once",
+      r["read_locked"] == 20 and r["read_locked_s"] < 0.15, str(r))
+check("an edit that came after a writer's load outlives that save, then lands",
+      r["pending_mid"] == 1 and r["disk_mid"] == 20 and r["pending_mid2"] == 0, str(r))
+check("another writer's save carries it, and its body sees it",
+      r["carried"] == 30 and r["pending_c"] == 0 and r["seen"].get("w2") == 30
+      and r["saves_c"] == 1, str(r))
+check("a writer that writes nothing leaves it pending for the flusher",
+      r["unchanged_pending"] == 1 and r["after_unchanged"] == 40, str(r))
+check("a failed save keeps it (still read), and the next pass saves it",
+      r["failed_pending"] == 1 and r["failed_disk"] == 40 and r["failed_read"] == 50
+      and r["recovered"] == 50 and r["pending_end"] == 0, str(r))
+check("one broken edit never blocks the rest",
+      r["after_bad"] == 60 and r["pending_bad"] == 0, str(r))
+check("a flush with nothing pending writes nothing", r["empty_flush_saves"] == 0, str(r))
+
+up = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "update_progress")
+up_src = ast.get_source_segment(src, up)
+check("update_progress defers instead of opening a transaction",
+      "defer_edit(" in up_src and "mutate_library" not in up_src and "await" not in up_src)
+ap = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_apply_progress")
+ap_src = ast.get_source_segment(src, ap)
+check("its edit takes the POST's clock, not the time it is applied",
+      "now_iso" in [a.arg for a in ap.args.args] and "_now_iso()" not in ap_src)
+check("no load-then-save by hand skips the pending edits",
+      "lib_io(_load_lib_raw)" not in src
+      and src.count("lib_io(_load_with_edits, edits)")
+      == sum(ln.strip() == "_edits_saved(edits)" for ln in src.splitlines()))
+# The real edit, with the real watch rule: applied to a read and again by the
+# save (or twice, when a save wrote the file and then raised) it must not move.
+import watchrule                          # noqa: E402
+import copy as _copy                      # noqa: E402
+pns = {"Optional": Optional, "datetime": __import__("datetime").datetime,
+       "timezone": __import__("datetime").timezone, "watchrule": watchrule,
+       "_credits_start_for": lambda item, fp: None}
+for n in tree.body:
+    if isinstance(n, ast.FunctionDef) and n.name in {"_apply_progress", "_watch_state", "_parse_iso_dt"}:
+        exec(ast.get_source_segment(src, n), pns)
+    elif isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "_TRACK_PREF_KEYS"
+                                           for t in n.targets):
+        exec(ast.get_source_segment(src, n), pns)
+base = {"items": [{"id": "x", "progress": {"p": {"file_progress": {"a.mkv": {
+    "position_sec": 100, "duration_sec": 1400, "played_sec": 90, "completed": False,
+    "updated_at": "2026-10-22T20:00:00+00:00", "subtitle_sel": {"k": 1}}}}}}]}
+E = [(i, (lambda pos, at: (lambda lib: pns["_apply_progress"]("x", "p", "a.mkv", pos, 1400.0, at, lib)))(
+    pos, at)) for i, (pos, at) in enumerate(((110.0, "2026-10-22T20:00:10+00:00"),
+                                             (120.0, "2026-10-22T20:00:20+00:00"),
+                                             (125.0, "2026-10-22T20:00:20+00:00")), 1)]
+once = rns["_apply_edits"](_copy.deepcopy(base), tuple(E))
+twice = rns["_apply_edits"](_copy.deepcopy(once), tuple(E))
+fp1 = once["items"][0]["progress"]["p"]["file_progress"]["a.mkv"]
+check("three POSTs land in order, track picks kept",
+      fp1["position_sec"] == 125.0 and fp1["played_sec"] > 90 and fp1["subtitle_sel"] == {"k": 1}, str(fp1))
+check("applying them again changes nothing", once == twice, str(twice))
+pns["_apply_progress"]("gone", "p", "a.mkv", 1.0, 2.0, "2026-10-22T20:00:30+00:00", once)
+check("an item that is gone is skipped", once == twice)
+life = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "lifespan")
+life_src = ast.get_source_segment(src, life)
+check("a clean stop saves what is pending",
+      "await flush_deferred()" in life_src[life_src.index("    yield"):])
 
 print()
 if fails:
