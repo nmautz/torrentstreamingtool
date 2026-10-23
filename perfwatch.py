@@ -33,7 +33,7 @@ _UPLOAD = ("/api/diag/client-log",)
 # Waits on someone else's server (Jackett's indexers, TMDb, OpenSubtitles): the
 # box can't make those faster, so they are reported, not judged.
 _EXTERNAL = ("/api/search", "/api/subtitles/search", "/api/library/{item_id}/subtitles/search",
-             "/api/admin/idle-screen/geocode",
+             "/api/admin/idle-screen/geocode", "/api/ambient/weather",
              "/api/library/{item_id}/metadata/search", "/api/tmdb/search",
              "/api/admin/indexers/{indexer_id}/test", "/api/admin/indexers/test-all")
 # A phone downloading a bundle: a background wait, timed end to end elsewhere.

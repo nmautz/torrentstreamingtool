@@ -1,5 +1,27 @@
 # Changelog
 
+## [20.30.1] — 2026-10-22
+
+### Fixed
+- **A screen no longer waits for someone else's library save.** A save is an
+  fsync, and with a prep encode and qBit writing it took 3.7-4.1 s; every read
+  took the same lock, so on 2026-10-22 seven `/api/offline-active` calls waited
+  7.7 s and prep-status 3.4 s. While someone holds the library lock, a read now
+  gets the last finished write at once (`_LIB_LAST`). The one caller that wrote
+  back what it had read (`_retire_ai_subtitles`) now edits in a transaction.
+- **No binary lookup on the event loop after a boot.** The first ffmpeg / fpcalc
+  lookup on a cold disk held the loop 0.72 s. The lifespan now finds ffmpeg,
+  ffprobe and fpcalc on a thread before serving, and an expired lookup answers
+  with what it had while it looks again on a thread.
+- **The admin page no longer waits 16.6 s for the NVENC check after a boot.** The
+  check now starts with the server, and every caller shares the one run.
+- **Entering a PIN no longer writes a file on the event loop** (0.32 s with the
+  disk busy). `profile_sessions.json` is written by its own thread, newest copy
+  wins, and a copy still waiting at exit is written then.
+- The slideshow's weather call counts as an outside service in the request
+  timings, not as an interactive request.
+- `tests/fixtures/main_surface.json` re-pinned (it had not been after 20.30.0).
+
 ## [20.30.0] — 2026-10-22
 
 ### Fixed

@@ -1925,7 +1925,7 @@ async with mutate_library() as lib:
 
 Rules that come with it:
 
-- **`get_library()` is still correct for read-only callers.** `put_library()` survives only for the rare caller that builds a library dict from scratch rather than editing the current one. If you are editing, you want `mutate_library()`.
+- **`get_library()` is still correct for read-only callers**, and while the lock is held it returns the last finished write without waiting (20.30.1, § A read must not wait), so never write its result back. `put_library()` survives only for the rare caller that builds a library dict from scratch rather than editing the current one. If you are editing, you want `mutate_library()`.
 - **Not reentrant.** `_lib_lock` is a plain `asyncio.Lock`, so never call `get_library()` / `put_library()` / `mutate_library()` inside the block — nor any helper that does. `_all_library_paths()` is the one that bites (and `_item_save_root()`, which calls it): hoist those *before* the transaction opens. `add_library_path` and `admin_cleanup_recover_item` show the shape — read outside, re-check the dynamic part inside.
 - **Keep network and disk IO out of the block.** It is the single global library lock; holding it across a qBit round trip or an N-file delete stalls every other reader and writer, including the 2 s stat broadcaster. Do the IO before or after (`delete_library_item` drops the item under the lock and calls `qbit_delete` after; `delete_item_files` commits the skip marks, then unlinks outside).
 - **A plain `return` inside the block COMMITS.** The context manager sees a clean exit. That's harmless for the usual "bail before mutating" guard — it rewrites what it just read — but it means an early return can no longer be used to *discard* a mutation you already made. Raise `LibraryUnchanged` for that; it's swallowed by the context manager and writes nothing. Any other exception (an `HTTPException` validation guard, say) also aborts the write, exactly as before.
@@ -7869,3 +7869,39 @@ will be noticed. Exact values (and the drive's idle time and queue depth) would
 need our own `IOCTL_DISK_PERFORMANCE` call; not built. See DIAGNOSTICS.md
 § vitals_loop.
 
+
+## A read must not wait for someone else's save (20.30.1)
+
+A library save is an `fsync`, and on the box's busy disk an fsync takes seconds
+(3-6 s for 2.6 MB with a prep encode and qBit writing). Every read used to take
+`_lib_lock` too, so on 2026-10-22 seven read-only `/api/offline-active` calls
+waited 7.7 s behind two progress saves, and prep-status 3.4 s.
+
+`get_library()` now answers from `_LIB_LAST` while someone holds the lock: the
+library as it was last loaded from disk. A load sets it; a save that succeeds
+clears it; a failed save leaves it (the file did not change). So the copy holds
+every write that has FINISHED (the lock holder loaded after them), never the
+holder's own unfinished one, and a caller still reads its own finished writes.
+
+- **What `get_library()` returns may be older than a write in progress.** That
+  was always true a moment earlier; now it is true while the writer works too.
+  So never write back what it returned (`lib = await get_library()` …
+  `await put_library(lib)`): that clobbers whatever the lock holder writes. Edit
+  in `mutate_library()`, which reads under the lock (§ Every library mutation).
+- With the lock free, `get_library()` takes it and checks the file as before, so
+  an outside edit of library.json is still seen.
+- Writers still queue: a progress save waits for the save before it. Making the
+  save itself cheaper is #96.
+
+## The first lookup is the slow one (20.30.1)
+
+The 20.26.8 memo stopped repeat lookups of ffmpeg / ffprobe / fpcalc, but not the
+first one, and the first one comes right after a boot, when the disk is coldest:
+reading `.env` and stat-ing the exe held the event loop 0.72 s (admin Activity →
+`analyzer.is_available` → `fpcalc_bin`). Each expiry was another lookup on the
+loop. Now the lifespan finds all of them on a thread before serving
+(`_warm_media_bins_sync`), and an expired answer is returned at once while the
+lookup runs again on a `bin-lookup` thread. Same for the NVENC check: two cold
+ffmpeg starts plus the GPU driver's took 16.6 s after a boot, and the admin page
+that first asked waited for all of it. It now starts in the lifespan, and every
+caller while it runs waits for that one check (`_start_nvenc_probe`).

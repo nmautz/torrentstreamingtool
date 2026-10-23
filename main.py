@@ -13429,8 +13429,10 @@ async def _retire_ai_subtitles() -> None:
                  for f in (it.get("files") or []) if f.get("path")]
         removed, freed = await asyncio.to_thread(_sweep_ai_subs_sync, paths)
         if (lib.get("settings", {}) or {}).get("stt", {}).get("enabled") is not False:
-            lib.setdefault("settings", {}).setdefault("stt", {})["enabled"] = False
-            await put_library(lib)
+            # In a transaction of its own: `lib` above may be the last finished
+            # write rather than the newest (get_library while the lock is held).
+            async with mutate_library() as cur:
+                cur.setdefault("settings", {}).setdefault("stt", {})["enabled"] = False
         AI_SUBS_RETIRED_MARKER.write_text(
             f"retired {datetime.now().isoformat(timespec='seconds')}; "
             f"{removed} generated subtitles removed, {freed / 1e9:.2f} GB freed" + chr(10),
@@ -13488,6 +13490,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # our handlers all exist by now.
     log.info("Log writes moved off the event loop: %d handler(s)", diag.defer_log_writes())
     await asyncio.to_thread(_warm_endpoint_sources_sync, app)
+    # Where ffmpeg / ffprobe / fpcalc are, found before the first request asks on
+    # the loop (20.30.1; mediabin `_memo_bin`).
+    await asyncio.to_thread(_warm_media_bins_sync)
     # Route asyncio's own callback errors into the app log (and demote the benign
     # Windows WinError 10054 disconnect churn that used to flood it at ERROR).
     diag.install_loop_exception_handler(runtime._MAIN_LOOP)
@@ -13667,6 +13672,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
                 log.warning("power-button raw-input listener failed to start",
                             exc_info=True)
 
+    # The NVENC check starts now rather than when the admin page first asks: after
+    # a boot it took 16.6 s (two cold ffmpeg starts and the GPU driver's), and the
+    # page waited for all of it (20.30.1). Callers share this one run.
+    _start_nvenc_probe()
     # Everything built so far lives as long as the process: keep it out of full
     # collections (20.26.1, see diag.freeze_startup_heap).
     diag.freeze_startup_heap()
@@ -31152,8 +31161,29 @@ async def _probe_run(cmd: list[str], keep: str = "stdout",
     return await asyncio.to_thread(_probe_run_sync, cmd, keep, kw, timeout)
 
 
+_nvenc_task: Optional[asyncio.Task] = None
+
+
 async def _has_nvenc() -> bool:
-    """Detect whether ffmpeg can actually open an h264_nvenc session right now."""
+    """Detect whether ffmpeg can actually open an h264_nvenc session right now.
+
+    One check at a time: every caller while it runs waits for the same one
+    (shielded, so a caller that gives up does not cancel it for the others). The
+    lifespan starts it, so a caller usually finds the answer already there."""
+    if "result" in _nvenc_probe:
+        return _nvenc_probe["result"]
+    return await asyncio.shield(_start_nvenc_probe())
+
+
+def _start_nvenc_probe() -> asyncio.Task:
+    """The running NVENC check, or a new one (after `_nvenc_probe.clear()`)."""
+    global _nvenc_task
+    if _nvenc_task is None or _nvenc_task.done():
+        _nvenc_task = asyncio.ensure_future(_probe_nvenc())
+    return _nvenc_task
+
+
+async def _probe_nvenc() -> bool:
     if "result" in _nvenc_probe:
         return _nvenc_probe["result"]
     ffmpeg = analyzer.ffmpeg_bin()
@@ -31522,6 +31552,15 @@ def _ffprobe_bin() -> Optional[str]:
                 return str(sib)
         return shutil.which("ffprobe")
     return mediabin._memo_bin("ffprobe-beside-ffmpeg", _find)
+
+
+def _warm_media_bins_sync() -> None:
+    """Every binary lookup, once, on a thread: `mediabin.warm_bins` and main's own
+    ffprobe lookup. After this no lookup runs on the event loop."""
+    found = mediabin.warm_bins()
+    _ffprobe_bin()
+    log.info("Media binaries: %s", ", ".join(f"{k} {'found' if v else 'MISSING'}"
+                                             for k, v in found.items()))
 
 
 async def _ffmpeg_version() -> Optional[tuple[int, int]]:

@@ -5,8 +5,10 @@ profile_sessions.json, checked by `_profile_session_id` and the content lock.
 `_profile_sessions` is reassigned when the file is loaded, so it is read only
 here, never imported.
 """
+import atexit
 import json
 import secrets
+import threading
 import time
 from typing import Optional
 
@@ -65,12 +67,63 @@ def _load_profile_sessions() -> None:
         _profile_sessions = {}
 
 
+# The file is written by a thread of its own (20.30.1). Entering a PIN wrote it
+# on the event loop, and with the disk busy that held the loop 0.32 s. The dict is
+# serialised by the caller (it is small, and only the loop changes it); the
+# thread writes the newest copy, so a burst of changes is one write. A copy still
+# waiting at exit is written by `_flush_profile_sessions`.
+_sessions_pending: Optional[str] = None
+_sessions_cv = threading.Condition()
+_sessions_io = threading.Lock()                # one write at a time
+_sessions_writer: Optional[threading.Thread] = None
+
+
+def _write_profile_sessions(blob: str) -> None:
+    with _sessions_io:
+        try:
+            PROFILE_SESSIONS_FILE.write_text(blob, encoding="utf-8")
+        except Exception as e:
+            log.warning("Could not persist profile sessions: %s", e)
+
+
+def _take_pending_sessions() -> Optional[str]:
+    global _sessions_pending
+    with _sessions_cv:
+        blob, _sessions_pending = _sessions_pending, None
+    return blob
+
+
+def _sessions_writer_main() -> None:
+    while True:
+        with _sessions_cv:
+            while _sessions_pending is None:
+                _sessions_cv.wait()
+        blob = _take_pending_sessions()
+        if blob is not None:
+            _write_profile_sessions(blob)
+
+
+@atexit.register
+def _flush_profile_sessions() -> None:
+    blob = _take_pending_sessions()
+    if blob is not None:
+        _write_profile_sessions(blob)
+
+
 def _save_profile_sessions() -> None:
+    global _sessions_pending, _sessions_writer
     try:
-        PROFILE_SESSIONS_FILE.write_text(
-            json.dumps(_profile_sessions, indent=2), encoding="utf-8")
+        blob = json.dumps(_profile_sessions, indent=2)
     except Exception as e:
         log.warning("Could not persist profile sessions: %s", e)
+        return
+    with _sessions_cv:
+        _sessions_pending = blob
+        if _sessions_writer is None:
+            _sessions_writer = threading.Thread(
+                target=_sessions_writer_main, name="sessions-writer", daemon=True)
+            _sessions_writer.start()
+        _sessions_cv.notify()
 
 
 def _new_profile_session(profile_id: str, remember: bool = False) -> str:

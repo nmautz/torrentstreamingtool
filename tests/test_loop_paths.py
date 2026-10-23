@@ -172,7 +172,7 @@ check("the rule found its callers", callers >= 10)
 print("the ffmpeg capability probes start no process on the loop (20.25.20)")
 # CreateProcess runs on the loop thread under asyncio on Windows; the first
 # ffmpeg start after a boot held it 0.6 s in _has_nvenc.
-PROBES = {"_has_nvenc", "_has_cuda_scale", "_has_tonemap", "_gpu_can_hwdecode",
+PROBES = {"_probe_nvenc", "_has_cuda_scale", "_has_tonemap", "_gpu_can_hwdecode",
           "_sample_gpu",               # 20.25.23: every 5 s, 0.14 s on the loop
           "vpn_guard",                 # 20.25.24: `mullvad status` every 3 s, 0.16 s
           "_ffmpeg_version"}           # 20.26.2: 0.67 s at start-up
@@ -321,21 +321,129 @@ try:
     a = mediabin.ffmpeg_bin(); b = mediabin.ffmpeg_bin()
     check("a found binary is looked up once", a == b == "C:/tools/ffmpeg.exe" and _looks == ["_FFMPEG_BIN"])
     _clock[0] += mediabin._BIN_TTL_FOUND_S + 1
-    mediabin.ffmpeg_bin()
-    check("and again after its TTL", _looks.count("_FFMPEG_BIN") == 2)
+    _gate = __import__("threading").Event()
+    _env = mediabin._env_bin
+    mediabin._env_bin = lambda k: (_gate.wait(5), _env(k))[1]
+    c = mediabin.ffmpeg_bin()
+    d = mediabin.ffmpeg_bin()                       # while the lookup is still running
+    check("after its TTL the old answer comes back at once (20.30.1)",
+          c == d == "C:/tools/ffmpeg.exe" and _looks.count("_FFMPEG_BIN") == 1)
+    _gate.set(); mediabin._bin_last_refresh.join(5)
+    mediabin._env_bin = _env
+    check("and it is looked up again on a thread, once",
+          _looks.count("_FFMPEG_BIN") == 2 and not mediabin._bin_refreshing)
     _looks.clear()
     mediabin.fpcalc_bin(); mediabin.fpcalc_bin()
     check("a missing one is remembered too", len(_looks) == 2)      # env + PATH, once
     _clock[0] += mediabin._BIN_TTL_MISSING_S + 1
-    mediabin.fpcalc_bin()
+    mediabin.fpcalc_bin(); mediabin._bin_last_refresh.join(5)
     check("but re-checked sooner, so an install is noticed",
           len(_looks) == 4 and mediabin._BIN_TTL_MISSING_S < mediabin._BIN_TTL_FOUND_S)
+    mediabin._bin_memo.clear(); _looks.clear()
+    got = mediabin.warm_bins()
+    check("warm_bins looks every binary up", set(got) == {"ffmpeg", "ffprobe", "fpcalc"}
+          and "_FFMPEG_BIN" in _looks and "_FPCALC_BIN" in _looks)
 finally:
     mediabin._env_bin, mediabin.shutil.which, mediabin.time.monotonic = _real
     mediabin._bin_memo.clear()
 fb = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_ffprobe_bin")
 check("main's ffprobe lookup goes through the memo",
       "mediabin._memo_bin(" in ast.get_source_segment(src, fb))
+_life = ast.get_source_segment(src, next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef)
+                                         and n.name == "lifespan"))
+check("the lifespan finds every binary on a thread, before serving",
+      "asyncio.to_thread(_warm_media_bins_sync)" in _life
+      and _life.index("_warm_media_bins_sync") < _life.index("yield"))
+check("and starts the NVENC check", "_start_nvenc_probe()" in _life
+      and _life.index("_start_nvenc_probe()") < _life.index("yield"))
+
+print("one NVENC check, shared (20.30.1)")
+import asyncio as _aio                    # noqa: E402
+nv = {"asyncio": _aio, "Optional": __import__("typing").Optional, "_nvenc_probe": {},
+      "_nvenc_task": None}
+nv_runs = []
+
+
+async def _fake_probe():
+    nv_runs.append(1)
+    await _aio.sleep(0.1)
+    nv["_nvenc_probe"]["result"] = True
+    return True
+
+exec("\n\n".join(ast.get_source_segment(src, n) for n in tree.body
+                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and n.name in ("_has_nvenc", "_start_nvenc_probe")), nv)
+nv["_probe_nvenc"] = _fake_probe
+
+
+async def _nv_case():
+    nv["_start_nvenc_probe"]()                    # the lifespan
+    gone = _aio.ensure_future(nv["_has_nvenc"]())
+    await _aio.sleep(0.01)
+    gone.cancel()                                 # a caller that gives up
+    res = await _aio.gather(*(nv["_has_nvenc"]() for _ in range(3)))
+    after = (await nv["_has_nvenc"](), len(nv_runs))
+    nv["_nvenc_probe"].clear()                    # the ffmpeg-changed reset
+    again = await nv["_has_nvenc"]()
+    return res, after, again
+
+res, after, again = _aio.run(_nv_case())
+check("callers while it runs share the one check, and one leaving doesn't stop it",
+      res == [True] * 3 and after == (True, 1))
+check("a reset starts a new one", again is True and len(nv_runs) == 2)
+
+print("profile sessions are written off the loop (20.30.1)")
+import threading as _th, time, types as _ty    # noqa: E402
+_writes = []
+_wgate = _th.Event()
+
+
+class _SlowFile:
+    def write_text(self, blob, encoding=None):
+        _wgate.wait(5)
+        _writes.append(json.loads(blob))
+
+import json                               # noqa: E402
+sns = {"json": json, "threading": _th, "Optional": __import__("typing").Optional,
+       "atexit": _ty.SimpleNamespace(register=lambda f: f),
+       "log": _ty.SimpleNamespace(warning=lambda *a: None),
+       "PROFILE_SESSIONS_FILE": _SlowFile(), "_profile_sessions": {}}
+ssrc = _backend_src.read()
+stree = ast.parse(ssrc)
+spieces = []
+for n in stree.body:
+    if isinstance(n, ast.FunctionDef) and n.name in (
+            "_write_profile_sessions", "_take_pending_sessions", "_sessions_writer_main",
+            "_flush_profile_sessions", "_save_profile_sessions"):
+        decos = "".join("@" + ast.get_source_segment(ssrc, d) + "\n" for d in n.decorator_list)
+        spieces.append(decos + ast.get_source_segment(ssrc, n))
+    elif isinstance(n, (ast.Assign, ast.AnnAssign)) and any(
+            getattr(t, "id", "").startswith("_sessions_")
+            for t in (n.targets if isinstance(n, ast.Assign) else [n.target])):
+        spieces.append(ast.get_source_segment(ssrc, n))
+exec("\n\n".join(spieces), sns)
+t0 = time.monotonic()
+for i in range(5):
+    sns["_profile_sessions"][f"t{i}"] = {"profile_id": "p", "expires": 1}
+    sns["_save_profile_sessions"]()
+check("saving returns at once while the disk is slow", time.monotonic() - t0 < 0.1)
+_wgate.set()
+deadline = time.monotonic() + 5
+while (sns["_sessions_pending"] is not None or not _writes or len(_writes[-1]) < 5) \
+        and time.monotonic() < deadline:
+    time.sleep(0.01)
+check("the newest copy is what lands, and a burst is not five writes",
+      bool(_writes) and len(_writes[-1]) == 5 and len(_writes) <= 2)
+_wgate.clear()
+sns["_profile_sessions"]["late"] = {"profile_id": "p", "expires": 1}
+with sns["_sessions_cv"]:
+    sns["_sessions_pending"] = json.dumps(sns["_profile_sessions"])   # not yet taken
+_wgate.set()
+sns["_flush_profile_sessions"]()
+check("a copy still waiting at exit is written", any("late" in w for w in _writes))
+save_src = next(ast.get_source_segment(ssrc, n) for n in stree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "_save_profile_sessions")
+check("_save_profile_sessions itself touches no file", "write_text" not in save_src)
 
 import asyncio, time                      # noqa: E402
 import epgroups                           # noqa: E402

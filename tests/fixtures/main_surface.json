@@ -1316,6 +1316,9 @@
   "_PHONE_DL_ROUTES": {
    "kind": "value"
   },
+  "_PLAYER_SHA_MEMO": {
+   "kind": "value"
+  },
   "_PLAYER_SNAPSHOT_FILES": {
    "kind": "value"
   },
@@ -4325,6 +4328,9 @@
   "_nvenc_probe": {
    "kind": "value"
   },
+  "_nvenc_task": {
+   "kind": "value"
+  },
   "_od_build_ffmpeg_args": {
    "kind": "def",
    "params": [
@@ -4974,6 +4980,10 @@
    "params": [
     "item_id:POSITIONAL_OR_KEYWORD"
    ]
+  },
+  "_probe_nvenc": {
+   "kind": "async def",
+   "params": []
   },
   "_probe_rendition_first_pts": {
    "kind": "def",
@@ -6260,6 +6270,10 @@
     "item_id:POSITIONAL_OR_KEYWORD"
    ]
   },
+  "_start_nvenc_probe": {
+   "kind": "def",
+   "params": []
+  },
   "_start_skip_countdown": {
    "kind": "def",
    "params": [
@@ -7210,6 +7224,10 @@
     "items:POSITIONAL_OR_KEYWORD",
     "meta:POSITIONAL_OR_KEYWORD"
    ]
+  },
+  "_warm_media_bins_sync": {
+   "kind": "def",
+   "params": []
   },
   "_watch_offers": {
    "kind": "def",
@@ -10204,7 +10222,7 @@
    "kind": "module zipfile"
   }
  },
- "openapi_sha256": "1f6e0e59c338b8d57c93d73ad6118cc8160c4e0dd083cab55cb3b242177e2f62",
+ "openapi_sha256": "88a79dcf15ecc4ba70685cdd95602229b71595e92ab48f1f176ff9a484ab9da7",
  "routes": [
   {
    "endpoint": "openapi",

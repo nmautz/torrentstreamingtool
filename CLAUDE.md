@@ -286,7 +286,7 @@ If a change makes the app stop working with older servers, raise `MIN_SERVER` in
 - **Metro UI** throughout the frontend — flat tiles, no rounded corners, bold uppercase typography, square status dots, no `backdrop-blur`. See [docs/FRONTEND.md](docs/FRONTEND.md).
 - **No emoji/dingbat glyphs in the UI** — they render differently on every OS. Use the inline SVG icon sprite (`<use href="#i-NAME">` in HTML, `ic("NAME")` in JS templates). See [docs/FRONTEND.md § Iconography](docs/FRONTEND.md).
 - Backend uses `asyncio` everywhere — never `time.sleep` inside a request handler or background task. Use `await asyncio.sleep(...)`.
-- Library access goes through `get_library()` / `put_library()` (both hold `_lib_lock`) — never read/write `library.json` raw outside that lock.
+- Library access goes through `get_library()` / `put_library()` / `mutate_library()` — never read/write `library.json` raw outside them. Edits go in `mutate_library()`: while the lock is held, `get_library()` returns the last finished write without waiting (20.30.1), so its result must never be written back.
 - VLC track IDs are **ES IDs** from the `"Stream N"` keys, not 1/2/3 counters. See [docs/GOTCHAS.md](docs/GOTCHAS.md).
 
 ---

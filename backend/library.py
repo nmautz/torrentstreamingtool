@@ -2,7 +2,9 @@
 
 `get_library` / `put_library` / `mutate_library` hold `runtime._lib_lock` (built
 in the lifespan) around every read and write; never read or write library.json
-outside them (CLAUDE.md § Style conventions). Saves are atomic and durable
+outside them (CLAUDE.md § Style conventions). A `get_library` while the lock is
+held is answered from the last finished write instead (see "Reads don't queue
+behind a save"), so edits belong in `mutate_library`. Saves are atomic and durable
 (`_save_lib_raw`, with a bounded Windows retry), snapshotted to
 library_backups/, and recovered from a snapshot when the file will not parse.
 `_migrate_item` brings an item read from disk up to the current schema
@@ -297,6 +299,20 @@ def _recover_library() -> Optional[dict]:
 _LIB_CACHE: Optional[tuple] = None    # (file key, gen, marshal bytes)
 _LIB_GEN = 0
 
+# ── Reads don't queue behind a save (20.30.1) ─────────────────────────────────
+#
+# A save is an fsync, and on a busy disk that takes seconds: on 2026-10-22 two
+# saves held the lock 3.7 s and 4.1 s while a prep encode and qBit wrote, and
+# seven read-only `/api/offline-active` calls waited 7.7 s behind them. A reader
+# needs what the last FINISHED write left, not the writer's lock. `_LIB_LAST` is
+# that: the marshal bytes of the library as last loaded from disk. A load sets
+# it; a save that SUCCEEDS clears it (its write is not in those bytes), and the
+# next load sets it again. So while a transaction holds the lock, every write that
+# has finished is in `_LIB_LAST` (the holder loaded after them), and the holder's
+# own write is not yet finished. A failed save leaves the file as it was, so it
+# leaves `_LIB_LAST` too. `get_library` uses it only while the lock is taken.
+_LIB_LAST: Optional[bytes] = None
+
 
 def _lib_file_key() -> Optional[tuple]:
     try:
@@ -307,11 +323,12 @@ def _lib_file_key() -> Optional[tuple]:
 
 
 def _load_lib_raw() -> dict:
-    global _LIB_CACHE
+    global _LIB_CACHE, _LIB_LAST
     gen = _LIB_GEN
     fkey = _lib_file_key()
     hit = _LIB_CACHE
     if fkey is not None and hit is not None and hit[0] == fkey and hit[1] == gen:
+        _LIB_LAST = hit[2]
         return marshal.loads(hit[2])
     t0 = time.monotonic()
     blob = b""
@@ -349,6 +366,7 @@ def _load_lib_raw() -> dict:
     if fkey is not None and gen == _LIB_GEN:
         try:
             _LIB_CACHE = (fkey, gen, marshal.dumps(raw))
+            _LIB_LAST = _LIB_CACHE[2]
         except ValueError:
             _LIB_CACHE = None
     return raw
@@ -437,11 +455,12 @@ def _save_lib_raw(data: dict) -> None:
     # Durable atomic write — see "Library durability" above. The replace alone
     # survives a process crash; the fsync in _write_durable is what survives a
     # power cut. library.json is rewritten every ~15 s during playback.
-    global _LIB_GEN, _LIB_CACHE
+    global _LIB_GEN, _LIB_CACHE, _LIB_LAST
     _LIB_GEN += 1                 # before AND after: see "Parsed-library cache"
     _LIB_CACHE = None
     try:
         _save_lib_raw_inner(data)
+        _LIB_LAST = None          # this write is not in it: see "Reads don't queue"
     finally:
         _LIB_GEN += 1
 
@@ -522,6 +541,16 @@ async def get_library() -> dict:
     # whole loop — the dashboard went laggy and the HTTPS proxy threw ReadErrors
     # mid-request while the loop was blocked. Run the blocking work in a thread;
     # the lock still serialises access, but the loop stays free.
+    #
+    # While someone holds the lock, the last finished write is served instead of
+    # waiting for theirs (see "Reads don't queue behind a save").
+    snap = _LIB_LAST
+    if snap is not None and runtime._lib_lock.locked():
+        t0 = time.monotonic()
+        try:
+            return await asyncio.to_thread(marshal.loads, snap)
+        finally:
+            diag.cost_add("lib", time.monotonic() - t0)
     caller = sys._getframe(1).f_code.co_name
     async with runtime._lib_lock:
         runtime._lib_lock.set_holder(f"{caller} [get_library]")

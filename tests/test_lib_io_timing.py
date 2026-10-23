@@ -393,6 +393,88 @@ check("await_chain follows the whole chain, outermost first",
 check("and stops at the frameless leaf it waits on",
       leaf is not None and not hasattr(leaf, "cr_frame"), repr(leaf))
 
+print("a read does not wait for a save (20.30.1)")
+# Real clock, real lock, real threads: a writer stuck in its fsync, readers meanwhile.
+rns = {"Optional": Optional, "Path": Path, "time": time, "json": json, "sys": sys,
+       "asyncio": asyncio, "asynccontextmanager": asynccontextmanager, "marshal": marshal,
+       "log": log, "diag": diag, "LIBRARY_FILE": TMP / "reads.json",
+       "_SAVE_RETRY_DELAYS": (), "_LIB_CACHE": None, "_LIB_GEN": 0, "_LIB_LAST": None,
+       "_LIB_POOL": None, "_LIB_IO_SLOW_S": 99.0,
+       "_parse_library_bytes": lambda b: json.loads(b) if b else None,
+       "_recover_library": lambda: None, "_migrate_item": lambda it: it,
+       "_fold_item_hides": lambda raw: None, "_note_slow_lib_io": lambda *a: None,
+       "_lock_failure_desc": lambda e: "", "_lock_holders_note": lambda: ""}
+FSYNC = threading.Event()
+SAVE_FAILS = [False]
+
+
+def _inner(data):
+    FSYNC.wait(5)
+    if SAVE_FAILS[0]:
+        raise OSError("disk gone")
+    rns["LIBRARY_FILE"].write_text(json.dumps(data))
+
+
+rns["_save_lib_raw_inner"] = _inner
+rpieces = [ast.get_source_segment(src, n) for n in tree.body
+           if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.name in
+           {"_lib_file_key", "_load_lib_raw", "_save_lib_raw", "get_library", "lib_io",
+            "mutate_library", "_library_txn", "_note_slow_txn", "LibraryUnchanged"}]
+rns["_library_txn"] = None
+exec("\n\n".join(p if not p.startswith("async def _library_txn") else "@asynccontextmanager\n" + p
+                  for p in rpieces), rns)
+rns["LIBRARY_FILE"].write_text(json.dumps({"items": [], "v": 1}))
+
+
+async def reads_case():
+    rns["runtime"] = types.SimpleNamespace(_lib_lock=diag.InstrumentedLock(asyncio.Lock(), "reads"))
+    out = {}
+
+    async def writer(v):
+        async with rns["mutate_library"]() as lib:
+            lib["v"] = v
+
+    FSYNC.clear()
+    w = asyncio.ensure_future(writer(2))
+    await asyncio.sleep(0.2)                                # the writer is in its fsync
+    t0 = time.monotonic()
+    out["during"] = (await rns["get_library"]())["v"]
+    out["during_s"] = time.monotonic() - t0
+    FSYNC.set()
+    await w
+    out["after_last"] = rns["_LIB_LAST"]
+    FSYNC.clear()
+    w = asyncio.ensure_future(writer(3))
+    await asyncio.sleep(0.2)
+    out["during2"] = (await rns["get_library"]())["v"]     # the writer loaded after v=2
+    FSYNC.set()
+    await w
+    out["free"] = (await rns["get_library"]())["v"]
+    SAVE_FAILS[0] = True
+    FSYNC.set()
+    try:
+        await writer(4)
+    except OSError:
+        pass
+    SAVE_FAILS[0] = False
+    out["failed_last"] = marshal.loads(rns["_LIB_LAST"])["v"] if rns["_LIB_LAST"] else None
+    rns["_LIB_LAST"] = marshal.dumps({"v": "stale"})
+    out["unlocked"] = (await rns["get_library"]())["v"]   # lock free: the file, not the copy
+    return out
+
+r = asyncio.run(reads_case())
+check("a read while a save is in its fsync gets the last finished write, at once",
+      r["during"] == 1 and r["during_s"] < 0.15, str(r))
+check("a finished save clears the copy (its write is not in it)", r["after_last"] is None, str(r))
+check("the next writer's load makes it current again", r["during2"] == 2, str(r))
+check("with the lock free a read waits for nobody and reads the file", r["free"] == 3, str(r))
+check("a failed save leaves the copy (the file did not change)", r["failed_last"] == 3, str(r))
+check("the copy is used only while the lock is taken", r["unlocked"] == 3, str(r))
+retire = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef)
+              and n.name == "_retire_ai_subtitles")
+check("no caller writes back what get_library returned",
+      "put_library(lib)" not in ast.get_source_segment(src, retire))
+
 print()
 if fails:
     print(f"{len(fails)} FAILED"); sys.exit(1)

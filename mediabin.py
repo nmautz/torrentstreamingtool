@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -45,14 +46,56 @@ _BIN_TTL_MISSING_S = 60.0
 _bin_memo: dict = {}
 
 
+# A remembered answer that has expired is still the answer (20.30.1): the caller
+# gets it at once and the lookup runs again on a thread of its own. The first
+# lookup after a boot, on a cold disk, held the event loop 0.72 s (admin
+# Activity → `fpcalc_bin`), and every expiry was another lookup on the loop.
+# `warm_bins` (run by the lifespan on a thread) makes the first one too.
+_bin_refreshing: set = set()
+_bin_refresh_lock = threading.Lock()
+_bin_last_refresh: Optional[threading.Thread] = None     # for the tests
+
+
+def _bin_store(key: str, val: Optional[str]) -> None:
+    ttl = _BIN_TTL_FOUND_S if val else _BIN_TTL_MISSING_S
+    _bin_memo[key] = (time.monotonic() + ttl, val)
+
+
+def _bin_refresh(key: str, find) -> None:
+    global _bin_last_refresh
+    with _bin_refresh_lock:
+        if key in _bin_refreshing:
+            return
+        _bin_refreshing.add(key)
+
+    def run() -> None:
+        try:
+            _bin_store(key, find())
+        except Exception:
+            pass                        # keep the old answer; try again next expiry
+        finally:
+            with _bin_refresh_lock:
+                _bin_refreshing.discard(key)
+
+    t = threading.Thread(target=run, name="bin-lookup", daemon=True)
+    _bin_last_refresh = t
+    t.start()
+
+
 def _memo_bin(key: str, find) -> Optional[str]:
-    now = time.monotonic()
     hit = _bin_memo.get(key)
-    if hit is not None and now < hit[0]:
+    if hit is not None:
+        if time.monotonic() >= hit[0]:
+            _bin_refresh(key, find)
         return hit[1]
-    val = find()
-    _bin_memo[key] = (now + (_BIN_TTL_FOUND_S if val else _BIN_TTL_MISSING_S), val)
+    val = find()                        # never asked yet: before warm_bins ran
+    _bin_store(key, val)
     return val
+
+
+def warm_bins() -> dict:
+    """Look every binary up now. Blocking: call it on a thread, before serving."""
+    return {"ffmpeg": ffmpeg_bin(), "ffprobe": ffprobe_bin(), "fpcalc": fpcalc_bin()}
 
 
 def _env_bin(env_key: str) -> Optional[str]:

@@ -33,7 +33,9 @@ What they could not show, and why:
 
 ### The failure mode this is built to catch
 
-`get_library()` holds `_lib_lock` **across** `asyncio.to_thread(_load_lib_raw)`.
+`get_library()` holds `_lib_lock` **across** `asyncio.to_thread(_load_lib_raw)`
+(since 20.30.1 only when the lock is free: a read while someone holds it gets
+the last finished write, GOTCHAS.md § A read must not wait).
 So if the default thread pool saturates, the lock is held while waiting for a
 worker, and **every request touching the library stalls** — while the VLC and
 qBittorrent pollers, which are pure async `httpx` and take no lock, carry on at
