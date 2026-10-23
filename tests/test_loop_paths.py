@@ -629,6 +629,60 @@ check("every stage is marked, in order",
 check("and the line is written past the threshold",
       "OD_START_SLOW_S" in sod_src and "slow start" in sod_src)
 
+print("the series page asks qBit once for all its members (20.30.7)")
+# South Park is 54 items: 108 qBit round trips and 54 thread hops in turn, 0.35 s
+# alone and 5-8 s with 20 readers.
+qv = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "_qbit_view")
+qv_src = ast.get_source_segment(src, qv)
+qv_calls = []
+
+
+async def _fake_qreq(method, url, **kw):
+    qv_calls.append(url)
+    return types.SimpleNamespace(status_code=200, json=lambda: [
+        {"hash": "aaa", "state": "uploading"}, {"hash": "bbb", "state": "stalledUP"}])
+
+
+async def _fake_qfiles(h):
+    qv_calls.append("files:" + h)
+    await asyncio.sleep(0.01)
+    return [{"name": h + ".mkv", "progress": 1.0}]
+
+qv_ns = {"asyncio": asyncio, "qreq": _fake_qreq, "qbit_files": _fake_qfiles,
+         "QBIT_VIEW_PARALLEL": 8, "Optional": None}
+exec(qv_src, qv_ns)
+view = asyncio.run(qv_ns["_qbit_view"](["AAA", "bbb", "", "bbb", "ccc"]))
+check("one torrents/info call names every hash once",
+      [u for u in qv_calls if "torrents/info" in u] == ["/api/v2/torrents/info?hashes=AAA|bbb|ccc"])
+check("each file list is fetched once", sorted(u for u in qv_calls if u.startswith("files:"))
+      == ["files:AAA", "files:bbb", "files:ccc"])
+check("a hash matches whatever its case", view["AAA"][0] == {"hash": "aaa", "state": "uploading"})
+check("a torrent qBit does not know reads as no info", view["ccc"][0] is None)
+check("no hashes, no calls", asyncio.run(qv_ns["_qbit_view"](["", ""])) == {})
+gsf = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "get_series_files")
+gsf_src = ast.get_source_segment(src, gsf)
+check("the series page builds every member from one view",
+      "await _qbit_view(" in gsf_src and "_build_item_files(it, profile_id, qview, prepped)" in gsf_src
+      and gsf_src.count("_prepped_paths_sync") == 1)
+bif = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "_build_item_files")
+bif_src = ast.get_source_segment(src, bif)
+check("and a member given the view asks qBit nothing itself",
+      bif_src.index("if qview is not None:") < bif_src.index("await qbit_info(")
+      and "if prepped is None:" in bif_src)
+
+print("ffprobe is started before anyone waits on it (20.30.7)")
+life = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "lifespan")
+life_src = ast.get_source_segment(src, life)
+check("lifespan warms ffprobe in the background, before serving",
+      "asyncio.ensure_future(_warm_ffprobe())" in life_src
+      and life_src.index("_warm_ffprobe()") < life_src.index("yield"))
+wf = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "_warm_ffprobe")
+check("on a worker thread", "_probe_run" in _direct_calls(wf)
+      and "create_subprocess_exec" not in _direct_calls(wf))
+check("an on-demand start ffprobe could not answer is not called 'no video'",
+      sod_src.index("if not info:") < sod_src.index('if not info.get("video"):')
+      and "HTTPException(503" in sod_src)
+
 print()
 if fails:
     print(f"{len(fails)} FAILED"); sys.exit(1)

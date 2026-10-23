@@ -1,5 +1,23 @@
 # Changelog
 
+## [20.30.7] — 2026-10-22
+
+### Fixed
+- **The first on-demand play after a boot is no longer told the file has no
+  video.** ffprobe's first start after Windows boots ran past its 15 s timeout.
+  The play waited 15.7 s and failed with "No video stream in source." (seen twice:
+  Steins;Gate at 21:11, Demon Slayer at 22:49). The server now starts ffprobe once
+  in the background as it comes up, and logs `ffprobe warm-up: first start took
+  N s` so the next boot shows what that start costs. A start that ffprobe can't
+  answer now gets a 503 "could not be read in time, try again", not a 422 that
+  says the file is broken.
+- **A merged show's page asks qBit once, not twice per member.** South Park's page
+  is 54 library items. It made 108 qBit requests and 54 thread hops one after
+  another: 0.35–0.5 s with nothing else running, and 5–8 s with 20 readers. It now
+  makes one `torrents/info` call for every member, fetches the file lists in
+  parallel (8 at a time), and checks prep state for all members in one pass
+  (`_qbit_view`). The single-item `/files` route is unchanged.
+
 ## [20.30.6] — 2026-10-22
 
 ### Fixed

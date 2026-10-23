@@ -13722,6 +13722,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # a boot it took 16.6 s (two cold ffmpeg starts and the GPU driver's), and the
     # page waited for all of it (20.30.1). Callers share this one run.
     _start_nvenc_probe()
+    asyncio.ensure_future(_warm_ffprobe())
     # Everything built so far lives as long as the process: keep it out of full
     # collections (20.26.1, see diag.freeze_startup_heap).
     diag.freeze_startup_heap()
@@ -14930,11 +14931,39 @@ def _prepped_paths_sync(files: list[dict]) -> set[str]:
     return out
 
 
-async def _build_item_files(item: dict, profile_id: str) -> list[dict]:
+async def _qbit_view(hashes: list) -> dict:
+    """{hash: (info or None, files)} for many torrents: one `torrents/info` for all
+    of them and the file lists side by side. The merged series page asked for
+    each member in turn (20.30.6: South Park is 54 items, 108 qBit round trips
+    and 54 thread hops one after another, 0.35 s with nothing else running)."""
+    hashes = [h for h in dict.fromkeys(hashes) if h]
+    if not hashes:
+        return {}
+    r = await qreq("GET", "/api/v2/torrents/info?hashes=" + "|".join(hashes))
+    infos: dict = {}
+    if r and r.status_code == 200:
+        infos = {str(t.get("hash", "")).lower(): t for t in r.json()}
+    sem = asyncio.Semaphore(QBIT_VIEW_PARALLEL)
+
+    async def _files(h: str) -> list:
+        async with sem:
+            return await qbit_files(h)
+
+    files = await asyncio.gather(*(_files(h) for h in hashes))
+    return {h: (infos.get(h.lower()), fl) for h, fl in zip(hashes, files)}
+
+
+QBIT_VIEW_PARALLEL = 8
+
+
+async def _build_item_files(item: dict, profile_id: str, qview: Optional[dict] = None,
+                            prepped: Optional[set] = None) -> list[dict]:
     """Build the per-file payload (progress + live download/prep state) for one
     library item. Shared by the single-item `/files` endpoint and the merged
     `/series/{key}` endpoint so both emit identically-shaped file objects — each
-    file additionally carries its owning ``item_id`` for the merged-series UI."""
+    file additionally carries its owning ``item_id`` for the merged-series UI.
+    The series page passes `qview` (`_qbit_view`) and `prepped` for all its
+    members at once; the single item asks for its own."""
     file_progs = (
         item.get("progress", {}).get(profile_id, {}).get("file_progress", {})
         if profile_id else {}
@@ -14956,8 +14985,11 @@ async def _build_item_files(item: dict, profile_id: str) -> list[dict]:
     # ready, a file on disk at its full size is the better answer.
     qbit_blind = False
     if has_torrent:
-        info = await qbit_info(item["torrent_hash"])
-        qfiles = await qbit_files(item["torrent_hash"])
+        if qview is not None:
+            info, qfiles = qview.get(item["torrent_hash"], (None, []))
+        else:
+            info = await qbit_info(item["torrent_hash"])
+            qfiles = await qbit_files(item["torrent_hash"])
         qstate = (info or {}).get("state", "")
         qbit_blind = is_ready and (qstate in ("error", "missingFiles")
                                    or qstate.startswith("checking"))
@@ -14970,7 +15002,8 @@ async def _build_item_files(item: dict, profile_id: str) -> list[dict]:
                 qbase[Path(name).name] = prog   # best-effort; collisions rare (SxxExx names)
 
     prep_cfg = _prep_cfg(item)
-    prepped = await asyncio.to_thread(_prepped_paths_sync, item.get("files") or [])
+    if prepped is None:
+        prepped = await asyncio.to_thread(_prepped_paths_sync, item.get("files") or [])
     out = []
     for f in item.get("files", []):
         path = f.get("path", "")
@@ -15409,8 +15442,11 @@ async def get_series_files(request: Request, series_key: str,
         raise HTTPException(404, "Series not found.")
 
     files: list[dict] = []
+    qview = await _qbit_view([it.get("torrent_hash", "") for it in members])
+    prepped = await asyncio.to_thread(
+        _prepped_paths_sync, [f for it in members for f in it.get("files") or []])
     for it in members:
-        files.extend(await _build_item_files(it, profile_id))
+        files.extend(await _build_item_files(it, profile_id, qview, prepped))
     files.sort(key=episodes.sort_key)
 
     # Title + metadata: the member whose cached TMDb metadata is newest. Each
@@ -31664,6 +31700,23 @@ def _warm_media_bins_sync() -> None:
                                              for k, v in found.items()))
 
 
+async def _warm_ffprobe() -> None:
+    """Start ffprobe once, in the background, as the server comes up. Its first
+    start after a boot outlasted `_ffprobe_full`'s 15 s timeout (20.30.7): the
+    first on-demand play after a boot waited 15.7 s and was told the file had no
+    video. The time is logged, so the next boot shows what that start costs."""
+    binp = _ffprobe_bin()
+    if not binp:
+        return
+    t0 = time.monotonic()
+    try:
+        await _probe_run([binp, "-hide_banner", "-version"], keep="", timeout=60.0)
+    except Exception as exc:
+        log.warning("ffprobe warm-up failed after %.1fs: %s", time.monotonic() - t0, exc)
+        return
+    log.info("ffprobe warm-up: first start took %.1fs", time.monotonic() - t0)
+
+
 async def _ffmpeg_version() -> Optional[tuple[int, int]]:
     """Return (major, minor) of the active ffmpeg binary, or None if unavailable.
 
@@ -39344,6 +39397,10 @@ async def stream_ondemand(item_id: str, req: OnDemandReq) -> JSONResponse:
     info = await asyncio.to_thread(_ffprobe_full, str(src))
     _mark("ffprobe")
     duration = float(info.get("duration_sec", 0) or 0)
+    if not info:
+        # ffprobe gave no answer at all (20.30.7: its first start after a boot ran
+        # past the 15 s timeout, and the player was told the file had no video).
+        raise HTTPException(503, "The file could not be read in time. Try again in a moment.")
     if not info.get("video"):
         raise HTTPException(422, "No video stream in source.")
     if duration <= 0:

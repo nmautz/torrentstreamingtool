@@ -664,6 +664,9 @@
   "ProgressReq": {
    "kind": "class"
   },
+  "QBIT_VIEW_PARALLEL": {
+   "kind": "value"
+  },
   "QbitLimitsReq": {
    "kind": "class"
   },
@@ -2233,7 +2236,9 @@
    "kind": "async def",
    "params": [
     "item:POSITIONAL_OR_KEYWORD",
-    "profile_id:POSITIONAL_OR_KEYWORD"
+    "profile_id:POSITIONAL_OR_KEYWORD",
+    "qview:POSITIONAL_OR_KEYWORD",
+    "prepped:POSITIONAL_OR_KEYWORD"
    ]
   },
   "_build_logs_zip": {
@@ -5162,6 +5167,12 @@
   "_qbit_prealloc": {
    "kind": "value"
   },
+  "_qbit_view": {
+   "kind": "async def",
+   "params": [
+    "hashes:POSITIONAL_OR_KEYWORD"
+   ]
+  },
   "_race_abandon": {
    "kind": "async def",
    "params": [
@@ -7289,6 +7300,10 @@
     "items:POSITIONAL_OR_KEYWORD",
     "meta:POSITIONAL_OR_KEYWORD"
    ]
+  },
+  "_warm_ffprobe": {
+   "kind": "async def",
+   "params": []
   },
   "_warm_media_bins_sync": {
    "kind": "def",
