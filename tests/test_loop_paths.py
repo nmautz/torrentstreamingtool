@@ -747,6 +747,18 @@ check("lifespan awaits the parse before it starts any task",
       and life_src.index("await _anime_map_warm()") < life_src.index("asyncio.create_task(")
       and "_spawn_bg(_anime_map_warm())" not in life_src)
 
+print("a slow series page says where its time went (20.30.10)")
+gsf = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "get_series_files")
+gsf_src = ast.get_source_segment(src, gsf)
+ser_stages = ["lib", "qbit", "prepped", "build", "sections", "ep-homes", "nudge"]
+check("every stage is marked, in order",
+      all(f'_mark("{m}")' in gsf_src for m in ser_stages)
+      and [gsf_src.index(f'_mark("{m}")') for m in ser_stages]
+      == sorted(gsf_src.index(f'_mark("{m}")') for m in ser_stages))
+check("and the line is written past the threshold", "SERIES_SLOW_S" in gsf_src)
+check("the qBit client gives up a connect long before a read",
+      "runtime.qbit = _http_client(timeout=httpx.Timeout(10.0, connect=QBIT_CONNECT_TIMEOUT_S))" in life_src)
+
 print()
 if fails:
     print(f"{len(fails)} FAILED"); sys.exit(1)

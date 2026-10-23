@@ -1,5 +1,23 @@
 # Changelog
 
+## [20.30.10] — 2026-10-22
+
+### Changed
+- **A slow merged-series page logs where its time went.** South Park's page took
+  9.9 s right after a boot on 20.30.9, after the qBit and anime causes were fixed,
+  and the request log could only call it "other". The page now writes `series
+  <key> slow N s (members, files): lib= qbit= prepped= build= sections=
+  ep-homes= nudge=` to the app log when it takes 1 s or more (`SERIES_SLOW_S`).
+
+### Fixed
+- **The first qBit call after a boot gives up its connect in 2 s, not 10.** The
+  qBit client had one 10 s timeout for everything. Before the watchdog starts
+  qBit, a connect can hang until it times out, and South Park's page finished
+  only ~2 s after qBit came up on both boots. The connect timeout is now 2 s
+  (`QBIT_CONNECT_TIMEOUT_S`); reads keep 10 s. The connect error arms `qreq`'s
+  3 s hold, so the calls after it don't wait either. The lifespan's own
+  `qbit_login` waits less too.
+
 ## [20.30.9] — 2026-10-22
 
 ### Fixed

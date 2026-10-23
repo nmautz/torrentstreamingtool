@@ -890,6 +890,9 @@ slowly enough to notice. All in `streamlink_app.log`; the freeze watch judges th
   (hls.log, 20.30.6): a `/stream-ondemand` that took `OD_START_SLOW_S` (1 s) or more,
   split by stage. It covers the POST only; the wait for the first segment (which
   includes the once-per-format NVDEC probe) is the request's own `SLOW REQUEST`.
+- **`series <key> slow 9.90s (54 members, 203 files): lib=0.01s qbit=0.02s prepped=… build=… sections=… ep-homes=… nudge=…`**
+  (app log, 20.30.10): a merged series page (`/api/library/series/{key}`) that took
+  `SERIES_SLOW_S` (1 s) or more, split by stage.
 - **`PREP TIME <file>: queued 600s, encoded 300s (4.7x realtime, 23 min of video)`**:
   one per finished prep (`queued_at` is kept when `started_at` is re-baselined).
 - **`DOWNLOAD TIME <title>: first episode playable after 312s`** and **`: all N file(s)

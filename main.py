@@ -1033,6 +1033,7 @@ async def qbit_login() -> bool:
 # opened then took 4.6 s, two calls (20.30.8). After a refused connect, calls
 # answer None at once for QBIT_DOWN_HOLD_S, then try again.
 QBIT_DOWN_HOLD_S = 3.0
+QBIT_CONNECT_TIMEOUT_S = 2.0
 _qbit_down_until = 0.0
 
 
@@ -13579,7 +13580,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     runtime._jackett_cookie_lock = asyncio.Lock()
     runtime._analysis_gate = asyncio.Semaphore(ANALYSIS_CONCURRENCY)
     _load_profile_sessions()   # PIN-verified profile sessions (survive a restart)
-    runtime.qbit = _http_client(timeout=10.0)
+    # qBit is on this machine: a connect either lands in milliseconds or qBit isn't
+    # listening. With one 10 s timeout for everything, the first call after a boot
+    # (qBit not started yet) hung up to 10 s; the South Park page took 9.8 s on two
+    # boots (20.30.10). The connect now gives up in 2 s and arms qreq's hold.
+    runtime.qbit = _http_client(timeout=httpx.Timeout(10.0, connect=QBIT_CONNECT_TIMEOUT_S))
     _vlc_http()   # build the persistent keep-alive VLC client up front
     await qbit_login()
     Path(settings.qbit_download_path).mkdir(parents=True, exist_ok=True)
@@ -15450,6 +15455,9 @@ def _meta_age_or_inf(meta: dict) -> float:
     return float("inf") if age is None else age
 
 
+SERIES_SLOW_S = 1.0       # a merged series page slower than this logs where its time went
+
+
 @app.get("/api/library/series/{series_key}")
 async def get_series_files(request: Request, series_key: str,
                             profile_id: str = "") -> JSONResponse:
@@ -15459,6 +15467,12 @@ async def get_series_files(request: Request, series_key: str,
     cached TMDb metadata — everything the one-cohesive-show UI needs to render and
     to drive cross-item play/resume. See docs/LIBRARY_DATA.md § merged series."""
     is_admin = _check_admin(request)
+    t0 = time.monotonic()
+    split: list = []                     # (stage, seconds), logged when the page is slow
+
+    def _mark(stage: str) -> None:
+        split.append((stage, time.monotonic() - t0 - sum(d for _, d in split)))
+
     lib = await get_library()
     is_elevated  = _is_elevated(request, lib, profile_id)
     members = [it for it in _items_for_series_key(lib, series_key)
@@ -15467,12 +15481,16 @@ async def get_series_files(request: Request, series_key: str,
         raise HTTPException(404, "Series not found.")
 
     files: list[dict] = []
+    _mark("lib")
     qview = await _qbit_view([it.get("torrent_hash", "") for it in members])
+    _mark("qbit")
     prepped = await asyncio.to_thread(
         _prepped_paths_sync, [f for it in members for f in it.get("files") or []])
+    _mark("prepped")
     for it in members:
         files.extend(await _build_item_files(it, profile_id, qview, prepped))
     files.sort(key=episodes.sort_key)
+    _mark("build")
 
     # Title + metadata: the member whose cached TMDb metadata is newest. Each
     # member holds its own copy, taken when it was fetched, and the oldest one
@@ -15490,6 +15508,7 @@ async def get_series_files(request: Request, series_key: str,
     sec_meta = (meta or {}).get("sections") or {}
     sections = [_section_summary(s, sec_meta)
                 for s in _section_hints(members, files, profile_id, title)]
+    _mark("sections")
     # Resolve any section that has never been looked up (Junior High is a show in
     # its own right, the Movies folder is four separate films). Background — this
     # response renders from filenames and a `metadata_update` repaints it.
@@ -15508,8 +15527,15 @@ async def get_series_files(request: Request, series_key: str,
     # the library — see _nudge_metadata_health, condition 0). Its fetch fires
     # `metadata_update`, which repaints this page with the settled numbers.
     await _warm_ep_homes(members)
+    _mark("ep-homes")
     for it in members:
         _nudge_metadata_health(it)
+    _mark("nudge")
+    if time.monotonic() - t0 >= SERIES_SLOW_S:
+        # 20.30.10: 9.9 s right after a boot, all of it "other". Where it went.
+        log.info("series %s slow %.2fs (%d members, %d files): %s", series_key,
+                 time.monotonic() - t0, len(members), len(files),
+                 " ".join(f"{k}={d:.2f}s" for k, d in split))
 
     # Series-level on-demand-only state so the merged-series episode page can
     # render its toggle: "on" only when EVERY member is on-demand-only; "locked"

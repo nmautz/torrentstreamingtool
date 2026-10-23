@@ -664,6 +664,9 @@
   "ProgressReq": {
    "kind": "class"
   },
+  "QBIT_CONNECT_TIMEOUT_S": {
+   "kind": "value"
+  },
   "QBIT_DOWN_HOLD_S": {
    "kind": "value"
   },
@@ -736,6 +739,9 @@
   },
   "RotatingFileHandler": {
    "kind": "class"
+  },
+  "SERIES_SLOW_S": {
+   "kind": "value"
   },
   "SHOTSCAN_IDLE_SEC": {
    "kind": "value"
