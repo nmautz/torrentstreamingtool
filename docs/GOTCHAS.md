@@ -7905,3 +7905,17 @@ lookup runs again on a `bin-lookup` thread. Same for the NVENC check: two cold
 ffmpeg starts plus the GPU driver's took 16.6 s after a boot, and the admin page
 that first asked waited for all of it. It now starts in the lifespan, and every
 caller while it runs waits for that one check (`_start_nvenc_probe`).
+
+## A failed import is never cached: Windows has no time-zone database (20.30.2)
+
+`ZoneInfo("America/Los_Angeles")` on Windows imports `tzdata.zoneinfo.America`,
+because Windows ships no IANA database. The box had no `tzdata` package, so the
+import failed, and Python remembers a successful import, never a failed one:
+each call searched every `sys.path` entry again, stat-ing folders on F:. The
+scheduled-reboot loop calls `_now_in_tz` once a minute, and with F: busy that
+held the event loop 0.44-0.60 s each time, while the configured time zone was
+silently ignored (local time). Now `tzdata` is a Windows requirement, each name
+is looked up once and remembered even when it fails (`_TZ_MEMO`, logged once),
+and a name not seen yet is looked up on a thread (`_now_in_tz_async`). The same
+trap waits for any import inside a function that can fail: do it once, at import
+time or on a thread, and remember the result.

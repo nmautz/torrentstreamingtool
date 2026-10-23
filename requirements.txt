@@ -18,6 +18,10 @@ numpy>=1.24.0
 # and producing "No module named 'comtypes'" at runtime. Belt-and-braces.
 pycaw>=20240210; sys_platform == "win32"
 comtypes>=1.2.0; sys_platform == "win32"
+# The IANA time-zone database for `zoneinfo` (the scheduled reboot's time zone).
+# Windows has none of its own: without this every `ZoneInfo("America/...")`
+# fails and the reboot runs on local time (20.30.2).
+tzdata>=2024.1; sys_platform == "win32"
 # HID wireless remote (air-mouse) media-key listener (remote_input.py).
 # Optional at runtime — a venv without it just disables remote support
 # (logged once at startup). See docs/REMOTE.md.

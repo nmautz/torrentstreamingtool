@@ -208,7 +208,9 @@ NEVER_ON_LOOP = {"_read_meta", "_client_pending_read", "_client_pending_write",
                  "_needs_bundle_check", "_any_bundle_check_needed", "_file_sig",
                  "_prep_status_rows_sync", "_bundle_audit_locate_sync",
                  # 20.26.3: numpy cross-correlation, 0.67 s
-                 "align", "parse_cues"}
+                 "align", "parse_cues",
+                 # 20.30.2: a stat / mkdir / failed import with F: busy, 0.4-0.6 s
+                 "_prep_out_dir_sync", "_tz_lookup_sync"}
 for n in ast.walk(tree):
     if isinstance(n, ast.AsyncFunctionDef):
         bad = sorted(NEVER_ON_LOOP & set(_direct_calls(n)))
@@ -441,6 +443,62 @@ with sns["_sessions_cv"]:
 _wgate.set()
 sns["_flush_profile_sessions"]()
 check("a copy still waiting at exit is written", any("late" in w for w in _writes))
+print("the on-demand and prep paths touch no disk on the loop (20.30.2)")
+
+
+def _afn(name):
+    return next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
+
+
+asp = _afn("_assert_source_present")
+check("_assert_source_present checks the file on a thread",
+      "exists" not in _direct_calls(asp) and "asyncio.to_thread(" in ast.get_source_segment(src, asp))
+for fn in ("stream_ondemand", "make_clip", "generate_subtitles", "library_subtitle_fetch"):
+    body = ast.get_source_segment(src, _afn(fn))
+    check(f"{fn} awaits it", "await _assert_source_present(" in body)
+ons = _afn("_od_new_session")
+check("_od_new_session makes its folder on a thread", "mkdir" not in _direct_calls(ons))
+op = _afn("offline_prepare")
+check("offline_prepare stats and makes folders on threads",
+      not ({"exists", "mkdir", "_offline_cache_dir"} & set(_direct_calls(op))))
+
+print("a time zone is looked up once (20.30.2)")
+tz_imports = []
+
+
+class _NoTz(Exception):
+    pass
+
+
+def _fake_zoneinfo(name):
+    tz_imports.append(name)
+    raise _NoTz(name)
+
+tns = {"asyncio": _aio, "datetime": __import__("datetime").datetime,
+       "log": _ty.SimpleNamespace(warning=lambda *a: None)}
+exec("\n\n".join(ast.get_source_segment(src, n) for n in tree.body
+                  if (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                      and n.name in ("_tz_lookup_sync", "_now_in_tz", "_now_in_tz_async"))
+                  or (isinstance(n, ast.AnnAssign) and getattr(n.target, "id", "") == "_TZ_MEMO")),
+     tns)
+_zi = _ty.ModuleType("zoneinfo"); _zi.ZoneInfo = _fake_zoneinfo
+_real_zi = sys.modules.get("zoneinfo"); sys.modules["zoneinfo"] = _zi
+try:
+    for _ in range(3):
+        _aio.run(tns["_now_in_tz_async"]("America/Los_Angeles"))
+    tns["_now_in_tz"]("America/Los_Angeles")
+finally:
+    if _real_zi is not None:
+        sys.modules["zoneinfo"] = _real_zi
+check("a name that does not resolve is tried once, then local time",
+      tz_imports == ["America/Los_Angeles"])
+rb = ast.get_source_segment(src, _afn("scheduled_reboot_loop"))
+check("the reboot loop asks through the thread-safe path",
+      "_now_in_tz_async(" in rb and "_now_in_tz(" not in rb.replace("_now_in_tz_async(", ""))
+req = (ROOT / "requirements.txt").read_text()
+check("tzdata is installed on Windows", 'tzdata>=' in req and 'sys_platform == "win32"' in
+      next(l for l in req.splitlines() if l.startswith("tzdata")))
+
 save_src = next(ast.get_source_segment(ssrc, n) for n in stree.body
                 if isinstance(n, ast.FunctionDef) and n.name == "_save_profile_sessions")
 check("_save_profile_sessions itself touches no file", "write_text" not in save_src)

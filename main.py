@@ -7066,16 +7066,40 @@ async def _reboot_machine(delay: float = 0.5) -> None:
               "or run the service with reboot rights.")
 
 
+# Time zones by name, looked up once each (20.30.2). Windows has no zone
+# database, so `ZoneInfo` imports `tzdata.zoneinfo.<Area>`; with tzdata missing
+# that import failed on every call, and a failed import is never cached, so each
+# one stat-ed every sys.path entry on F:. The scheduled-reboot loop asks once a
+# minute: 0.44-0.60 s on the event loop with the disk busy. A name that does not
+# resolve is remembered too (None: local time), and an unseen name is looked up
+# on a thread (`_now_in_tz_async`).
+_TZ_MEMO: dict = {}
+
+
+def _tz_lookup_sync(tzname: str):
+    if tzname not in _TZ_MEMO:
+        try:
+            from zoneinfo import ZoneInfo
+            _TZ_MEMO[tzname] = ZoneInfo(tzname)
+        except Exception:
+            _TZ_MEMO[tzname] = None
+            log.warning("Time zone %r is not available here; using local time "
+                        "(is the tzdata package installed?)", tzname)
+    return _TZ_MEMO[tzname]
+
+
 def _now_in_tz(tzname: str) -> datetime:
     """Current time in the named IANA tz (e.g. 'America/Los_Angeles').
     Empty / unknown tz → system local time."""
-    if tzname:
-        try:
-            from zoneinfo import ZoneInfo
-            return datetime.now(ZoneInfo(tzname))
-        except Exception:
-            pass
-    return datetime.now()
+    tz = _tz_lookup_sync(tzname) if tzname else None
+    return datetime.now(tz) if tz is not None else datetime.now()
+
+
+async def _now_in_tz_async(tzname: str) -> datetime:
+    """`_now_in_tz`, with a name not looked up yet looked up on a thread."""
+    if tzname and tzname not in _TZ_MEMO:
+        await asyncio.to_thread(_tz_lookup_sync, tzname)
+    return _now_in_tz(tzname)
 
 
 async def _machine_in_use(window_secs: int, ignore_downloads: bool = False,
@@ -8265,7 +8289,7 @@ async def scheduled_reboot_loop() -> None:
             if not (0 <= target_h <= 23 and 0 <= target_m <= 59):
                 continue
 
-            now = _now_in_tz(cfg["timezone"])
+            now = await _now_in_tz_async(cfg["timezone"])
             today = now.date().isoformat()
             if cfg["last_fired"] == today:
                 continue   # already handled (or rebooted) for today
@@ -25649,7 +25673,7 @@ async def library_subtitle_fetch(request: Request, item_id: str,
     if not fmeta:
         raise HTTPException(404, "File not found in this item.")
     src = Path(fmeta["path"])
-    _assert_source_present(fmeta, "Subtitle search")
+    await _assert_source_present(fmeta, "Subtitle search")
     sel = await _effective_sub_lang(req.lang)
     target = await _subtitle_target(item, fmeta)
     cands = await _subtitle_search(target, sel, (req.query or "").strip())
@@ -28869,7 +28893,7 @@ async def admin_get_scheduled_reboot(request: Request) -> JSONResponse:
     configured timezone (so the UI can show what 'now' looks like there)."""
     _require_admin(request)
     cfg = _scheduled_reboot_cfg(await get_library())
-    now = _now_in_tz(cfg["timezone"])
+    now = await _now_in_tz_async(cfg["timezone"])
     cfg["now"] = now.strftime("%Y-%m-%d %H:%M %Z").strip()
     return JSONResponse(cfg)
 
@@ -28905,7 +28929,7 @@ async def admin_set_scheduled_reboot(
         sr["last_fired"]     = ""   # reset guard so the new schedule can arm today
 
     cfg = _scheduled_reboot_cfg(lib)
-    cfg["now"] = _now_in_tz(cfg["timezone"]).strftime("%Y-%m-%d %H:%M %Z").strip()
+    cfg["now"] = (await _now_in_tz_async(cfg["timezone"])).strftime("%Y-%m-%d %H:%M %Z").strip()
     return JSONResponse({"ok": True, **cfg})
 
 
@@ -32261,7 +32285,7 @@ def _bundle_key_for_file(f: dict) -> str:
     return d.name if d is not None else ""
 
 
-def _assert_source_present(f: dict, what: str) -> None:
+async def _assert_source_present(f: dict, what: str) -> None:
     """Gate a feature that genuinely needs the SOURCE file, not just the bundle.
 
     Distinguishes the two ways a source can be absent, because they call for
@@ -32271,7 +32295,8 @@ def _assert_source_present(f: dict, what: str) -> None:
     broken library. See docs/STREAMING.md § Source eviction.
     """
     try:
-        if Path(f.get("path", "")).exists():
+        # On a thread: with F: busy this one exists() held the loop 0.42 s (20.30.2).
+        if await asyncio.to_thread(Path(f.get("path", "")).exists):
             return
     except OSError:
         pass
@@ -37188,6 +37213,12 @@ def _prep_404_note(lib: dict, item_id: str, item: Optional[dict],
 
 
 @app.post("/api/library/{item_id}/offline-prepare")
+def _prep_out_dir_sync(out_dir: Path) -> bool:
+    """Make the bundle's parent folder; True when the bundle is already built."""
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    return (out_dir / "master.m3u8").exists()
+
+
 async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
     """Decide what processing a file needs for HLS browser playback.
 
@@ -37214,13 +37245,15 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
     # key and fall through to the cached-bundle branch below. Everything past that
     # branch needs a source (it would build one), so a missing bundle here is a
     # genuine dead end rather than a prep to enqueue.
+    # Every disk call here is on a thread: with F: busy one stat held the event
+    # loop 0.52 s (20.30.2).
     evicted_dir = _evicted_bundle_dir(target)
     if evicted_dir is not None:
-        if not (evicted_dir / "master.m3u8").exists():
+        if not await asyncio.to_thread((evicted_dir / "master.m3u8").exists):
             raise HTTPException(
                 410, "This episode's source was reclaimed and its bundle is gone. "
                      "Re-download the same release to restore it.")
-    elif not src.exists():
+    elif not await asyncio.to_thread(src.exists):
         _prep_404_note(lib, item_id, item, req, "file not on disk")
         raise HTTPException(404, "File not on disk.")
     _assert_not_compressing(str(src))
@@ -37229,11 +37262,11 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
                     else await asyncio.to_thread(_list_sidecar_subs, src, item_id))
     saved_tracks = (_saved_local_tracks(lib, item, req.profile_id, req.file_path)
                     if req.profile_id else {})
-    out_dir = evicted_dir if evicted_dir is not None else _offline_cache_dir(src)
+    out_dir = (evicted_dir if evicted_dir is not None
+               else await asyncio.to_thread(_offline_cache_dir, src))
     key = out_dir.name
-    out_dir.parent.mkdir(parents=True, exist_ok=True)
 
-    if (out_dir / "master.m3u8").exists():
+    if await asyncio.to_thread(_prep_out_dir_sync, out_dir):
         _bundle_index_register(key, out_dir)
         meta = await asyncio.to_thread(_read_meta, out_dir)
         # Nothing in the preferred language? Look one up while the viewer starts
@@ -37730,7 +37763,7 @@ async def generate_subtitles(item_id: str, req: GenerateSubsReq) -> JSONResponse
     if not target:
         raise HTTPException(404, "File not found in this item.")
     src = Path(target["path"])
-    _assert_source_present(target, "AI subtitle generation")
+    await _assert_source_present(target, "AI subtitle generation")
     st = _maybe_start_stt_job(src, item_id, translate=req.translate, queue="interactive")
     return JSONResponse(st)
 
@@ -39126,7 +39159,6 @@ async def _od_new_session(key: str, src: Path, info: dict, aidx: int,
                           sub_idxs: list) -> dict:
     """Make and register the session for `key`. Shared by `stream_ondemand` and
     `_od_revive`, so a revived session is the one a fresh POST would have made."""
-    ONDEMAND_CACHE.mkdir(exist_ok=True)
     session = {
         "key":         key,
         "src":         str(src),
@@ -39142,7 +39174,8 @@ async def _od_new_session(key: str, src: Path, info: dict, aidx: int,
         "fonts":       [],           # embedded fonts for styled ASS subs (libass)
         "video":       info.get("video") or {},   # codec/pix_fmt for NVDEC probe
     }
-    session["dir"].mkdir(parents=True, exist_ok=True)
+    # On a thread: with F: busy this mkdir held the event loop 0.84 s (20.30.2).
+    await asyncio.to_thread(session["dir"].mkdir, parents=True, exist_ok=True)
     _od_sessions[key] = session
     _od_gone.pop(key, None)
     # Styled subs need the fansub's embedded fonts. Extract them eagerly (once,
@@ -39218,7 +39251,7 @@ async def stream_ondemand(item_id: str, req: OnDemandReq) -> JSONResponse:
     if not target:
         raise HTTPException(404, "File not found in this item.")
     src = Path(target["path"])
-    _assert_source_present(target, "Just-in-time streaming")
+    await _assert_source_present(target, "Just-in-time streaming")
     _assert_not_compressing(str(src))
 
     info = await asyncio.to_thread(_ffprobe_full, str(src))
@@ -39577,7 +39610,7 @@ async def make_clip(item_id: str, req: ClipReq) -> JSONResponse:
     if not target:
         raise HTTPException(404, "File not found in this item.")
     src = Path(target["path"])
-    _assert_source_present(target, "Clipping")
+    await _assert_source_present(target, "Clipping")
     _assert_not_compressing(str(src))
 
     # Clippable when the file is actively watchable on-device: either a full HLS
@@ -39585,7 +39618,7 @@ async def make_clip(item_id: str, req: ClipReq) -> JSONResponse:
     # guarantee the source is on disk + probed — the same invariant the old
     # bundle-only gate provided. `_build_clip` cuts straight from the source, so no
     # bundle artifact is actually read; this only gates on active playback.
-    bundle_ready = (_offline_cache_dir(src) / "master.m3u8").exists()
+    bundle_ready = await asyncio.to_thread(lambda: (_offline_cache_dir(src) / "master.m3u8").exists())
     od_active = any(s.get("src") == str(src) for s in _od_sessions.values())
     if not (bundle_ready or od_active):
         raise HTTPException(409, "Play this episode on-device first, then you can clip it.")

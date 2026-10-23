@@ -1,5 +1,22 @@
 # Changelog
 
+## [20.30.2] — 2026-10-22
+
+### Fixed
+- **Starting a stream no longer freezes the server while the disk is busy.** With
+  F: under heavy load (60-90 MB/s from 19:13, not from StreamLink), disk calls in
+  the on-demand and prep paths held the event loop 0.42-0.84 s each: the
+  on-demand session's folder (`_od_new_session`), the source check
+  (`_assert_source_present`, now async), and the stat and folder in
+  `offline_prepare`. All run on threads now.
+- **The scheduled reboot's time zone works on Windows, and asking for it no longer
+  freezes the server.** Windows has no time-zone database and `tzdata` was not
+  installed, so every `ZoneInfo(...)` failed, the reboot ran on local time, and
+  each failed import searched the whole Python path again: once a minute, 0.44-
+  0.60 s on the event loop with the disk busy. `tzdata` is now a Windows
+  requirement (installed by the updater's setup run), and each time zone is
+  looked up once, on a thread.
+
 ## [20.30.1] — 2026-10-22
 
 ### Fixed
