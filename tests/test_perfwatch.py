@@ -29,7 +29,8 @@ for tmpl, want in (("/api/library/{item_id}/files", "ui"), ("/api/library/covera
                    ("/api/diag/client-log", "upload"), ("/api/search", "external"),
                    ("/api/library/{item_id}/bundle-manifest", "background"),
                    ("/api/admin/logs/{name}", "bulk"), ("/api/admin/logsx", "ui"),
-                   ("/healthz", "probe"), ("/api/ambient/weather", "external")):
+                   ("/healthz", "probe"), ("/api/ambient/weather", "external"),
+                   ("/api/admin/hls-resync", "bulk"), ("/api/admin/hls-trim", "bulk")):
     check(f"{tmpl} is {want}", perfwatch.classify("GET", tmpl) == want,
           perfwatch.classify("GET", tmpl))
 

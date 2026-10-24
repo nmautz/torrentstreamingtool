@@ -1,5 +1,13 @@
 # Changelog
 
+## [20.30.14] — 2026-10-24
+
+### Fixed
+- The admin HLS resync and trim sweeps are counted as `bulk`, not `ui`, in the
+  request timings (`perfwatch`). Each one ffprobes every bundle before it answers
+  (6.4 s for one show), like the log downloads already counted there, so the
+  freeze watch no longer reports one as a 2 s interactive wait.
+
 ## [20.30.13] — 2026-10-24
 
 ### Fixed

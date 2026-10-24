@@ -38,8 +38,10 @@ _EXTERNAL = ("/api/search", "/api/subtitles/search", "/api/library/{item_id}/sub
              "/api/admin/indexers/{indexer_id}/test", "/api/admin/indexers/test-all")
 # A phone downloading a bundle: a background wait, timed end to end elsewhere.
 _BACKGROUND = ("/api/library/{item_id}/bundle-manifest",)
+# Bulk: a big download, or an admin sweep that ffprobes every bundle before it answers.
 _BULK = ("/api/admin/logs", "/api/admin/updater/", "/api/library/{item_id}/download-zip",
-         "/api/admin/client-logs", "/api/admin/analyzer-log")
+         "/api/admin/client-logs", "/api/admin/analyzer-log",
+         "/api/admin/hls-resync", "/api/admin/hls-trim")
 
 
 def _matches(tmpl: str, rules: tuple) -> bool:
