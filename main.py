@@ -32364,6 +32364,16 @@ def _clean_webvtt(text: str) -> str:
     return "\n\n".join(out) + "\n"
 
 
+def _text_sub_to_vtt_sync(path: Path) -> str:
+    """A `.vtt` / `.srt` sidecar read and cleaned to WebVTT. The read waits on the
+    library disk and the regex passes are ~10-50 ms on a long SRT, so this runs on a
+    thread (20.30.13)."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if path.suffix.lower() == ".srt":
+        text = _srt_to_vtt(text)
+    return _clean_webvtt(text)
+
+
 async def _sub_to_vtt(path: Path) -> str:
     """Read a sidecar subtitle file and return WebVTT text the browser can render.
 
@@ -32376,10 +32386,8 @@ async def _sub_to_vtt(path: Path) -> str:
     """
     await asyncio.to_thread(_heal_sub_newlines, path)
     ext = path.suffix.lower()
-    if ext == ".vtt":
-        return _clean_webvtt(path.read_text(encoding="utf-8", errors="replace"))
-    if ext == ".srt":
-        return _clean_webvtt(_srt_to_vtt(path.read_text(encoding="utf-8", errors="replace")))
+    if ext in (".vtt", ".srt"):
+        return await asyncio.to_thread(_text_sub_to_vtt_sync, path)
     ffmpeg = analyzer.ffmpeg_bin()
     if not ffmpeg:
         raise RuntimeError("ffmpeg unavailable for subtitle conversion")
@@ -40624,6 +40632,23 @@ def _bundle_sync_flagged(delta: Optional[float], duration_sec: float) -> bool:
     return delta > max(HLS_SYNC_FLAG_SECS, 0.01 * max(0.0, duration_sec))
 
 
+def _hls_resync_list_sync(root: Path) -> list[tuple[Path, Optional[dict]]]:
+    """The bundle dirs under one cache root with their meta.json (None when it
+    won't read). A listing and one file open per bundle: a thread's job (20.30.13)."""
+    out: list[tuple[Path, Optional[dict]]] = []
+    if not root.exists():
+        return out
+    for p in sorted(root.iterdir()):
+        if not (p.is_dir() and _CACHE_KEY_RE.match(p.name)):
+            continue
+        try:
+            meta = json.loads((p / "meta.json").read_text("utf-8"))
+        except Exception:
+            meta = None
+        out.append((p, meta if isinstance(meta, dict) else None))
+    return out
+
+
 async def _hls_resync_bundles(*, dry_run: bool, scope: str = "all") -> dict:
     """Scan existing bundles for audio misalignment — duration DRIFT
     (`_bundle_audio_sync_delta`) OR a prep-introduced constant OFFSET
@@ -40652,18 +40677,12 @@ async def _hls_resync_bundles(*, dry_run: bool, scope: str = "all") -> dict:
     flagged = 0
     repaired = 0
     for root in roots:
-        if not root.exists():
-            continue
-        for p in sorted(root.iterdir()):
-            if not (p.is_dir() and _CACHE_KEY_RE.match(p.name)):
-                continue
+        for p, meta in await asyncio.to_thread(_hls_resync_list_sync, root):
             if _offline_cache_path_active(p.name):
                 continue
             # Scope gate first (cheap): skip bundles whose source isn't in scope
             # before spending an ffprobe on them.
-            try:
-                meta = json.loads((p / "meta.json").read_text("utf-8"))
-            except Exception:
+            if meta is None:
                 await asyncio.sleep(0)
                 continue
             src = meta.get("src", "")
@@ -41258,6 +41277,48 @@ async def admin_cleanup_delete_item(item_id: str, request: Request,
     return JSONResponse({"ok": True})
 
 
+def _stray_target_sync(path: str, root_paths: list[str]) -> tuple[Path, str]:
+    """Resolve and guard a stray-delete target: (resolved path, "" when it may go,
+    else why not). Every `resolve`/`exists` waits on the library disk, so this runs
+    on a thread (20.30.13)."""
+    roots: list[Path] = []
+    for rp in root_paths:
+        try:
+            roots.append(Path(rp).resolve())
+        except OSError:
+            continue
+    try:
+        target = Path(path).resolve()
+    except OSError:
+        return Path(path), "Invalid path."
+    if target in roots:
+        return target, "Refusing to delete a configured library folder itself."
+    def _within(t: Path, root: Path) -> bool:
+        try:
+            t.relative_to(root)
+            return True
+        except ValueError:
+            return False
+    if not any(_within(target, r) for r in roots):
+        return target, "Path is outside the configured download/library folders."
+    if not target.exists():
+        return target, "404"
+    return target, ""
+
+
+def _delete_stray_sync(target: Path) -> int:
+    """Delete one stray file or folder; the bytes it held. A folder of a few
+    thousand files is seconds of unlinks on a busy disk: 0.74 s on the loop on
+    2026-10-23, so this runs on a thread (20.30.13)."""
+    if target.is_dir():
+        freed = _dir_size_bytes(target)
+        shutil.rmtree(target, ignore_errors=True)
+        return freed
+    freed = target.stat().st_size
+    target.unlink()
+    return freed
+
+
 @app.delete("/api/admin/cleanup/stray")
 async def admin_cleanup_delete_stray(request: Request, path: str = "") -> JSONResponse:
     """Delete one stray file/dir. Path-guarded: it must resolve strictly inside one
@@ -41266,28 +41327,12 @@ async def admin_cleanup_delete_stray(request: Request, path: str = "") -> JSONRe
     _require_admin(request)
     if not path:
         raise HTTPException(400, "Missing path.")
-    roots: list[Path] = []
-    for info in await _all_library_paths():
-        try:
-            roots.append(Path(info["path"]).resolve())
-        except OSError:
-            continue
-    try:
-        target = Path(path).resolve()
-    except OSError:
-        raise HTTPException(400, "Invalid path.")
-    if target in roots:
-        raise HTTPException(400, "Refusing to delete a configured library folder itself.")
-    def _within(t: Path, root: Path) -> bool:
-        try:
-            t.relative_to(root)
-            return True
-        except ValueError:
-            return False
-    if not any(_within(target, r) for r in roots):
-        raise HTTPException(400, "Path is outside the configured download/library folders.")
-    if not target.exists():
+    root_paths = [info["path"] for info in await _all_library_paths() if info.get("path")]
+    target, why = await asyncio.to_thread(_stray_target_sync, path, root_paths)
+    if why == "404":
         raise HTTPException(404, "Path not found.")
+    if why:
+        raise HTTPException(400, why)
     # Refuse if a current torrent owns this path (only stray clutter is deletable).
     torrents = await qbit_info_all() or []
     n = _norm_path(str(target))
@@ -41299,13 +41344,8 @@ async def admin_cleanup_delete_stray(request: Request, path: str = "") -> JSONRe
             o = _norm_path(owned)
             if o == n or o.startswith(n + os.sep) or n.startswith(o + os.sep):
                 raise HTTPException(409, "A current torrent owns this path.")
-    bytes_freed = await asyncio.to_thread(_dir_size_bytes, target) if target.is_dir() else 0
     try:
-        if target.is_dir():
-            shutil.rmtree(target, ignore_errors=True)
-        else:
-            bytes_freed = target.stat().st_size
-            target.unlink()
+        bytes_freed = await asyncio.to_thread(_delete_stray_sync, target)
     except OSError as exc:
         raise HTTPException(500, f"Could not delete: {exc}")
     _invalidate_cleanup_inventory()

@@ -1,5 +1,25 @@
 # Changelog
 
+## [20.30.13] — 2026-10-24
+
+### Fixed
+- **Deleting a stray folder from the admin Cleanup tab no longer freezes the
+  server.** `DELETE /api/admin/cleanup/stray` ran `shutil.rmtree` on the event
+  loop, plus the path `resolve` / `exists` / `is_dir` guards: 0.74 s with nothing
+  answering on 2026-10-23 (freeze watch, #112). The guards now run in
+  `_stray_target_sync` and the delete in `_delete_stray_sync`, both on a thread.
+  The qBit ownership check is unchanged.
+- The same sweep moved two more disk reads off the loop: a `.srt` / `.vtt` sidecar
+  subtitle is read and converted on a thread (`_text_sub_to_vtt_sync`, every time
+  a sidecar sub loads), and the admin HLS resync lists bundle folders and reads
+  their `meta.json` on a thread (`_hls_resync_list_sync`).
+  `tests/test_loop_paths.py` now fails if any of the three handlers calls
+  `rmtree`, `read_text` or `_dir_size_bytes` directly.
+- Not fixed, filed as #111: two stalls of 0.41 s and 1.42 s, each exactly one
+  hour after a boot. Both times the loop was idle, Windows' AggregatorHost.exe
+  was reading C:, and Jackett (a separate process) missed its health probe in
+  the same seconds. That is the machine pausing, not our code.
+
 ## [20.30.12] — 2026-10-23
 
 ### Fixed

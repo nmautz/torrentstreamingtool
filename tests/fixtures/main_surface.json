@@ -2721,6 +2721,12 @@
     "profile_id:POSITIONAL_OR_KEYWORD"
    ]
   },
+  "_delete_stray_sync": {
+   "kind": "def",
+   "params": [
+    "target:POSITIONAL_OR_KEYWORD"
+   ]
+  },
   "_dev_bundle_label": {
    "kind": "async def",
    "params": [
@@ -3524,6 +3530,12 @@
    "params": [
     "dry_run:KEYWORD_ONLY",
     "scope:KEYWORD_ONLY"
+   ]
+  },
+  "_hls_resync_list_sync": {
+   "kind": "def",
+   "params": [
+    "root:POSITIONAL_OR_KEYWORD"
    ]
   },
   "_hls_trim_bundles": {
@@ -6399,6 +6411,13 @@
     "titles:VAR_POSITIONAL"
    ]
   },
+  "_stray_target_sync": {
+   "kind": "def",
+   "params": [
+    "path:POSITIONAL_OR_KEYWORD",
+    "root_paths:POSITIONAL_OR_KEYWORD"
+   ]
+  },
   "_stream_anchor_ok": {
    "kind": "def",
    "params": [
@@ -6609,6 +6628,12 @@
    "params": [
     "c:POSITIONAL_OR_KEYWORD",
     "indexer_id:POSITIONAL_OR_KEYWORD"
+   ]
+  },
+  "_text_sub_to_vtt_sync": {
+   "kind": "def",
+   "params": [
+    "path:POSITIONAL_OR_KEYWORD"
    ]
   },
   "_title_relevance": {

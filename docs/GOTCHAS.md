@@ -7323,6 +7323,18 @@ after it is free again. The loop-block sampler (`diagnostics._loop_watchdog`) sa
 the loop thread from outside while it is blocked and logs `LOOP BLOCKED …` naming the
 frame. Read that line first. See [DIAGNOSTICS.md § Loop-block sampler](DIAGNOSTICS.md).
 
+Deletes count too (20.30.13): the admin stray delete ran `shutil.rmtree` on the
+loop and held it 0.74 s for one folder. An `unlink` per file is a disk write per
+file. Put the whole delete, the size count and the path guards in one `*_sync`
+helper on a thread. Cleanup functions handed to a `FileResponse` as a
+`BackgroundTask` are fine: Starlette runs a plain function in its thread pool.
+
+**Not every block is ours.** A block at process uptime 3600 s (one hour after a
+boot) with `io=AggregatorHost.exe` in the vitals line, the loop thread sampled
+idle in `GetQueuedCompletionStatus`, and a Jackett health probe failing in the
+same seconds is the whole machine pausing (#111). Seen twice (0.41 s, 1.42 s) on
+20.30.12, and not every hour-one mark does it.
+
 ## The monitor's write-back must merge keys, not items (19.10.1)
 
 `library_download_monitor` reads a snapshot, spends seconds on qBit round trips, and
